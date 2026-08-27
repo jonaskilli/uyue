@@ -133,36 +133,58 @@ fun Book.getLocalUri(): Uri {
     val importBookDir = AppConfig.importBookPath
 
     // 查找书籍保存目录
+    // 整段 runCatching 保护: 重装备份恢复后 SAF 授权随卸载清空时,
+    // fromUri/exists 会向 ExternalStorageProvider 查询并抛 SecurityException,
+    // 若不吞掉会中断后续自愈定位(授权失效恰是自愈要解决的主场景)
     if (!defaultBookDir.isNullOrBlank()) {
-        val treeUri = defaultBookDir.toUri()
-        val treeFileDoc = FileDoc.fromUri(treeUri, true)
-        if (!treeFileDoc.exists()) {
-            appCtx.toastOnUi("书籍保存目录失效，请重新设置！")
-        } else {
-            val fileDoc = treeFileDoc.find(originName, 5, 100)
-            if (fileDoc != null) {
-                localUriCache[bookUrl] = fileDoc.uri
-                //更新bookUrl 重启不用再找一遍
-                bookUrl = fileDoc.toString()
-                save()
-                return fileDoc.uri
+        runCatching {
+            val treeUri = defaultBookDir.toUri()
+            val treeFileDoc = FileDoc.fromUri(treeUri, true)
+            if (!treeFileDoc.exists()) {
+                appCtx.toastOnUi("书籍保存目录失效，请重新设置！")
+            } else {
+                val fileDoc = treeFileDoc.find(originName, 5, 100)
+                if (fileDoc != null) {
+                    localUriCache[bookUrl] = fileDoc.uri
+                    //更新bookUrl 重启不用再找一遍
+                    bookUrl = fileDoc.toString()
+                    save()
+                    return@runCatching fileDoc.uri
+                }
             }
-        }
+            null
+        }.getOrNull()?.let { return it }
     }
 
     // 查找添加本地选择的目录
     if (!importBookDir.isNullOrBlank() && defaultBookDir != importBookDir) {
-        val treeUri = if (importBookDir.isUri()) {
-            importBookDir.toUri()
-        } else {
-            Uri.fromFile(File(importBookDir))
-        }
-        val treeFileDoc = FileDoc.fromUri(treeUri, true)
-        val fileDoc = treeFileDoc.find(originName, 5, 100)
-        if (fileDoc != null) {
+        runCatching {
+            val treeUri = if (importBookDir.isUri()) {
+                importBookDir.toUri()
+            } else {
+                Uri.fromFile(File(importBookDir))
+            }
+            val treeFileDoc = FileDoc.fromUri(treeUri, true)
+            val fileDoc = treeFileDoc.find(originName, 5, 100)
+            if (fileDoc != null) {
+                localUriCache[bookUrl] = fileDoc.uri
+                bookUrl = fileDoc.toString()
+                save()
+                return@runCatching fileDoc.uri
+            }
+            null
+        }.getOrNull()?.let { return it }
+    }
+
+    // 以上常规定位全部失败(典型场景: 重装备份恢复后 SAF 授权随卸载清空):
+    // 用导入时记录的原文件物理路径候选 + 令牌明文直译 + 全盘索引搜索依次自动找回。
+    // 注意: 不变更 book.bookUrl 主键(books/chapters/bookmark多表以它为键, 中途换键
+    // 会引发外键约束失败), 只写进程内缓存让本进程后续读取直达命中文件;
+    // 持久加速由 recover 内部把命中路径置顶 originPaths 完成, 下次打开热路径毫秒级。
+    runCatching {
+        OriginPathLocator.recover(this)?.let { fileDoc ->
             localUriCache[bookUrl] = fileDoc.uri
-            bookUrl = fileDoc.toString()
-            save()
+            appCtx.toastOnUi("本地书《$name》已自动重新定位到原文件")
             return fileDoc.uri
         }
     }

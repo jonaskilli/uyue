@@ -383,7 +383,7 @@ object LocalBook {
     fun importFile(uri: Uri): Book {
         val bookUrl: String
         //updateTime变量不要修改,否则会导致读取不到缓存
-        val (fileName, _, _, updateTime, _) = FileDoc.fromUri(uri, false).apply {
+        val (fileName, _, size, updateTime, _) = FileDoc.fromUri(uri, false).apply {
             if (size == 0L) throw EmptyFileException("Unexpected empty File")
 
             bookUrl = toString()
@@ -401,6 +401,8 @@ object LocalBook {
                 order = appDb.bookDao.minOrder - 1
             )
             upBookInfo(book)
+            // 采集原文件物理路径候选(MediaStore+令牌直译), 供重装备份恢复后自动重新定位
+            io.legado.app.help.book.OriginPathLocator.capture(book, uri, fileName, size, updateTime)
             appDb.bookDao.insert(book)
         } else {
             deleteBook(book, false)
@@ -409,6 +411,9 @@ object LocalBook {
             book.latestChapterTime = 0
             //已有书籍说明是更新,删除原有目录
             appDb.bookChapterDao.delByBook(bookUrl)
+            // 更新导入也刷新候选(文件可能被移动过, 以最新一次成功访问为准), 显式落库
+            io.legado.app.help.book.OriginPathLocator.capture(book, uri, fileName, size, updateTime)
+            appDb.bookDao.update(book)
         }
         return book
     }

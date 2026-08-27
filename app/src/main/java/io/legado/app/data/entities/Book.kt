@@ -123,7 +123,11 @@ data class Book(
     var readConfig: ReadConfig? = null,
     //同步时间
     @ColumnInfo(defaultValue = "0")
-    var syncTime: Long = 0L
+    var syncTime: Long = 0L,
+    // 本地书原文件物理路径候选(JSON数组 [{p:路径,s:字节,m:修改毫秒}],上限20条)。
+    // 由 MediaStore 全盘索引+SAF令牌明文解析采集于导入时刻;
+    // 重装/恢复备份导致 content:// 授权失效时用于自动重新定位原文件
+    var originPaths: String? = null
 ) : Parcelable, BaseBook {
 
     override fun equals(other: Any?): Boolean {

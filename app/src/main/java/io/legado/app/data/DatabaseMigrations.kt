@@ -23,6 +23,7 @@ object DatabaseMigrations {
             migration_89_90,
             migration_90_91, migration_91_92, migration_92_93, migration_93_94,
             migration_94_95, migration_95_96, migration_96_97, migration_97_98, migration_98_99,
+            migration_99_100,
         )
     }
 
@@ -517,6 +518,14 @@ object DatabaseMigrations {
             // 避免 tokenrhythm.studio 等严格校验「未知字段」的服务返回 400。
             // 必须显式加列并配套 98→99 迁移，否则 Room schema 校验与旧版数据库结构不一致会导致闪退。
             db.execSQL("ALTER TABLE `aiImageTemplate` ADD `strictFormat` INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
+    private val migration_99_100 = object : Migration(99, 100) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // books 表新增本地书原文件物理路径候选字段(nullable TEXT),
+            // 用于重装/恢复备份后 SAF 授权失效时自动重新定位原文件。存量书为 NULL(惰性补录)。
+            db.execSQL("ALTER TABLE `books` ADD `originPaths` TEXT")
         }
     }
 
