@@ -41,12 +41,18 @@ object JReadVoiceEngine {
     @Volatile
     private var cachedPluginIndex: Map<String, VoicePlugin>? = null
 
-    /** 清空配置缓存（在 saveConfigs 写盘后调用） */
-    private fun invalidateConfigCache() {
+    /**
+     * 清空配置缓存（在 saveConfigs 写盘后调用）。
+     * @param resetMigration 仅在外部数据入口（导入/播种）置 true；
+     * 自身写盘的数据已规范化，不再复位 migrationDone，
+     * 否则每次写后的首次读取都要对全部配置重跑一遍迁移扫描，配置量大时明显卡顿。
+     */
+    private fun invalidateConfigCache(resetMigration: Boolean = false) {
         cachedConfigs = null
         cachedConfigIndex = null
-        // 配置可能被外部修改，迁移需要重新检查
-        migrationDone = false
+        if (resetMigration) {
+            migrationDone = false
+        }
     }
 
     /** 清空插件缓存（在 savePlugins 写盘后调用） */
@@ -476,6 +482,52 @@ object JReadVoiceEngine {
         )
     }
 
+    /**
+     * 快速启停单条配置（供列表开关使用）——事务化"读-改-写"：
+     * 全程持有配置写锁，快速连点时各次修改串行且基于最新状态累加，
+     * 彻底消除并发整表快照互相覆盖导致的"点4个只成功2个"。
+     * 不做内容规范化、不 upsert 分组（分组信息未变）；
+     * 启用时在单次遍历内完成同 voiceTag 互斥；仅一次写盘，写后直接预热缓存。
+     * @return 写盘后的最新配置全量列表（可直接用于刷新 UI 内存态）
+     */
+    fun setConfigEnabled(context: Context, id: String, enabled: Boolean): List<VoiceConfig> {
+        synchronized(configWriteLock) {
+            val configs = listConfigs(context, ensureBuiltIns = false)
+            val target = configs.firstOrNull { it.id == id }
+                ?: return configs
+            if (target.enabled == enabled) return configs
+            val changed = booleanArrayOf(false)
+            val updated: List<VoiceConfig> = if (enabled) {
+                configs.map {
+                    when {
+                        it.id == id -> {
+                            changed[0] = true
+                            it.copy(enabled = true)
+                        }
+                        // 同标签互斥：同一遍完成，避免二次全扫
+                        it.enabled && sameVoiceTag(it.voiceTag, target.voiceTag) -> {
+                            changed[0] = true
+                            it.copy(enabled = false)
+                        }
+                        else -> it
+                    }
+                }
+            } else {
+                configs.map {
+                    if (it.id == id && it.enabled) {
+                        changed[0] = true
+                        it.copy(enabled = false)
+                    } else it
+                }
+            }
+            if (changed[0]) {
+                saveConfigs(context, updated)
+                return updated
+            }
+            return configs
+        }
+    }
+
     fun saveConfig(context: Context, config: VoiceConfig) {
         val normalizedConfig = normalizeVoiceConfigForStorage(config)
         saveGroup(
@@ -596,33 +648,66 @@ object JReadVoiceEngine {
         saveConfigs(context, updated)
     }
 
-    fun setConfigsEnabled(context: Context, configIds: Collection<String>, enabled: Boolean) {
-        val idSet = configIds.filter { it.isNotBlank() }.toSet()
-        if (idSet.isEmpty()) return
-        val configs = listConfigs(context)
-        val enabledIdByVoiceTag = linkedMapOf<String, String>()
-        if (enabled) {
-            configs.forEach { config ->
-                if (config.id in idSet) {
-                    val key = normalizedVoiceTagForConfig(config)
-                    if (key.isNotBlank()) {
-                        enabledIdByVoiceTag[key] = config.id
+    /**
+     * 分组/批量启停（事务化）：
+     * 全程持有配置写锁——读取、互斥计算、写盘、缓存预热为一次原子"读-改-写"，
+     * 并发调用串行执行且各自基于最新状态，不再发生整表快照互相覆盖。
+     * 禁用路径跳过 voiceTag 规范化扫描（互斥仅在启用时有意义），大表下显著提速。
+     * @return 写盘后的最新配置全量列表（可直接用于刷新 UI 内存态）
+     */
+    fun setConfigsEnabled(
+        context: Context,
+        configIds: Collection<String>,
+        enabled: Boolean,
+    ): List<VoiceConfig> {
+        synchronized(configWriteLock) {
+            val idSet = configIds.filter { it.isNotBlank() }.toSet()
+            if (idSet.isEmpty()) return listConfigs(context, ensureBuiltIns = false)
+            val configs = listConfigs(context, ensureBuiltIns = false)
+            val enabledIdByVoiceTag = linkedMapOf<String, String>()
+            if (enabled) {
+                configs.forEach { config ->
+                    if (config.id in idSet) {
+                        val key = normalizedVoiceTagForConfig(config)
+                        if (key.isNotBlank()) {
+                            enabledIdByVoiceTag[key] = config.id
+                        }
                     }
                 }
             }
-        }
-        val chosenEnabledIds = enabledIdByVoiceTag.values.toSet()
-        val targetTags = enabledIdByVoiceTag.keys
-        val savedConfigs = configs.map { config ->
-            val key = normalizedVoiceTagForConfig(config)
-            val targetEnabled = when {
-                config.id in idSet -> enabled && config.id in chosenEnabledIds
-                enabled && key in targetTags -> false
-                else -> config.enabled
+            val chosenEnabledIds = enabledIdByVoiceTag.values.toSet()
+            val targetTags = enabledIdByVoiceTag.keys
+            val changed = booleanArrayOf(false)
+            val updated: List<VoiceConfig>
+            if (enabled) {
+                updated = configs.map { config ->
+                    val key = normalizedVoiceTagForConfig(config)
+                    val targetEnabled = when {
+                        config.id in idSet -> config.id in chosenEnabledIds
+                        key in targetTags -> false
+                        else -> config.enabled
+                    }
+                    if (config.enabled == targetEnabled) config
+                    else {
+                        changed[0] = true
+                        config.copy(enabled = targetEnabled)
+                    }
+                }
+            } else {
+                // 禁用：无互斥语义，仅翻转目标项
+                updated = configs.map { config ->
+                    if (config.id in idSet && config.enabled) {
+                        changed[0] = true
+                        config.copy(enabled = false)
+                    } else config
+                }
             }
-            if (config.enabled == targetEnabled) config else config.copy(enabled = targetEnabled)
+            if (changed[0]) {
+                saveConfigs(context, updated)
+                return updated
+            }
+            return configs
         }
-        saveConfigs(context, savedConfigs)
     }
 
     fun updatePluginAudioParams(
@@ -1303,6 +1388,8 @@ object JReadVoiceEngine {
             imported += config.copy(id = id)
         }
         if (imported.isEmpty()) return 0
+        // 外部数据可能含未规范化 voiceTag，标记迁移需重查
+        migrationDone = false
         if (useStableId) {
             // 用稳定 id 去重：删除现有列表中与导入项稳定 id 相同的旧条目，再整体写入（覆盖而非追加）。
             // 注意：单次导入的 JSON 内若包含多条稳定 id 相同的配置（例如导出时同一角色被重复写入），
@@ -1444,6 +1531,8 @@ object JReadVoiceEngine {
         if (count > 0) {
             saveGroups(context, importedGroups)
             saveConfigs(context, importedConfigs)
+            // 外部分组导入同样标记迁移需重查
+            migrationDone = false
         }
         return count
     }
@@ -2077,24 +2166,37 @@ object JReadVoiceEngine {
         return null
     }
 
+    /**
+     * 配置表进程内写锁：所有"读-改-写"事务的串行化点。
+     * 配置以整串 JSON 存储，任何一条修改都要全量读+全量写；
+     * 无锁时并发修改会用各自的旧快照互相覆盖（后写胜出），造成丢改动。
+     * 持锁后并发请求排队且各自基于最新状态累加——语义等价于数据库的单行 UPDATE。
+     * synchronized 可重入：事务函数内部调用 saveConfigs 不会死锁。
+     */
+    private val configWriteLock = Any()
+
     private fun saveConfigs(context: Context, configs: List<VoiceConfig>) {
-        // 防御：不允许存储里出现多条相同 id 的配置（例如历史导入产生的重复副本、
-        // 或导出再导入时同 id 被多次写入）。相同 id 视为同一配置，保留最后一条，
-        // 确保 id 可作为唯一主键使用，避免按 id 删除/替换时误伤同 id 的其它配置。
-        val deduped = configs.withIndex().groupBy(
-            keySelector = { if (it.value.id.isBlank()) "blank_${it.index}" else it.value.id },
-            valueTransform = { it.value }
-        ).map { (_, list) -> list.last() }
-        val array = JSONArray()
-        deduped.forEach {
-            array.put(voiceConfigToJson(it))
+        synchronized(configWriteLock) {
+            // 防御：不允许存储里出现多条相同 id 的配置（例如历史导入产生的重复副本、
+            // 或导出再导入时同 id 被多次写入）。相同 id 视为同一配置，保留最后一条，
+            // 确保 id 可作为唯一主键使用，避免按 id 删除/替换时误伤同 id 的其它配置。
+            val deduped = configs.withIndex().groupBy(
+                keySelector = { if (it.value.id.isBlank()) "blank_${it.index}" else it.value.id },
+                valueTransform = { it.value }
+            ).map { (_, list) -> list.last() }
+            val array = JSONArray()
+            deduped.forEach {
+                array.put(voiceConfigToJson(it))
+            }
+            context.applicationContext
+                .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_CONFIGS, array.toString())
+                .apply()
+            invalidateConfigCache()
+            // 预热：磁盘内容与 deduped 一致，后续读取直接命中缓存，跳过全量重解析
+            cachedConfigs = deduped
         }
-        context.applicationContext
-            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_CONFIGS, array.toString())
-            .apply()
-        invalidateConfigCache()
     }
 
     /**

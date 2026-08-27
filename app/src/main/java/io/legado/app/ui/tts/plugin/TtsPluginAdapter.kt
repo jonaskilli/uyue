@@ -7,6 +7,7 @@ import android.widget.CheckBox
 import android.widget.ImageView
 import android.widget.PopupMenu
 import android.widget.TextView
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.RecyclerView
 import io.legado.app.R
@@ -44,7 +45,42 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private var onPluginDelete: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null
     private var onPluginAudioParams: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null
 
-    fun setRows(newRows: List<ConfigListRow>) { rows.clear(); rows.addAll(newRows); notifyDataSetChanged() }
+    /**
+     * 差量刷新：DiffUtil 计算新旧列表差异，只重绑内容变化的行
+     * （如开关某几条配置后，仅变化的 ConfigRow 和受影响的分组头三态图标刷新），
+     * 替代原 notifyDataSetChanged 全表重绑——大列表下这是"点一下卡一秒"的主因之一。
+     * diff 基于快照计算，避免拖拽等直接改动 rows 时产生并发修改。
+     */
+    fun setRows(newRows: List<ConfigListRow>) {
+        val old = rows.toList()
+        if (old.isEmpty()) {
+            rows.clear(); rows.addAll(newRows); notifyDataSetChanged(); return
+        }
+        val diffResult = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize() = old.size
+            override fun getNewListSize() = newRows.size
+            override fun areItemsTheSame(oldPos: Int, newPos: Int): Boolean {
+                return rowIdentity(old[oldPos]) == rowIdentity(newRows[newPos])
+            }
+            override fun areContentsTheSame(oldPos: Int, newPos: Int): Boolean {
+                // data class equals：ConfigRow 比较 config 全字段（含 enabled）+ 缩进，
+                // GroupHeader/SubGroupHeader 比较三态/计数/展开
+                return old[oldPos] == newRows[newPos]
+            }
+        })
+        rows.clear()
+        rows.addAll(newRows)
+        diffResult.dispatchUpdatesTo(this)
+    }
+
+    /** 行身份标识：同类型 + 稳定键，用于 diff 定位"同一行" */
+    private fun rowIdentity(row: ConfigListRow): Any = when (row) {
+        is ConfigListRow.GroupHeader -> "G:${row.groupName}"
+        is ConfigListRow.SubGroupHeader -> "S:${row.groupName}/${row.subGroupName}"
+        is ConfigListRow.ConfigRow -> "C:${row.config.id}"
+        is ConfigListRow.PluginRow -> "P:${row.plugin.id}"
+    }
+
     fun setPluginsMap(map: Map<String, JReadVoiceEngine.VoicePlugin>) { pluginsMap = map }
 
     var onConfigMoved: ((List<String>) -> Unit)? = null

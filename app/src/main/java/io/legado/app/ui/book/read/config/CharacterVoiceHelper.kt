@@ -4,11 +4,24 @@ import android.content.Context
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.LifecycleOwner
+import io.legado.app.data.appDb
+import io.legado.app.help.audiobook.JReadVoiceEngine
+import io.legado.app.model.ReadAloud
+import io.legado.app.utils.StringUtils
 import org.json.JSONArray
 import org.json.JSONObject
+import splitties.init.appCtx
 import java.io.File
 
 object CharacterVoiceHelper {
+
+    // 引擎判定结果缓存：key 为当前引擎 id（引擎切换频率极低，弹窗触发频率高，
+    // 命中缓存时零 IO，避免每次打开发音人弹窗都同步查库造成卡顿）
+    @Volatile
+    private var cachedTtsEngineId: String? = null
+
+    @Volatile
+    private var cachedIsBuiltinPlugin = false
 
     private val baseDir: String
         get() = "/storage/emulated/0/Download/chajian/mingwuyan/"
@@ -192,7 +205,49 @@ object CharacterVoiceHelper {
             .show()
     }
 
-    private fun getVoiceList(): List<String> {
+    /**
+     * 当前朗读引擎是否选择了内置TTS插件源。
+     * 判定：ReadAloud.ttsEngine（已含书籍级覆盖）为数字 id → 查对应 HttpTTS 源，
+     * 名称为"内置TTS插件"，或 url 以 @js: 开头且脚本调用插件合成 API（synthesize）。
+     */
+    fun isUsingBuiltinTtsPlugin(): Boolean {
+        return try {
+            val engineId = ReadAloud.ttsEngine ?: return false
+            if (!StringUtils.isNumeric(engineId)) return false
+            if (engineId == cachedTtsEngineId) return cachedIsBuiltinPlugin
+            val result = appDb.httpTTSDao.get(engineId.toLong())?.let { httpTTS ->
+                httpTTS.name == "内置TTS插件" ||
+                    (httpTTS.url.startsWith("@js:") && httpTTS.url.contains("synthesize"))
+            } ?: false
+            cachedTtsEngineId = engineId
+            cachedIsBuiltinPlugin = result
+            result
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 角色管理可分配的发音人列表。
+     * 朗读引擎选择内置TTS插件时：实时从内置配置列表提取启用项的 voiceTag，不走 fayinren.json；
+     * 其他引擎（系统TTS/普通HTTP源）：维持原状读取 fayinren.json。
+     */
+    fun getAvailableVoices(): List<String> {
+        if (isUsingBuiltinTtsPlugin()) {
+            val tags = try {
+                // listConfigs 优先命中 JReadVoiceEngine 内存缓存（配置写盘后由 invalidateConfigCache
+                // 失效重建，永远最新）；ensureBuiltIns=false 跳过预设播种检查，读取路径最轻量。
+                JReadVoiceEngine.listConfigs(appCtx, ensureBuiltIns = false)
+                    .filter { it.enabled }
+                    .map { it.voiceTag }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .sorted()
+            } catch (e: Exception) {
+                emptyList()
+            }
+            return tags.ifEmpty { listOf("auto") }
+        }
         return try {
             val content = readTxtFile("fayinren.json")
             if (content.isNotEmpty()) {
@@ -204,6 +259,10 @@ object CharacterVoiceHelper {
         } catch (e: Exception) {
             listOf("auto")
         }
+    }
+
+    private fun getVoiceList(): List<String> {
+        return getAvailableVoices()
     }
 
     fun previewCharacterVoice(

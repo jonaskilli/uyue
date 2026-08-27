@@ -106,7 +106,11 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         binding.tabLayout.addTab(binding.tabLayout.newTab().setText("配置列表"))
         binding.tabLayout.addTab(binding.tabLayout.newTab().setText("插件管理"))
         binding.tabLayout.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: TabLayout.Tab) { currentTab = tab.position; loadData() }
+            // 切换 tab 不改数据内容，直接重建当前列表行即可，无需重新读盘
+            override fun onTabSelected(tab: TabLayout.Tab) {
+                currentTab = tab.position
+                if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
+            }
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit
             override fun onTabReselected(tab: TabLayout.Tab) = Unit
         })
@@ -170,9 +174,24 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         loadData()
     }
 
+    // 上次全量加载时的数据快照版本；从编辑器返回时版本未变则跳过重读盘
+    private var lastConfigSnapshot: String? = null
+
     override fun onResume() {
         super.onResume()
-        loadData()
+        lifecycleScope.launch {
+            val snap = withContext(Dispatchers.IO) {
+                JReadVoiceEngine.voiceConfigSnapshotVersion(this@TtsPluginActivity)
+            }
+            if (snap != lastConfigSnapshot || allConfigs.isEmpty()) {
+                // 数据有变化（首次进入/编辑保存/导入等）→ 全量加载
+                lastConfigSnapshot = snap
+                loadData()
+            } else {
+                // 无变化（如从对话框返回）→ 只重建列表行，不读盘
+                if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
+            }
+        }
     }
 
     private fun toggleGroup(groupName: String) {
@@ -189,6 +208,10 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     private fun loadData() {
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { JReadVoiceEngine.ensureBuiltInVoicePresets(this@TtsPluginActivity) }
+            // 全量加载完成后记录快照版本，onResume 据此判断能否走轻量刷新
+            lastConfigSnapshot = withContext(Dispatchers.IO) {
+                JReadVoiceEngine.voiceConfigSnapshotVersion(this@TtsPluginActivity)
+            }
             // 并行加载 plugins/groups/configs，避免串行 3 次 IO
             val pluginsDeferred = async(Dispatchers.IO) { JReadVoiceEngine.listPlugins(this@TtsPluginActivity) }
             val groupsDeferred = async(Dispatchers.IO) { JReadVoiceEngine.listGroups(this@TtsPluginActivity) }
@@ -230,9 +253,50 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         }
     }
 
+    /** 防止快速连续触发时旧的后台构建结果覆盖新的 */
+    @Volatile
+    private var rebuildGeneration = 0
+
     private fun rebuildRows() {
-        val filtered = if (searchQuery.isEmpty()) allConfigs
-        else allConfigs.filter {
+        // 快照主线程状态后在后台线程构建，避免大列表（数千配置）排序/分组阻塞 UI
+        val gen = ++rebuildGeneration
+        val configs = allConfigs
+        val groups = allGroups
+        val query = searchQuery
+        val expandedG = HashSet(expandedGroups)
+        val expandedS = HashSet(expandedSubGroups)
+        lifecycleScope.launch(Dispatchers.Default) {
+            val rows = buildConfigRows(configs, groups, query, expandedG, expandedS)
+            withContext(Dispatchers.Main) {
+                if (gen != rebuildGeneration) return@withContext
+                updateEmpty(rows.isEmpty())
+                adapter.setRows(rows)
+            }
+        }
+    }
+
+    private fun rebuildPluginRows() {
+        val gen = ++rebuildGeneration
+        val plugins = allPlugins
+        lifecycleScope.launch(Dispatchers.Default) {
+            val rows = plugins.map { ConfigListRow.PluginRow(it) }
+            withContext(Dispatchers.Main) {
+                if (gen != rebuildGeneration) return@withContext
+                updateEmpty(rows.isEmpty())
+                adapter.setRows(rows)
+            }
+        }
+    }
+
+    private fun buildConfigRows(
+        configs: List<JReadVoiceEngine.VoiceConfig>,
+        groups: List<JReadVoiceEngine.VoiceGroup>,
+        searchQuery: String,
+        expandedGroups: Set<String>,
+        expandedSubGroups: Set<Pair<String, String>>,
+    ): List<ConfigListRow> {
+        val filtered = if (searchQuery.isEmpty()) configs
+        else configs.filter {
             it.voiceTag.contains(searchQuery, true) || it.displayName.contains(searchQuery, true) ||
             it.groupName.contains(searchQuery, true) || it.subGroupName.contains(searchQuery, true) ||
             it.voice.contains(searchQuery, true) || it.locale.contains(searchQuery, true)
@@ -240,9 +304,9 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         // 合并：从配置项中提取的分组 + 从 listGroups() 读取的分组（含空分组）
         // 按 sortOrder 排序，sortOrder 相同则按名称
         val configGroupNames = filtered.map { it.groupName.ifBlank { "默认分组" } }.toMutableSet()
-        val savedGroupNames = allGroups.map { it.groupName.ifBlank { "默认分组" } }.toSet()
+        val savedGroupNames = groups.map { it.groupName.ifBlank { "默认分组" } }.toSet()
         configGroupNames.addAll(savedGroupNames)
-        val groupSortMap = allGroups
+        val groupSortMap = groups
             .filter { it.subGroupName.isBlank() && it.thirdGroupName.isBlank() }
             .associate { it.groupName.ifBlank { "默认分组" } to it.sortOrder }
         val sortedGroupNames = configGroupNames.sortedWith(compareBy(
@@ -251,7 +315,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         ))
         // 预分组：一次 groupBy 消除循环内重复 filter（O(N×G) → O(N)）
         val configsByGroup = filtered.groupBy { it.groupName.ifBlank { "默认分组" } }
-        val groupsByGroupName = allGroups.groupBy { it.groupName.ifBlank { "默认分组" } }
+        val groupsByGroupName = groups.groupBy { it.groupName.ifBlank { "默认分组" } }
         val rows = mutableListOf<ConfigListRow>()
         for (groupName in sortedGroupNames) {
             val groupConfigs = configsByGroup[groupName] ?: emptyList()
@@ -293,14 +357,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 }
             }
         }
-        updateEmpty(rows.isEmpty())
-        adapter.setRows(rows)
-    }
-
-    private fun rebuildPluginRows() {
-        val rows = allPlugins.map { ConfigListRow.PluginRow(it) }
-        updateEmpty(rows.isEmpty())
-        adapter.setRows(rows)
+        return rows
     }
 
     private fun updateEmpty(empty: Boolean) {
@@ -407,25 +464,25 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
 
     private fun toggleConfig(config: JReadVoiceEngine.VoiceConfig, enabled: Boolean) {
         lifecycleScope.launch {
-            withContext(Dispatchers.IO) { JReadVoiceEngine.saveConfig(this@TtsPluginActivity, config.copy(enabled = enabled)) }
-            // 仅内存更新 + 局部重排，避免 loadData() 全量读盘/解析/写文件造成的卡顿
-            allConfigs = allConfigs.map { if (it.id == config.id) it.copy(enabled = enabled) else it }
+            // 事务化：锁内完成读改写并直接返回最新全量列表（连点安全），无需二次回读
+            allConfigs = withContext(Dispatchers.IO) {
+                JReadVoiceEngine.setConfigEnabled(this@TtsPluginActivity, config.id, enabled)
+            }
             refreshListLight()
         }
     }
 
     private fun setGroupEnabled(groupName: String, subGroupName: String?, enabled: Boolean) {
         lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
-                val configs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity)
+            // 事务化批量启停：引擎内一次读改写（禁用零互斥扫描），返回最新全量列表
+            allConfigs = withContext(Dispatchers.IO) {
+                val configs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity, ensureBuiltIns = false)
                 val ids = configs.filter { c ->
                     c.groupName.ifBlank { "默认分组" } == groupName &&
-                    (subGroupName == null || c.subGroupName.ifBlank { "默认" } == subGroupName)
+                        (subGroupName == null || c.subGroupName.ifBlank { "默认" } == subGroupName)
                 }.map { it.id }
-                JReadVoiceEngine.setConfigsEnabled(this@TtsPluginActivity, ids, enabled)
-                // 同步内存，避免 loadData() 全量重载
-                val idSet = ids.toSet()
-                allConfigs = allConfigs.map { if (idSet.contains(it.id)) it.copy(enabled = enabled) else it }
+                if (ids.isEmpty()) configs
+                else JReadVoiceEngine.setConfigsEnabled(this@TtsPluginActivity, ids, enabled)
             }
             refreshListLight()
         }
@@ -438,23 +495,6 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     private fun refreshListLight() {
         if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
         scheduleExportEnabledTags()
-    }
-
-    /**
-     * 仅重读列表数据（groups/configs/plugins 各读盘一次），不执行 ensureBuiltIn 也不写 fayinren.json。
-     * 用于仅改动分组/插件元信息、configs 内容不变的轻量场景。
-     */
-    private fun reloadListsLight() {
-        lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
-                allConfigs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity)
-                allGroups = JReadVoiceEngine.listGroups(this@TtsPluginActivity)
-                allPlugins = JReadVoiceEngine.listPlugins(this@TtsPluginActivity)
-                pluginsMap = allPlugins.associateBy { it.id }
-            }
-            adapter.setPluginsMap(pluginsMap)
-            if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
-        }
     }
 
     // 后台写 fayinren.json 的串行标记：多次调用只保证"最终基于最新内存写一次"，避免快速连点堆积 I/O
@@ -476,6 +516,23 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     exportTagsPending = false
                 }
             }
+        }
+    }
+
+    /**
+     * 仅重读列表数据（groups/configs/plugins 各读盘一次），不执行 ensureBuiltIn 也不写 fayinren.json。
+     * 用于仅改动分组/插件元信息、configs 内容不变的轻量场景。
+     */
+    private fun reloadListsLight() {
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                allConfigs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity)
+                allGroups = JReadVoiceEngine.listGroups(this@TtsPluginActivity)
+                allPlugins = JReadVoiceEngine.listPlugins(this@TtsPluginActivity)
+                pluginsMap = allPlugins.associateBy { it.id }
+            }
+            adapter.setPluginsMap(pluginsMap)
+            if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
         }
     }
 

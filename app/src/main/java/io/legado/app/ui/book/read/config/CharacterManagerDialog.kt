@@ -1789,17 +1789,8 @@ class CharacterManagerDialog : DialogFragment() {
     }
 
     private fun getVoiceList(): List<String> {
-        return try {
-            val content = readTxtFile("fayinren.json")
-            if (content.isNotEmpty()) {
-                val arr = JSONArray(content)
-                (0 until arr.length()).map { arr.getString(it) }
-            } else {
-                listOf("auto")
-            }
-        } catch (e: Exception) {
-            listOf("auto")
-        }
+        // 内置TTS插件引擎：从内置配置列表实时提取；其他引擎：读 fayinren.json
+        return CharacterVoiceHelper.getAvailableVoices()
     }
 
     // ==================== 文件操作 ====================
