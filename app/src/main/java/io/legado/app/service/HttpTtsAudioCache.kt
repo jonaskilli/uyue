@@ -59,8 +59,9 @@ object HttpTtsAudioCache {
         val t = title.trim()
         val c = content.trim()
         val indexPart = if (index >= 0) "|$index" else ""
-        // 必须与 HttpReadAloudService.getFileNameHelper 保持完全一致
-        return MD5Utils.md5Encode16(t) + "_" + MD5Utils.md5Encode16("${speechRate()}-$indexPart-|$c")
+        // 必须与 HttpReadAloudService.getFileNameHelper 保持完全一致（含精细语速刻度）
+        return MD5Utils.md5Encode16(t) + "_" +
+                MD5Utils.md5Encode16("${speechRate()}-${AppConfig.speechRatePlayFine}-$indexPart-|$c")
     }
 
     /**

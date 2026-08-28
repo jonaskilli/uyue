@@ -23,6 +23,7 @@ import io.legado.app.R
 import io.legado.app.base.BaseActivity
 import io.legado.app.databinding.ActivityTtsPluginBinding
 import io.legado.app.help.audiobook.JReadVoiceEngine
+import io.legado.app.help.audiobook.JReadVoicePluginRuntime
 import io.legado.app.help.audiobook.PostAudioParams
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
@@ -167,6 +168,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             onGroupMergeSubs = { groupName -> mergeSubGroups(groupName) },
             onPluginClick = { plugin -> showPluginOptions(plugin) },
             onPluginEdit = { plugin -> showPluginEditor(plugin) },
+            onPluginVars = { plugin -> showPluginVarsDialog(plugin) },
             onPluginToggle = { plugin, enabled -> togglePlugin(plugin, enabled) },
             onPluginDelete = { plugin -> deletePlugin(plugin) },
             onPluginAudioParams = { plugin -> showPluginAudioParams(plugin) },
@@ -1161,17 +1163,76 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     }
 
     private fun showPluginOptions(plugin: JReadVoiceEngine.VoicePlugin) {
-        val options = arrayOf("编辑插件", "音频参数", "清空数据", "删除插件")
+        val options = arrayOf("编辑插件", "设置变量", "音频参数", "清空数据", "删除插件")
         android.app.AlertDialog.Builder(this)
             .setTitle(plugin.name)
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> showPluginEditor(plugin)
-                    1 -> showPluginAudioParams(plugin)
-                    2 -> clearPluginData(plugin)
-                    3 -> deletePlugin(plugin)
+                    1 -> showPluginVarsDialog(plugin)
+                    2 -> showPluginAudioParams(plugin)
+                    3 -> clearPluginData(plugin)
+                    4 -> deletePlugin(plugin)
                 }
             }.show()
+    }
+
+    /**
+     * 设置变量：执行插件 JS，调用其 EditorJS/PluginJS.onLoadUI 自绘变量 UI
+     * （支持任意多个输入框/下拉框），确认后把值写回插件 userVarsJson，
+     * 合成时脚本通过 ttsrv.data 读取。插件未实现 onLoadUI 时提示无可设置变量。
+     */
+    private fun showPluginVarsDialog(plugin: JReadVoiceEngine.VoicePlugin) {
+        lifecycleScope.launch {
+            // 自绘控件(onLoadUI/ttsrv.data)用 dataMap 承载
+            val dataMap: MutableMap<String, String> = runCatching {
+                val obj = JSONObject(plugin.userVarsJson.ifBlank { "{}" })
+                buildMap { obj.keys().forEach { put(it, obj.optString(it)) } }.toMutableMap()
+            }.getOrDefault(mutableMapOf())
+            // 声明式变量(PluginJS.vars / ttsrv.userVars)用 userVarsMap 承载，
+            // 预填：已保存值 > defVarsJson 默认值 > 空
+            val userVarsMap: MutableMap<String, String> = dataMap.toMutableMap()
+            runCatching { JSONObject(plugin.defVarsJson.ifBlank { "{}" }) }.getOrNull()?.let { dv ->
+                dv.keys().forEach { k ->
+                    if (!userVarsMap.containsKey(k)) {
+                        val v = dv.opt(k)
+                        userVarsMap[k] = when (v) {
+                            is JSONObject -> v.optString("value", v.optString("default", v.optString("def", "")))
+                            null -> ""
+                            else -> v.toString()
+                        }
+                    }
+                }
+            }
+            val container = withContext(Dispatchers.IO) {
+                JReadVoicePluginRuntime.loadPluginEditorUI(
+                    this@TtsPluginActivity, plugin, dataMap, userVarsMap,
+                )
+            }
+            if (container == null || container.childCount == 0) {
+                toastOnUi("该插件没有可设置的变量")
+                return@launch
+            }
+            val scrollView = android.widget.ScrollView(this@TtsPluginActivity).apply { addView(container) }
+            alert("设置变量 - ${plugin.name}") {
+                customView { scrollView }
+                okButton {
+                    lifecycleScope.launch {
+                        withContext(Dispatchers.IO) {
+                            val json = JSONObject()
+                            userVarsMap.forEach { (k, v) -> json.put(k, v ?: "") }
+                            JReadVoiceEngine.savePlugin(
+                                this@TtsPluginActivity,
+                                plugin.copy(userVarsJson = json.toString()),
+                            )
+                        }
+                        toastOnUi("变量已保存: ${plugin.name}")
+                        reloadListsLight()
+                    }
+                }
+                cancelButton()
+            }
+        }
     }
 
     private fun clearPluginData(plugin: JReadVoiceEngine.VoicePlugin) {
@@ -1195,11 +1256,26 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             .show()
     }
 
+    /**
+     * 从插件 JS 代码中提取 PluginJS 声明对象里的 name / id 字段。
+     * 匹配 `PluginJS = {` 声明块开头范围内的 `name: "xxx"` 与 `id: "xxx"`（兼容单双引号）。
+     */
+    private fun extractPluginMeta(code: String): Pair<String?, String?> {
+        val idx = code.indexOf("PluginJS")
+        if (idx < 0) return null to null
+        val scope = code.substring(idx, minOf(code.length, idx + 2000))
+        // 兼容三种键名写法：name: "x" / 'name': 'x' / "name": "x"
+        // (?<![\w$]) 防止匹配到 roleName/userId 等复合词内部
+        val name = Regex("(?<![\\w$])[\"']?name[\"']?\\s*:\\s*[\"']([^\"']+)[\"']").find(scope)?.groupValues?.get(1)?.trim()
+        val id = Regex("(?<![\\w$])[\"']?id[\"']?\\s*:\\s*[\"']([^\"']+)[\"']").find(scope)?.groupValues?.get(1)?.trim()
+        return name?.takeIf { it.isNotBlank() } to id?.takeIf { it.isNotBlank() }
+    }
+
     private fun showPluginEditor(plugin: JReadVoiceEngine.VoicePlugin?) {
         if (plugin == null) {
             // 新增插件：提供完整的代码输入框
-            val etName = EditText(this).apply { hint = "插件名称"; setPadding(4, 8, 4, 8) }
-            val etPluginId = EditText(this).apply { hint = "插件 ID (可选，留空自动生成)"; setPadding(4, 8, 4, 8) }
+            val etName = EditText(this).apply { hint = "插件名称（粘贴代码后自动识别）"; setPadding(4, 8, 4, 8) }
+            val etPluginId = EditText(this).apply { hint = "插件 ID（自动识别，可修改，留空用名称）"; setPadding(4, 8, 4, 8) }
             val tvCodeLabel = TextView(this).apply { text = "插件 JS 代码"; textSize = 12f; setPadding(4, 12, 4, 4) }
             val etCode = EditText(this).apply {
                 hint = "在此粘贴完整的插件 JS 代码..."
@@ -1212,6 +1288,18 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     }
                     false
                 }
+                // 粘贴代码后自动识别 PluginJS 声明里的 name/id，仅在对应输入框为空时填充（不覆盖手动输入）
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun afterTextChanged(s: Editable?) {
+                        val code = s?.toString().orEmpty()
+                        if (code.length < 10) return
+                        val (metaName, metaId) = extractPluginMeta(code)
+                        if (etName.text.isNullOrBlank() && !metaName.isNullOrBlank()) etName.setText(metaName)
+                        if (etPluginId.text.isNullOrBlank() && !metaId.isNullOrBlank()) etPluginId.setText(metaId)
+                    }
+                })
             }
             val tvHint = TextView(this).apply {
                 text = "也可从右上角菜单「导入」J.TTS 插件 JSON 文件。"
@@ -1225,14 +1313,17 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             alert("新增声音插件") {
                 customView { scrollView }
                 okButton {
-                    val name = etName.text.toString().trim()
                     val code = etCode.text.toString().trim()
-                    if (name.isBlank()) { toastOnUi("插件名称不能为空"); return@okButton }
+                    val (metaName, metaId) = extractPluginMeta(code)
+                    val name = etName.text.toString().trim().ifBlank { metaName.orEmpty() }
+                    if (name.isBlank()) { toastOnUi("插件名称不能为空（且代码中未识别到 PluginJS.name）"); return@okButton }
                     if (code.isBlank()) { toastOnUi("插件代码不能为空"); return@okButton }
                     val newPlugin = JReadVoiceEngine.VoicePlugin(
                         id = UUID.randomUUID().toString(),
                         name = name,
-                        pluginId = etPluginId.text.toString().trim().ifBlank { name },
+                        // ID 优先级：手动输入 > JS 声明的 id > 插件名称
+                        pluginId = etPluginId.text.toString().trim()
+                            .ifBlank { metaId ?: name },
                         code = code,
                         enabled = true,
                     )
@@ -1245,10 +1336,12 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             }
             return
         }
-        // 编辑插件：API 密钥 + JS 代码编辑
+        // 编辑插件：名称 + ID + API 密钥 + JS 代码编辑
         val userVars = runCatching { JSONObject(plugin.userVarsJson.ifBlank { "{}" }) }.getOrNull() ?: JSONObject()
         val apiValue = listOf("api", "apiKey", "api_key", "key", "token", "accessToken", "secret")
             .firstNotNullOfOrNull { key -> userVars.optString(key).takeIf { it.isNotBlank() } }.orEmpty()
+        val etName = EditText(this).apply { setText(plugin.name); textSize = 13f; hint = "插件名称" }
+        val etPluginId = EditText(this).apply { setText(plugin.pluginId); textSize = 13f; hint = "插件 ID" }
         val etApi = EditText(this).apply { setText(apiValue); textSize = 13f; hint = "API 密钥" }
         val tvCodeLabel = TextView(this).apply { text = "插件 JS 代码"; textSize = 12f; setPadding(4, 12, 4, 4) }
         val etCode = EditText(this).apply {
@@ -1261,7 +1354,10 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(48, 24, 48, 0)
-            addView(TextView(this@TtsPluginActivity).apply { text = plugin.name; textSize = 18f; setPadding(4, 6, 4, 2) })
+            addView(TextView(this@TtsPluginActivity).apply { text = "插件名称"; textSize = 12f; setPadding(4, 6, 4, 2) })
+            addView(etName)
+            addView(TextView(this@TtsPluginActivity).apply { text = "插件 ID"; textSize = 12f; setPadding(4, 8, 4, 2) })
+            addView(etPluginId)
             addView(TextView(this@TtsPluginActivity).apply { text = "API 密钥"; textSize = 12f; setPadding(4, 8, 4, 2) })
             addView(etApi)
             addView(tvCodeLabel)
@@ -1271,14 +1367,21 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         alert("编辑插件") {
             customView { scrollView }
             okButton {
+                val newName = etName.text.toString().trim().ifBlank { plugin.name }
+                val newPluginId = etPluginId.text.toString().trim().ifBlank { plugin.pluginId }
                 val api = etApi.text.toString().trim()
                 val code = etCode.text.toString().trim()
                 val merged = JSONObject(plugin.userVarsJson.ifBlank { "{}" })
                 listOf("api", "apiKey", "api_key", "key", "token", "accessToken", "secret").forEach { merged.put(it, api) }
-                val updated = plugin.copy(userVarsJson = merged.toString(), code = code)
+                val updated = plugin.copy(
+                    name = newName,
+                    pluginId = newPluginId,
+                    userVarsJson = merged.toString(),
+                    code = code,
+                )
                 lifecycleScope.launch {
                     withContext(Dispatchers.IO) { JReadVoiceEngine.savePlugin(this@TtsPluginActivity, updated) }
-                    toastOnUi("已保存插件: ${plugin.name}"); reloadListsLight()
+                    toastOnUi("已保存插件: $newName"); reloadListsLight()
                 }
             }
             cancelButton()

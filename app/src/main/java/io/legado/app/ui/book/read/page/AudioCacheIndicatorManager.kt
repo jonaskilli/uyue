@@ -62,6 +62,7 @@ object AudioCacheIndicatorManager {
 
         val title = textChapter.title
         val speechRateHttp = AppConfig.speechRatePlay + 5
+        val fineRateHttp = AppConfig.speechRatePlayFine
         val engine = ReadAloud.ttsEngine ?: "default"
         val voice = AppConfig.sysTtsVoiceName ?: "default"
         val rateSys = (AppConfig.ttsSpeechRate + 5) / 10f
@@ -78,7 +79,7 @@ object AudioCacheIndicatorManager {
 
             // 1) 尝试 HttpTTS 缓存（使用 trim 后的文本，与 HttpReadAloudService.getFileNameHelper 保持一致）
             val httpFileName = MD5Utils.md5Encode16(title.trim()) + "_" +
-                    MD5Utils.md5Encode16("$speechRateHttp-$indexPart-|${rawText.trim()}")
+                    MD5Utils.md5Encode16("$speechRateHttp-$fineRateHttp-$indexPart-|${rawText.trim()}")
             if (httpCacheFiles.contains(httpFileName)) {
                 cachedParagraphMap[paragraph.num] = File("${httpTtsFolderPath}$httpFileName.mp3")
                 return@forEachIndexed
@@ -138,8 +139,9 @@ object AudioCacheIndicatorManager {
 
         // 1) 尝试 HttpTTS（使用 trim 后的文本，与 HttpReadAloudService.getFileNameHelper 保持一致）
         val speechRateHttp = AppConfig.speechRatePlay + 5
+        val fineRateHttp = AppConfig.speechRatePlayFine
         val httpFileName = MD5Utils.md5Encode16(title.trim()) + "_" +
-                MD5Utils.md5Encode16("$speechRateHttp-$indexPart-|${rawText.trim()}")
+                MD5Utils.md5Encode16("$speechRateHttp-$fineRateHttp-$indexPart-|${rawText.trim()}")
         File("${httpTtsFolderPath}$httpFileName.mp3").takeIf { it.exists() }?.let { return it }
 
         // 2) 尝试系统 TTS

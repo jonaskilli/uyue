@@ -41,6 +41,7 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private var onGroupMergeSubs: ((String) -> Unit)? = null
     private var onPluginClick: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null
     private var onPluginEdit: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null
+    private var onPluginVars: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null
     private var onPluginToggle: ((JReadVoiceEngine.VoicePlugin, Boolean) -> Unit)? = null
     private var onPluginDelete: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null
     private var onPluginAudioParams: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null
@@ -298,6 +299,7 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         onGroupMergeSubs: ((String) -> Unit)? = null,
         onPluginClick: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null,
         onPluginEdit: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null,
+        onPluginVars: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null,
         onPluginToggle: ((JReadVoiceEngine.VoicePlugin, Boolean) -> Unit)? = null,
         onPluginDelete: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null,
         onPluginAudioParams: ((JReadVoiceEngine.VoicePlugin) -> Unit)? = null,
@@ -317,6 +319,7 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         this.onPluginClick = onPluginClick; this.onPluginEdit = onPluginEdit
         this.onPluginToggle = onPluginToggle; this.onPluginDelete = onPluginDelete
         this.onPluginAudioParams = onPluginAudioParams
+        this.onPluginVars = onPluginVars
     }
 
     override fun getItemViewType(position: Int): Int = when (rows[position]) {
@@ -496,10 +499,11 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             itemView.setOnClickListener { onPluginClick?.invoke(plugin) }
             ivMore.setOnClickListener {
                 val pm = PopupMenu(itemView.context, ivMore)
-                pm.menu.add("编辑"); pm.menu.add("音频参数"); pm.menu.add("删除")
+                pm.menu.add("编辑"); pm.menu.add("设置变量"); pm.menu.add("音频参数"); pm.menu.add("删除")
                 pm.setOnMenuItemClickListener { item ->
                     when (item.title) {
                         "编辑" -> onPluginEdit?.invoke(plugin)
+                        "设置变量" -> onPluginVars?.invoke(plugin)
                         "音频参数" -> onPluginAudioParams?.invoke(plugin)
                         "删除" -> onPluginDelete?.invoke(plugin)
                     }; true

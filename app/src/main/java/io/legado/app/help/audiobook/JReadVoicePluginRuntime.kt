@@ -728,6 +728,7 @@ object JReadVoicePluginRuntime {
         context: Context,
         plugin: JReadVoiceEngine.VoicePlugin,
         dataMap: MutableMap<String, String>,
+        userVarsMap: MutableMap<String, String>? = null,
     ): ViewGroup? {
         if (plugin.code.isBlank()) return null
         return withContext(Dispatchers.IO) {
@@ -759,24 +760,20 @@ object JReadVoicePluginRuntime {
                     else -> ""
                 }
                 if (uiObjectName.isBlank()) return@runCatching null
-                // onLoadData 可能含网络请求，放在 IO 线程
-                if (ScriptableObject.getProperty(scope, uiObjectName) is ScriptableObject &&
-                    ScriptableObject.hasProperty(scope, uiObjectName)
-                ) {
-                    runCatching {
-                        RhinoScriptEngine.eval(
-                            "if (typeof $uiObjectName.onLoadData === 'function') { $uiObjectName.onLoadData(); }",
-                            scope
-                        )
-                    }.onFailure {
-                        Log.w(TAG, "loadPluginEditorUI onLoadData failed: plugin=${plugin.name}", it)
-                    }
-                }
+                // 提取声明式变量定义 vars（原版 TTS Server 语义：plugin.defVars = PluginJS.vars）。
+                // 用 JSON.stringify 提取，不依赖源码键名写法（"vars": {...} 与 vars: {...} 通吃）
+                val varsJson = runCatching {
+                    RhinoScriptEngine.eval(
+                        "JSON.stringify((typeof PluginJS !== 'undefined' && PluginJS && PluginJS.vars) " +
+                            "? PluginJS.vars : ((typeof $uiObjectName !== 'undefined' && $uiObjectName " +
+                            "&& $uiObjectName.vars) ? $uiObjectName.vars : {}))",
+                        scope,
+                    )?.toString() ?: "{}"
+                }.getOrDefault("{}")
+                val varsObj = runCatching { JSONObject(varsJson) }.getOrNull() ?: JSONObject()
                 // runtime.tts.data 已与外部 dataMap 共享同一引用，
                 // onLoadData 修改的值会实时同步到 dataMap。
                 // onLoadUI 必须在主线程创建真实 View。
-                // 直接传真实 LinearLayout 作为容器，插件代码 b.addView(JSpinner(...)) 直接工作，
-                // 因为 JSpinner 继承 FrameLayout，本身就是 View。
                 withContext(Dispatchers.Main) {
                     val container = LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
@@ -785,33 +782,86 @@ object JReadVoicePluginRuntime {
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         )
                     }
-                    ScriptableObject.putProperty(scope, "__jreadContainer", container)
-                    RhinoScriptEngine.eval(
-                        """
-                        (function() {
-                            var __jreadUiContext = __jreadCtx;
-                            var __jreadUiContainer = __jreadContainer;
-                            if (typeof $uiObjectName.onLoadUI === 'function') {
-                                $uiObjectName.onLoadUI(__jreadUiContext, __jreadUiContainer);
+
+                    if (varsObj.length() > 0) {
+                        // ★ 原版 PluginVarsBottomSheet 模式：变量设置 = 遍历 defVars 声明渲染输入框。
+                        // 不调用 onLoadUI —— 那是语音选择界面的 UI（智谱"刷新语音列表"按钮即来自它），
+                        // 不调用 onLoadData —— 原版变量弹窗不执行它，且常依赖未填写的变量值发起请求。
+                        // 每项：label 标签 + 输入框（hint 占位、预填已保存值/默认值），实时写入 userVarsMap，
+                        // 确认后持久化到插件 userVarsJson，合成时 ttsrv.userVars 直接读到
+                        val target = userVarsMap ?: dataMap
+                        val keys = varsObj.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            var label = key
+                            var hint = ""
+                            when (val v = varsObj.opt(key)) {
+                                is JSONObject -> {
+                                    label = v.optString("label", key)
+                                    hint = v.optString("hint", "")
+                                }
+                                null -> {}
+                                else -> hint = v.toString()
                             }
-                        })();
-                        """.trimIndent(),
-                        scope
-                    )
-                    Log.d(TAG, "loadPluginEditorUI onLoadUI done: plugin=${plugin.name}, containerChild=${container.childCount}")
-                    // 插件在 onLoadUI 中可能通过 "ttsrv.root = b" 把根容器重定向到自建的 LinearLayout，
-                    // 而 container(uiRoot) 始终为空。这里把插件最终设置的 ttsrv.root 挂到 container 上渲染，
-                    // 保证无论是往 ttsrv.root(container) 加还是往自建根 b 加，UI 都能显示出来。
-                    val ttsrvObj = ScriptableObject.getProperty(scope, "ttsrv")
-                    val pluginRoot = if (ttsrvObj is Scriptable) {
-                        ScriptableObject.getProperty(ttsrvObj, "root") as? View
-                    } else null
-                    if (pluginRoot != null && pluginRoot !== container && pluginRoot.parent == null) {
-                        container.addView(pluginRoot, LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT,
-                            LinearLayout.LayoutParams.WRAP_CONTENT
-                        ))
-                        Log.d(TAG, "loadPluginEditorUI attached plugin root to container: childCount=${(pluginRoot as? ViewGroup)?.childCount}")
+                            container.addView(TextView(context).apply {
+                                text = label; textSize = 13f; setPadding(4, 16, 4, 2)
+                            })
+                            container.addView(EditText(context).apply {
+                                setText(target[key] ?: "")
+                                if (hint.isNotBlank()) this.hint = hint
+                                textSize = 13f
+                                addTextChangedListener(object : android.text.TextWatcher {
+                                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                                    override fun afterTextChanged(s: android.text.Editable?) {
+                                        target[key] = s?.toString().orEmpty()
+                                    }
+                                })
+                            })
+                        }
+                        Log.d(TAG, "loadPluginEditorUI rendered ${varsObj.length()} declarative vars (defVars mode): plugin=${plugin.name}")
+                    } else {
+                        // 无 vars 声明 → 自绘模式（如微软翻译并发2 的 JSpinner 服务器选择界面）：
+                        // onLoadData 可能含网络请求，先在当前 IO 线程执行，再主线程调 onLoadUI
+                        runCatching {
+                            RhinoScriptEngine.eval(
+                                "if (typeof $uiObjectName.onLoadData === 'function') { $uiObjectName.onLoadData(); }",
+                                scope
+                            )
+                        }.onFailure {
+                            Log.w(TAG, "loadPluginEditorUI onLoadData failed: plugin=${plugin.name}", it)
+                        }
+                        ScriptableObject.putProperty(scope, "__jreadContainer", container)
+                        RhinoScriptEngine.eval(
+                            """
+                            (function() {
+                                var __jreadUiContext = __jreadCtx;
+                                var __jreadUiContainer = __jreadContainer;
+                                if (typeof $uiObjectName.onLoadUI === 'function') {
+                                    $uiObjectName.onLoadUI(__jreadUiContext, __jreadUiContainer);
+                                }
+                            })();
+                            """.trimIndent(),
+                            scope
+                        )
+                        Log.d(TAG, "loadPluginEditorUI onLoadUI done: plugin=${plugin.name}, containerChild=${container.childCount}")
+                        // 插件在 onLoadUI 中可能通过 "ttsrv.root = b" 把根容器重定向到自建的 LinearLayout，
+                        // 这里把插件最终设置的 ttsrv.root 挂到 container 上，保证两种挂载方式都能显示
+                        val ttsrvObj = ScriptableObject.getProperty(scope, "ttsrv")
+                        val pluginRoot = if (ttsrvObj is Scriptable) {
+                            ScriptableObject.getProperty(ttsrvObj, "root") as? View
+                        } else null
+                        if (pluginRoot != null && pluginRoot !== container && pluginRoot.parent == null) {
+                            container.addView(pluginRoot, LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT
+                            ))
+                            Log.d(TAG, "loadPluginEditorUI attached plugin root to container: childCount=${(pluginRoot as? ViewGroup)?.childCount}")
+                        }
+                    }
+                    if (container.childCount == 0) {
+                        Log.d(TAG, "loadPluginEditorUI empty container: plugin=${plugin.name}")
+                        return@withContext null
                     }
                     container
                 }
