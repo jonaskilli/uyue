@@ -102,7 +102,7 @@
         app:isBottomBackground="true" />
 
     <io.legado.app.lib.prefs.SwitchPreference
-        android:defaultValue="true"
+        android:defaultValue="false"
         android:key="volumeKeyPage"
         android:title="@string/volume_key_page"
         app:iconSpaceReserved="false"

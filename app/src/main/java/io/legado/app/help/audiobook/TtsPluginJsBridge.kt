@@ -40,10 +40,20 @@ class TtsPluginJsBridge {
         var lastVoiceTag: String = ""
             private set
 
+        /**
+         * 本次朗读的音频是否已在 synthesize 返回前按各角色自身的后处理参数调节完毕。
+         * 为 true 时合并阶段不再做统一调速（各角色参数不同，不能用一套参数调）。
+         */
+        @Volatile
+        @JvmStatic
+        var synthesisPostProcessed: Boolean = false
+            private set
+
         @JvmStatic
         fun resetSynthesizeFlag() {
             synthesizeCalled = false
             lastVoiceTag = ""
+            synthesisPostProcessed = false
         }
     }
 
@@ -66,7 +76,8 @@ class TtsPluginJsBridge {
         val requestId = UUID.randomUUID().toString()
         val pointerJson = JSONObject().put("voiceTag", voiceTag).toString()
         return try {
-            JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
+            val bytes = JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
+            applyPostAudioImmediately(bytes, voiceTag)
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesize 失败: tag=$voiceTag error=${e.message}", e)
             Log.e(TAG, "synthesize failed: tag=$voiceTag", e)
@@ -93,12 +104,29 @@ class TtsPluginJsBridge {
         val requestId = UUID.randomUUID().toString()
         val pointerJson = JSONObject().put("voiceTag", config.voiceTag).toString()
         return try {
-            JReadVoiceEngine.synthesizeConfigLineAudio(context, config, text, pointerJson, requestId)
+            val bytes = JReadVoiceEngine.synthesizeConfigLineAudio(context, config, text, pointerJson, requestId)
+            applyPostAudioImmediately(bytes, config.voiceTag)
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesizeByConfigId 失败: configId=$configId error=${e.message}", e)
             Log.e(TAG, "synthesizeByConfigId failed: configId=$configId", e)
             null
         }
+    }
+
+    /**
+     * 合成完毕后立即按该角色（voiceTag）自身的后处理参数调节音频：
+     * 分组/全局链路 × 插件后参数 × 朗读界面语速滑块，一次乘齐，源头上调完，
+     * 让引擎/脚本后续拿到的就是成品，合并阶段只做纯拼接。
+     * 参数全部为默认值时字节原样返回（零转码开销），但同样置位标志以免合并阶段重复调速。
+     */
+    private fun applyPostAudioImmediately(bytes: ByteArray?, voiceTag: String): ByteArray? {
+        if (bytes == null || bytes.isEmpty()) return bytes
+        synthesisPostProcessed = true
+        val params = JReadVoiceEngine.resolvePostAudioParams(context, voiceTag)
+        if (params.resolved().isDefault()) return bytes
+        // 输入可能是插件原始格式（mp3 等）或标准 WAV，decodeToStandardWav 统一处理：
+        // 解码 → 重采样 24k → Sonic(语速/音量/音高) → 封装 WAV
+        return io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(bytes, postParams = params) ?: bytes
     }
 
     /**

@@ -373,10 +373,31 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     const val defaultSpeechRate = 5
 
-    var ttsSpeechRate: Int
-        get() = appCtx.getPrefInt(PreferKey.ttsSpeechRate, defaultSpeechRate)
+    /** 精细刻度默认进度：50 → 显示 1.00 */
+    const val defaultSpeechRateFine = defaultSpeechRate * 10
+
+    /**
+     * 朗读界面语速滑块原始进度（精细刻度 0~450，步进 0.01）：
+     * 显示系数 = (ttsSpeechRateFine + 50) / 100f，默认 50 → 1.00。
+     * 首次读取时自动从旧版 ttsSpeechRate（0~45）迁移（×10），老用户取值不变。
+     */
+    var ttsSpeechRateFine: Int
+        get() {
+            val stored = appCtx.getPrefInt(PreferKey.ttsSpeechRateFine, Int.MIN_VALUE)
+            if (stored != Int.MIN_VALUE) return stored.coerceIn(0, 450)
+            val migrated = appCtx.getPrefInt(PreferKey.ttsSpeechRate, defaultSpeechRate) * 10
+            appCtx.putPrefInt(PreferKey.ttsSpeechRateFine, migrated)
+            return migrated
+        }
         set(value) {
-            appCtx.putPrefInt(PreferKey.ttsSpeechRate, value)
+            appCtx.putPrefInt(PreferKey.ttsSpeechRateFine, value.coerceIn(0, 450))
+        }
+
+    /** 旧版粗刻度（0~45，步进 0.1）：供引擎参数/缓存 key 等整数刻度消费方使用，由精细值派生 */
+    var ttsSpeechRate: Int
+        get() = Math.round(ttsSpeechRateFine / 10f)
+        set(value) {
+            ttsSpeechRateFine = value * 10
         }
 
     var ttsTimer: Int
@@ -385,6 +406,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefInt(PreferKey.ttsTimer, value)
         }
 
+    val speechRatePlayFine: Int get() = if (ttsFlowSys) defaultSpeechRateFine else ttsSpeechRateFine
     val speechRatePlay: Int get() = if (ttsFlowSys) defaultSpeechRate else ttsSpeechRate
 
     var chineseConverterType: Int
@@ -638,7 +660,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.keyPageOnLongPress, false)
 
     val volumeKeyPage
-        get() = appCtx.getPrefBoolean(PreferKey.volumeKeyPage, true)
+        get() = appCtx.getPrefBoolean(PreferKey.volumeKeyPage, false)
 
     val volumeKeyPageOnPlay
         get() = appCtx.getPrefBoolean(PreferKey.volumeKeyPageOnPlay, true)
@@ -1260,7 +1282,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     // 16. 角色标注显示开关
     var showRoleAnnotation: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.showRoleAnnotation, false)
+        get() = appCtx.getPrefBoolean(PreferKey.showRoleAnnotation, true)
         set(value) = appCtx.putPrefBoolean(PreferKey.showRoleAnnotation, value)
 
     // 17. 角色标注上下偏移量（dp），默认0。正数向上偏移，负数向下偏移

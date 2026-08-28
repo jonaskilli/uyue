@@ -125,12 +125,16 @@ object JReadVoicePluginRuntime {
 
         val locale = config.locale.ifBlank { "zh-CN" }
         val voice = config.voice.ifBlank { voiceTag }
+        // 插件级合成参数：与配置参数相乘（1.0 = 不调整）
+        val effSpeed = config.speed * JReadVoiceEngine.pluginSynthFactor(plugin.speed)
+        val effVolume = config.volume * JReadVoiceEngine.pluginSynthFactor(plugin.volume)
+        val effPitch = config.pitch * JReadVoiceEngine.pluginSynthFactor(plugin.pitch)
         ScriptableObject.putProperty(scope, "__jreadText", text)
         ScriptableObject.putProperty(scope, "__jreadLocale", locale)
         ScriptableObject.putProperty(scope, "__jreadVoice", voice)
-        ScriptableObject.putProperty(scope, "__jreadRate", (config.speed * 50f).toInt())
-        ScriptableObject.putProperty(scope, "__jreadVolume", (config.volume * 50f).toInt())
-        ScriptableObject.putProperty(scope, "__jreadPitch", (config.pitch * 50f).toInt())
+        ScriptableObject.putProperty(scope, "__jreadRate", (effSpeed * 50f).toInt())
+        ScriptableObject.putProperty(scope, "__jreadVolume", (effVolume * 50f).toInt())
+        ScriptableObject.putProperty(scope, "__jreadPitch", (effPitch * 50f).toInt())
         val result = runCatching {
             RhinoScriptEngine.eval(
                 """
@@ -156,10 +160,10 @@ object JReadVoicePluginRuntime {
                     "text" to text,
                     "locale" to locale,
                     "voice" to voice,
-                    "rate" to (config.speed * 50f).toInt(),
-                    "speed" to (config.speed * 50f).toInt(),
-                    "volume" to (config.volume * 50f).toInt(),
-                    "pitch" to (config.pitch * 50f).toInt(),
+                    "rate" to (effSpeed * 50f).toInt(),
+                    "speed" to (effSpeed * 50f).toInt(),
+                    "volume" to (effVolume * 50f).toInt(),
+                    "pitch" to (effPitch * 50f).toInt(),
                     "data" to configData,
                 )
                 configData.forEach { (key, value) ->
@@ -1267,9 +1271,9 @@ object JReadVoicePluginRuntime {
             locale = config.locale,
             voice = config.voice,
             pluginId = plugin.pluginId.ifBlank { plugin.id },
-            speed = config.speed,
-            volume = config.volume,
-            pitch = config.pitch,
+            speed = config.speed * JReadVoiceEngine.pluginSynthFactor(plugin.speed),
+            volume = config.volume * JReadVoiceEngine.pluginSynthFactor(plugin.volume),
+            pitch = config.pitch * JReadVoiceEngine.pluginSynthFactor(plugin.pitch),
             userVars = userVars,
             defVars = defVars,
             data = (externalDataMap ?: jsonObjectToMap(config.dataJson)).apply {

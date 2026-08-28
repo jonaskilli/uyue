@@ -38,6 +38,8 @@ object PreferKey {
     const val ttsEngine = "appTtsEngine"
     const val ttsFollowSys = "ttsFollowSys"
     const val ttsSpeechRate = "ttsSpeechRate"
+    /** 语速滑块精细进度（0~450，步进 0.01），ttsSpeechRate 为其粗刻度派生值 */
+    const val ttsSpeechRateFine = "ttsSpeechRateFine"
     const val ttsCacheEnabled = "ttsCacheEnabled"
     const val sysTtsPackageName = "sysTtsPackageName"
     const val sysTtsSynthesizeTimeout = "sysTtsSynthesizeTimeout"

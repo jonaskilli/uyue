@@ -1194,7 +1194,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                         put("ws", wsHelper)
                     }
                     val ttsUsed = io.legado.app.help.audiobook.TtsPluginJsBridge.synthesizeCalled
-                    val postParams = if (ttsUsed) {
+                    val postParams = if (ttsUsed && !io.legado.app.help.audiobook.TtsPluginJsBridge.synthesisPostProcessed) {
                         val tag = io.legado.app.help.audiobook.TtsPluginJsBridge.lastVoiceTag
                         if (tag.isNotBlank()) {
                             io.legado.app.help.audiobook.JReadVoiceEngine.resolvePostAudioParams(appCtx, tag)
@@ -1257,7 +1257,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                         put("ws", wsHelper)
                     }
                     val ttsUsed = io.legado.app.help.audiobook.TtsPluginJsBridge.synthesizeCalled
-                    val postParams = if (ttsUsed) {
+                    val postParams = if (ttsUsed && !io.legado.app.help.audiobook.TtsPluginJsBridge.synthesisPostProcessed) {
                         val tag = io.legado.app.help.audiobook.TtsPluginJsBridge.lastVoiceTag
                         if (tag.isNotBlank()) {
                             io.legado.app.help.audiobook.JReadVoiceEngine.resolvePostAudioParams(appCtx, tag)
@@ -1628,7 +1628,11 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         val t = title.trim()
         val c = content.trim()
         val indexPart = if (index >= 0) "|$index" else ""
-        return MD5Utils.md5Encode16(t) + "_" + MD5Utils.md5Encode16("$speechRate-$indexPart-|$c")
+        // 语速是"合成后烘焙进缓存音频"的（Sonic 后处理在写缓存前执行），
+        // 因此缓存 key 必须包含精细语速（0.01 精度）：滑块任意微调都换 key 重新合成，
+        // 否则同一粗刻度区间（如 1.00~1.04）内微调会命中旧语速的缓存，听不到变化
+        val fineRate = io.legado.app.help.config.AppConfig.speechRatePlayFine
+        return MD5Utils.md5Encode16(t) + "_" + MD5Utils.md5Encode16("$speechRate-$fineRate-$indexPart-|$c")
     }
 
     /**

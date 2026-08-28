@@ -2327,7 +2327,7 @@ abstract class BaseReadAloudService : BaseService(),
     }
 
     private fun upFloatWindow() {
-        if (getPrefBoolean(PreferKey.readAloudFloatWindow) && isPlay()) {
+        if (getPrefBoolean(PreferKey.readAloudFloatWindow, true) && isPlay()) {
             ReadAloudFloatService.updateVisibility(this)
         }
     }

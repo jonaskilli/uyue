@@ -109,6 +109,14 @@ object JReadVoiceEngine {
         val bodyTemplate: String = "",
         val responseAudioPath: String = "",
         val enabled: Boolean = true,
+        /** 插件级合成参数：与每个配置的同名参数相乘，1.0 = 不调整 */
+        val speed: Float = 1f,
+        val volume: Float = 1f,
+        val pitch: Float = 1f,
+        /** 插件级后处理参数（合成后生效）：与分组/全局后处理链路结果相乘，FOLLOW(0) = 不干预 */
+        val postSpeed: Float = PostAudioParams.FOLLOW,
+        val postVolume: Float = PostAudioParams.FOLLOW,
+        val postPitch: Float = PostAudioParams.FOLLOW,
     )
 
     data class VoiceGroup(
@@ -361,13 +369,28 @@ object JReadVoiceEngine {
     }
 
     /**
+     * 朗读界面语速滑块系数：显示值 = (speechRatePlayFine + 50) / 100f。
+     * 滑块精细进度 0~450（步进 0.01）→ 系数 0.50~5.00；默认 50 → 系数 1.00（不调整）；
+     * 「跟随系统」开关打开时系数恒 1.00。
+     * 该系数作用于合成完毕后的音频（Sonic 变速后处理）。
+     */
+    fun readAloudUiSpeedFactor(): Float =
+        (io.legado.app.help.config.AppConfig.speechRatePlayFine + 50) / 100f
+
+    /**
      * 解析某个 voiceTag 的最终后处理音频参数
      * 优先级：配置 → 小分组(thirdGroup) → 中分组(subGroup) → 大分组(group) → 全局
+     * 最终语速再乘以朗读界面语速滑块系数与插件级后处理参数。
      */
     fun resolvePostAudioParams(context: Context, voiceTag: String): PostAudioParams {
+        val uiSpeedFactor = readAloudUiSpeedFactor()
         val config = listConfigs(context, ensureBuiltIns = false)
             .firstOrNull { it.voiceTag == voiceTag }
-            ?: return PostAudioParams(PostAudioParams.DEFAULT, PostAudioParams.DEFAULT, PostAudioParams.DEFAULT)
+            ?: return PostAudioParams(
+                speed = PostAudioParams.DEFAULT * uiSpeedFactor,
+                volume = PostAudioParams.DEFAULT,
+                pitch = PostAudioParams.DEFAULT,
+            )
 
         val groups = listGroups(context)
         val globalParams = PostAudioParams(
@@ -395,9 +418,24 @@ object JReadVoiceEngine {
             ?: subGroupParams
 
         // 配置级别
-        return PostAudioParams(config.postSpeed, config.postVolume, config.postPitch)
+        val base = PostAudioParams(config.postSpeed, config.postVolume, config.postPitch)
             .copyIfFollow(thirdGroupParams)
             .resolved()
+        // 插件级后处理参数：与链路结果相乘（FOLLOW/0 视为 1.0 = 不干预）；
+        // 语速再乘朗读界面滑块系数；总体钳制到有效范围
+        val plugin = findPlugin(context, config.pluginId) ?: return PostAudioParams(
+            speed = (base.speed * uiSpeedFactor).coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+            volume = base.volume,
+            pitch = base.pitch,
+        )
+        return PostAudioParams(
+            speed = (base.speed * pluginSynthFactor(plugin.postSpeed) * uiSpeedFactor)
+                .coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+            volume = (base.volume * pluginSynthFactor(plugin.postVolume))
+                .coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+            pitch = (base.pitch * pluginSynthFactor(plugin.postPitch))
+                .coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+        )
     }
 
     fun saveGroup(context: Context, group: VoiceGroup) {
@@ -710,29 +748,40 @@ object JReadVoiceEngine {
         }
     }
 
+    /** 插件级音频参数因子：<=0 视为 1.0（不调整） */
+    fun pluginSynthFactor(value: Float): Float =
+        if (value <= 0f) PostAudioParams.DEFAULT else value
+
+    /**
+     * 更新插件级音频参数（保存在插件自身上，不覆盖各配置的参数）：
+     * - speed/volume/pitch：合成参数，与每个配置的同名参数相乘，1.0 = 不调整
+     * - postSpeed/postVolume/postPitch：合成后后处理参数，与分组/全局链路结果相乘，FOLLOW(0) = 不干预
+     */
     fun updatePluginAudioParams(
         context: Context,
         plugin: VoicePlugin,
         speed: Float,
         volume: Float,
         pitch: Float,
-    ): Int {
-        val pluginKeys = listOf(plugin.id, plugin.pluginId)
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .toSet()
-        if (pluginKeys.isEmpty()) return 0
-        var changedCount = 0
-        val updatedConfigs = listConfigs(context).map { config ->
-            if (config.pluginId.trim() in pluginKeys) {
-                changedCount++
-                config.copy(speed = speed, volume = volume, pitch = pitch)
-            } else {
-                config
-            }
+        postSpeed: Float = PostAudioParams.FOLLOW,
+        postVolume: Float = PostAudioParams.FOLLOW,
+        postPitch: Float = PostAudioParams.FOLLOW,
+    ): Boolean {
+        val plugins = listPlugins(context).toMutableList()
+        val index = plugins.indexOfFirst {
+            it.id == plugin.id || (plugin.pluginId.isNotBlank() && it.pluginId == plugin.pluginId)
         }
-        if (changedCount > 0) saveConfigs(context, updatedConfigs)
-        return changedCount
+        if (index < 0) return false
+        plugins[index] = plugins[index].copy(
+            speed = speed,
+            volume = volume,
+            pitch = pitch,
+            postSpeed = postSpeed,
+            postVolume = postVolume,
+            postPitch = postPitch,
+        )
+        savePlugins(context, plugins)
+        return true
     }
 
     fun deleteConfig(context: Context, id: String) {
@@ -1078,6 +1127,12 @@ object JReadVoiceEngine {
                         bodyTemplate = firstText(obj, "bodyTemplate", "body", "requestBody"),
                         responseAudioPath = firstText(obj, "responseAudioPath", "audioPath", "audioUrlPath"),
                         enabled = obj.optBoolean("enabled", obj.optBoolean("isEnabled", true)),
+                        speed = obj.optDouble("speed", 1.0).toFloat(),
+                        volume = obj.optDouble("volume", 1.0).toFloat(),
+                        pitch = obj.optDouble("pitch", 1.0).toFloat(),
+                        postSpeed = obj.optDouble("postSpeed", PostAudioParams.FOLLOW.toDouble()).toFloat(),
+                        postVolume = obj.optDouble("postVolume", PostAudioParams.FOLLOW.toDouble()).toFloat(),
+                        postPitch = obj.optDouble("postPitch", PostAudioParams.FOLLOW.toDouble()).toFloat(),
                     )
                 )
             }
@@ -1811,14 +1866,14 @@ object JReadVoiceEngine {
             return
         }
 
-        val request = config.resolveRequest(findPlugin(context, config.pluginId))
+        val request = config.resolveRequest(plugin)
         require(request.urlTemplate.isNotBlank()) { "J阅读声音配置缺少插件或 URL" }
-        val url = render(request.urlTemplate, text, voiceTag, config, pointer, requestId)
-        val headers = parseHeaders(render(request.headersText, text, voiceTag, config, pointer, requestId))
+        val url = render(request.urlTemplate, text, voiceTag, config, plugin, pointer, requestId)
+        val headers = parseHeaders(render(request.headersText, text, voiceTag, config, plugin, pointer, requestId))
         val builder = Request.Builder().url(url)
         headers.forEach { (name, value) -> builder.addHeader(name, value) }
         if (request.method.equals("POST", ignoreCase = true)) {
-            val body = render(request.bodyTemplate, text, voiceTag, config, pointer, requestId)
+            val body = render(request.bodyTemplate, text, voiceTag, config, plugin, pointer, requestId)
             val mediaType = headers.entries
                 .firstOrNull { it.key.equals("Content-Type", ignoreCase = true) }
                 ?.value
@@ -1902,6 +1957,7 @@ object JReadVoiceEngine {
         text: String,
         voiceTag: String,
         config: VoiceConfig,
+        plugin: VoicePlugin?,
         pointer: JSONObject,
         requestId: String,
     ): String {
@@ -1923,9 +1979,9 @@ object JReadVoiceEngine {
             .replace("{rawEmotion}", emotion)
             .replace("{effectText}", enc(effectText))
             .replace("{rawEffectText}", effectText)
-            .replace("{speed}", config.speed.toString())
-            .replace("{volume}", config.volume.toString())
-            .replace("{pitch}", config.pitch.toString())
+            .replace("{speed}", (config.speed * pluginSynthFactor(plugin?.speed ?: 1f)).toString())
+            .replace("{volume}", (config.volume * pluginSynthFactor(plugin?.volume ?: 1f)).toString())
+            .replace("{pitch}", (config.pitch * pluginSynthFactor(plugin?.pitch ?: 1f)).toString())
             .replace("{requestId}", enc(requestId))
     }
 
@@ -2269,6 +2325,12 @@ object JReadVoiceEngine {
             .put("bodyTemplate", plugin.bodyTemplate)
             .put("responseAudioPath", plugin.responseAudioPath)
             .put("enabled", plugin.enabled)
+            .put("speed", plugin.speed)
+            .put("volume", plugin.volume)
+            .put("pitch", plugin.pitch)
+            .put("postSpeed", plugin.postSpeed)
+            .put("postVolume", plugin.postVolume)
+            .put("postPitch", plugin.postPitch)
     }
 
     private fun parseVoiceConfig(obj: JSONObject): VoiceConfig? {

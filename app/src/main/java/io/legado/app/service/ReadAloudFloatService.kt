@@ -79,7 +79,7 @@ class ReadAloudFloatService : BaseService() {
          */
         fun updateVisibility(context: android.content.Context) {
             if (!BaseReadAloudService.isRun) return
-            if (!context.getPrefBoolean(PreferKey.readAloudFloatWindow)) return
+            if (!context.getPrefBoolean(PreferKey.readAloudFloatWindow, true)) return
             val intent = Intent(context, ReadAloudFloatService::class.java)
             intent.action = ACTION_UPDATE_VISIBILITY
             context.startForegroundServiceCompat(intent)
@@ -125,7 +125,7 @@ class ReadAloudFloatService : BaseService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!getPrefBoolean(PreferKey.readAloudFloatWindow)) {
+        if (!getPrefBoolean(PreferKey.readAloudFloatWindow, true)) {
             removeFloatingWindow()
             stopSelf()
             return START_NOT_STICKY

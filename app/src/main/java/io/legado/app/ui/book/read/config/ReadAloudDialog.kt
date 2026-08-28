@@ -678,13 +678,15 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             upTtsSpeechRate()
         }
         ivTtsSpeechReduce.setOnClickListener {
-            seekTtsSpeechRate.progress = AppConfig.ttsSpeechRate - 1
-            AppConfig.ttsSpeechRate -= 1
+            val v = (AppConfig.ttsSpeechRateFine - 5).coerceAtLeast(0)
+            seekTtsSpeechRate.progress = v
+            AppConfig.ttsSpeechRateFine = v
             upTtsSpeechRate()
         }
         ivTtsSpeechAdd.setOnClickListener {
-            seekTtsSpeechRate.progress = AppConfig.ttsSpeechRate + 1
-            AppConfig.ttsSpeechRate += 1
+            val v = (AppConfig.ttsSpeechRateFine + 5).coerceAtMost(450)
+            seekTtsSpeechRate.progress = v
+            AppConfig.ttsSpeechRateFine = v
             upTtsSpeechRate()
         }
         ivTimer.setOnClickListener {
@@ -698,8 +700,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 ReadAloud.setTimer(requireContext(), times[index])
             }
         }
-        //设置保存的默认值
-        seekTtsSpeechRate.progress = AppConfig.ttsSpeechRate
+        //设置保存的默认值（精细刻度 0~450，步进 0.01）
+        seekTtsSpeechRate.progress = AppConfig.ttsSpeechRateFine
         seekTtsSpeechRate.setOnSeekBarChangeListener(object : SeekBarChangeListener {
 
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
@@ -708,7 +710,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             }
 
             override fun onStopTrackingTouch(seekBar: SeekBar) {
-                AppConfig.ttsSpeechRate = seekBar.progress
+                AppConfig.ttsSpeechRateFine = seekBar.progress
                 upTtsSpeechRate()
             }
         })
@@ -763,7 +765,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     private fun upTtsSpeechRateEnabled(enabled: Boolean) {
         binding.run {
-            upTtsSpeechRateText(AppConfig.ttsSpeechRate)
+            upTtsSpeechRateText(AppConfig.ttsSpeechRateFine)
             tvTtsSpeedValue.visible(enabled)
             seekTtsSpeechRate.isEnabled = enabled
             ivTtsSpeechReduce.isEnabled = enabled
@@ -1209,7 +1211,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     @SuppressLint("SetTextIsNull")
     private fun upTtsSpeechRateText(value: Int) {
-        binding.tvTtsSpeedValue.text = ((value + 5) / 10f).toString()
+        // 精细刻度：显示系数 = (进度 + 50) / 100，如进度 52 → 1.02
+        binding.tvTtsSpeedValue.text = String.format("%.2f", (value + 50) / 100f)
     }
 
     private fun upTtsSpeechRate() {

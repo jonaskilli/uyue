@@ -1356,20 +1356,43 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     }
 
     private fun showPluginAudioParams(plugin: JReadVoiceEngine.VoicePlugin) {
-        val configs = allConfigs.filter { it.pluginId == plugin.id || it.pluginId == plugin.pluginId }
-        val firstConfig = configs.firstOrNull()
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 24, 48, 0) }
-        container.addView(TextView(this).apply { text = "${plugin.name} (${configs.size}个音色项)"; textSize = 14f; setPadding(4, 4, 4, 12) })
-        val (sbSpeed, _, _) = buildSliderRow("语速", ((firstConfig?.speed ?: 1f) * 100).toInt(), false)
-        val (sbVol, _, _) = buildSliderRow("音量", ((firstConfig?.volume ?: 1f) * 100).toInt(), false)
-        val (sbPitch, _, _) = buildSliderRow("音调", ((firstConfig?.pitch ?: 1f) * 100).toInt(), false)
+        container.addView(TextView(this).apply { text = plugin.name; textSize = 14f; setPadding(4, 4, 4, 4) })
+        container.addView(TextView(this).apply {
+            text = "合成参数：与每个音色配置里的参数相乘，不会覆盖配置本身的值"
+            textSize = 12f; setPadding(4, 4, 4, 12)
+        })
+        val pluginSpeed = if (plugin.speed <= 0f) 1f else plugin.speed
+        val pluginVolume = if (plugin.volume <= 0f) 1f else plugin.volume
+        val pluginPitch = if (plugin.pitch <= 0f) 1f else plugin.pitch
+        val (sbSpeed, _, _) = buildSliderRow("语速", (pluginSpeed * 100).toInt(), false)
+        val (sbVol, _, _) = buildSliderRow("音量", (pluginVolume * 100).toInt(), false)
+        val (sbPitch, _, _) = buildSliderRow("音调", (pluginPitch * 100).toInt(), false)
         listOf(sbSpeed, sbVol, sbPitch).forEach { container.addView(it.tag as android.view.View) }
+        container.addView(TextView(this).apply {
+            text = "合成完毕后（后处理）：与分组/全局后处理参数相乘\n跟随 = 不干预"
+            textSize = 12f; setPadding(4, 16, 4, 12)
+        })
+        val (sbPostSpeed, _, _) = buildSliderRow("后语速", if (plugin.postSpeed <= 0f) 0 else (plugin.postSpeed * 100).toInt(), true)
+        val (sbPostVol, _, _) = buildSliderRow("后音量", if (plugin.postVolume <= 0f) 0 else (plugin.postVolume * 100).toInt(), true)
+        val (sbPostPitch, _, _) = buildSliderRow("后音高", if (plugin.postPitch <= 0f) 0 else (plugin.postPitch * 100).toInt(), true)
+        listOf(sbPostSpeed, sbPostVol, sbPostPitch).forEach { container.addView(it.tag as android.view.View) }
         alert("音频参数") {
             customView { container }
             okButton {
-                val speed = sbSpeed.progress / 100f; val volume = sbVol.progress / 100f; val pitch = sbPitch.progress / 100f
+                val speed = sbSpeed.progress / 100f
+                val volume = sbVol.progress / 100f
+                val pitch = sbPitch.progress / 100f
+                val postSpeed = sbPostSpeed.progress / 100f
+                val postVolume = sbPostVol.progress / 100f
+                val postPitch = sbPostPitch.progress / 100f
                 lifecycleScope.launch {
-                    withContext(Dispatchers.IO) { JReadVoiceEngine.updatePluginAudioParams(this@TtsPluginActivity, plugin, speed, volume, pitch) }
+                    withContext(Dispatchers.IO) {
+                        JReadVoiceEngine.updatePluginAudioParams(
+                            this@TtsPluginActivity, plugin,
+                            speed, volume, pitch, postSpeed, postVolume, postPitch,
+                        )
+                    }
                     toastOnUi("已更新音频参数"); reloadListsLight()
                 }
             }

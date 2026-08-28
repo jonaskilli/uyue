@@ -303,7 +303,7 @@ class ReadBookActivity : BaseReadBookActivity(),
                 return@addCallback
             }
             if (BaseReadAloudService.isPlay()) {
-                if (!getPrefBoolean(PreferKey.readAloudBackToBackground)) {
+                if (!getPrefBoolean(PreferKey.readAloudBackToBackground, true)) {
                     ReadAloud.pause(this@ReadBookActivity)
                     toastOnUi(R.string.read_aloud_pause)
                     return@addCallback

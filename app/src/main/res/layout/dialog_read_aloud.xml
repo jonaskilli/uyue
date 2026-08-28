@@ -489,7 +489,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:max="45" />
+                android:max="450" />
 
             <androidx.appcompat.widget.AppCompatImageView
                 android:id="@+id/iv_tts_speech_add"

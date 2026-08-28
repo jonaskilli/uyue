@@ -28,7 +28,7 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.SwitchPreference
-            android:defaultValue="false"
+            android:defaultValue="true"
             android:title="@string/read_aloud_float_window"
             android:summary="@string/read_aloud_float_window_summary"
             android:key="readAloudFloatWindow"
@@ -53,7 +53,7 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.SwitchPreference
-            android:defaultValue="false"
+            android:defaultValue="true"
             android:title="@string/read_aloud_back_to_background"
             android:summary="@string/read_aloud_back_to_background_summary"
             android:key="readAloudBackToBackground"
@@ -361,7 +361,7 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.SwitchPreference
-            android:defaultValue="false"
+            android:defaultValue="true"
             android:title="@string/show_role_annotation"
             android:summary="@string/show_role_annotation_summary"
             android:key="showRoleAnnotation"
