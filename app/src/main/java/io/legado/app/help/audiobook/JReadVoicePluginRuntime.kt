@@ -724,6 +724,23 @@ object JReadVoicePluginRuntime {
      * 控件值变更通过插件自身写回 runtime.tts.data（即 dataMap），保存时合并进 config.dataJson。
      * 返回根布局（真实 ViewGroup），若插件没有 EditorJS/PluginJS 或渲染失败则返回 null。
      */
+    /** 声明式变量的登录参数（原版 PluginLoginActivity 入参） */
+    class VarLoginInfo(
+        val key: String,
+        val loginUrl: String,
+        val binding: String,
+        val desc: String,
+        val ua: String,
+    )
+
+    /** 声明式变量渲染结果：登录信息/按钮/输入框 + 值容器，挂 container.tag 供 Activity 绑定回调 */
+    class VarLoginRequestHolder(
+        val infos: List<VarLoginInfo>,
+        val buttons: Map<String, Button>,
+        val editViews: Map<String, EditText>,
+        val values: MutableMap<String, String>,
+    )
+
     suspend fun loadPluginEditorUI(
         context: Context,
         plugin: JReadVoiceEngine.VoicePlugin,
@@ -788,17 +805,34 @@ object JReadVoicePluginRuntime {
                         // 不调用 onLoadUI —— 那是语音选择界面的 UI（智谱"刷新语音列表"按钮即来自它），
                         // 不调用 onLoadData —— 原版变量弹窗不执行它，且常依赖未填写的变量值发起请求。
                         // 每项：label 标签 + 输入框（hint 占位、预填已保存值/默认值），实时写入 userVarsMap，
-                        // 确认后持久化到插件 userVarsJson，合成时 ttsrv.userVars 直接读到
+                        // 确认后持久化到插件 userVarsJson，合成时 ttsrv.userVars 直接读到。
+                        // 声明带 loginUrl/binding 的项（原版 PluginLoginActivity 机制）→ 输入框旁挂"登录"按钮，
+                        // 登录参数以 VarLoginInfo 挂在 EditText.tag 上，由调用方注册回调启动登录页并回填
                         val target = userVarsMap ?: dataMap
+                        val loginInfos = mutableListOf<VarLoginInfo>()
+                        val loginEditViews = mutableMapOf<String, EditText>()
+                        val loginButtons = mutableMapOf<String, Button>()
                         val keys = varsObj.keys()
                         while (keys.hasNext()) {
                             val key = keys.next()
                             var label = key
                             var hint = ""
+                            var loginInfo: VarLoginInfo? = null
                             when (val v = varsObj.opt(key)) {
                                 is JSONObject -> {
                                     label = v.optString("label", key)
                                     hint = v.optString("hint", "")
+                                    val loginUrl = v.optString("loginUrl", "")
+                                    val binding = v.optString("binding", "")
+                                    if (loginUrl.isNotBlank() && binding.isNotBlank()) {
+                                        loginInfo = VarLoginInfo(
+                                            key = key,
+                                            loginUrl = loginUrl,
+                                            binding = binding,
+                                            desc = v.optString("loginDesc", ""),
+                                            ua = v.optString("ua", ""),
+                                        )
+                                    }
                                 }
                                 null -> {}
                                 else -> hint = v.toString()
@@ -806,7 +840,7 @@ object JReadVoicePluginRuntime {
                             container.addView(TextView(context).apply {
                                 text = label; textSize = 13f; setPadding(4, 16, 4, 2)
                             })
-                            container.addView(EditText(context).apply {
+                            val editText = EditText(context).apply {
                                 setText(target[key] ?: "")
                                 if (hint.isNotBlank()) this.hint = hint
                                 textSize = 13f
@@ -817,7 +851,38 @@ object JReadVoicePluginRuntime {
                                         target[key] = s?.toString().orEmpty()
                                     }
                                 })
-                            })
+                            }
+                            if (loginInfo != null) {
+                                // 输入框 + 登录按钮 同行；点击回调由 Activity 通过 holder 注册
+                                val row = LinearLayout(context).apply {
+                                    orientation = LinearLayout.HORIZONTAL
+                                    gravity = android.view.Gravity.CENTER_VERTICAL
+                                }
+                                editText.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                                row.addView(editText)
+                                row.addView(Button(context).apply {
+                                    text = "登录"
+                                    textSize = 13f
+                                    minWidth = 0
+                                    minHeight = 0
+                                    setPadding(24, 8, 24, 8)
+                                }.also { loginButtons[key] = it })
+                                container.addView(row, LinearLayout.LayoutParams(
+                                    LinearLayout.LayoutParams.MATCH_PARENT,
+                                    LinearLayout.LayoutParams.WRAP_CONTENT
+                                ))
+                                loginInfos.add(loginInfo)
+                                loginEditViews[key] = editText
+                            } else {
+                                container.addView(editText, LinearLayout.LayoutParams(
+                                    LinearLayout.LayoutParams.MATCH_PARENT,
+                                    LinearLayout.LayoutParams.WRAP_CONTENT
+                                ))
+                            }
+                        }
+                        // 登录请求统一挂到 container.tag，由 Activity 注册点击回调与结果回填
+                        if (loginInfos.isNotEmpty()) {
+                            container.tag = VarLoginRequestHolder(loginInfos, loginButtons, loginEditViews, target)
                         }
                         Log.d(TAG, "loadPluginEditorUI rendered ${varsObj.length()} declarative vars (defVars mode): plugin=${plugin.name}")
                     } else {

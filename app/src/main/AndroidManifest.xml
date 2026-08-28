@@ -258,6 +258,10 @@
             android:name=".ui.tts.plugin.TtsConfigEditorActivity"
             android:launchMode="singleTop"
             android:screenOrientation="behind" />
+        <!-- 插件变量登录页 -->
+        <activity
+            android:name=".ui.tts.plugin.PluginLoginActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
         <!-- 朗读脚本编辑 -->
         <activity
             android:name=".ui.tts.script.TtsScriptEditActivity"

@@ -59,6 +59,23 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     private val configEditorLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) scheduleExportEnabledTags()
     }
+    // 插件变量登录页结果回填
+    private var currentLoginHolder: JReadVoicePluginRuntime.VarLoginRequestHolder? = null
+    private var currentLoginKey: String? = null
+    private val loginLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == PluginLoginActivity.OK) {
+            val value = result.data?.getStringExtra(PluginLoginActivity.RESULT).orEmpty()
+            val holder = currentLoginHolder
+            val key = currentLoginKey
+            if (holder != null && key != null && value.isNotBlank()) {
+                holder.values[key] = value
+                holder.editViews[key]?.setText(value)
+                toastOnUi("已获取登录信息")
+            }
+        }
+        currentLoginHolder = null
+        currentLoginKey = null
+    }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         binding.recyclerView.setEdgeEffectColor(primaryColor)
@@ -1212,6 +1229,21 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             if (container == null || container.childCount == 0) {
                 toastOnUi("该插件没有可设置的变量")
                 return@launch
+            }
+            // 声明式变量带 loginUrl/binding → 给"登录"按钮绑定回调：
+            // 启动 PluginLoginActivity，返回的值回填输入框与 userVarsMap
+            val loginHolder = container.tag as? JReadVoicePluginRuntime.VarLoginRequestHolder
+            loginHolder?.infos?.forEach { info ->
+                loginHolder.buttons[info.key]?.setOnClickListener {
+                    currentLoginKey = info.key
+                    currentLoginHolder = loginHolder
+                    loginLauncher.launch(Intent(this@TtsPluginActivity, PluginLoginActivity::class.java).apply {
+                        putExtra(PluginLoginActivity.ARG_LOGIN_URL, info.loginUrl)
+                        putExtra(PluginLoginActivity.ARG_BINDING, info.binding)
+                        putExtra(PluginLoginActivity.ARG_DESC, info.desc)
+                        putExtra(PluginLoginActivity.ARG_UA, info.ua)
+                    })
+                }
             }
             val scrollView = android.widget.ScrollView(this@TtsPluginActivity).apply { addView(container) }
             alert("设置变量 - ${plugin.name}") {
