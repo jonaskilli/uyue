@@ -550,7 +550,9 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
             displayName = binding.etDisplayName.text.toString().trim(),
             groupName = binding.etGroup.text.toString().trim(),
             subGroupName = binding.etSubGroup.text.toString().trim(),
-            pluginId = selectedPlugin.id,
+            // 绑定键用业务 pluginId（重导入/重粘贴后不变），无 pluginId 才退回内部 id；
+            // findPlugin/归属判断均双匹配，存量 UUID 绑定不受影响
+            pluginId = selectedPlugin.pluginId.ifBlank { selectedPlugin.id },
             voice = voice,
             locale = locale,
             speed = binding.seekbarSpeed.progress / 100f,

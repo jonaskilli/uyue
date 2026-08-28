@@ -923,7 +923,7 @@ object JReadVoiceEngine {
             val matchesSub = normalizedSub == null || configSub == normalizedSub
             if (!matchesGroup || !matchesSub) return@map config
             val next = config.copy(
-                pluginId = targetPlugin.id,
+                pluginId = targetPlugin.pluginId.ifBlank { targetPlugin.id },
                 locale = cleanLocale,
                 voice = resolveTargetPluginVoice(config, targetVoices),
                 method = "GET",
@@ -1270,13 +1270,10 @@ object JReadVoiceEngine {
     }
 
     fun deletePlugin(context: Context, id: String) {
+        // 只删除插件本身，保留各配置的 pluginId 绑定：
+        // 重新导入同 ID 插件后配置自动恢复可用（findPlugin 按 id/pluginId 双匹配），
+        // 无需逐个手动重绑。插件缺失期间合成会报"缺少插件"并走音色兜底，不影响其他配置。
         savePlugins(context, listPlugins(context).filterNot { it.id == id })
-        saveConfigs(
-            context,
-            listConfigs(context).map {
-                if (it.pluginId == id) it.copy(pluginId = "") else it
-            }
-        )
     }
 
     fun importPluginsFromJson(context: Context, raw: String): Int {

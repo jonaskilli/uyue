@@ -754,10 +754,10 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                             val toUpdate = configs.filter { c ->
                                 c.groupName.ifBlank { "默认分组" } == groupName &&
                                 (subGroupName == null || c.subGroupName.ifBlank { "默认" } == subGroupName)
-                            }.map { it.copy(pluginId = newPlugin.id) }
+                            }.map { it.copy(pluginId = newPlugin.pluginId.ifBlank { newPlugin.id }) }
                             JReadVoiceEngine.saveConfigsBatch(this@TtsPluginActivity, toUpdate)
                             val updateIds = toUpdate.map { it.id }.toSet()
-                            allConfigs = configs.map { if (updateIds.contains(it.id)) it.copy(pluginId = newPlugin.id) else it }
+                            allConfigs = configs.map { if (updateIds.contains(it.id)) it.copy(pluginId = newPlugin.pluginId.ifBlank { newPlugin.id }) else it }
                         }
                         toastOnUi("已更换插件为 ${newPlugin.name}")
                         refreshListLight()
