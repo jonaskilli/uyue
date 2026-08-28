@@ -55,6 +55,28 @@ class TtsPluginJsBridge {
             lastVoiceTag = ""
             synthesisPostProcessed = false
         }
+
+        /** 可朗读字符：任意语言文字 + 十进制数字。不含任何此类字符的切片送进引擎必然报"不支持文本" */
+        private val SPEAKABLE_REGEX = Regex("[\\p{L}\\p{Nd}]")
+
+        /** 剥离 HTML 标签/实体，避免 "<img>" 之类标签里的字母被误判为可朗读内容 */
+        private val STRIP_REGEX = Regex("<[a-zA-Z][^>]*>|&[a-zA-Z#0-9]+;")
+
+        /**
+         * 纯符号检测：不含中文/英文/数字（\p{L} 或 \p{Nd}）即为纯符号切片。
+         * 用于在脚本角色切分后的最后关口拦截，返回 0.2 秒静音替代合成，
+         * 避免引擎报"参数错误，不支持的发音人 / 文本"后触发 10 次重试（累计卡顿约 36 秒）。
+         */
+        fun isSymbolOnly(text: String): Boolean =
+            !SPEAKABLE_REGEX.containsMatchIn(STRIP_REGEX.replace(text, ""))
+
+        /**
+         * 0.2 秒静音，WAV 格式（带 RIFF 头）。
+         * 必须是合法音频文件而非裸 PCM：脚本会把静音与其他角色片段（MP3/WAV）拼接，
+         * 裸 PCM 无格式头，splitMixedAudioBytes 无法识别、解码器无法处理 → ExoPlayer 播放错误。
+         */
+        fun silentPcm02s(): ByteArray =
+            io.legado.app.service.BaseReadAloudService.generateSilentWavBytes(200)
     }
 
     private val context: Context = appCtx
@@ -72,6 +94,13 @@ class TtsPluginJsBridge {
         if (voiceTag.isBlank() || text.isBlank()) {
             AppLog.putDebug("[TtsPluginJsBridge] synthesize 参数为空: tag=$voiceTag textLen=${text.length}")
             return null
+        }
+        // 纯符号切片前置拦截：非中文/英文/数字直接返回 0.2 秒静音，不进引擎
+        // （引擎对纯符号报"参数错误，不支持的文本"并触发 10 次重试，累计卡顿 36 秒+）
+        if (isSymbolOnly(text)) {
+            AppLog.putDebug("[TtsPluginJsBridge] 纯符号切片，返回0.2秒静音: tag=$voiceTag textLen=${text.length}")
+            synthesisPostProcessed = true
+            return silentPcm02s()
         }
         val requestId = UUID.randomUUID().toString()
         val pointerJson = JSONObject().put("voiceTag", voiceTag).toString()
@@ -101,6 +130,12 @@ class TtsPluginJsBridge {
                 return null
             }
         lastVoiceTag = config.voiceTag
+        // 纯符号切片前置拦截：非中文/英文/数字直接返回 0.2 秒静音，不进引擎
+        if (isSymbolOnly(text)) {
+            AppLog.putDebug("[TtsPluginJsBridge] 纯符号切片，返回0.2秒静音: configId=$configId textLen=${text.length}")
+            synthesisPostProcessed = true
+            return silentPcm02s()
+        }
         val requestId = UUID.randomUUID().toString()
         val pointerJson = JSONObject().put("voiceTag", config.voiceTag).toString()
         return try {

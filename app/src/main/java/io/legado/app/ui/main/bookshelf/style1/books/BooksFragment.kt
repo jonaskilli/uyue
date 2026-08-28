@@ -199,6 +199,9 @@ class BooksFragment() : BaseFragment(R.layout.fragment_books),
 
     fun upBookSort(sort: Int) {
         binding.root.post {
+            // post 排队期间 Fragment 可能已被销毁（切走书架、旋转屏幕等），
+            // 此时 viewLifecycleOwner 会抛 IllegalStateException，直接跳过
+            if (view == null || !isAdded) return@post
             arguments?.putInt("bookSort", sort)
             bookSort = sort
             upRecyclerData()

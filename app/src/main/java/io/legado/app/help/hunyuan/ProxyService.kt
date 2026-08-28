@@ -145,9 +145,18 @@ class ProxyService : android.app.Service() {
     }
 
     override fun onDestroy() {
-        ProxyServer.stop()
-        DeepSeekPowWebView.destroy()
+        // 必须先退出前台：Android 对 dataSync 类型前台服务有严格停止时限，
+        // 若 stopForeground 排在耗时操作之后未及时执行，系统会抛
+        // ForegroundServiceDidNotStopInTimeException（vivo/Android 15 上尤其严格）
         stopForeground(true)
+        // Ktor 优雅关闭最多阻塞 3 秒（engine.stop(1000, 2000)），
+        // 异步执行避免计入服务停止耗时；ProxyServer.start() 内部会先 stop()，
+        // 故重启时端口仍能正确释放，不会 BindException
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching { ProxyServer.stop() }
+        }
+        // WebView 销毁内部走 post，已是非阻塞
+        DeepSeekPowWebView.destroy()
         LogStore.i("Proxy", "■ 前台服务已停止")
         super.onDestroy()
     }
