@@ -374,6 +374,9 @@ class ObsoleteUrlFactory(private var client: OkHttpClient) : URLStreamHandlerFac
                 .build()
             val clientBuilder: OkHttpClient.Builder = client.newBuilder()
             clientBuilder.interceptors().clear()
+            // HttpURLConnection 通道（jsoup / java.net.URL 等）会清空全部拦截器，
+            // 需把混元太极本地网关重新挂回，否则朗读脚本经 jsoup 发起的请求无法被进程内接管。
+            clientBuilder.addInterceptor(io.legado.app.help.hunyuan.HunyuanLocalGateway)
             clientBuilder.interceptors().add(UnexpectedException.INTERCEPTOR)
 
             clientBuilder.networkInterceptors().clear()

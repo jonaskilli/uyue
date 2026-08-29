@@ -331,6 +331,12 @@ private fun saveResponseHeadersIfWebPage(
             if (v != null) k to v else null
         }?.toMap()
 
+        // 混元太极本地网关：命中本地端口时进程内直接处理，不发起任何网络请求。
+        // 必须在此接管——POST 分支走 jsoup，不继承 OkHttp 拦截器。
+        io.legado.app.help.hunyuan.HunyuanLocalGateway
+            .takeOver(url, method, body, headerMap)
+            ?.let { return it }
+
         // 仅当请求显式携带 saveHeaders=true（由朗读脚本等特定调用方设置）时才侧存响应头，
         // 其它任何脚本/请求都不保存。
         val saveHeaders = (reqMap["saveHeaders"] as? Boolean) == true

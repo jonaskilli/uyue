@@ -16,6 +16,8 @@ import io.ktor.utils.io.writeFully
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -1693,5 +1695,287 @@ object ProxyServer {
                 Usage(), ""
             )
         )
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  进程内直连入口（免启动端口）
+    //
+    //  供 HunyuanLocalGateway 调用：不经过 Ktor，也不发起本地 HTTP 请求，
+    //  直接复用上面的 Client / 解析逻辑算出结果，返回 OpenAI 格式的 JSON 字符串。
+    //  分流顺序与非流式聚合逻辑均与 Ktor 路由完全一致，两种路径结果相同。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /** 进程内调用结果：HTTP 状态码 + 响应体（JSON 字符串）。 */
+    data class InProcessResult(val code: Int, val body: String)
+
+    /** 与 Ktor handler 一致的上游超时。 */
+    private const val UPSTREAM_TIMEOUT_MS = 300_000L
+
+    /**
+     * DeepSeek 依赖 PoW（须用 WebView 加载 wasm 计算，只能由 ProxyService 在主线程初始化），
+     * 进程内直连无法提供，需回退到已启动的真实端口。
+     */
+    val DEEPSEEK_NEEDS_SERVER = InProcessResult(
+        503,
+        """{"error":"DeepSeek 需要混元太极服务处于「已启动」状态（PoW 依赖 WebView），请在混元太极界面点「启动」后重试"}"""
+    )
+
+    private fun errJson(msg: String): String =
+        org.json.JSONObject().put("error", msg).toString()
+
+    /** 统一的上游调用包裹：切到 IO 线程 + 300s 超时 + 异常落日志。 */
+    private suspend fun <T> upstream(tag: String, block: suspend () -> T): T =
+        withContext(Dispatchers.IO) {
+            try {
+                withTimeout(UPSTREAM_TIMEOUT_MS) { block() }
+            } catch (e: Exception) {
+                LogStore.e(tag, "进程内请求异常: ${e.stackTraceToString()}")
+                throw e
+            }
+        }
+
+    /**
+     * 聊天（进程内）。分流顺序与 [handleChatCompletions] 完全一致。
+     * 恒按「非流式」处理：一次性聚合完整文本后返回 OpenAI JSON
+     *（朗读 / 背景音乐 / 生图三处均为「发完等完整结果」，不需要 SSE）。
+     */
+    suspend fun chatInProcess(bodyJson: String): InProcessResult {
+        val req = try {
+            json.decodeFromString<ChatCompletionRequest>(bodyJson)
+        } catch (e: Exception) {
+            return InProcessResult(400, errJson("请求体解析失败: ${e.localizedMessage}"))
+        }
+        val model = req.model
+        LogStore.i("Proxy", "进程内聊天 | model=$model msgs=${req.messages.size}")
+        return try {
+            val content = when {
+                isKimiModel(model) -> kimiText(req)
+                isZhipuModel(model) -> zhipuText(req, isZhipuPlusModel(model))
+                isLongCatModel(model) -> longCatText(req)
+                isQwenModel(model) -> qwenText(req)
+                isDeepSeekModel(model) -> return DEEPSEEK_NEEDS_SERVER
+                isDoubaoModel(model) -> doubaoText(req)
+                else -> cnbText(req)
+            }
+            if (content.isBlank()) {
+                InProcessResult(502, errJson("模型未返回内容"))
+            } else {
+                InProcessResult(200, chatJson(model, content))
+            }
+        } catch (e: Exception) {
+            InProcessResult(502, errJson(e.localizedMessage ?: e.toString()))
+        }
+    }
+
+    /** 生图（进程内）。返回 OpenAI images 格式 JSON。 */
+    suspend fun imageInProcess(bodyJson: String): InProcessResult {
+        val o = try {
+            org.json.JSONObject(bodyJson)
+        } catch (e: Exception) {
+            return InProcessResult(400, errJson("请求体解析失败: ${e.localizedMessage}"))
+        }
+        val prompt = o.optString("prompt", "")
+        val size = o.optString("size", "")
+        val model = o.optString("model", "")
+        val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
+        LogStore.i("Proxy", "进程内生图 | model=$model ratio=$ratio")
+        return try {
+            val urls = if (isZhipuImageModel(model)) {
+                upstream("Zhipu") {
+                    ZhipuClient.generateImage(prompt, ratio, isZhipuCinematicImageModel(model))
+                }
+            } else {
+                upstream("Doubao") {
+                    val cookies = DoubaoClient.parseCookie(nextDoubaoCookie())
+                    DoubaoClient.generateImage(prompt, cookies, ratio)
+                        .images
+                        .map { if (it.rawUrl.isNotBlank()) it.rawUrl else it.oriUrl }
+                }
+            }
+            if (urls.isEmpty()) {
+                InProcessResult(502, errJson("生图未返回图片"))
+            } else {
+                InProcessResult(
+                    200,
+                    json.encodeToString(
+                        ImageGenResponse.serializer(),
+                        ImageGenResponse(
+                            created = (System.currentTimeMillis() / 1000).toInt(),
+                            data = urls.map { ImageDataItem(url = it) }
+                        )
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            InProcessResult(502, errJson(e.localizedMessage ?: e.toString()))
+        }
+    }
+
+    /** /v1/models（进程内）。与真实端口返回同一份列表，供各配置页「测试连接」使用。 */
+    fun modelsInProcess(): InProcessResult {
+        val entries = listOf(
+            CnbClient.DEFAULT_MODEL to "cnb",
+            "longcat" to "longcat",
+            "longcat-search" to "longcat",
+            "doubao" to "doubao",
+            "doubao-think" to "doubao",
+            "doubao-image" to "doubao",
+            "Kimi" to "kimi",
+            "deepseek" to "deepseek",
+            "deepseek-pro" to "deepseek",
+            "gml" to "zhipu",
+            "gml-plus" to "zhipu",
+            "glm-image" to "zhipu",
+            "glm-image-hd" to "zhipu",
+            "qwen" to "qwen",
+            "qwen-think" to "qwen"
+        )
+        val data = org.json.JSONArray()
+        entries.forEach { (id, owner) ->
+            data.put(
+                org.json.JSONObject()
+                    .put("id", id)
+                    .put("object", "model")
+                    .put("owned_by", owner)
+            )
+        }
+        return InProcessResult(
+            200,
+            org.json.JSONObject().put("object", "list").put("data", data).toString()
+        )
+    }
+
+    private fun chatJson(model: String, content: String): String =
+        json.encodeToString(
+            ChatCompletion.serializer(),
+            ChatCompletion(
+                id = "chatcmpl-${UUID.randomUUID().toString().take(12)}",
+                `object` = "chat.completion",
+                created = (System.currentTimeMillis() / 1000).toInt(),
+                model = model,
+                choices = listOf(
+                    Choice(message = Msg("assistant", content), finish_reason = "stop")
+                ),
+                usage = Usage(),
+                conversation_id = ""
+            )
+        )
+
+    // ── 各上游的「非流式聚合」：与对应 handleXxxChat 的非流式分支逻辑一致 ──
+
+    private suspend fun kimiText(req: ChatCompletionRequest): String = upstream("Kimi") {
+        val rawToken = KimiClient.extractToken(nextKimiCookie())
+        val resp = KimiClient.chatCompletion(req.messages, rawToken)
+        var chatId: String? = null
+        val sb = StringBuilder()
+        try {
+            KimiClient.decodeFrames(
+                resp.body!!.source(),
+                onText = { sb.append(it) },
+                onChatId = { chatId = it }
+            )
+        } finally {
+            resp.close()
+        }
+        if (deleteSessionAfterReply) chatId?.let { KimiClient.deleteChat(it, rawToken) }
+        sb.toString()
+    }
+
+    private suspend fun zhipuText(req: ChatCompletionRequest, plus: Boolean): String =
+        upstream("Zhipu") {
+            val text = extractDeepSeekPrompt(req.messages)
+            val resp = ZhipuClient.chatCompletion(text, plusModel = plus)
+            val sb = StringBuilder()
+            try {
+                parseZhipuSse(resp.body!!.source()) { sb.append(it) }
+            } finally {
+                resp.close()
+            }
+            sb.toString()
+        }
+
+    private suspend fun longCatText(req: ChatCompletionRequest): String = upstream("LongCat") {
+        applyNextLongCatConfig()
+        if (LongCatClient.mtgsig.isBlank() || LongCatClient.cookies.isBlank()) {
+            throw IllegalStateException(
+                "LongCat 未配置：请在混元太极「中转」页选择龙猫并填写抓包得到的配置(JSON)"
+            )
+        }
+        val resp = LongCatClient.chatCompletion(req.messages, req.model)
+        val sb = StringBuilder()
+        try {
+            parseLongCatSse(resp.body!!.source()) { sb.append(it) }
+        } finally {
+            resp.close()
+        }
+        sb.toString()
+    }
+
+    private suspend fun qwenText(req: ChatCompletionRequest): String = upstream("Qwen") {
+        val cookie = nextQwenCookie()
+        val text = extractDoubaoPrompt(req.messages)
+        val lower = req.model.lowercase()
+        val deepSearch = if (lower.contains("think") || lower.contains("reason")) "1" else "0"
+        val qwenModel =
+            if (lower in setOf("qwen", "qwen-think")) QwenClient.DEFAULT_MODEL else req.model
+        val resp = QwenClient.chatCompletion(text, cookie, deepSearch, qwenModel)
+        var sessionId: String? = null
+        val sb = StringBuilder()
+        try {
+            QwenClient.parseQwenSse(
+                resp.body!!.source(),
+                onText = { sb.append(it) },
+                onSessionId = { sessionId = it }
+            )
+        } finally {
+            resp.close()
+        }
+        if (deleteSessionAfterReply) sessionId?.let { QwenClient.deleteSession(it, cookie) }
+        sb.toString()
+    }
+
+    private suspend fun doubaoText(req: ChatCompletionRequest): String = upstream("Doubao") {
+        val cookies = DoubaoClient.parseCookie(nextDoubaoCookie())
+        val text = extractDoubaoPrompt(req.messages)
+        val resp = DoubaoClient.chatCompletion(text, cookies, doubaoDeepThink(req.model))
+        val sb = StringBuilder()
+        try {
+            parseDoubaoSse(resp.body!!.source()) { sb.append(it) }
+        } finally {
+            resp.close()
+        }
+        sb.toString()
+    }
+
+    /** 混元3 / CNB：上游非流式时直接取 JSON 的 content，流式时聚合 SSE。 */
+    private suspend fun cnbText(req: ChatCompletionRequest): String {
+        val model = mapModel(req.model)
+        val body = org.json.JSONObject().apply {
+            put("model", model)
+            put("stream", streamMode)
+            put(
+                "messages",
+                org.json.JSONArray(
+                    req.messages.map {
+                        org.json.JSONObject().put("role", it.role).put("content", it.content)
+                    }
+                )
+            )
+            req.temperature?.let { put("temperature", it) }
+            req.max_tokens?.let { put("max_tokens", it) }
+        }.toString()
+        return upstream("CNB") {
+            CnbClient.chatCompletion(body).use { resp ->
+                if (streamMode) {
+                    val sb = StringBuilder()
+                    parseCnbSse(resp.body!!.source()) { sb.append(it) }
+                    sb.toString()
+                } else {
+                    org.json.JSONObject(resp.body!!.string())
+                        .getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content")
+                }
+            }
+        }
     }
 }

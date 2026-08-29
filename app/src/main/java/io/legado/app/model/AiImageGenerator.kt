@@ -41,6 +41,18 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object AiImageGenerator {
 
+    /**
+     * 生图专用客户端：继承全局拦截器（含混元太极本地网关），
+     * 但放宽超时——全局 okHttpClient 只有 60s，豆包/智谱生图常常更慢。
+     */
+    private val imageClient by lazy {
+        okHttpClient.newBuilder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(240, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
+
     const val CACHE_DIR_NAME = "ai_images"
     const val DEFAULT_STYLE_SUFFIX = "，超高清8K，有故事感，国风3DCG，皮肤质感真实细腻；柔和柔光打光，电影级细腻光影、皮肤次表面散射，细腻材质质感，氛围感清冷温柔，仙侠唯美，写实渲染，PBR材质，全局光照，极致画质，景深特写，高级冷调色调"
     const val DEFAULT_PROMPT_TEMPLATE = "请根据以下小说片段，从中选取一个最有画面感、最精彩动人的场景，生成一张完整的场景插图：{text}{book}要求：1.必须是一个完整的场景画面（包含环境背景、空间氛围、人物位置关系、互动动作），不要只画人物特写或正面肖像；2.选取主角参与度最高、互动最丰富的瞬间；3.如果片段中有女性角色，优先选取主角与美女角色互动的场景，女性角色娇媚动人、美丽迷人；4.男性角色英姿飒爽、气宇轩昂。{style}"
@@ -977,7 +989,7 @@ object AiImageGenerator {
             requestBuilder.header("Authorization", authHeader)
         }
 
-        val response = okHttpClient.newCall(requestBuilder.build()).execute()
+        val response = imageClient.newCall(requestBuilder.build()).execute()
         if (!response.isSuccessful) {
             val errorBody = response.body?.string()?.take(500) ?: ""
             AppLog.put("AI生图 API 请求失败 HTTP ${response.code}: $errorBody")
@@ -1272,7 +1284,7 @@ object AiImageGenerator {
                 requestBuilder.header("Authorization", authHeader)
             }
 
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
+            val response = imageClient.newCall(requestBuilder.build()).execute()
             if (!response.isSuccessful) {
                 val errorBody = response.body?.string()?.take(500) ?: "未知错误"
                 return Result.failure(Exception("HTTP ${response.code}: $errorBody"))

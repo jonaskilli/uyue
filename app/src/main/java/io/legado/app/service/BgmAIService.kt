@@ -22,9 +22,13 @@ import java.util.concurrent.TimeUnit
  */
 object BgmAIService {
 
+    // 混元太极本地网关：命中 127.0.0.1/localhost:<混元太极端口> 时进程内直连，无需先启动端口。
+    // 本处是独立 OkHttpClient（不走 HttpHelper 全局客户端），故需单独注册。
     private val client = OkHttpClient.Builder()
+        .addInterceptor(io.legado.app.help.hunyuan.HunyuanLocalGateway)
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .callTimeout(180, TimeUnit.SECONDS)
         .build()
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()

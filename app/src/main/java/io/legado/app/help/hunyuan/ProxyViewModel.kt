@@ -455,6 +455,8 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         app.stopService(Intent(app, ProxyService::class.java))
         ProxyServer.stop()
+        // 服务已停 → 本地网关重新接管，置为待加载以便下次请求重新读取最新凭证
+        HunyuanLocalGateway.invalidateConfig()
         serverRunning.value = false
         prefs.edit().putBoolean("running", false).apply()
         LogStore.i("Proxy", "■ 服务已停止")

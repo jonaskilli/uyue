@@ -950,12 +950,8 @@ class CharacterManagerDialog : DialogFragment() {
             .setNegativeButton("取消", null)
             .create()
 
-        // 保存：仅更新 keys.json
-        dialog.setButton(AlertDialog.BUTTON_POSITIVE, "保存") { _, _ ->
-            applyModifyKey(keyMap, name, nameInput, keyInput, false)
-        }
-        // 保存并使用：更新 keys.json 并设为当前生效密钥（最右边）
-        dialog.setButton(AlertDialog.BUTTON_NEUTRAL, "保存并使用") { _, _ ->
+        // 保存并使用：更新 keys.json 并设为当前生效密钥（占原「保存」的位置，最右边）
+        dialog.setButton(AlertDialog.BUTTON_POSITIVE, "保存并使用") { _, _ ->
             applyModifyKey(keyMap, name, nameInput, keyInput, true)
         }
         dialog.show()

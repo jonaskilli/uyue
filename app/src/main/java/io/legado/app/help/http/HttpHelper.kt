@@ -68,6 +68,9 @@ val okHttpClient: OkHttpClient by lazy {
         .followRedirects(true)
         .followSslRedirects(true)
         .addInterceptor(OkHttpExceptionInterceptor)
+        // 混元太极本地网关：命中 127.0.0.1/localhost:<混元太极端口> 时进程内直连，无需先启动端口。
+        // 必须注册在 Cronet 之前——Cronet 拦截器会直接短路返回，排在它后面将永不生效。
+        .addInterceptor(io.legado.app.help.hunyuan.HunyuanLocalGateway)
         .addInterceptor { chain ->
             val request = chain.request()
             val builder = request.newBuilder()
