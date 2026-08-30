@@ -191,7 +191,7 @@ abstract class BaseReadAloudService : BaseService(),
 
             val jsonFileName = if (mode == "normal") "ttsrv-replaces5.json" else "ttsrv-replaces3.json"
             val hasEffects = soundEffectPattern.containsMatchIn(text)
-            val file = java.io.File("/storage/emulated/0/Download/chajian/mingwuyan/$jsonFileName")
+            val file = java.io.File(io.legado.app.help.EngineDataDir.baseDir() + jsonFileName)
             val downloadUrl = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/$jsonFileName?download=true"
             var raw: String? = null
             // 1. 优先读取本地 JSON
@@ -529,8 +529,8 @@ abstract class BaseReadAloudService : BaseService(),
         }
     }
 
-    /** gengxin 信号文件所在目录 */
-    private val gengxinDir = "/storage/emulated/0/Download/chajian/mingwuyan/"
+    /** gengxin 信号文件所在目录（随当前朗读引擎切换） */
+    private val gengxinDir get() = io.legado.app.help.EngineDataDir.baseDir()
     /** cunfang.txt 存放书名，shuming.{书名}.json 是要检测修改时间的信号文件 */
     private val gengxinCunfangPath get() = gengxinDir + "cunfang.txt"
     private fun gengxinShumingPath(bookName: String) = gengxinDir + "shuming.$bookName.json"

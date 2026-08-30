@@ -24,7 +24,7 @@ object CharacterVoiceHelper {
     private var cachedIsBuiltinPlugin = false
 
     private val baseDir: String
-        get() = "/storage/emulated/0/Download/chajian/mingwuyan/"
+        get() = io.legado.app.help.EngineDataDir.baseDir()
 
     private fun readTxtFile(fileName: String): String {
         return try {

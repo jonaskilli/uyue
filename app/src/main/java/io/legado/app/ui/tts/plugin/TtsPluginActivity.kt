@@ -55,9 +55,9 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri -> uri?.let { doImport(it) } }
     private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> uri?.let { doExport(it) } }
-    // 编辑/新增配置保存后回传，父页面据此再保存一次 fayinren.json
+    // 编辑/新增配置保存后回传，父页面据此刷新内置发音人列表缓存
     private val configEditorLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == RESULT_OK) scheduleExportEnabledTags()
+        if (result.resultCode == RESULT_OK) invalidateEnabledTagsCache()
     }
     // 插件变量登录页结果回填
     private var currentLoginHolder: JReadVoicePluginRuntime.VarLoginRequestHolder? = null
@@ -86,7 +86,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         adapter.onConfigMoved = { orderedIds ->
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) { JReadVoiceEngine.saveConfigsSortOrder(this@TtsPluginActivity, orderedIds) }
-                scheduleExportEnabledTags()
+                invalidateEnabledTagsCache()
             }
         }
         adapter.onGroupMoved = { orderedGroupNames ->
@@ -101,7 +101,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     }
                     JReadVoiceEngine.saveGroups(this@TtsPluginActivity, updated)
                 }
-                scheduleExportEnabledTags()
+                invalidateEnabledTagsCache()
             }
         }
         adapter.onSubGroupMoved = { parentGroupName, orderedSubNames ->
@@ -116,7 +116,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     }
                     JReadVoiceEngine.saveGroups(this@TtsPluginActivity, updated)
                 }
-                scheduleExportEnabledTags()
+                invalidateEnabledTagsCache()
             }
         }
         adapter.createItemTouchHelper().attachToRecyclerView(binding.recyclerView)
@@ -251,24 +251,6 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     rebuildPluginRows()
                 }
             }
-        }
-    }
-
-    private fun exportEnabledTagsNow() {
-        try {
-            // 直接用内存中的最新配置，不再读盘全量解析，文件很小直接覆盖写
-            val tags = allConfigs.filter { it.enabled }
-                .map { it.voiceTag }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .sorted()
-            val json = org.json.JSONArray(tags).toString(2)
-            val dir = java.io.File("/storage/emulated/0/Download/chajian/mingwuyan")
-            if (!dir.exists()) dir.mkdirs()
-            val file = java.io.File(dir, "fayinren.json")
-            file.writeText(json)
-        } catch (e: Exception) {
-            // 忽略写入错误（可能没有存储权限）
         }
     }
 
@@ -418,7 +400,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                             }
                             allConfigs = allConfigs.map { it.copy(enabled = false) }
                             rebuildRows()
-                            scheduleExportEnabledTags()
+                            invalidateEnabledTagsCache()
                             toastOnUi("已禁用所有配置")
                         }
                     }
@@ -508,38 +490,27 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     }
 
     /**
-     * 轻量刷新：内存已是最新，只重排可见列表并异步写 fayinren.json，
+     * 轻量刷新：内存已是最新，只重排可见列表并刷新内置发音人列表缓存，
      * 不再走 loadData()（不读盘、不解析整表、不做内置预设/迁移）。
      */
     private fun refreshListLight() {
         if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
-        scheduleExportEnabledTags()
-    }
-
-    // 后台写 fayinren.json 的串行标记：多次调用只保证"最终基于最新内存写一次"，避免快速连点堆积 I/O
-    @Volatile
-    private var exportTagsPending = false
-
-    private fun scheduleExportEnabledTags() {
-        if (exportTagsPending) return
-        exportTagsPending = true
-        lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
-                try {
-                    do {
-                        exportTagsPending = false
-                        exportEnabledTagsNow()
-                        // 若期间又来了新请求，再写一次（基于最新内存），保证最终一致
-                    } while (exportTagsPending)
-                } catch (e: Exception) {
-                    exportTagsPending = false
-                }
-            }
-        }
+        invalidateEnabledTagsCache()
     }
 
     /**
-     * 仅重读列表数据（groups/configs/plugins 各读盘一次），不执行 ensureBuiltIn 也不写 fayinren.json。
+     * 发音人启用状态变化后调用：让内置发音人列表的缓存立即失效，
+     * 朗读脚本下一次读取就能拿到最新列表（否则最多要等缓存自然过期）。
+     *
+     * 原先这里还会把标签写到外部存储的 fayinren.json，
+     * 现已改为 APP 内部实时提供，不再产生任何磁盘写入。
+     */
+    private fun invalidateEnabledTagsCache() {
+        io.legado.app.help.VirtualExternalFiles.invalidate()
+    }
+
+    /**
+     * 仅重读列表数据（groups/configs/plugins 各读盘一次），不执行 ensureBuiltIn。
      * 用于仅改动分组/插件元信息、configs 内容不变的轻量场景。
      */
     private fun reloadListsLight() {
@@ -668,7 +639,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 put("postSpeed", config.postSpeed); put("postVolume", config.postVolume); put("postPitch", config.postPitch)
             })
         }.toString(2)
-        val dir = java.io.File("/storage/emulated/0/Download/chajian/mingwuyan")
+        val dir = java.io.File(io.legado.app.help.EngineDataDir.baseDir())
         try {
             if (!dir.exists()) dir.mkdirs()
             val safeName = config.displayName.ifBlank { config.voice }.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40)

@@ -98,14 +98,14 @@ import io.legado.app.help.config.ThemeConfig
  * 所有对于文件的读写删操作都是相对路径,只能操作阅读缓存内的文件
  * /android/data/{package}/cache/...
  */
-@Keep
-@Suppress("unused")
 /**
  * 网页请求（GET 且响应为 HTML / 请求 Accept 含 text/html）的响应头侧存：
  * 不改变 ajaxRaceDelayed 原有返回值（仅响应体字符串），把响应头（含 Set-Cookie）
  * 按 URL 写入 Download 目录下的 JSON 文件，供朗读等 JS 脚本拿到响应体后另行读取。
+ * 路径随当前朗读引擎切换（mingwuyan / mingwuyanZ）。
  */
-private const val AJAX_HEADER_FILE = "/storage/emulated/0/Download/chajian/mingwuyan/response_headers.json"
+private val ajaxHeaderFile: String
+    get() = EngineDataDir.baseDir() + "response_headers.json"
 
 interface JsExtensions : JsEncodeUtils {
 
@@ -302,7 +302,7 @@ private fun saveResponseHeadersIfWebPage(
             for (name in response.headers.names()) {
                 headersMap[name] = response.headers.values(name).joinToString("; ")
             }
-            val file = File(AJAX_HEADER_FILE)
+            val file = File(ajaxHeaderFile)
             val existing = if (file.exists()) {
                 runCatching { GSON.fromJsonObject<Map<String, Any>>(file.readText()).getOrNull() }
                     .getOrNull() ?: emptyMap()
@@ -981,7 +981,10 @@ private fun saveResponseHeadersIfWebPage(
      */
     @JavascriptInterface
     fun readExternalFile(path: String): String {
-        val file = File(path)
+        val realPath = EngineDataDir.rewrite(path)
+        // 内置文件优先：命中 fayinren.json 时直接返回 APP 内部数据，不再读外部存储
+        VirtualExternalFiles.read(realPath)?.let { return it }
+        val file = File(realPath)
         val safePath = "/storage/emulated/0/Download/"
         if (!file.canonicalPath.startsWith(safePath)) {
             throw SecurityException("非法路径")
@@ -1002,7 +1005,8 @@ private fun saveResponseHeadersIfWebPage(
      */
     @JavascriptInterface
     fun writeExternalFile(path: String, content: String): Boolean {
-        val file = File(path)
+        val realPath = EngineDataDir.rewrite(path)
+        val file = File(realPath)
         val safePath = "/storage/emulated/0/Download/"
         if (!file.canonicalPath.startsWith(safePath)) {
             throw SecurityException("非法路径")
@@ -1023,7 +1027,8 @@ private fun saveResponseHeadersIfWebPage(
      */
     @JavascriptInterface
     fun deleteExternalFile(path: String): Boolean {
-        val file = File(path)
+        val realPath = EngineDataDir.rewrite(path)
+        val file = File(realPath)
         val safePath = "/storage/emulated/0/Download/"
         if (!file.canonicalPath.startsWith(safePath)) {
             throw SecurityException("非法路径")

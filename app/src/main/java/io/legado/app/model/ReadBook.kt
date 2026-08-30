@@ -1050,7 +1050,7 @@ object ReadBook : CoroutineScope by MainScope() {
             val json = JSONObject()
             json.put("bookName", bookName)
             json.put("texts", sb.toString())
-            val dir = File("/storage/emulated/0/Download/chajian/mingwuyan")
+            val dir = File(io.legado.app.help.EngineDataDir.baseDir())
             dir.mkdirs()
             val success = FileUtils.writeText(
                 File(dir, "data.json").absolutePath,
