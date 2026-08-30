@@ -1,5 +1,6 @@
 package io.legado.app.ui.tts.plugin
 
+import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -86,36 +87,24 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         adapter.onConfigMoved = { orderedIds ->
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) { JReadVoiceEngine.saveConfigsSortOrder(this@TtsPluginActivity, orderedIds) }
-                invalidateEnabledTagsCache()
-            }
-        }
-        adapter.onGroupMoved = { orderedGroupNames ->
-            lifecycleScope.launch {
-                withContext(Dispatchers.IO) {
-                    val groups = JReadVoiceEngine.listGroups(this@TtsPluginActivity)
-                    val nameToOrder = orderedGroupNames.mapIndexed { index, name -> name to index }.toMap()
-                    val updated = groups.map { g ->
-                        if (g.subGroupName.isBlank() && g.thirdGroupName.isBlank()) {
-                            g.copy(sortOrder = nameToOrder[g.groupName] ?: g.sortOrder)
-                        } else g
-                    }
-                    JReadVoiceEngine.saveGroups(this@TtsPluginActivity, updated)
+                // 同步内存态：onResume 的快照判断只看 configs/plugins，若写盘后内容指纹没变
+                // 就不会重新读盘，此时仍用旧的 allConfigs 重建会把刚拖动的结果还原回去
+                val idToOrder = orderedIds.mapIndexed { index, id -> id to index }.toMap()
+                allConfigs = allConfigs.map { config ->
+                    val order = idToOrder[config.id]
+                    if (order != null && order != config.sortOrder) config.copy(sortOrder = order) else config
                 }
                 invalidateEnabledTagsCache()
             }
         }
-        adapter.onSubGroupMoved = { parentGroupName, orderedSubNames ->
+        // 长按拖拽排序大分组/子分组：一次性提交，串行合并后只写盘一次
+        adapter.onGroupsOrderChanged = { orderedGroupNames, orderedSubNames ->
             lifecycleScope.launch {
-                withContext(Dispatchers.IO) {
-                    val groups = JReadVoiceEngine.listGroups(this@TtsPluginActivity)
-                    val nameToOrder = orderedSubNames.mapIndexed { index, name -> name to index }.toMap()
-                    val updated = groups.map { g ->
-                        if (g.groupName == parentGroupName && g.subGroupName.isNotBlank() && g.thirdGroupName.isBlank()) {
-                            g.copy(sortOrder = nameToOrder[g.subGroupName] ?: g.sortOrder)
-                        } else g
-                    }
-                    JReadVoiceEngine.saveGroups(this@TtsPluginActivity, updated)
+                val updated = withContext(Dispatchers.IO) {
+                    applyGroupsSortOrder(this@TtsPluginActivity, orderedGroupNames, orderedSubNames)
                 }
+                // 落盘结果直接回填内存态，否则退出页面再进来仍按旧 sortOrder 重建
+                allGroups = updated
                 invalidateEnabledTagsCache()
             }
         }
@@ -211,6 +200,90 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
             }
         }
+    }
+
+    /**
+     * 把列表里当前的大分组/子分组顺序落到分组记录的 sortOrder 上：一次读、一次改、一次写盘。
+     *
+     * 关键点：
+     * 1. 必须把大分组顺序和所有子分组顺序合并后再统一写盘。原先每个分组各自
+     *    "读快照 → 改 → 写" 且并发提交，后完成的写入基于旧快照，会把先写入的结果覆盖掉，
+     *    表现就是分组拖动后看着生效，退出页面再进来又回到原顺序。
+     * 2. 列表里的分组名是展示口径（空名已替换成"默认分组"/"默认"），落盘匹配时也统一用
+     *    展示口径建索引，否则空名分组永远匹配不上，sortOrder 保持原值。
+     * 3. 只存在于配置项中、还没有分组记录的大分组/子分组补建一条记录，
+     *    否则新顺序无处可存。
+     *
+     * @return 写盘后的分组列表（已含新 sortOrder），可直接回填内存态
+     */
+    private fun applyGroupsSortOrder(
+        context: Context,
+        orderedGroupNames: List<String>,
+        orderedSubNames: Map<String, List<String>>,
+    ): List<JReadVoiceEngine.VoiceGroup> {
+        val groupOrder = linkedMapOf<String, Int>()
+        orderedGroupNames
+            .map { it.trim().ifBlank { DEFAULT_GROUP_NAME } }
+            .distinct()
+            .forEachIndexed { index, name -> groupOrder[name] = index }
+        val subOrders = linkedMapOf<String, Map<String, Int>>()
+        orderedSubNames.forEach { (groupName, subNames) ->
+            val subOrder = linkedMapOf<String, Int>()
+            subNames
+                .map { it.trim().ifBlank { DEFAULT_SUB_GROUP_NAME } }
+                .distinct()
+                .forEachIndexed { index, name -> subOrder[name] = index }
+            subOrders[groupName.trim().ifBlank { DEFAULT_GROUP_NAME }] = subOrder
+        }
+
+        val groups = JReadVoiceEngine.listGroups(context)
+        // 补建记录时把展示用分组名还原成存储口径（空分组名在存储里就是空串）：
+        // 否则会同时存在 ("", "男声") 与 ("默认分组", "男声") 两条重复记录
+        val rawGroupNameOf = HashMap<String, String>()
+        groups.forEach { group ->
+            rawGroupNameOf.putIfAbsent(group.groupName.ifBlank { DEFAULT_GROUP_NAME }, group.groupName)
+        }
+        fun rawGroupName(displayName: String): String {
+            return rawGroupNameOf[displayName]
+                ?: if (displayName == DEFAULT_GROUP_NAME) "" else displayName
+        }
+
+        val updated = ArrayList<JReadVoiceEngine.VoiceGroup>(groups.size + groupOrder.size)
+        val handled = HashSet<Triple<String, String, String>>()
+        groups.forEach { group ->
+            val groupKey = group.groupName.ifBlank { DEFAULT_GROUP_NAME }
+            val subKey = group.subGroupName.ifBlank { DEFAULT_SUB_GROUP_NAME }
+            updated += if (group.thirdGroupName.isBlank()) {
+                // 三级分组不在本页列表中，保持原值
+                val newOrder = if (group.subGroupName.isBlank()) {
+                    groupOrder[groupKey] ?: group.sortOrder
+                } else {
+                    subOrders[groupKey]?.get(subKey) ?: group.sortOrder
+                }
+                group.copy(sortOrder = newOrder)
+            } else {
+                group
+            }
+            handled += Triple(groupKey, subKey, group.thirdGroupName)
+        }
+        groupOrder.forEach { (groupName, order) ->
+            if (handled.add(Triple(groupName, DEFAULT_SUB_GROUP_NAME, ""))) {
+                updated += JReadVoiceEngine.VoiceGroup(groupName = rawGroupName(groupName), sortOrder = order)
+            }
+        }
+        subOrders.forEach { (groupName, subOrder) ->
+            subOrder.forEach { (subName, order) ->
+                if (handled.add(Triple(groupName, subName, ""))) {
+                    updated += JReadVoiceEngine.VoiceGroup(
+                        groupName = rawGroupName(groupName),
+                        subGroupName = if (subName == DEFAULT_SUB_GROUP_NAME) "" else subName,
+                        sortOrder = order,
+                    )
+                }
+            }
+        }
+        JReadVoiceEngine.saveGroups(context, updated)
+        return updated
     }
 
     private fun toggleGroup(groupName: String) {
@@ -328,8 +401,14 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             if (groupExpanded) {
                 // 合并子分组：配置项中的 + listGroups 中该分组下的
                 val configSubNames = groupConfigs.map { it.subGroupName.ifBlank { "默认" } }.toMutableSet()
+                // 关键：分组记录里 subGroupName 为空的那条「默认」记录，只有在本分组确实存在
+                // 空子分组的配置项时才算一个真实子分组。否则拖动排序时补建的大分组记录
+                // 会让界面凭空多出一个 0 项的「默认」子分组（甚至让原本不显示子分组头的
+                // 单子分组分组突然多出一层子分组头）。
                 val savedSubNames = (groupsByGroupName[groupName] ?: emptyList())
-                    .map { it.subGroupName.ifBlank { "默认" } }.toSet()
+                    .map { it.subGroupName.ifBlank { "默认" } }
+                    .filter { it != "默认" || configSubNames.contains("默认") }
+                    .toSet()
                 configSubNames.addAll(savedSubNames)
                 val subSortMap = (groupsByGroupName[groupName] ?: emptyList())
                     .filter { it.subGroupName.isNotBlank() && it.thirdGroupName.isBlank() }
@@ -1559,5 +1638,8 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     companion object {
         private const val TAB_CONFIGS = 0
         private const val TAB_PLUGINS = 1
+        /** 空分组名在列表中的展示名，落盘匹配时沿用同一口径 */
+        private const val DEFAULT_GROUP_NAME = "默认分组"
+        private const val DEFAULT_SUB_GROUP_NAME = "默认"
     }
 }

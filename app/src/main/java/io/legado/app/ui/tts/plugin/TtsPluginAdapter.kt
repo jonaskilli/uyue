@@ -85,8 +85,13 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     fun setPluginsMap(map: Map<String, JReadVoiceEngine.VoicePlugin>) { pluginsMap = map }
 
     var onConfigMoved: ((List<String>) -> Unit)? = null
-    var onGroupMoved: ((List<String>) -> Unit)? = null  // group names order
-    var onSubGroupMoved: ((String, List<String>) -> Unit)? = null  // parent groupName, subGroup names order
+    /**
+     * 一次性回传最新的分组顺序（拖拽结束后只回调一次）：
+     * 参数1 = 大分组名顺序；参数2 = 每个大分组下的子分组名顺序（Map<大分组名, 子分组名列表>）。
+     * 必须由调用方合并后只写盘一次——每个分组各自"读快照→改→写"并并发提交时，
+     * 后提交的会覆盖先提交的结果，导致分组顺序看似生效、实际没落盘。
+     */
+    var onGroupsOrderChanged: ((List<String>, Map<String, List<String>>) -> Unit)? = null
 
     /**
      * 交换两个相邻 ConfigRow 的位置（仅限同一子分组内）
@@ -266,10 +271,7 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             override fun clearView(rv: RecyclerView, vh: RecyclerView.ViewHolder) {
                 super.clearView(rv, vh)
                 onConfigMoved?.invoke(getConfigIdOrder())
-                onGroupMoved?.invoke(getGroupNameOrder())
-                getSubGroupNameOrders().forEach { (groupName, subNames) ->
-                    onSubGroupMoved?.invoke(groupName, subNames)
-                }
+                onGroupsOrderChanged?.invoke(getGroupNameOrder(), getSubGroupNameOrders())
             }
         }
         return ItemTouchHelper(callback)
