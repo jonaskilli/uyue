@@ -1217,6 +1217,23 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefInt(PreferKey.bgmVolume, 30)
         set(value) = appCtx.putPrefInt(PreferKey.bgmVolume, value)
 
+    /**
+     * 合并章节音频 / 合成视频时是否混入背景音乐。
+     * 混入时使用的音量与朗读播放一致，取自 [bgmVolume]。
+     */
+    var mixBgmOnMerge: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.mixBgmOnMerge, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.mixBgmOnMerge, value)
+
+    /**
+     * 混入背景音乐时，单首最少持续时长（毫秒，用字符串存储以便 EditTextPreference 兼容）。
+     * 当前这首铺够该时长后，遇到下一个候选切换点才切换，避免音乐过于零碎。
+     */
+    var bgmMinSegmentMs: Long
+        get() = appCtx.getPrefString(PreferKey.bgmMinSegmentMs, "60000")
+            ?.toLongOrNull()?.coerceAtLeast(0L) ?: 60000L
+        set(value) = appCtx.putPrefString(PreferKey.bgmMinSegmentMs, value.toString())
+
     var bgmAIEnabled: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.bgmAIEnabled, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.bgmAIEnabled, value)

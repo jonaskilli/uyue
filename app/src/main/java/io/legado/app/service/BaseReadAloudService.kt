@@ -906,6 +906,8 @@ abstract class BaseReadAloudService : BaseService(),
         BgmManager.onBgmStarted = { 
             // 更新BgmManager中的预存索引
             BgmManager.pendingNextBgmIndex = pendingNextBgmIndex
+            // 记录本次切歌：新歌从当前段落开始放
+            recordBgmAtCurrentPara()
             // BGM预分析（仅推荐下一首BGM，AI生图已改为字数独立驱动）
             triggerBgmAnalysis() 
         }
@@ -1159,6 +1161,8 @@ abstract class BaseReadAloudService : BaseService(),
         for (i in 0 until targetIndex) {
             readAloudNumber += contentList[i].length + 1
         }
+        // 跳转到新段落：回跳则记落点、前进则作废跨过的记录
+        onBgmParagraphJumped(targetIndex)
     }
 
     private fun prevP() {
@@ -1345,6 +1349,114 @@ abstract class BaseReadAloudService : BaseService(),
             }
         }
     }
+
+    // ==================== BGM 播放记录 ====================
+    // 朗读时把「哪首歌从哪一段开始播」写进每章一个的 JSON 文件，
+    // 章节合并时直接照这份记录铺背景音乐，而不是重新选曲。
+
+    /** 上次记录 BGM 时所在的段落，用于判定「跨过」区间 */
+    private var lastBgmRecordPara: Int = -1
+
+    /**
+     * 当前段内已播放位置（毫秒）。
+     * Http 朗读能精确取到播放器的 currentPosition；系统 TTS 取不到，返回 0（按段落开头算）。
+     */
+    protected open fun getCurrentParaPosMs(): Long = 0L
+
+    private fun bgmBookUrl(): String? = ReadBook.book?.bookUrl?.takeIf { it.isNotBlank() }
+
+    /** 记录「当前这首 BGM 从当前段落开始播放」。切歌时调用，新歌从头放，故 songOffsetMs = 0。 */
+    private fun recordBgmAtCurrentPara() {
+        if (!AppConfig.isBgmEnabled) return
+        val bookUrl = bgmBookUrl() ?: return
+        val name = BgmManager.getCurrentBgmName() ?: return
+        val mark = BgmMark(
+            bgmName = name,
+            paraIndex = nowSpeak,
+            posInParaMs = getCurrentParaPosMs(),
+            songOffsetMs = 0L
+        )
+        val chapterIndex = ReadBook.durChapterIndex
+        lifecycleScope.launch {
+            BgmTimelineStore.mark(bookUrl, chapterIndex, mark)
+        }
+        lastBgmRecordPara = nowSpeak
+    }
+
+    /**
+     * 跨章节接续：上一章放到一半的歌，本章接着放后半段。
+     * 必须在新章节索引生效后调用，songOffsetMs 取当前歌已播放位置。
+     */
+    fun recordBgmChapterStart(newChapterIndex: Int) {
+        if (!AppConfig.isBgmEnabled) return
+        val bookUrl = bgmBookUrl() ?: return
+        val name = BgmManager.getCurrentBgmName() ?: return
+        val mark = BgmMark(
+            bgmName = name,
+            paraIndex = 0,
+            posInParaMs = 0L,
+            songOffsetMs = BgmManager.getCurrentBgmPosition()
+        )
+        lifecycleScope.launch {
+            BgmTimelineStore.mark(bookUrl, newChapterIndex, mark)
+        }
+        lastBgmRecordPara = 0
+    }
+
+    /**
+     * 段落推进时调用（子类 nowSpeak++ 之后）。
+     * 把被跨过的旧记录标记为 stale——不删除，留作导出时的候选切换点：
+     * 当前这首铺够 AppConfig.bgmMinSegmentMs 后才允许切过去，否则由前一首延长覆盖。
+     */
+    protected fun onBgmParagraphAdvanced() {
+        if (!AppConfig.isBgmEnabled) return
+        val from = lastBgmRecordPara
+        if (from >= 0 && nowSpeak > from) {
+            val bookUrl = bgmBookUrl() ?: return
+            val chapterIndex = ReadBook.durChapterIndex
+            lifecycleScope.launch {
+                BgmTimelineStore.invalidateRange(bookUrl, chapterIndex, from, nowSpeak)
+            }
+        }
+        lastBgmRecordPara = nowSpeak
+    }
+
+    /**
+     * 跳转段落（拖动进度条 / 回跳）时调用。
+     * - 回跳：**不批量删**后面的记录，只在落点记一条（同段落则覆盖）
+     * - 前进：跨过的区间标记 stale
+     */
+    private fun onBgmParagraphJumped(newIndex: Int) {
+        if (!AppConfig.isBgmEnabled) return
+        val bookUrl = bgmBookUrl() ?: return
+        val chapterIndex = ReadBook.durChapterIndex
+        if (newIndex < lastBgmRecordPara || lastBgmRecordPara < 0) {
+            // 回跳（或首次定位）：落点记一条当前正在放的歌，带上它已播放位置以便接续
+            val name = BgmManager.getCurrentBgmName() ?: return
+            val mark = BgmMark(
+                bgmName = name,
+                paraIndex = newIndex,
+                posInParaMs = 0L,
+                songOffsetMs = BgmManager.getCurrentBgmPosition()
+            )
+            lifecycleScope.launch {
+                BgmTimelineStore.mark(bookUrl, chapterIndex, mark)
+            }
+        } else if (newIndex > lastBgmRecordPara) {
+            val from = lastBgmRecordPara
+            lifecycleScope.launch {
+                BgmTimelineStore.invalidateRange(bookUrl, chapterIndex, from, newIndex)
+            }
+        }
+        lastBgmRecordPara = newIndex
+    }
+
+    /** 开始/切换朗读时重置段落追踪，避免跨章后误判「跨过」区间 */
+    fun resetBgmRecordPara(paraIndex: Int) {
+        lastBgmRecordPara = paraIndex
+    }
+
+    // ==================== BGM 播放记录 结束 ====================
 
     /**
      * BGM播放时预分析下一首：根据BGM剩余时长定位朗读结束段落，

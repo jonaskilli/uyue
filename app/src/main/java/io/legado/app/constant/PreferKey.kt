@@ -233,6 +233,10 @@ object PreferKey {
     const val soundEffectOffsetChars = "soundEffectOffsetChars"
     const val soundEffectVolume = "soundEffectVolume"
     const val mixSoundEffectOnMerge = "mixSoundEffectOnMerge"
+    // 合并章节音频/合成视频时是否混入背景音乐
+    const val mixBgmOnMerge = "mixBgmOnMerge"
+    // 混入背景音乐时单首最少持续时长(毫秒)，超过后才允许切换到下一首
+    const val bgmMinSegmentMs = "bgmMinSegmentMs"
     const val readAloudTitle = "readAloudTitle"
     const val readAloudStartFromFirst = "readAloudStartFromFirst"
     const val autoMergeAudioOnChapterEnd = "autoMergeAudioOnChapterEnd"

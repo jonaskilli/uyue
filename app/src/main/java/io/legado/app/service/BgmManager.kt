@@ -563,6 +563,44 @@ object BgmManager {
     }
 
     /**
+     * 供导出流程使用：按 BGM 名（不含扩展名）取得本地可访问的音频文件。
+     * - 普通文件路径：直接返回 File
+     * - SAF(content://)：先拷贝到 workDir 下的临时文件再返回（content Uri 无法当 File 用）
+     * 必须在 IO 线程调用。
+     */
+    fun resolveBgmFile(nameWithoutExt: String, workDir: File): File? {
+        if (bgmNames.isEmpty()) loadBgmFiles()
+        val uri = resolveAudioUri(nameWithoutExt) ?: return null
+        val path = uri.path
+        if (uri.scheme == "file" && !path.isNullOrBlank()) {
+            val f = File(path)
+            return if (f.exists() && f.length() > 0L) f else null
+        }
+        return try {
+            workDir.mkdirs()
+            val out = File(workDir, "bgm_${Integer.toHexString(nameWithoutExt.hashCode())}.tmp")
+            if (!out.exists() || out.length() == 0L) {
+                appCtx.contentResolver.openInputStream(uri)?.use { input ->
+                    out.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+            if (out.exists() && out.length() > 0L) out else null
+        } catch (e: Exception) {
+            io.legado.app.constant.AppLog.put(
+                "BGM导出: 复制音频失败 $nameWithoutExt, ${e.localizedMessage}"
+            )
+            null
+        }
+    }
+
+    /**
+     * 当前 BGM 已播放到的位置（毫秒），跨章节接续时作为下一章的起始偏移。
+     */
+    fun getCurrentBgmPosition(): Long {
+        return activePlayer?.currentPosition?.coerceAtLeast(0) ?: 0L
+    }
+
+    /**
      * 是否已播放过（用于区分首次启动和恢复播放）
      */
     var hasPlayedOnce = false

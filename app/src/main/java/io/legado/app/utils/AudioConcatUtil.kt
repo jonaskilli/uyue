@@ -676,6 +676,43 @@ object AudioConcatUtil {
         outputFile: File,
         effectFileProvider: (String) -> File?
     ): Boolean {
+        return mixChapterWithBgmAndEffects(
+            audioFiles = audioFiles,
+            segments = segments,
+            bgmTracks = emptyList<BgmChapterMixer.Track>(),
+            bgmFileProvider = { _: String -> null },
+            bgmWorkDir = outputFile.parentFile ?: File("."),
+            volume = volume,
+            outputFile = outputFile,
+            effectFileProvider = effectFileProvider
+        )
+    }
+
+    /**
+     * 将章节缓存音频解码拼接为完整 PCM，按需混入背景音乐铺底，
+     * 再叠加文本中音效标记对应的音效，最后写成完整 WAV。
+     *
+     * 顺序：正文(人声) → 背景音乐(铺底) → 音效(叠在最上层)，三者独立加法叠加后统一限幅。
+     *
+     * @param audioFiles 按朗读顺序的缓存音频文件（与 segments 一一对应）
+     * @param segments 每段文本信息（净字符数 + 段内音效标记）
+     * @param bgmTracks 背景音乐轨道，为空则只混音效
+     * @param bgmFileProvider 按 BGM 名（不含扩展名）取本地可访问的音频文件
+     * @param bgmWorkDir BGM 解码中间文件目录（调用方应给独立目录，避免并发冲突）
+     * @param volume 音效音量 0..1
+     * @param outputFile 输出 WAV 文件
+     * @param effectFileProvider 根据音效文件名取解码后的音频文件
+     */
+    fun mixChapterWithBgmAndEffects(
+        audioFiles: List<File>,
+        segments: List<SegmentInfo>,
+        bgmTracks: List<BgmChapterMixer.Track>,
+        bgmFileProvider: (String) -> File?,
+        bgmWorkDir: File,
+        volume: Float,
+        outputFile: File,
+        effectFileProvider: (String) -> File?
+    ): Boolean {
         if (audioFiles.isEmpty()) return false
         return try {
             outputFile.parentFile?.mkdirs()
@@ -702,7 +739,19 @@ object AudioConcatUtil {
                     raf.write(res.bytes)
                 }
                 val baseFrames = curFrame
-                // 2. 计算每个音效的绝对帧偏移并混音（只读写音效影响的局部区域）
+                // 2. 混入背景音乐铺底（在音效之前，使音效叠在最上层）
+                if (bgmTracks.isNotEmpty()) {
+                    BgmChapterMixer.mixIntoWav(
+                        raf = raf,
+                        sampleRate = baseRate,
+                        channels = baseChannels,
+                        baseFrames = baseFrames,
+                        tracks = bgmTracks,
+                        fileProvider = bgmFileProvider,
+                        workDir = bgmWorkDir
+                    )
+                }
+                // 3. 计算每个音效的绝对帧偏移并混音（只读写音效影响的局部区域）
                 // 顺序叠加：若本音效与上一个已放置的音效在时间上重叠，则延后到上一个播放完毕之后，
                 // 与播放流程「队列顺序播放」行为保持一致，避免重叠时两个音效同时出声。
                 var lastEffectEndFrame = 0
@@ -727,7 +776,7 @@ object AudioConcatUtil {
                         if (endFrame > lastEffectEndFrame) lastEffectEndFrame = endFrame
                     }
                 }
-                // 3. 回填 WAV 头
+                // 4. 回填 WAV 头
                 val totalAudioLength = baseFrames.toLong() * baseChannels * 2
                 raf.seek(0)
                 writeWavHeaderTo(raf, baseRate, baseChannels, totalAudioLength)

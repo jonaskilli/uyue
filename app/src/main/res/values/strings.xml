@@ -190,6 +190,9 @@
     <string name="clear_tts_role_current_chapter">Delete only current chapter recognized roles</string>
     <string name="clear_tts_role_current_done">Deleted recognized roles of current chapter</string>
     <string name="clear_tts_role_current_none">No recognized roles in current chapter</string>
+    <string name="clear_bgm_timeline_current_chapter">Delete recognized background music of current chapter</string>
+    <string name="clear_bgm_timeline_current_done">Deleted background music record of current chapter</string>
+    <string name="clear_bgm_timeline_current_none">No background music record in current chapter</string>
     <string name="action_save">Save</string>
     <string name="edit_source">Edit source</string>
     <string name="edit_book_source">Edit Book source</string>

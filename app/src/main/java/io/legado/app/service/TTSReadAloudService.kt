@@ -683,6 +683,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         paragraphStartPos = 0
         if (nowSpeak < contentList.lastIndex) {
             nowSpeak++
+            // 段落推进后作废被跨过的BGM记录（保留为导出时的候选切换点）
+            onBgmParagraphAdvanced()
             // 段落推进后检查是否触发AI生图切换
             checkAiImageTrigger(advancedLen)
         } else {
@@ -713,6 +715,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
 
         if (hasNext) {
+            // 跨章接续：上一章放到一半的歌，本章接着放后半段
+            recordBgmChapterStart(ReadBook.durChapterIndex)
             resumeReadAloud()
         } else {
             stopSelf()

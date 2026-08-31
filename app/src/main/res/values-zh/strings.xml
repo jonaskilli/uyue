@@ -185,6 +185,9 @@
     <string name="clear_tts_role_current_chapter">仅删除当前章节已识别角色</string>
     <string name="clear_tts_role_current_done">已删除当前章节已识别角色</string>
     <string name="clear_tts_role_current_none">当前章节没有已识别角色</string>
+    <string name="clear_bgm_timeline_current_chapter">仅删除当前章节已识别背景音乐</string>
+    <string name="clear_bgm_timeline_current_done">已删除当前章节已识别背景音乐</string>
+    <string name="clear_bgm_timeline_current_none">当前章节没有已识别背景音乐</string>
     <string name="action_save">保存</string>
     <string name="edit_source">编辑源</string>
     <string name="edit_book_source">编辑书源</string>

@@ -371,44 +371,48 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
                 // 记录带音效的混音输出文件（WAV 或 M4A），供后续视频合成作为音轨
                 var mixedAudioForVideo: File? = null
 
-                // 混音分支：开启「合并时混音效」开关且音效模式非关闭时，尝试带音效合并
+                // 混音分支：开启「合并时混音效」或「导出混入背景音乐」时，先混音再决定输出格式
                 // （与自动合并一致，重叠音效按播放队列行为顺序延后，输出 WAV）
-                if (AppConfig.mixSoundEffectOnMerge) {
-                    val mode = if (book.bookUrl.isNotBlank())
-                        AppConfig.getEffectiveSoundEffectMode(book.bookUrl) else AppConfig.soundEffectMode
-                    if (mode != "off") {
-                        AudioLogCollector.log("步骤3.5: 尝试带音效合并")
-                        val mixed = HttpTtsAudioCache.mergeChapterAudioWithEffects(
-                            book = book,
-                            chapter = bookChapter,
-                            audioFiles = audioFiles,
-                            outputFolder = downloadFolder,
-                            filePrefix = filePrefix
-                        )
-                        if (mixed) {
-                            success = true
-                            if (convertToM4a) {
-                                // 开启「保存为 M4A」：把混音完成的 WAV 转成 M4A
-                                AudioLogCollector.log("带音效合并完成，开始转换为 M4A")
-                                val converted = AudioConvertUtil.wavToAac(wavFile, m4aFile, 64000)
-                                if (converted && m4aFile.exists() && m4aFile.length() > 0) {
-                                    wavFile.delete()
-                                    finalOutputFile = m4aFile
-                                    mixedAudioForVideo = m4aFile
-                                    AudioLogCollector.log("带音效合并(M4A)完成: ${m4aFile.absolutePath}")
-                                } else {
-                                    AudioLogCollector.log("转换为 M4A 失败，保留 WAV")
-                                    finalOutputFile = wavFile
-                                    mixedAudioForVideo = wavFile
-                                }
+                val effectMode = if (book.bookUrl.isNotBlank())
+                    AppConfig.getEffectiveSoundEffectMode(book.bookUrl) else AppConfig.soundEffectMode
+                val wantEffect = AppConfig.mixSoundEffectOnMerge && effectMode != "off"
+                val wantBgm = AppConfig.mixBgmOnMerge
+                if (wantEffect || wantBgm) {
+                    AudioLogCollector.log("步骤3.5: 尝试混音合并(音效=$wantEffect, 背景音乐=$wantBgm)")
+                    val mixed = HttpTtsAudioCache.mergeChapterAudioWithEffects(
+                        book = book,
+                        chapter = bookChapter,
+                        audioFiles = audioFiles,
+                        outputFolder = downloadFolder,
+                        filePrefix = filePrefix,
+                        withEffects = wantEffect
+                    )
+                    if (mixed) {
+                        success = true
+                        if (convertToM4a) {
+                            // 开启「保存为 M4A」：把混音完成的 WAV 转成 M4A
+                            // 带背景音乐时提高码率，64k 下音乐明显发糊
+                            AudioLogCollector.log("混音合并完成，开始转换为 M4A")
+                            val converted = AudioConvertUtil.wavToAac(
+                                wavFile, m4aFile, if (wantBgm) 128000 else 64000
+                            )
+                            if (converted && m4aFile.exists() && m4aFile.length() > 0) {
+                                wavFile.delete()
+                                finalOutputFile = m4aFile
+                                mixedAudioForVideo = m4aFile
+                                AudioLogCollector.log("混音合并(M4A)完成: ${m4aFile.absolutePath}")
                             } else {
+                                AudioLogCollector.log("转换为 M4A 失败，保留 WAV")
                                 finalOutputFile = wavFile
                                 mixedAudioForVideo = wavFile
-                                AudioLogCollector.log("带音效合并完成: ${wavFile.absolutePath}")
                             }
                         } else {
-                            AudioLogCollector.log("带音效合并失败，回退普通合并")
+                            finalOutputFile = wavFile
+                            mixedAudioForVideo = wavFile
+                            AudioLogCollector.log("混音合并完成: ${wavFile.absolutePath}")
                         }
+                    } else {
+                        AudioLogCollector.log("混音合并失败，回退普通合并")
                     }
                 }
 

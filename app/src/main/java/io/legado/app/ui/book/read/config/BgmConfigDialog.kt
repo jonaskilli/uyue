@@ -98,6 +98,8 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         tvVolumeValue.setTextColor(textColor)
         tvSoundEffectVolLabel.setTextColor(textColor)
         tvSoundEffectVolumeValue.setTextColor(textColor)
+        tvMixBgmOnMerge.setTextColor(textColor)
+        tvBgmMinSegmentLabel.setTextColor(textColor)
         ivPrev.setColorFilter(textColor)
         ivPlayPause.setColorFilter(textColor)
         ivNext.setColorFilter(textColor)
@@ -159,6 +161,10 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         // 初始化音效音量
         seekSoundEffectVolume.progress = AppConfig.soundEffectVolume
         tvSoundEffectVolumeValue.text = "${AppConfig.soundEffectVolume}%"
+
+        // 初始化「导出时混入背景音乐」：音频与视频共用，音量取朗读播放的 bgmVolume
+        switchMixBgmOnMerge.isChecked = AppConfig.mixBgmOnMerge
+        etBgmMinSegment.setText(AppConfig.bgmMinSegmentMs.toString())
     }
 
     private fun initEvent() = binding.run {
@@ -232,6 +238,21 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
                     AppConfig.soundEffectVolume = progress
                     tvSoundEffectVolumeValue.text = "$progress%"
                 }
+            }
+        })
+
+        // 导出（合并音频 / 合成视频）时混入背景音乐
+        switchMixBgmOnMerge.setOnCheckedChangeListener { _, isChecked ->
+            AppConfig.mixBgmOnMerge = isChecked
+        }
+
+        // 单首最少持续时长：铺够该时长后才允许切下一首，避免音乐过碎
+        etBgmMinSegment.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                AppConfig.bgmMinSegmentMs =
+                    s?.toString()?.toLongOrNull()?.coerceAtLeast(0L) ?: 60000L
             }
         })
 

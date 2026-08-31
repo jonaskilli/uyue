@@ -90,6 +90,56 @@
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
+        android:layout_marginTop="4dp">
+
+        <TextView
+            android:id="@+id/tv_mix_bgm_on_merge"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="导出音频/视频时混入背景音乐"
+            android:textColor="@color/primaryText"
+            android:textSize="14sp" />
+
+        <io.legado.app.lib.theme.view.ThemeSwitch
+            android:id="@+id/switch_mix_bgm_on_merge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            tools:ignore="TouchTargetSizeCheck" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:layout_marginTop="4dp">
+
+        <TextView
+            android:id="@+id/tv_bgm_min_segment_label"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="单首最少时长(毫秒)"
+            android:textColor="@color/primaryText"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/et_bgm_min_segment"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:inputType="number"
+            android:text="60000"
+            android:textColor="@color/primaryText"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
         android:layout_marginTop="8dp">
 
         <TextView

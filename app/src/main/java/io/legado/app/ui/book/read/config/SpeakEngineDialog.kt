@@ -256,7 +256,8 @@ class SpeakEngineDialog() : BaseDialogFragment(R.layout.dialog_recycler_view),
             val items = arrayOf(
                 context.getString(R.string.clear_tts_cache_all),
                 context.getString(R.string.clear_tts_cache_current_chapter),
-                context.getString(R.string.clear_tts_role_current_chapter)
+                context.getString(R.string.clear_tts_role_current_chapter),
+                context.getString(R.string.clear_bgm_timeline_current_chapter)
             )
             // 自定义适配器：增大每个选项的上下间距（约原默认行高的 130%）以防误触
             val adapter = object : ArrayAdapter<String>(
@@ -285,6 +286,9 @@ class SpeakEngineDialog() : BaseDialogFragment(R.layout.dialog_recycler_view),
                         when (which) {
                             0 -> {
                                 AppConfig.clearTtsCache()
+                                // 缓存音频已全部清除，BGM 播放记录失去对应的音频，
+                                // 留着只会让下次合并按已不存在的缓存选曲，故一并清掉。
+                                io.legado.app.service.BgmTimelineStore.clearAll()
                                 withContext(Dispatchers.Main) {
                                     android.widget.Toast.makeText(
                                         context,
@@ -313,6 +317,28 @@ class SpeakEngineDialog() : BaseDialogFragment(R.layout.dialog_recycler_view),
                                         context.getString(R.string.clear_tts_cache_no_chapter)
                                     } else {
                                         context.getString(R.string.clear_tts_role_current_done)
+                                    }
+                                    android.widget.Toast.makeText(
+                                        context, msg, android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                            3 -> {
+                                // 清理当前章节的背景音乐识别记录（下次合并将重新选曲）
+                                val book = io.legado.app.model.ReadBook.book
+                                val deleted = if (book == null) {
+                                    false
+                                } else {
+                                    io.legado.app.service.BgmTimelineStore.deleteChapter(
+                                        book.bookUrl,
+                                        io.legado.app.model.ReadBook.durChapterIndex
+                                    )
+                                }
+                                withContext(Dispatchers.Main) {
+                                    val msg = if (!deleted) {
+                                        context.getString(R.string.clear_bgm_timeline_current_none)
+                                    } else {
+                                        context.getString(R.string.clear_bgm_timeline_current_done)
                                     }
                                     android.widget.Toast.makeText(
                                         context, msg, android.widget.Toast.LENGTH_SHORT

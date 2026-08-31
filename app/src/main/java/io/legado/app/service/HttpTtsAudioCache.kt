@@ -15,6 +15,7 @@ import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.utils.AudioConcatUtil
 import io.legado.app.utils.AudioConvertUtil
 import io.legado.app.utils.AudioLogCollector
+import io.legado.app.utils.BgmChapterMixer
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.SubTitleUtils
@@ -426,33 +427,50 @@ object HttpTtsAudioCache {
             val filePrefix = "${String.format("%04d", chapterIndex + 1)}_$chapterTitle"
             val wavFile = File(outputFolder, "${filePrefix}.wav")
 
-            // 混音分支：开启混音开关、已传入 service、且音效模式非关闭时，尝试带音效合并
-            if (AppConfig.mixSoundEffectOnMerge && service != null) {
-                val mode = if (book.bookUrl.isNotBlank())
-                    AppConfig.getEffectiveSoundEffectMode(book.bookUrl) else AppConfig.soundEffectMode
-                if (mode != "off" && tryMixWithEffects(book, chapter, chapterIndex, audioFiles)) {
-                    AppLog.put("带音效合并完成: ${wavFile.name}")
-                    // 开启「保存为 M4A」：把混音完成的 WAV 转成 M4A，否则保留 WAV
-                    if (AppConfig.convertToMp3AfterMerge) {
-                        val m4aFile = File(outputFolder, "${filePrefix}.m4a")
-                        if (AudioConvertUtil.wavToAac(wavFile, m4aFile, 64000) && m4aFile.exists() && m4aFile.length() > 0) {
-                            wavFile.delete()
-                            AppLog.put("带音效合并(M4A)完成: ${m4aFile.name}")
-                        } else {
-                            AppLog.put("带音效合并转 M4A 失败，保留 WAV: ${wavFile.name}")
-                        }
+            // 混音分支：开启音效混音或背景音乐混音时，先混音再决定输出格式
+            val effectMode = if (book.bookUrl.isNotBlank())
+                AppConfig.getEffectiveSoundEffectMode(book.bookUrl) else AppConfig.soundEffectMode
+            val wantEffect = AppConfig.mixSoundEffectOnMerge && service != null && effectMode != "off"
+            val wantBgm = AppConfig.mixBgmOnMerge
+            if ((wantEffect || wantBgm) && tryMixChapter(
+                    book = book,
+                    chapter = chapter,
+                    chapterIndex = chapterIndex,
+                    audioFiles = audioFiles,
+                    outputFolder = outputFolder,
+                    filePrefix = filePrefix,
+                    withEffects = wantEffect
+                )
+            ) {
+                AppLog.put("混音合并完成(音效=$wantEffect, 背景音乐=$wantBgm): ${wavFile.name}")
+                // 开启「保存为 M4A」：把混音完成的 WAV 转成 M4A，否则保留 WAV
+                if (AppConfig.convertToMp3AfterMerge) {
+                    val m4aFile = File(outputFolder, "${filePrefix}.m4a")
+                    // 带背景音乐时提高码率，64k 下音乐明显发糊
+                    val bitRate = if (wantBgm) 128000 else 64000
+                    if (AudioConvertUtil.wavToAac(wavFile, m4aFile, bitRate) && m4aFile.exists() && m4aFile.length() > 0) {
+                        wavFile.delete()
+                        AppLog.put("混音合并(M4A)完成: ${m4aFile.name}")
+                    } else {
+                        AppLog.put("混音合并转 M4A 失败，保留 WAV: ${wavFile.name}")
                     }
-                    if (AppConfig.saveVideoWithMerge) {
-                        // 把带音效的混音 WAV 作为视频音轨传入，确保视频音频包含音效
-                        mergeChapterVideo(
-                            book, chapter, chapterIndex, audioFiles, outputFolder,
-                            filePrefix, mixedAudioFile = wavFile
-                        )
-                    } else if (AppConfig.saveTextWithMerge) {
-                        saveChapterSrtAuto(book, chapter, outputFolder, filePrefix)
-                    }
-                    return
                 }
+                if (AppConfig.saveVideoWithMerge) {
+                    // 把带背景音乐/音效的混音文件作为视频音轨传入。
+                    // 转 M4A 后 WAV 已被删除，此时改用 M4A，否则视频会丢掉背景音乐与音效。
+                    val mixedForVideo = if (wavFile.exists() && wavFile.length() > 0) {
+                        wavFile
+                    } else {
+                        File(outputFolder, "${filePrefix}.m4a").takeIf { it.exists() && it.length() > 0 }
+                    }
+                    mergeChapterVideo(
+                        book, chapter, chapterIndex, audioFiles, outputFolder,
+                        filePrefix, mixedAudioFile = mixedForVideo
+                    )
+                } else if (AppConfig.saveTextWithMerge) {
+                    saveChapterSrtAuto(book, chapter, outputFolder, filePrefix)
+                }
+                return
             }
 
             // 原合并逻辑（不含音效）
@@ -504,17 +522,26 @@ object HttpTtsAudioCache {
     }
 
     /**
-     * 尝试将章节缓存音频与音效混音合并为完整 WAV。
-     * 复用播放流程的 applySoundEffectRules / 音效下载解码逻辑。
+     * 尝试将章节缓存音频与「背景音乐 + 音效」混音合并为完整 WAV。
+     *
+     * 叠加顺序：正文(人声) → 背景音乐(铺底) → 音效(最上层)。
+     * 背景音乐轨道由 [BgmExportPlanner] 离线规划，音量取 [AppConfig.bgmVolume]，
+     * 与朗读播放时听到的音量一致。
+     *
+     * @param withEffects 是否叠加音效；false 时只混背景音乐（避免无谓下载音效文件）
      * @return true 表示混音成功并写出文件
      */
-    private suspend fun tryMixWithEffects(
+    private suspend fun tryMixChapter(
         book: Book,
         chapter: BookChapter,
         chapterIndex: Int,
-        audioFiles: List<File>
+        audioFiles: List<File>,
+        outputFolder: File,
+        filePrefix: String,
+        withEffects: Boolean
     ): Boolean {
         return withContext(Dispatchers.IO) {
+            val bgmWorkDir = File(outputFolder, ".bgm_tmp_${System.currentTimeMillis()}")
             try {
                 val segments = getChapterSegments(book, chapter)
                 if (segments.size != audioFiles.size) {
@@ -523,6 +550,11 @@ object HttpTtsAudioCache {
                 }
                 val segInfos = mutableListOf<AudioConcatUtil.SegmentInfo>()
                 segments.forEach { text ->
+                    if (!withEffects) {
+                        // 不叠音效时无需解析/下载音效，字符数仅用于占位
+                        segInfos.add(AudioConcatUtil.SegmentInfo(text.length, emptyList()))
+                        return@forEach
+                    }
                     val (clean, effects) = BaseReadAloudService.extractSoundEffectsForMerge(text)
                     segInfos.add(
                         AudioConcatUtil.SegmentInfo(
@@ -533,21 +565,28 @@ object HttpTtsAudioCache {
                         )
                     )
                 }
-                val volume = AppConfig.soundEffectVolume / 100f
-                val outputFolder = AudioConcatUtil.getDownloadFolder(book.name)
-                val chapterTitle = AudioConcatUtil.sanitizeChapterTitle(chapter.title)
-                val filePrefix = "${String.format("%04d", chapterIndex + 1)}_$chapterTitle"
+                val bgmTracks = if (AppConfig.mixBgmOnMerge) {
+                    BgmExportPlanner.planTracks(book.bookUrl, chapterIndex, segments, audioFiles)
+                } else {
+                    emptyList<BgmChapterMixer.Track>()
+                }
                 val wavFile = File(outputFolder, "${filePrefix}.wav")
-                AudioConcatUtil.mixChapterWithEffects(
+                AudioConcatUtil.mixChapterWithBgmAndEffects(
                     audioFiles = audioFiles,
                     segments = segInfos,
-                    volume = volume,
+                    bgmTracks = bgmTracks,
+                    bgmFileProvider = { name -> BgmManager.resolveBgmFile(name, bgmWorkDir) },
+                    bgmWorkDir = bgmWorkDir,
+                    volume = AppConfig.soundEffectVolume / 100f,
                     outputFile = wavFile,
                     effectFileProvider = { fileName -> BaseReadAloudService.getSoundEffectAudioFile(fileName) }
                 )
             } catch (e: Exception) {
                 AppLog.put("混音异常: ${e.localizedMessage}", e)
                 false
+            } finally {
+                // 清理 BGM 解码中间文件
+                try { bgmWorkDir.deleteRecursively() } catch (_: Exception) {}
             }
         }
     }
@@ -562,41 +601,18 @@ object HttpTtsAudioCache {
         chapter: BookChapter,
         audioFiles: List<File>,
         outputFolder: File,
-        filePrefix: String
+        filePrefix: String,
+        withEffects: Boolean = true
     ): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val segments = getChapterSegments(book, chapter)
-                if (segments.size != audioFiles.size) {
-                    AppLog.put("混音: 段落数(${segments.size})与音频数(${audioFiles.size})不一致，跳过混音")
-                    return@withContext false
-                }
-                val segInfos = mutableListOf<AudioConcatUtil.SegmentInfo>()
-                segments.forEach { text ->
-                    val (clean, effects) = BaseReadAloudService.extractSoundEffectsForMerge(text)
-                    segInfos.add(
-                        AudioConcatUtil.SegmentInfo(
-                            textLength = clean.length,
-                            effects = effects.map {
-                                AudioConcatUtil.SegmentEffect(it.fileName, it.charOffset)
-                            }
-                        )
-                    )
-                }
-                val volume = AppConfig.soundEffectVolume / 100f
-                val wavFile = File(outputFolder, "${filePrefix}.wav")
-                AudioConcatUtil.mixChapterWithEffects(
-                    audioFiles = audioFiles,
-                    segments = segInfos,
-                    volume = volume,
-                    outputFile = wavFile,
-                    effectFileProvider = { fileName -> BaseReadAloudService.getSoundEffectAudioFile(fileName) }
-                )
-            } catch (e: Exception) {
-                AppLog.put("混音异常: ${e.localizedMessage}", e)
-                false
-            }
-        }
+        return tryMixChapter(
+            book = book,
+            chapter = chapter,
+            chapterIndex = chapter.index,
+            audioFiles = audioFiles,
+            outputFolder = outputFolder,
+            filePrefix = filePrefix,
+            withEffects = withEffects
+        )
     }
 
     /**

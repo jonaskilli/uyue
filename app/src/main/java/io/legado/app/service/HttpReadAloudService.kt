@@ -372,6 +372,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         paragraphStartPos = 0
         if (nowSpeak < contentList.lastIndex) {
             nowSpeak++
+            // 段落推进后作废被跨过的BGM记录（保留为导出时的候选切换点）
+            onBgmParagraphAdvanced()
             // 段落推进后检查是否触发AI生图切换
             checkAiImageTrigger(advancedLen)
         } else {
@@ -2122,6 +2124,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         }
 
         if (hasNext) {
+            // 跨章接续：上一章放到一半的歌，本章接着放后半段
+            recordBgmChapterStart(ReadBook.durChapterIndex)
             resumeReadAloud()
         } else {
             stopSelf()
@@ -2133,6 +2137,18 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
      * 优先读取缓存音频的准确时长，无缓存时按字数估算
      * 正确处理 paragraphStartPos：当前段落可能从中间位置开始朗读
      */
+    /**
+     * Http 朗读能取到播放器位置，BGM 记录用它作为段内偏移，切换点更精确。
+     * 系统 TTS 无播放器概念，沿用基类的 0（按段落开头算）。
+     */
+    override fun getCurrentParaPosMs(): Long {
+        return try {
+            exoPlayer.currentPosition.coerceAtLeast(0)
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
     override fun estimateParagraphDuration(index: Int): Long {
         if (index < 0 || index >= contentList.size) return 0L
         var text = contentList[index]
