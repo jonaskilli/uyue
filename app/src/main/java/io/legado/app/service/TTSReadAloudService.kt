@@ -123,6 +123,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
     // ====== 字幕同步 ======
     private var subtitleSyncJob: Job? = null
+    /** 音效规则计算任务。与字幕同步循环解耦，避免长段落计算阻塞字幕显示 */
+    private var effectCalcJob: Job? = null
     private var lastNowSpeak: Int = -1
     private var currentSubtitles: List<String> = emptyList()
     private var currentSubtitleCharRanges: List<Pair<Int, Int>> = emptyList()
@@ -775,6 +777,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private fun stopSubtitleSync() {
         subtitleSyncJob?.cancel()
         subtitleSyncJob = null
+        effectCalcJob?.cancel()
+        effectCalcJob = null
         lastNowSpeak = -1
         currentSubtitles = emptyList()
         currentSubtitleCharRanges = emptyList()
@@ -787,18 +791,44 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         if (paragraphStartPos > 0 && paragraphStartPos < text.length) {
             text = text.substring(paragraphStartPos)
         }
+        // 字幕用原始文本立即构建并交给本轮 updateSubtitle 发送。
+        // 注意本函数不能挂起：调用方 while 循环里 updateSubtitle 排在它之后，
+        // 一旦挂起等待音效计算，字幕就会被推迟到计算结束才显示。
+        val baseText = purifySpeakText(text)
+        buildSubtitles(baseText)
+
         val effectiveMode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
             AppConfig.getEffectiveSoundEffectMode(it)
         } ?: AppConfig.soundEffectMode
         if (effectiveMode != "off") {
-            // 朗读时：对当前朗读文本执行替换规则，提取音效标记
-            // 替换结果只用于 MediaPlayer 音效播放，不影响合成文本
-            text = applySoundEffectRules(text)
-            text = extractSoundEffects(text, nowSpeak)
+            scheduleSoundEffects(text, baseText, nowSpeak)
         }
-        // 字幕显示用净化后的文本（去掉 HTML 标签）
-        text = purifySpeakText(text)
-        currentSubtitles = SubTitleUtils.splitToSubtitles(text, 15)
+    }
+
+    /**
+     * 异步计算音效规则，不阻塞字幕同步循环。
+     * 替换结果只用于 MediaPlayer 音效播放，不影响合成文本。
+     */
+    private fun scheduleSoundEffects(text: String, baseText: String, index: Int) {
+        effectCalcJob?.cancel()
+        effectCalcJob = lifecycleScope.launch(Dispatchers.IO) {
+            val (cleanText, effects) = parseSoundEffects(applySoundEffectRules(text))
+            val effectText = purifySpeakText(cleanText)
+            withContext(Dispatchers.Main) {
+                // 计算期间段落已切换，丢弃结果，交由下一轮重新计算
+                if (index != nowSpeak) return@withContext
+                paragraphEffects[index] = effects
+                // 规则若改写了正文（不只是插入音效标记），按替换后文本刷新一次字幕
+                if (effectText != baseText) {
+                    buildSubtitles(effectText)
+                }
+            }
+        }
+    }
+
+    /** 按净化后的文本切片字幕并统计字数区间 */
+    private fun buildSubtitles(purifiedText: String) {
+        currentSubtitles = SubTitleUtils.splitToSubtitles(purifiedText, 15)
         var acc = 0
         currentSubtitleCharRanges = currentSubtitles.map { subtitle ->
             val chars = SubTitleUtils.countChinese(subtitle)

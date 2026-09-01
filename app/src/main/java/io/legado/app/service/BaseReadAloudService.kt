@@ -190,9 +190,124 @@ abstract class BaseReadAloudService : BaseService(),
             if (mode == "off") return text
 
             val jsonFileName = if (mode == "normal") "ttsrv-replaces5.json" else "ttsrv-replaces3.json"
-            val hasEffects = soundEffectPattern.containsMatchIn(text)
             val file = java.io.File(io.legado.app.help.EngineDataDir.baseDir() + jsonFileName)
             val downloadUrl = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/$jsonFileName?download=true"
+            val rules = getSoundEffectRules(file, downloadUrl) ?: return text
+
+            return try {
+                val hasEffects = soundEffectPattern.containsMatchIn(text)
+                var result = text
+                var successRules = 0
+                var failRules = 0
+                for (rule in rules) {
+                    if (rule.isRegex && rule.regex == null) {
+                        // 正则编译失败：保持原有行为，跳过该条
+                        failRules++
+                        continue
+                    }
+                    try {
+                        result = if (rule.regex != null) {
+                            rule.regex.replace(result, rule.replacement)
+                        } else {
+                            result.replace(rule.pattern, rule.replacement)
+                        }
+                        successRules++
+                    } catch (e: Exception) {
+                        failRules++
+                        AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message} pattern=${rule.pattern}")
+                    }
+                }
+                AppLog.put("[ttsrv] 规则执行: ${rules.size}条, 成功${successRules}条, 失败${failRules}条, 原文本${text.length}字, 结果${result.length}字")
+                val nowHasEffects = soundEffectPattern.containsMatchIn(result)
+                if (!hasEffects && nowHasEffects) {
+                    AppLog.put("[ttsrv] 替换后生成了音效标记")
+                }
+                result
+            } catch (e: Exception) {
+                AppLog.put("[ttsrv] 整体异常: ${e.message}")
+                text
+            }
+        }
+
+        /**
+         * 已完成编译的音效规则。
+         * @param regex 正则规则编译后的 Regex；字面规则或编译失败时为 null
+         * @param isRegex true 表示这是一条正则规则（区别于字面替换）
+         * @param order 规则序号，用于日志定位
+         */
+        private data class CompiledRule(
+            val pattern: String,
+            val replacement: String,
+            val regex: Regex?,
+            val isRegex: Boolean,
+            val order: Int
+        )
+
+        /**
+         * 规则集缓存。
+         * 判定是否失效的三项：文件完整路径、最后修改时间、文件大小。
+         * 切换音效模式（3/5 文件不同）、切换朗读引擎（mingwuyan/mingwuyanZ 目录不同）、
+         * 手动修改或更新规则文件（修改时间与大小变化）都会命中其中一项，从而自动重新加载。
+         */
+        private data class RuleCache(
+            val path: String,
+            val lastModified: Long,
+            val size: Long,
+            val rules: List<CompiledRule>
+        )
+
+        private val ruleCacheLock = Any()
+        private var ruleCache: RuleCache? = null
+
+        /**
+         * 获取当前生效的音效规则集（已按 order 排序、已完成正则编译）。
+         * 命中缓存时只比对文件元信息，不读取也不解析 JSON。
+         * @return 规则列表；加载或下载失败返回 null
+         */
+        private fun getSoundEffectRules(
+            file: java.io.File,
+            downloadUrl: String
+        ): List<CompiledRule>? {
+            val path = file.absolutePath
+            // 1. 命中缓存：只需文件元信息，避免每次都读取并解析整个 JSON
+            if (file.exists()) {
+                val lastModified = file.lastModified()
+                val size = file.length()
+                synchronized(ruleCacheLock) {
+                    val cached = ruleCache
+                    if (cached != null && cached.path == path
+                        && cached.lastModified == lastModified && cached.size == size
+                    ) {
+                        return cached.rules
+                    }
+                }
+            }
+            // 2. 缓存不可用：读取本地 JSON，缺失或无效则重新下载
+            val raw = readOrDownloadSoundEffectRules(file, downloadUrl) ?: return null
+            // 3. 解析 + 编译正则（只在缓存失效时执行一次）
+            val rules = try {
+                compileSoundEffectRules(raw)
+            } catch (e: Exception) {
+                AppLog.put("[ttsrv] 规则解析失败: ${e.message}")
+                return null
+            }
+            val lastModified = if (file.exists()) file.lastModified() else 0L
+            val size = if (file.exists()) file.length() else raw.length.toLong()
+            synchronized(ruleCacheLock) {
+                ruleCache = RuleCache(path, lastModified, size, rules)
+            }
+            AppLog.put("[ttsrv] 规则已编译缓存: ${rules.size}条, 文件=${file.name}")
+            return rules
+        }
+
+        /**
+         * 读取本地规则 JSON；不存在或内容无效时删除并重新下载保存。
+         * @return 原始 JSON 文本，失败返回 null
+         */
+        private fun readOrDownloadSoundEffectRules(
+            file: java.io.File,
+            downloadUrl: String
+        ): String? {
             var raw: String? = null
             // 1. 优先读取本地 JSON
             if (file.exists()) {
@@ -225,81 +340,70 @@ abstract class BaseReadAloudService : BaseService(),
                         AppLog.put("[ttsrv] 下载成功并保存")
                     } else {
                         AppLog.put("[ttsrv] 下载返回无效内容: ${raw?.take(100)}")
-                        return text
+                        return null
                     }
                 } catch (e: Exception) {
                     AppLog.put("[ttsrv] 下载失败: ${e.message}")
-                    return text
+                    return null
                 }
             }
-            return try {
-                val data = org.json.JSONArray(raw)
-                var result = text
-                var totalRules = 0
-                var successRules = 0
-                var failRules = 0
-                for (i in 0 until data.length()) {
-                    val groupObj = data.getJSONObject(i)
-                    val list = groupObj.optJSONArray("list") ?: continue
-                    val rules = mutableListOf<RuleItem>()
-                    for (j in 0 until list.length()) {
-                        val item = list.getJSONObject(j)
-                        if (item.optBoolean("isEnabled", true).not()) continue
-                        val pattern = item.optString("pattern", "") ?: continue
-                        if (pattern.isEmpty()) continue
-                        val order = item.optInt("order", 0)
-                        rules.add(RuleItem(
-                            pattern = pattern,
-                            replacement = item.optString("replacement", ""),
-                            isRegex = item.optBoolean("isRegex", false),
-                            order = order
-                        ))
-                    }
-                    rules.sortBy { it.order }
-                    for (rule in rules) {
-                        totalRules++
-                        try {
-                            val (cleanPattern, flags) = parsePatternAndFlags(rule.pattern)
-                            val effectivePattern = convertEs6RegexToJava(cleanPattern)
-                            result = if (rule.isRegex) {
-                                val regex = if (flags.isNotEmpty()) {
-                                    val flagSet = mutableSetOf<RegexOption>()
-                                    if (flags.contains('i')) flagSet.add(RegexOption.IGNORE_CASE)
-                                    if (flags.contains('m')) flagSet.add(RegexOption.MULTILINE)
-                                    if (flags.contains('s')) flagSet.add(RegexOption.DOT_MATCHES_ALL)
-                                    Regex(effectivePattern, flagSet)
-                                } else {
-                                    Regex(effectivePattern)
-                                }
-                                regex.replace(result, rule.replacement)
-                            } else {
-                                result.replace(rule.pattern, rule.replacement)
-                            }
-                            successRules++
-                        } catch (e: Exception) {
-                            failRules++
-                            AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message} pattern=${rule.pattern}")
-                        }
-                    }
-                }
-                AppLog.put("[ttsrv] 规则执行: ${totalRules}条, 成功${successRules}条, 失败${failRules}条, 原文本${text.length}字, 结果${result.length}字")
-                val nowHasEffects = soundEffectPattern.containsMatchIn(result)
-                if (!hasEffects && nowHasEffects) {
-                    AppLog.put("[ttsrv] 替换后生成了音效标记")
-                }
-                result
-            } catch (e: Exception) {
-                AppLog.put("[ttsrv] 整体异常: ${e.message}")
-                text
-            }
+            return raw
         }
 
-        private data class RuleItem(
-            val pattern: String,
-            val replacement: String,
-            val isRegex: Boolean,
-            val order: Int
-        )
+        /**
+         * 把规则 JSON 解析为有序、已编译的规则列表。
+         * 保持原有执行顺序：按 JSON 中的分组顺序，组内按 order 升序。
+         */
+        private fun compileSoundEffectRules(raw: String): List<CompiledRule> {
+            val data = org.json.JSONArray(raw)
+            val rules = mutableListOf<CompiledRule>()
+            for (i in 0 until data.length()) {
+                val groupObj = data.getJSONObject(i)
+                val list = groupObj.optJSONArray("list") ?: continue
+                val groupRules = mutableListOf<CompiledRule>()
+                for (j in 0 until list.length()) {
+                    val item = list.getJSONObject(j)
+                    if (item.optBoolean("isEnabled", true).not()) continue
+                    val pattern = item.optString("pattern", "") ?: continue
+                    if (pattern.isEmpty()) continue
+                    val order = item.optInt("order", 0)
+                    val isRegex = item.optBoolean("isRegex", false)
+                    val regex = if (isRegex) {
+                        try {
+                            val (cleanPattern, flags) = parsePatternAndFlags(pattern)
+                            val effectivePattern = convertEs6RegexToJava(cleanPattern)
+                            if (flags.isNotEmpty()) {
+                                val flagSet = mutableSetOf<RegexOption>()
+                                if (flags.contains('i')) flagSet.add(RegexOption.IGNORE_CASE)
+                                if (flags.contains('m')) flagSet.add(RegexOption.MULTILINE)
+                                if (flags.contains('s')) flagSet.add(RegexOption.DOT_MATCHES_ALL)
+                                Regex(effectivePattern, flagSet)
+                            } else {
+                                Regex(effectivePattern)
+                            }
+                        } catch (e: Exception) {
+                            // 编译失败留作 null，执行阶段按原有逻辑跳过该条
+                            AppLog.put("[ttsrv] 正则编译失败 [order=$order]: ${e.message} pattern=$pattern")
+                            null
+                        }
+                    } else {
+                        null
+                    }
+                    groupRules.add(
+                        CompiledRule(
+                            pattern = pattern,
+                            replacement = item.optString("replacement", ""),
+                            regex = regex,
+                            isRegex = isRegex,
+                            order = order
+                        )
+                    )
+                }
+                groupRules.sortBy { it.order }
+                rules.addAll(groupRules)
+            }
+            return rules
+        }
 
         private fun parsePatternAndFlags(pattern: String): Pair<String, String> {
             if (pattern.length >= 2 && pattern.startsWith("/") && !pattern.substring(1).contains("/")) {
@@ -323,12 +427,11 @@ abstract class BaseReadAloudService : BaseService(),
         }
 
         /**
-         * 供合并流程使用：对文本应用音效替换规则并提取音效标记。
-         * 返回 (去掉标记后的净文本, 音效列表)，不依赖播放时的 paragraphEffects 状态。
-         * 可在无 service 实例时静态调用（如目录界面手动保存）。
+         * 从已完成规则替换的文本中提取 (音效) 标记（纯计算，不触碰播放状态，可在后台线程调用）。
+         * @return (去掉标记后的净文本, 音效列表)
          */
-        fun extractSoundEffectsForMerge(text: String): Pair<String, List<SoundEffect>> {
-            val processed = applySoundEffectRules(text)
+        @JvmStatic
+        protected fun parseSoundEffects(processed: String): Pair<String, MutableList<SoundEffect>> {
             val effects = mutableListOf<SoundEffect>()
             val sb = StringBuilder()
             var lastEnd = 0
@@ -341,6 +444,15 @@ abstract class BaseReadAloudService : BaseService(),
             }
             sb.append(processed.substring(lastEnd))
             return sb.toString() to effects
+        }
+
+        /**
+         * 供合并流程使用：对文本应用音效替换规则并提取音效标记。
+         * 返回 (去掉标记后的净文本, 音效列表)，不依赖播放时的 paragraphEffects 状态。
+         * 可在无 service 实例时静态调用（如目录界面手动保存）。
+         */
+        fun extractSoundEffectsForMerge(text: String): Pair<String, List<SoundEffect>> {
+            return parseSoundEffects(applySoundEffectRules(text))
         }
 
         /**
@@ -710,19 +822,9 @@ abstract class BaseReadAloudService : BaseService(),
      * 返回已移除标记的纯文本。
      */
     fun extractSoundEffects(text: String, index: Int): String {
-        val effects = mutableListOf<SoundEffect>()
-        val sb = StringBuilder()
-        var lastEnd = 0
-        soundEffectPattern.findAll(text).forEach { match ->
-            sb.append(text.substring(lastEnd, match.range.first))
-            val offset = sb.length
-            val name = match.groupValues[1]
-            effects.add(SoundEffect(offset, name, "$name.json"))
-            lastEnd = match.range.last + 1
-        }
-        sb.append(text.substring(lastEnd))
+        val (cleanText, effects) = parseSoundEffects(text)
         paragraphEffects[index] = effects
-        return sb.toString()
+        return cleanText
     }
 
     /**
