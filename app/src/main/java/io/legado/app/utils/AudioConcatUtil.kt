@@ -13,6 +13,8 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.roundToInt
+import kotlin.math.tanh
 
 /**
  * 音频文件合并工具类
@@ -613,13 +615,36 @@ object AudioConcatUtil {
                 val bIdx = f * baseChannels + c
                 val eIdx = f * effectChannels + effC
                 val bv = baseBuf.getShort(bIdx * 2).toInt()
-                val ev = (effBuf.getShort(eIdx * 2).toInt() * volume).toInt()
+                val evRaw = (effBuf.getShort(eIdx * 2).toInt() * volume).toInt()
+                // 增益后的音效先软限幅，避免超过 100% 时被直接切平产生爆音。
+                // 与朗读时 GainAudioProcessor 的处理保持一致
+                val ev = softClipSample(evRaw)
+                // 与基底叠加后仍可能溢出，此处保留硬限幅（仅在溢出时削平）
                 val mixed = (bv + ev).coerceIn(-32768, 32767)
                 baseBuf.putShort(bIdx * 2, mixed.toShort())
             }
         }
         raf.seek(baseOffset)
         raf.write(region)
+    }
+
+    /**
+     * 对单个采样做 tanh 软限幅，压缩回 16-bit 范围。
+     *
+     * 高音量下硬削波（直接 clamp 到 ±32767）会把波形顶部切平，产生明显爆音。
+     * 这里改用 tanh 曲线平滑饱和：小信号保持线性，大信号渐进压缩。
+     *
+     * 注意只作用于音效采样本身。基底（人声/BGM）不参与非线性处理，
+     * 否则调节"音效音量"会连带压缩人声的音量和动态，与滑块语义不符。
+     *
+     * @param sample 增益后的音效采样，范围 int
+     * @return 压缩到 16-bit 范围内的采样值
+     */
+    private fun softClipSample(sample: Int): Int {
+        val normalized = sample / 32768.0f
+        val clipped = tanh(normalized)
+        // 四舍五入而非截断：截断会让所有采样统一向下偏 0.5 LSB，累积成直流偏移
+        return (clipped * 32767.0f).roundToInt().coerceIn(-32768, 32767)
     }
 
     /**
@@ -665,7 +690,7 @@ object AudioConcatUtil {
      *
      * @param audioFiles 按朗读顺序的缓存音频文件（与 segments 一一对应）
      * @param segments 每段文本信息（净字符数 + 段内音效标记）
-     * @param volume 音效音量 0..1
+     * @param volume 音效音量倍率，0..3（0%..300%，对应音效音量滑块范围）
      * @param outputFile 输出 WAV 文件
      * @param effectFileProvider 根据音效文件名取解码后的音频文件
      */
@@ -699,7 +724,7 @@ object AudioConcatUtil {
      * @param bgmTracks 背景音乐轨道，为空则只混音效
      * @param bgmFileProvider 按 BGM 名（不含扩展名）取本地可访问的音频文件
      * @param bgmWorkDir BGM 解码中间文件目录（调用方应给独立目录，避免并发冲突）
-     * @param volume 音效音量 0..1
+     * @param volume 音效音量倍率，0..3（0%..300%，对应音效音量滑块范围）
      * @param outputFile 输出 WAV 文件
      * @param effectFileProvider 根据音效文件名取解码后的音频文件
      */

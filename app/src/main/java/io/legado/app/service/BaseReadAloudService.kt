@@ -53,6 +53,7 @@ import io.legado.app.model.ReadBook
 import io.legado.app.receiver.MediaButtonReceiver
 import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.ui.book.read.page.entities.TextChapter
+import io.legado.app.help.audio.GainAudioProcessor
 import io.legado.app.data.appDb
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.activityPendingIntent
@@ -61,6 +62,12 @@ import io.legado.app.utils.observeEvent
 import io.legado.app.utils.observeSharedPreferences
 import io.legado.app.utils.postEvent
 import io.legado.app.utils.toastOnUi
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -834,21 +841,83 @@ abstract class BaseReadAloudService : BaseService(),
         paragraphEffects.values.forEach { list ->
             list.forEach { it.triggered = false }
         }
-        effectPlayQueue.clear()
-        currentMediaPlayer?.release()
-        currentMediaPlayer = null
+        effectPlayer?.run {
+            stop()
+            clearMediaItems()
+        }
     }
 
     protected var currentParagraphTotalChars: Int = 0
 
-    // ========== 音效播放（MediaPlayer 顺序队列） ==========
-    private var currentMediaPlayer: android.media.MediaPlayer? = null
-    private val effectPlayQueue = java.util.LinkedList<Pair<java.io.File, String>>()
+    // ========== 音效播放（ExoPlayer 播放列表 + PCM 增益）==========
+
+    /**
+     * 音效增益处理器。作用在解码后的 PCM 上，支持 >100% 增益。
+     *
+     * 原来是 MediaPlayer.setVolume()，其上限被系统强制限制为 1.0f，
+     * 超过 100% 的音量设置完全无效。改用 ExoPlayer 音频管线后，
+     * 增益直接乘在 PCM 采样上，无此限制，且带 tanh 软限幅不会爆音。
+     */
+    private val effectGainProcessor: GainAudioProcessor by lazy {
+        GainAudioProcessor(AppConfig.soundEffectVolume / 100f)
+    }
+
+    /** 音效播放器。构造失败时为 null，此时音效静默降级为不播放 */
+    private var effectPlayer: ExoPlayer? = null
+
+    private fun getOrCreateEffectPlayer(): ExoPlayer? {
+        effectPlayer?.let { return it }
+        return try {
+            val renderersFactory = object : DefaultRenderersFactory(this) {
+                override fun buildAudioSink(
+                    context: Context,
+                    enableFloatOutput: Boolean,
+                    enableAudioTrackPlaybackParams: Boolean
+                ): androidx.media3.exoplayer.audio.AudioSink? {
+                    return DefaultAudioSink.Builder(this@BaseReadAloudService)
+                        .setEnableFloatOutput(enableFloatOutput)
+                        .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                        .setAudioProcessors(arrayOf(effectGainProcessor))
+                        .build()
+                }
+            }
+            val player = ExoPlayer.Builder(this, renderersFactory).build().apply {
+                repeatMode = Player.REPEAT_MODE_OFF
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        // 列表播完后清空，回到闲置状态，下次 addMediaItem 重新 prepare
+                        if (playbackState == Player.STATE_ENDED) {
+                            lastEffectPlayTime = System.currentTimeMillis()
+                            clearMediaItems()
+                        }
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        AppLog.put("[音效] 播放错误: ${error.message}")
+                        // 出错的 item 无法自动跳过，移除后继续播剩下的
+                        removeMediaItem(currentMediaItemIndex)
+                        if (mediaItemCount > 0) {
+                            prepare()
+                            play()
+                        } else {
+                            lastEffectPlayTime = System.currentTimeMillis()
+                        }
+                    }
+                })
+            }
+            effectPlayer = player
+            player
+        } catch (e: Exception) {
+            AppLog.put("[音效] 播放器创建失败: ${e.message}")
+            null
+        }
+    }
+
     protected var lastEffectPlayTime = 0L
 
     /**
      * 触发时下载/解码音效，然后加入播放队列。
-     * 当前无音效播放时立即播放，否则排队等待。
+     * ExoPlayer 播放列表会自动顺序播放，无需手动维护队列。
      */
     protected fun loadAndPlayEffect(effect: SoundEffect) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -865,59 +934,31 @@ abstract class BaseReadAloudService : BaseService(),
     }
 
     /**
-     * 将音效加入队列，或立即播放。
+     * 将音效加入播放列表并立即开始播放。
      */
     private fun enqueueOrPlayEffect(audioFile: java.io.File, effectName: String) {
-        if (currentMediaPlayer?.isPlaying == true) {
-            effectPlayQueue.add(audioFile to effectName)
-            AppLog.put("[音效] 加入队列等待: $effectName")
-        } else {
-            doPlayEffect(audioFile, effectName)
-        }
-    }
-
-    /**
-     * 使用 MediaPlayer 播放音效，并在播放完成后自动播放下一个。
-     */
-    private fun doPlayEffect(audioFile: java.io.File, effectName: String) {
         try {
-            val volume = AppConfig.soundEffectVolume / 100f
-            val mp = android.media.MediaPlayer().apply {
-                setDataSource(audioFile.absolutePath)
-                setVolume(volume, volume)
-                prepare()
-                setOnCompletionListener {
-                    it.release()
-                    lastEffectPlayTime = System.currentTimeMillis()
-                    currentMediaPlayer = null
-                    playNextEffect()
+            val player = getOrCreateEffectPlayer() ?: return
+            // 每次播放前刷新增益，使音量滑块调节实时生效
+            effectGainProcessor.setGain(AppConfig.soundEffectVolume / 100f)
+            val mediaItem = MediaItem.fromUri(android.net.Uri.fromFile(audioFile))
+            // 列表已播完但 STATE_ENDED 的清空回调尚未执行时，mediaItemCount 仍 > 0，
+            // 此时只 addMediaItem + play() 不会重新起播，该条音效会被静默丢弃。
+            val ended = player.playbackState == Player.STATE_ENDED
+            val needPrepare = player.mediaItemCount == 0 || ended
+            player.addMediaItem(mediaItem)
+            if (needPrepare) {
+                if (ended) {
+                    // 定位到刚加入的音效，避免重播列表中已播完的旧 item
+                    player.seekTo(player.mediaItemCount - 1, 0)
                 }
-                setOnErrorListener { mp, what, extra ->
-                    AppLog.put("[音效] 播放错误: $effectName what=$what extra=$extra")
-                    mp.release()
-                    currentMediaPlayer = null
-                    playNextEffect()
-                    true
-                }
-                start()
+                player.prepare()
             }
-            currentMediaPlayer = mp
+            player.play()
             lastEffectPlayTime = System.currentTimeMillis()
             AppLog.put("[音效] 播放: $effectName")
         } catch (e: Exception) {
             AppLog.put("[音效] 播放失败: $effectName, ${e.message}")
-            currentMediaPlayer = null
-            playNextEffect()
-        }
-    }
-
-    /**
-     * 从队列中取出下一个音效播放。
-     */
-    private fun playNextEffect() {
-        if (effectPlayQueue.isNotEmpty()) {
-            val (file, name) = effectPlayQueue.poll()
-            doPlayEffect(file, name)
         }
     }
 
@@ -925,7 +966,13 @@ abstract class BaseReadAloudService : BaseService(),
      * 暂停当前音效播放（用于朗读暂停时）。
      */
     protected fun pauseSoundEffects() {
-        currentMediaPlayer?.pause()
+        effectPlayer?.pause()
+    }
+
+    /** 释放音效播放器资源 */
+    private fun releaseEffectPlayer() {
+        effectPlayer?.release()
+        effectPlayer = null
     }
 
     /**
@@ -1053,6 +1100,8 @@ abstract class BaseReadAloudService : BaseService(),
 
     override fun onDestroy() {
         super.onDestroy()
+        // 释放音效播放器
+        releaseEffectPlayer()
         // 停止 gengxin 信号后台轮询
         stopGengxinPolling()
         if (useWakeLock) {
