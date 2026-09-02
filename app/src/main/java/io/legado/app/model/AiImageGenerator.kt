@@ -13,6 +13,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.help.tts.TtsEngineActivator
 import io.legado.app.utils.GSON
+import io.legado.app.utils.defaultSharedPreferences
 import io.legado.app.utils.getPrefString
 import io.legado.app.utils.postEvent
 import io.legado.app.utils.putPrefString
@@ -194,6 +195,34 @@ object AiImageGenerator {
     fun unbindBook(bookUrl: String) {
         if (bookUrl.isBlank()) return
         appCtx.removePref(PreferKey.aiImageTemplateBindPrefix + bookUrl)
+    }
+
+    /**
+     * 删除模板时清理所有书籍对该模板的绑定。
+     * 绑定 id 存在 SharedPreferences 里，只删数据库会残留失效 id，
+     * 导致生图轮换时选中一个已不存在的模板。
+     * @return 受影响的书籍数量
+     */
+    fun unbindTemplateFromAllBooks(templateId: Long): Int {
+        val all: Map<String, Any?> = appCtx.defaultSharedPreferences.all
+        val keys = all.keys.filter { it.startsWith(PreferKey.aiImageTemplateBindPrefix) }
+        if (keys.isEmpty()) return 0
+        val editor = appCtx.defaultSharedPreferences.edit()
+        var affected = 0
+        for (key in keys) {
+            val bookUrl = key.removePrefix(PreferKey.aiImageTemplateBindPrefix)
+            val ids = getBoundTemplateIds(bookUrl)
+            val kept = ids.filter { it != templateId }
+            if (kept.size == ids.size) continue
+            if (kept.isEmpty()) {
+                editor.remove(key)
+            } else {
+                editor.putString(key, kept.joinToString(","))
+            }
+            affected++
+        }
+        if (affected > 0) editor.apply()
+        return affected
     }
 
     /**

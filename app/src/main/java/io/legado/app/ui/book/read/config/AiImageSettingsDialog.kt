@@ -316,7 +316,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
                         .setMessage("""AI生图失败后的重试次数。
 
 【说明】
-1. 默认重试1次，可设置为0~5次；
+1. 默认重试1次，可设置为0~20次；
 2. 每次重试会重新根据当前朗读位置收集正文内容（而非使用上次文本）；
 3. 重试次数耗尽则放弃本次生图，等待下次触发。""")
                         .setPositiveButton("知道了", null)
@@ -327,7 +327,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
         etRetryCount = EditText(context).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             setText(AppConfig.aiImageRetryCount.toString())
-            hint = "默认1，范围0~5"
+            hint = "默认1，范围0~20"
         }
         colRetry.addView(etRetryCount)
         // 右列：请求间隔时间
@@ -755,6 +755,13 @@ sk-aaa@@sk-bbb@@sk-ccc
             onBindChanged = {
                 // 绑定状态变化后刷新当前界面的绑定开关提示
                 currentTemplate?.let { refreshBindSwitch(it) }
+            },
+            onRenamed = { renamed ->
+                // 重命名的是当前编辑的模板，重新填充界面同步顶部模板名
+                // 注意：会覆盖本界面尚未保存的修改
+                if (currentTemplate?.id == renamed.id) {
+                    applyTemplateToUi(renamed)
+                }
             }
         ).show(childFragmentManager, "aiImageTemplateList")
     }
@@ -775,7 +782,7 @@ sk-aaa@@sk-bbb@@sk-ccc
             ?.coerceIn(0, 2000) ?: 50
         AppConfig.aiImageContextCharCount = contextCount
         val retryCount = etRetryCount.text?.toString()?.trim()?.toIntOrNull()
-            ?.coerceIn(0, 5) ?: 1
+            ?.coerceIn(0, 20) ?: 1
         AppConfig.aiImageRetryCount = retryCount
         val requestInterval = etRequestInterval.text?.toString()?.trim()?.toFloatOrNull()
             ?.coerceIn(0f, 60f) ?: 1.0f

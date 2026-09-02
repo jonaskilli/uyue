@@ -14,7 +14,8 @@ class AiImageTemplateListAdapter(
     private val selectedId: Long,
     private val bookUrl: String,
     private val onSelect: (AiImageTemplate) -> Unit,
-    private val onDelete: (AiImageTemplate) -> Unit,
+    /** 点击更多按钮，第二参数为锚点 View，用于挂载 PopupMenu */
+    private val onMore: (AiImageTemplate, View) -> Unit,
     private val onBindToggle: (AiImageTemplate, Boolean) -> Unit,
 ) : ListAdapter<AiImageTemplate, AiImageTemplateListAdapter.ViewHolder>(DiffCallback()) {
 
@@ -39,8 +40,7 @@ class AiImageTemplateListAdapter(
         fun bind(template: AiImageTemplate) {
             binding.tvName.text = if (template.isDefault) "${template.name}（默认）" else template.name
             binding.radioButton.isChecked = template.id == selectedId
-            // 默认模板不可删除
-            binding.btnDelete.visibility = if (template.isDefault) View.GONE else View.VISIBLE
+            // 更多按钮对所有模板可用（含默认模板），删除项在菜单里按是否默认模板动态隐藏
 
             // 绑定开关：未打开书籍时隐藏
             val bindVisible = bookUrl.isNotBlank()
@@ -60,7 +60,7 @@ class AiImageTemplateListAdapter(
             binding.root.setOnClickListener(selectListener)
             binding.radioButton.setOnClickListener(selectListener)
 
-            binding.btnDelete.setOnClickListener { onDelete(template) }
+            binding.btnMore.setOnClickListener { onMore(template, it) }
         }
     }
 
