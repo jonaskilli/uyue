@@ -1005,17 +1005,23 @@ object ReadBook : CoroutineScope by MainScope() {
     /**
      * 保存当前及后续章节文本到 JSON，供 TTS 使用
      * 只有书名或章节发生变化时才真正写入
+     *
+     * @param force true 时跳过"书名+章节未变"的节流，强制重新收集并写入。
+     *   章节刚加载完成时后续章节常未下载，此时写入的内容不完整，
+     *   但节流已被记录，导致后续章节补齐后也不会重写。
+     *   开始朗读等需要确保数据完整的场景应传 true。
      */
-    fun saveTtsTextJson() {
+    fun saveTtsTextJson(force: Boolean = false) {
         val book = book ?: return
         val bookName = book.name
         val chapterIndex = durChapterIndex
-        if (lastSavedBookName == bookName && lastSavedChapterIndex == chapterIndex) {
+        if (!force && lastSavedBookName == bookName && lastSavedChapterIndex == chapterIndex) {
             return
         }
         kotlin.runCatching {
             val limit = AppConfig.audioPreDownloadNum + 2
             val sb = StringBuilder()
+            var chapterCount = 0
             for (i in 0 until limit) {
                 val idx = durChapterIndex + i
                 if (idx >= chapterSize) break
@@ -1040,6 +1046,7 @@ object ReadBook : CoroutineScope by MainScope() {
                     if (clean.isNotBlank()) {
                         if (sb.isNotEmpty()) sb.append("\n")
                         sb.append(clean)
+                        chapterCount++
                     }
                 }
             }
@@ -1059,6 +1066,11 @@ object ReadBook : CoroutineScope by MainScope() {
             if (success) {
                 lastSavedBookName = bookName
                 lastSavedChapterIndex = chapterIndex
+                AppLog.putDebug(
+                    "保存 TTS JSON 成功: $bookName 第${chapterIndex}章起, 实收${chapterCount}/${limit}章"
+                )
+            } else {
+                AppLog.put("保存 TTS JSON 失败: $bookName 第${chapterIndex}章起")
             }
         }.onFailure {
             AppLog.put("保存 TTS JSON 出错\n$it", it)

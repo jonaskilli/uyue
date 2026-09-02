@@ -1116,7 +1116,9 @@ abstract class BaseReadAloudService : BaseService(),
             this@BaseReadAloudService.pageIndex = pageIndex
             this@BaseReadAloudService.textChapter = textChapter
             readAloudNumber = textChapter.getReadLength(pageIndex) + startPos
-            ReadBook.saveTtsTextJson()
+            // 强制刷新：章节刚加载时后续章节常未下载，写入内容不完整，
+            // 若沿用节流则开始朗读时拿不到完整的预加载章节
+            ReadBook.saveTtsTextJson(force = true)
             readAloudByPage = getPrefBoolean(PreferKey.readAloudByPage)
             contentList = textChapter.getNeedReadAloud(0, readAloudByPage, 0)
                 .split("\n")

@@ -103,8 +103,10 @@ object BgmManager {
                     io.legado.app.constant.AppLog.put("AI背景音乐: 播放错误 $fileName，自动跳过: ${error.localizedMessage}")
                     // 播放出错时自动跳过到下一首
                     mainScope.launch {
-                        if (bgmNames.isNotEmpty()) {
-                            val nextIndex = (currentPlayingIndex + 1) % bgmNames.size
+                        // 取局部 size，避免检查与取模之间 bgmNames 被清空导致 % 0
+                        val size = bgmNames.size
+                        if (size > 0) {
+                            val nextIndex = (currentPlayingIndex + 1) % size
                             playAudioByIndex(nextIndex)
                             animateVolume(activePlayer, AppConfig.bgmVolume / 100f, duration = 500L)
                         }
@@ -127,6 +129,11 @@ object BgmManager {
                 playAudioByIndex(nextIndex)
             } else {
                 // 无AI推荐：随机播放下一首
+                // 清单为空时 random() 会抛 NoSuchElementException，先判断是否为空
+                if (bgmNames.isEmpty()) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: BGM清单为空，无法随机播放下一首")
+                    return@launch
+                }
                 val nextIndex = (0 until bgmNames.size).random()
                 val fileName = bgmNames.getOrNull(nextIndex) ?: "未知"
                 io.legado.app.utils.LogUtils.d("BgmManager", "🎵 BGM结束，无AI推荐，随机播放: index=$nextIndex, name=$fileName")
@@ -494,8 +501,12 @@ object BgmManager {
             io.legado.app.utils.LogUtils.d("BgmManager", "❌ 找不到音频文件: $name")
             io.legado.app.constant.AppLog.put("AI背景音乐: 找不到音频文件: $name，自动跳过")
             // 自动跳过到下一首
-            val nextIndex = (index + 1) % bgmNames.size
-            if (nextIndex != index) {
+            // 注意：上面的 withContext(IO) 挂起期间，loadBgmFiles() 可能已清空 bgmNames，
+            // 此处必须重新校验 size，不能用函数开头那次检查的结果，否则 % 0 崩溃
+            val size = bgmNames.size
+            if (size <= 0) return
+            val nextIndex = (index + 1) % size
+            if (nextIndex != index && nextIndex >= 0 && nextIndex < bgmNames.size) {
                 playAudioByIndex(nextIndex)
             }
             return
@@ -674,8 +685,9 @@ object BgmManager {
      */
     fun next() {
         mainScope.launch {
-            if (bgmNames.isEmpty()) return@launch
-            val nextIndex = (currentPlayingIndex + 1) % bgmNames.size
+            val size = bgmNames.size
+            if (size <= 0) return@launch
+            val nextIndex = (currentPlayingIndex + 1) % size
             playAudioByIndex(nextIndex)
             io.legado.app.utils.LogUtils.d("BgmManager", "手动切换到下一首: index=$nextIndex")
         }
@@ -686,8 +698,9 @@ object BgmManager {
      */
     fun prev() {
         mainScope.launch {
-            if (bgmNames.isEmpty()) return@launch
-            val prevIndex = (currentPlayingIndex - 1 + bgmNames.size) % bgmNames.size
+            val size = bgmNames.size
+            if (size <= 0) return@launch
+            val prevIndex = (currentPlayingIndex - 1 + size) % size
             playAudioByIndex(prevIndex)
             io.legado.app.utils.LogUtils.d("BgmManager", "手动切换到上一首: index=$prevIndex")
         }
