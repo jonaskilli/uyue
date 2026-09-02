@@ -5,6 +5,7 @@ import com.google.gson.JsonParser
 import io.legado.app.constant.AppLog
 import java.io.File
 import java.security.MessageDigest
+import splitties.init.appCtx
 
 /**
  * manifest 单条记录（顶层类，确保 Gson 能正确反序列化泛型列表元素）
@@ -244,8 +245,8 @@ object AiImagePersistentCache {
         return null
     }
 
-    /** 段落区间重叠比例判定（详见 rangeOverlapHit） */
-    private fun rangeOverlapHit(s1: Int, e1: Int, s2: Int, e2: Int): Boolean {
+    /** 段落区间重叠比例判定（详见 rangeOverlapHit）。内部缓存复用同一套匹配逻辑 */
+    fun rangeOverlapHit(s1: Int, e1: Int, s2: Int, e2: Int): Boolean {
         val overlapStart = maxOf(s1, s2)
         val overlapEnd = minOf(e1, e2)
         if (overlapEnd < overlapStart) return false
@@ -340,5 +341,64 @@ object AiImagePersistentCache {
     fun clearAllCursors() {
         usedSeqsByKey.clear()
         chapterImagesCache.clear()
+    }
+
+    // ==================== 内部缓存（App 私有 cacheDir） ====================
+    // 文件名与持久缓存完全同格式: {seq}_p{startPara}_p{endPara}_c{charCount}.png
+    // 目的：让内部缓存也携带段落信息，与持久缓存共用同一套「按段落区间」的识别逻辑。
+    // 从章节中间开始朗读时 sceneIndex 的语义与上次从头朗读不同，
+    // 靠文件名里的段落区间即可正确匹配到对应图片；匹配不上就重新生成。
+
+    private const val INTERNAL_DIR_NAME = "ai_images"
+
+    /** 内部缓存章节目录: cacheDir/ai_images/{bookUrl.hashCode()}/{chapterIndex}/ */
+    fun internalChapterDir(bookUrl: String, chapterIndex: Int): File {
+        val dir = File(File(appCtx.cacheDir, INTERNAL_DIR_NAME), "${bookUrl.hashCode()}/$chapterIndex")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    /**
+     * 按段落区间在内部缓存中查找命中图片。
+     * 复用 rangeOverlapHit，阈值维持原 HIT_RATIO 不变。
+     * 同一区间有多张时，优先返回起始段落最接近当前起点的一张。
+     */
+    fun findInternalHit(bookUrl: String, chapterIndex: Int, startPara: Int, endPara: Int): File? {
+        val dir = internalChapterDir(bookUrl, chapterIndex)
+        if (!dir.exists()) return null
+        val hit = scanChapterImages(dir)
+            .filter { it.file.exists() && rangeOverlapHit(it.startPara, it.endPara, startPara, endPara) }
+            .minByOrNull { kotlin.math.abs(it.startPara - startPara) }
+        if (hit != null) {
+            AppLog.put(
+                "AI生图内部缓存命中: [${hit.startPara},${hit.endPara}] 匹配 [${startPara},${endPara}] -> ${hit.file.name}"
+            )
+        }
+        return hit?.file
+    }
+
+    /**
+     * 保存图片到内部缓存，文件名带段落区间与字数（与持久缓存同格式）。
+     */
+    @Synchronized
+    fun saveInternalImage(
+        bookUrl: String,
+        chapterIndex: Int,
+        startPara: Int,
+        endPara: Int,
+        charCount: Int,
+        imageFile: File,
+    ): File? {
+        return try {
+            val dir = internalChapterDir(bookUrl, chapterIndex)
+            val seq = (scanChapterImages(dir).maxOfOrNull { it.seq } ?: 0) + 1
+            val target = File(dir, "%03d_p%03d_p%03d_c%d.png".format(seq, startPara, endPara, charCount))
+            imageFile.copyTo(target, overwrite = true)
+            AppLog.put("AI生图内部缓存保存: [${startPara},${endPara}] c=$charCount -> ${target.name}")
+            target
+        } catch (e: Exception) {
+            AppLog.put("AI生图内部缓存保存失败: ${e.message}")
+            null
+        }
     }
 }

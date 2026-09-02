@@ -468,8 +468,7 @@ object AiImageGenerator {
                     cacheCtxProvider = cacheCtxProvider
                 )
                 if (genResult != null) {
-                    val imageFile = genResult.file
-                    sceneCache[cacheKey] = imageFile
+                    var imageFile = genResult.file
                     // 持久化到 AI生图/{书名}/{章节}/ 目录，供二次朗读命中复用
                     // 仅当"本次是真正新生成的图"且当前书开启"保存AI图片"开关时才落盘。
                     // 命中已有持久缓存时（genResult.isHit=true），imageFile 就是章节文件夹里
@@ -487,6 +486,28 @@ object AiImageGenerator {
                             imageFile = imageFile,
                         )
                     }
+                    // 写入内部缓存：文件名带段落区间，供后续按段落匹配复用。
+                    // 命中持久缓存时不必再存（届时内部缓存会在查找时回落到持久缓存）。
+                    if (!genResult.isHit && cacheCtx != null) {
+                        AiImagePersistentCache.saveInternalImage(
+                            bookUrl = cacheCtx.bookUrl,
+                            chapterIndex = cacheCtx.chapterIndex,
+                            startPara = cacheCtx.startPara,
+                            endPara = cacheCtx.endPara,
+                            charCount = cacheCtx.charCount,
+                            imageFile = imageFile,
+                        )?.let { saved ->
+                            // 改用带段落名的文件，删掉临时的 hash 命名文件，
+                            // 避免同一张图占两份磁盘配额（trimHistoryIfNeeded 按文件数限长）。
+                            // 命中持久缓存时 imageFile 就是持久目录的旧图，绝不能删。
+                            val internalRoot = File(appCtx.cacheDir, CACHE_DIR_NAME).absolutePath
+                            if (imageFile.absolutePath.startsWith(internalRoot) && imageFile.absolutePath != saved.absolutePath) {
+                                runCatching { imageFile.delete() }
+                            }
+                            imageFile = saved
+                        }
+                    }
+                    sceneCache[cacheKey] = imageFile
                     if (notifyUi) {
                         lastGeneratedImagePath = imageFile.absolutePath
                         recordDisplay(imageFile.absolutePath)
@@ -619,14 +640,33 @@ object AiImageGenerator {
     /**
      * 获取已缓存的场景图片（内存+文件系统）
      */
-    fun getCachedImage(bookUrl: String, chapterIndex: Int, sceneIndex: Int): File? {
+    /**
+     * 获取指定场景的缓存图片。
+     *
+     * 先按 sceneIndex 精确查内存（保证预生成->秒切）；未命中时按当前段落区间
+     * 在内部缓存中匹配（内部缓存文件名带段落区间，见
+     * [AiImagePersistentCache.saveInternalImage]）。
+     *
+     * 从章节中间开始朗读时，sceneIndex 的语义与上次从头朗读时不同，
+     * 精确 key 不可用，正是靠段落区间匹配来找到对应图片；
+     * 匹配不上则返回 null 触发生成。
+     */
+    fun getCachedImage(
+        bookUrl: String,
+        chapterIndex: Int,
+        sceneIndex: Int,
+        startPara: Int = -1,
+        endPara: Int = -1,
+    ): File? {
         val cacheKey = "${bookUrl}_${chapterIndex}_${sceneIndex}"
         sceneCache[cacheKey]?.let { return it }
-        // 内存缺失时从文件系统恢复
-        val file = getCacheFile(cacheKey)
-        if (file.exists()) {
-            sceneCache[cacheKey] = file
-            return file
+        if (startPara >= 0 && endPara >= startPara) {
+            val file = AiImagePersistentCache.findInternalHit(bookUrl, chapterIndex, startPara, endPara)
+            if (file != null) {
+                // 回填内存缓存，保证同一场景后续秒切
+                sceneCache[cacheKey] = file
+                return file
+            }
         }
         return null
     }
@@ -640,12 +680,23 @@ object AiImageGenerator {
         return job != null && job.isActive
     }
 
+    /**
+     * 获取当前应显示的图片，依次尝试：
+     * 1. [lastGeneratedImagePath] —— 内存记录的最新图
+     * 2. [displaySequence] —— 真正显示过的图片（最新显示在前）
+     * 3. 文件系统按修改时间倒序第一张
+     *
+     * 后两级兜底很关键：Service 被系统回收后重建会清空内存变量，
+     * 若无兜底，切回朗读界面会闪回书籍封面。
+     * 有了兜底，新图尚未生成的阶段会一直保持"上一张图片"。
+     */
     fun getLastGeneratedImage(): File? {
         lastGeneratedImagePath?.let { path ->
             val f = File(path)
             if (f.exists()) return f
         }
-        // 内存变量失效时，从文件系统取最新一张（按修改时间倒序第一张）
+        // 内存变量失效时，优先按"显示顺序"恢复最后真正显示过的那张
+        displaySequence.firstOrNull()?.let { if (it.exists()) return it }
         return getHistoryImages().firstOrNull()
     }
 
@@ -667,10 +718,11 @@ object AiImageGenerator {
     fun getHistoryImages(): List<File> {
         val cacheDir = File(appCtx.cacheDir, CACHE_DIR_NAME)
         if (!cacheDir.exists()) return emptyList()
-        val files = cacheDir.listFiles { f ->
-            f.isFile && f.name.endsWith(".png") && !f.name.startsWith("test_image_")
-        }?.sortedByDescending { it.lastModified() }
-            ?: return emptyList()
+        // 内部缓存已改为按 书/章节 分目录存放，需递归扫描
+        val files = cacheDir.walkTopDown()
+            .filter { it.isFile && it.name.endsWith(".png") && !it.name.startsWith("test_image_") }
+            .toList()
+            .sortedByDescending { it.lastModified() }
         // 清理超量旧图片
         if (files.size > maxHistoryImages) {
             files.drop(maxHistoryImages).forEach { it.delete() }
@@ -721,16 +773,19 @@ object AiImageGenerator {
         try {
             val cacheDir = File(appCtx.cacheDir, CACHE_DIR_NAME)
             if (!cacheDir.exists()) return
-            val files = cacheDir.listFiles { f ->
-                f.isFile && f.name.endsWith(".png") && !f.name.startsWith("test_image_")
-            }?.sortedByDescending { it.lastModified() } ?: return
+            // 内部缓存已改为按 书/章节 分目录存放，需递归扫描
+            val files = cacheDir.walkTopDown()
+                .filter { it.isFile && it.name.endsWith(".png") && !it.name.startsWith("test_image_") }
+                .toList()
+                .sortedByDescending { it.lastModified() }
             if (files.size > maxHistoryImages) {
                 files.drop(maxHistoryImages).forEach { it.delete() }
             }
             // 顺便清理超过1小时的测试图片
             val now = System.currentTimeMillis()
-            cacheDir.listFiles { f -> f.isFile && f.name.startsWith("test_image_") }
-                ?.forEach { if (now - it.lastModified() > 3600000L) it.delete() }
+            cacheDir.walkTopDown()
+                .filter { it.isFile && it.name.startsWith("test_image_") }
+                .forEach { if (now - it.lastModified() > 3600000L) it.delete() }
         } catch (_: Exception) {}
     }
 
@@ -746,11 +801,12 @@ object AiImageGenerator {
         try {
             val cacheDir = File(appCtx.cacheDir, CACHE_DIR_NAME)
             if (cacheDir.exists()) {
-                cacheDir.listFiles { f ->
-                    f.isFile && f.name.endsWith(".png") && !f.name.startsWith("test_image_")
-                }?.forEach {
-                    if (it.delete()) deleted++
-                }
+                // 内部缓存已改为按 书/章节 分目录存放，需递归扫描
+                cacheDir.walkTopDown()
+                    .filter { it.isFile && it.name.endsWith(".png") && !it.name.startsWith("test_image_") }
+                    .forEach {
+                        if (it.delete()) deleted++
+                    }
             }
         } catch (_: Exception) {}
         // 同步清理内存引用，避免画廊继续引用已删除的文件
@@ -775,6 +831,7 @@ object AiImageGenerator {
             val f = File(path)
             if (f.exists()) return f
         }
+        displaySequence.firstOrNull()?.let { if (it.exists()) return it }
         return getHistoryImages().firstOrNull()
     }
 
@@ -816,11 +873,18 @@ object AiImageGenerator {
         if (!useGradioFallback && (template.modelUrl.isBlank() || template.modelName.isBlank())) return
 
         val cacheKey = "${bookUrl}_${chapterIndex}_${sceneIndex}"
-        // 已缓存则跳过（顺便把文件系统缓存恢复到内存）
+        // 已缓存则跳过
         if (sceneCache.containsKey(cacheKey)) return
-        if (getCacheFile(cacheKey).exists()) {
-            sceneCache[cacheKey] = getCacheFile(cacheKey)
-            return
+        // 内部缓存按段落区间匹配（文件名带段落信息），与持久缓存同逻辑
+        if (cacheCtx != null) {
+            val internalHit = AiImagePersistentCache.findInternalHit(
+                bookUrl, chapterIndex, cacheCtx.startPara, cacheCtx.endPara
+            )
+            if (internalHit != null) {
+                AppLog.put("AI生图[DEBUG] preGenerateForScene: 命中内部缓存, 静默回填 sceneIndex=$sceneIndex")
+                sceneCache[cacheKey] = internalHit
+                return
+            }
         }
         // 持久缓存命中：静默回填到内存，不再调 API
         if (cacheCtx != null) {
@@ -850,15 +914,21 @@ object AiImageGenerator {
         )
     }
 
-    /** 通知UI显示已预生成的图片（支持文件系统恢复）。返回 true 表示找到并通知了图片 */
-    fun notifyImageIfReady(bookUrl: String, chapterIndex: Int, sceneIndex: Int): Boolean {
+    /** 通知UI显示已缓存的图片（支持按段落区间从内部缓存恢复）。返回 true 表示找到并通知了图片 */
+    fun notifyImageIfReady(
+        bookUrl: String,
+        chapterIndex: Int,
+        sceneIndex: Int,
+        startPara: Int = -1,
+        endPara: Int = -1,
+    ): Boolean {
         val cacheKey = "${bookUrl}_${chapterIndex}_${sceneIndex}"
-        var imageFile = sceneCache[cacheKey]
-        if (imageFile == null) {
-            val file = getCacheFile(cacheKey)
-            if (file.exists()) {
-                sceneCache[cacheKey] = file
-                imageFile = file
+        val imageFile = sceneCache[cacheKey] ?: run {
+            if (startPara >= 0 && endPara >= startPara) {
+                AiImagePersistentCache.findInternalHit(bookUrl, chapterIndex, startPara, endPara)
+                    ?.also { sceneCache[cacheKey] = it }
+            } else {
+                null
             }
         }
         if (imageFile != null) {
