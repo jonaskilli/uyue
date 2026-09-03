@@ -541,14 +541,22 @@ class SoundEffectRuleActivity :
                 toastOnUi("有 ${uris.size - audios.size} 个文件读取失败，将跳过")
             }
             showLoading("正在写入 ${audios.size} 个音频…")
-            val error = withContext(IO) {
+            val result = withContext(IO) {
                 SoundEffectFileManager.save(name, audios)
             }
             hideLoading()
-            if (error != null) {
-                toastOnUi(error)
+            if (result.error != null) {
+                toastOnUi(result.error)
             } else {
-                toastOnUi("已保存「$name」，共 ${audios.size} 个音频\n规则中填写：($name)")
+                toastOnUi(
+                    buildString {
+                        append("已保存「$name」，共 ${audios.size} 个音频")
+                        if (result.cleanedMp3 > 0) {
+                            append("，已清除旧音频 ${result.cleanedMp3} 个")
+                        }
+                        append("\n规则中填写：($name)")
+                    }
+                )
             }
         }
     }
@@ -560,6 +568,7 @@ class SoundEffectRuleActivity :
         showLoading("正在处理 0/${uris.size}…")
         lifecycleScope.launch {
             var success = 0
+            var replaced = 0
             val failed = mutableListOf<String>()
             val names = mutableListOf<String>()
             withContext(IO) {
@@ -577,10 +586,11 @@ class SoundEffectRuleActivity :
                         failed.add(name)
                         return@forEachIndexed
                     }
-                    val error = SoundEffectFileManager.saveSingle(name, audio)
-                    if (error == null) {
+                    val result = SoundEffectFileManager.saveSingle(name, audio)
+                    if (result.error == null) {
                         success++
                         names.add(name)
+                        if (result.cleanedMp3 > 0) replaced += result.cleanedMp3
                     } else {
                         failed.add(name)
                     }
@@ -589,6 +599,7 @@ class SoundEffectRuleActivity :
             hideLoading()
             val msg = buildString {
                 append("成功 $success 个")
+                if (replaced > 0) append("，已清除旧音频 $replaced 个")
                 if (failed.isNotEmpty()) {
                     append("，失败 ${failed.size} 个：${failed.joinToString("、")}")
                 }

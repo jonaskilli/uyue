@@ -62,22 +62,59 @@ object SoundEffectFileManager {
         }
 
     /**
+     * 删除某个音效 JSON 此前解码产生的所有 mp3 文件。
+     *
+     * 朗读服务解码时把音频存为同名前缀的 mp3，
+     * 命名规则见 `BaseReadAloudService.downloadAndDecodeEffect()`：
+     * `打雷音效.json` → `打雷音效_0.mp3`、`打雷音效_1.mp3`……
+     *
+     * 虽然解码每次都会覆盖同名 mp3，但新音效的音频数量变少时，
+     * 多出来的旧 mp3 会残留下来。覆盖写入前先清理，
+     * 顺便避免写入中途失败时残留旧内容被播放。
+     */
+    fun deleteDerivedMp3(name: String): Int {
+        val prefix = name + "_"
+        var count = 0
+        dir.listFiles()?.forEach { file ->
+            if (file.isFile
+                && file.name.startsWith(prefix)
+                && file.name.endsWith(".mp3")
+                && file.delete()
+            ) {
+                count++
+            }
+        }
+        if (count > 0) {
+            AppLog.put("[音效文件] 清理旧 mp3：$name，共 $count 个")
+        }
+        return count
+    }
+
+    /** 保存结果：[error] 为 null 表示成功 */
+    data class SaveResult(val error: String?, val cleanedMp3: Int = 0)
+
+    /**
      * 把多个音频写入一个音效文件。
+     *
+     * 覆盖同名音效时，会先删除该音效此前解码产生的 mp3，
+     * 避免旧音频文件残留。
      *
      * @param name 音效名，对应规则中的标记内容
      * @param audios 音频字节数组，多个会在播放时按顺序轮换
      * @param overwrite 同名文件已存在时是否覆盖
-     * @return 成功返回 null，失败返回错误信息
      */
     fun save(
         name: String,
         audios: List<ByteArray>,
         overwrite: Boolean = true
-    ): String? {
-        if (name.isBlank()) return "音效名为空"
-        if (audios.isEmpty()) return "没有音频内容"
+    ): SaveResult {
+        if (name.isBlank()) return SaveResult("音效名为空")
+        if (audios.isEmpty()) return SaveResult("没有音频内容")
         val file = fileOf(name)
-        if (file.exists() && !overwrite) return "已存在同名音效：$name"
+        if (file.exists() && !overwrite) return SaveResult("已存在同名音效：$name")
+        // 写入前先清掉该音效此前解码出来的 mp3。
+        // 即使 JSON 已被手工删除，残留的 mp3 也一并清掉。
+        val cleanedMp3 = deleteDerivedMp3(name)
         val tmp = File(file.absolutePath + ".tmp")
         return try {
             if (!dir.exists()) dir.mkdirs()
@@ -96,12 +133,15 @@ object SoundEffectFileManager {
                 tmp.copyTo(file, true)
                 tmp.delete()
             }
-            AppLog.put("[音效文件] 已保存：${file.absolutePath}，${audios.size} 个音频")
-            null
+            AppLog.put(
+                "[音效文件] 已保存：${file.absolutePath}，${audios.size} 个音频，" +
+                    "清理旧 mp3 $cleanedMp3 个"
+            )
+            SaveResult(null, cleanedMp3)
         } catch (e: Exception) {
             tmp.delete()
             AppLog.put("[音效文件] 保存失败：${e.message}", e)
-            "保存失败：${e.message}"
+            SaveResult("保存失败：${e.message}", cleanedMp3)
         }
     }
 
@@ -113,5 +153,5 @@ object SoundEffectFileManager {
         name: String,
         audio: ByteArray,
         overwrite: Boolean = true
-    ): String? = save(name, listOf(audio), overwrite)
+    ): SaveResult = save(name, listOf(audio), overwrite)
 }
