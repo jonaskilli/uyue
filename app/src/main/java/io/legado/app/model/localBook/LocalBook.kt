@@ -219,6 +219,10 @@ object LocalBook {
     /**
      * 从TXT正文提取角色标注，保存为AI缓存json，并返回去掉标注后的正文
      * 以去掉标注后的正文为基准：内容变了就重新提取覆盖，没变就保持原样
+     *
+     * 只保存**带标注**的对话。序号是该对话在全章第几个左双引号，
+     * 与朗读脚本的定位方式一致；没有标注的对话不写入，
+     * 避免脚本按 dialogText 命中后取不到姓名而误判为「已识别」。
      */
     private fun extractAndSaveAnnotations(content: String, book: Book, chapter: BookChapter): String {
         val cacheFile = AiCacheFileUtil.getChapterCacheFile(book, chapter)
@@ -241,14 +245,18 @@ object LocalBook {
 
         while (i < content.length) {
             if (content[i] == '“') {
+                // 每个左双引号都要计数：序号表示该对话是全章第几个，
+                // 朗读脚本按这个序号定位，不能只统计有标注的。
                 seq++
                 val afterQuote = content.substring(i + 1)
-                val obj = JSONObject()
-                var dialogText = ""
 
-                // 检查 " 后面是否紧跟 <<...>> 标注
+                // 只有紧跟 <<...>> 标注的对话才保存。
+                // 无标注的不写入：否则朗读脚本会按 dialogText 命中缓存，
+                // 却取不到姓名，判定为「已识别」而不再调用 AI 分析，
+                // 最终用默认发音人播放。
                 val annotationMatch = annotationRegex.find(afterQuote)
                 if (annotationMatch != null && annotationMatch.range.first == 0) {
+                    val obj = JSONObject()
                     val inner = annotationMatch.groupValues[1].trim()
                     val detailMatch = annotationDetailRegex.matchEntire(inner)
                     if (detailMatch != null) {
@@ -263,16 +271,17 @@ object LocalBook {
                     // 标注后的文本到下一个 " 之间是对话文本
                     val afterAnnotation = afterQuote.substring(annotationMatch.value.length)
                     val endIdx = afterAnnotation.indexOf('”')
-                    dialogText = if (endIdx >= 0) afterAnnotation.substring(0, endIdx).trim() else afterAnnotation.trim()
-                    i += annotationMatch.value.length
-                } else {
-                    // 没有标注，提取 " 到 " 之间的文本
-                    val endIdx = afterQuote.indexOf('”')
-                    dialogText = if (endIdx >= 0) afterQuote.substring(0, endIdx).trim() else afterQuote.trim()
-                }
+                    val dialogText = if (endIdx >= 0) {
+                        afterAnnotation.substring(0, endIdx).trim()
+                    } else {
+                        afterAnnotation.trim()
+                    }
+                    obj.put("dialogText", dialogText)
 
-                obj.put("dialogText", dialogText)
-                results.put(seq.toString(), obj)
+                    // 有标注的条目才写入，序号仍是全章真实位置，不重新编号
+                    results.put(seq.toString(), obj)
+                    i += annotationMatch.value.length
+                }
             }
             i++
         }
