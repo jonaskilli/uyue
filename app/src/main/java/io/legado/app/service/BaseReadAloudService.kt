@@ -237,6 +237,21 @@ abstract class BaseReadAloudService : BaseService(),
         }
 
         /**
+         * 外部（音效规则管理界面）改写规则文件后调用，强制丢弃已编译的规则缓存，
+         * 使下一次朗读重新读取并编译规则文件。
+         *
+         * 仅依赖文件的修改时间与大小判定缓存并不可靠：改动可能恰好不改变大小，
+         * 或文件系统时间戳精度不足，因此由改写方显式通知。
+         */
+        @JvmStatic
+        fun invalidateSoundEffectRuleCache() {
+            synchronized(ruleCacheLock) {
+                ruleCache = null
+            }
+            AppLog.put("[ttsrv] 规则缓存已失效，下次朗读将重新加载")
+        }
+
+        /**
          * 已完成编译的音效规则。
          * @param regex 正则规则编译后的 Regex；字面规则或编译失败时为 null
          * @param isRegex true 表示这是一条正则规则（区别于字面替换）

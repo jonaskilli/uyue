@@ -249,6 +249,17 @@
             android:name=".ui.hunyuan.HunyuanTaijiActivity"
             android:label="混元太极"
             android:screenOrientation="behind" />
+        <!-- 音效规则管理界面 -->
+        <activity
+            android:name=".ui.soundeffect.SoundEffectRuleActivity"
+            android:label="音效规则管理"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind" />
+        <activity
+            android:name=".ui.soundeffect.SoundEffectRuleEditActivity"
+            android:label="编辑音效规则"
+            android:screenOrientation="behind"
+            android:windowSoftInputMode="adjustResize" />
         <service
             android:name=".help.hunyuan.ProxyService"
             android:exported="false"

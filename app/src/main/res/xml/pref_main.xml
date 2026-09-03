@@ -45,6 +45,12 @@
         android:title="混元太极" />
 
     <io.legado.app.lib.prefs.Preference
+        android:icon="@drawable/ic_taiji_color"
+        android:key="soundEffectRuleManage"
+        android:summary="编辑朗读时自动插入音效的替换规则（全部音效 / 普通音效）"
+        android:title="音效规则管理" />
+
+    <io.legado.app.lib.prefs.Preference
         android:icon="@drawable/ic_translate"
         android:key="dictRuleManage"
         android:summary="@string/config_dict_rule"

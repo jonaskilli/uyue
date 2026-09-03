@@ -29,6 +29,7 @@ import io.legado.app.ui.dict.rule.DictRuleActivity
 import io.legado.app.ui.file.FileManageActivity
 import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.replace.ReplaceRuleActivity
+import io.legado.app.ui.soundeffect.SoundEffectRuleActivity
 import io.legado.app.ui.tts.script.TtsScriptActivity
 import io.legado.app.ui.tts.plugin.TtsPluginActivity
 import io.legado.app.utils.LogUtils
@@ -151,6 +152,7 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
                 "ttsScriptManage" -> startActivity<TtsScriptActivity>()
                 "ttsPluginManage" -> startActivity<TtsPluginActivity>()
                 "hunyuanTaiji" -> startActivity<io.legado.app.ui.hunyuan.HunyuanTaijiActivity>()
+                "soundEffectRuleManage" -> startActivity<SoundEffectRuleActivity>()
                 "dictRuleManage" -> startActivity<DictRuleActivity>()
                 "txtTocRuleManage" -> startActivity<TxtTocRuleActivity>()
                 "bookmark" -> startActivity<AllBookmarkActivity>()
