@@ -5,6 +5,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.read.page.provider.ChapterProvider
+import io.legado.app.ui.book.toc.AiCacheFileUtil
 import io.legado.app.utils.dpToPx
 import org.json.JSONObject
 import java.io.File
@@ -36,18 +37,31 @@ object DialogRoleManager {
 
     fun getCacheRoot(): String = CACHE_ROOT
 
-    fun sanitizeFileName(name: String): String {
-        return name.replace("?", "？")
-            .replace(Regex("[\\\\/:*?\"<>|]"), "＿")
-    }
+    /**
+     * 章节名清洗规则。
+     *
+     * 实际实现在 [AiCacheFileUtil.sanitizeChapterFileName]，与内置朗读脚本一致。
+     * 注意：**不要用它处理书名**，书名规则不同（见 [getBookFolder]）。
+     */
+    fun sanitizeFileName(name: String): String =
+        AiCacheFileUtil.sanitizeChapterFileName(name)
+
+    /**
+     * 书名目录。
+     *
+     * 必须用书名的规则（半角下划线 + 截断 50），
+     * 与写入方 [AiCacheFileUtil.getBookDirByName] 及朗读脚本保持一致。
+     */
+    private fun getBookFolder(bookName: String): File =
+        AiCacheFileUtil.getBookDirByName(bookName)
 
     /**
      * 扫描小说文件夹中的图片文件（关闭 AI 生图时，朗读界面小图与全屏大图都靠它轮播本地图片）。
-     * 目录：CACHE_ROOT + sanitizeFileName(bookName)
+     * 目录：[getBookFolder]，即 CACHE_ROOT + 书名清洗规则。
      * 支持 jpg/jpeg/png/gif/webp/bmp，按文件名排序返回。
      */
     fun scanBookImages(bookName: String): List<File> {
-        val bookFolder = File(CACHE_ROOT + sanitizeFileName(bookName))
+        val bookFolder = getBookFolder(bookName)
         if (!bookFolder.exists() || !bookFolder.isDirectory) return emptyList()
         val imageExtensions = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
         return bookFolder.listFiles { file ->
@@ -56,9 +70,9 @@ object DialogRoleManager {
     }
 
     private fun getCacheFile(bookName: String, chapterTitle: String): File {
-        val dir = File(CACHE_ROOT + sanitizeFileName(bookName))
-        if (!dir.exists()) dir.mkdirs()
-        return File(dir, sanitizeFileName(chapterTitle) + ".json")
+        val file = AiCacheFileUtil.getChapterCacheFileByName(bookName, chapterTitle)
+        file.parentFile?.let { if (!it.exists()) it.mkdirs() }
+        return file
     }
 
     fun loadChapterCache(bookName: String, chapterTitle: String): Map<Int, RoleInfo> {
@@ -182,7 +196,7 @@ object DialogRoleManager {
     /**
      * 将全本书所有章节 JSON 中名为 [oldName] 的角色（姓名/性别/年龄）替换为新值。
      * 按旧名字全文搜索匹配，遍历本书目录下所有 .json 文件的所有角色。
-     * 书名目录沿用 sanitizeFileName 规则，确保与生成 json 时一致。
+     * 书名目录沿用 [AiCacheFileUtil.getBookDirByName] 的规则，确保与生成 json 时一致。
      */
     fun replaceBookRole(
         bookName: String,
@@ -191,7 +205,7 @@ object DialogRoleManager {
         gender: String,
         age: String
     ) {
-        val bookFolder = File(CACHE_ROOT + sanitizeFileName(bookName))
+        val bookFolder = getBookFolder(bookName)
         if (!bookFolder.exists() || !bookFolder.isDirectory) return
         val jsonFiles = bookFolder.listFiles { f ->
             f.isFile && f.extension.lowercase() == "json"

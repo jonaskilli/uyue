@@ -14,8 +14,15 @@ object AiCacheFileUtil {
     private const val CACHE_ROOT = "/storage/emulated/0/Download/chajian/xiaoshuo/"
 
     /**
-     * 处理文件名中的非法字符（章节名规则）
-     * JS: name.replace(/\?/g, "？").replace(/[\\/:*?"<>|]/g, "＿")
+     * 章节名清洗规则。
+     *
+     * 与内置朗读脚本（assets/defaultData/ttsScripts.json）一致：
+     * ```js
+     * function sanitizeFileName(name) {
+     *   return name.replace(/\?/g, "？").replace(/[\\/:*?"<>|]/g, "＿");
+     * }
+     * ```
+     * 注意：这里用的是全角「？」与全角「＿」，且与书名规则不同。
      */
     fun sanitizeChapterFileName(name: String): String {
         return name.replace("?", "？")
@@ -23,8 +30,16 @@ object AiCacheFileUtil {
     }
 
     /**
-     * 处理书名中的非法字符（书名规则）
-     * JS: bookName.replace(/[\\/:*?"<>|]/g, "_").substring(0, 50)
+     * 书名清洗规则。
+     *
+     * 与内置朗读脚本一致：
+     * ```js
+     * function getBookNameSafely() {
+     *   return bookName.replace(/[\\/:*?"<>|]/g, "_").substring(0, 50);
+     * }
+     * ```
+     * 脚本随后还会对结果套一层 sanitizeFileName，但此时非法字符已被
+     * 替换成半角下划线，那一层是空操作，故最终规则即「半角下划线 + 截断 50」。
      */
     fun sanitizeBookName(name: String): String {
         return name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
@@ -34,17 +49,29 @@ object AiCacheFileUtil {
     /**
      * 获取书籍缓存目录
      */
-    fun getBookDir(book: Book): File {
-        return File(CACHE_ROOT + sanitizeBookName(book.name) + "/")
-    }
+    fun getBookDir(book: Book): File = getBookDirByName(book.name)
+
+    /**
+     * 按书名获取缓存目录。
+     * 朗读脚本（ttsScripts.json）里的等价实现：
+     * `sanitizeFileName(getBookNameSafely())`，
+     * 后一步对书名已是空操作，故实际为「半角下划线 + 截断 50」。
+     */
+    fun getBookDirByName(bookName: String): File =
+        File(CACHE_ROOT + sanitizeBookName(bookName) + "/")
 
     /**
      * 获取章节的 AI 缓存文件
      */
-    fun getChapterCacheFile(book: Book, chapter: BookChapter): File {
-        val bookDir = getBookDir(book)
-        return File(bookDir, sanitizeChapterFileName(chapter.title) + ".json")
-    }
+    fun getChapterCacheFile(book: Book, chapter: BookChapter): File =
+        getChapterCacheFileByName(book.name, chapter.title)
+
+    /**
+     * 按书名与章节名获取缓存文件。
+     * 朗读脚本里的等价实现：`getBookDir() + sanitizeFileName(chapterTitle) + ".json"`。
+     */
+    fun getChapterCacheFileByName(bookName: String, chapterTitle: String): File =
+        File(getBookDirByName(bookName), sanitizeChapterFileName(chapterTitle) + ".json")
 
     /**
      * 检查章节是否有 AI 缓存文件
