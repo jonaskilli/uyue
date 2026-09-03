@@ -89,6 +89,9 @@ abstract class BaseReadAloudService : BaseService(),
     AudioManager.OnAudioFocusChangeListener {
 
     companion object {
+        /** 音效文件（JSON）存放目录，音效规则管理界面也往这里写入 */
+        const val SOUND_EFFECT_DIR = "/storage/emulated/0/Download/chajian/bendiyinxiao2"
+
         @JvmStatic
         var isRun = false
             private set
@@ -492,7 +495,7 @@ abstract class BaseReadAloudService : BaseService(),
          * 返回音频文件和当前索引。
          */
         private fun downloadAndDecodeEffect(fileName: String, consumeIndex: Boolean = false): Pair<java.io.File, Int>? {
-            val sfxDir = java.io.File("/storage/emulated/0/Download/chajian/bendiyinxiao2")
+            val sfxDir = java.io.File(SOUND_EFFECT_DIR)
             if (!sfxDir.exists()) sfxDir.mkdirs()
             val jsonFile = java.io.File(sfxDir, fileName)
 

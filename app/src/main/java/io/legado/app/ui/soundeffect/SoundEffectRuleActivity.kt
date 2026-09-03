@@ -1,6 +1,7 @@
 package io.legado.app.ui.soundeffect
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Bundle
 import android.view.MenuItem
 import android.view.View
@@ -13,6 +14,7 @@ import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import io.legado.app.R
 import io.legado.app.base.VMBaseActivity
+import io.legado.app.constant.AppLog
 import io.legado.app.databinding.ActivitySoundEffectRuleBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.lib.dialogs.alert
@@ -29,6 +31,7 @@ import io.legado.app.utils.readText
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,6 +98,28 @@ class SoundEffectRuleActivity :
     private val exportDoc = registerForActivityResult(HandleFileContract()) { result ->
         if (result.uri != null) toastOnUi("导出成功")
     }
+
+    /**
+     * 新增音效：多选音频，全部写入一个 JSON，播放时按顺序轮换。
+     * 选完后需要输入音效名。
+     */
+    private val pickAudiosForSingle =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isEmpty()) return@registerForActivityResult
+            showInputDialog("新增音效", "", "音效名，例如：打雷音效") { name ->
+                writeSoundEffect(name, uris)
+            }
+        }
+
+    /**
+     * 批量添加音效：多选音频，每个文件各自生成一个 JSON，
+     * 音效名直接取文件名，无需输入。
+     */
+    private val pickAudiosForBatch =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isEmpty()) return@registerForActivityResult
+            writeSoundEffectBatch(uris)
+        }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         initRecyclerView()
@@ -219,6 +244,8 @@ class SoundEffectRuleActivity :
         when (item.itemId) {
             R.id.menu_add_rule -> startEdit(null, defaultGroupId())
             R.id.menu_add_group -> showAddGroupDialog()
+            R.id.menu_add_sound_effect -> pickAudiosForSingle.launch(arrayOf(AUDIO_MIME))
+            R.id.menu_batch_add_sound_effect -> pickAudiosForBatch.launch(arrayOf(AUDIO_MIME))
             R.id.menu_import_local -> importDoc.launch {
                 mode = HandleFileContract.FILE
                 allowExtensions = arrayOf("json", "txt")
@@ -471,11 +498,13 @@ class SoundEffectRuleActivity :
     private fun showInputDialog(
         title: String,
         default: String,
+        hint: String = "",
         onConfirm: (String) -> Unit
     ) {
         val alertBinding = DialogEditTextBinding.inflate(layoutInflater).apply {
             editView.setText(default)
             editView.setSelection(default.length)
+            if (hint.isNotEmpty()) editView.hint = hint
         }
         alert(title) {
             customView { alertBinding.root }
@@ -488,6 +517,86 @@ class SoundEffectRuleActivity :
                 onConfirm(text)
             }
             cancelButton()
+        }
+    }
+
+    // ---------------- 音效文件 ----------------
+
+    /**
+     * 新增音效：把选中的多个音频写入一个音效文件。
+     * 多个音频在播放时按 currentIndex 顺序轮换。
+     */
+    private fun writeSoundEffect(name: String, uris: List<Uri>) {
+        showLoading("正在读取音频…")
+        lifecycleScope.launch {
+            val audios = withContext(IO) {
+                uris.mapNotNull { SoundEffectFileManager.readBytes(this@SoundEffectRuleActivity, it) }
+            }
+            hideLoading()
+            if (audios.isEmpty()) {
+                toastOnUi("没有读到音频内容")
+                return@launch
+            }
+            if (audios.size < uris.size) {
+                toastOnUi("有 ${uris.size - audios.size} 个文件读取失败，将跳过")
+            }
+            showLoading("正在写入 ${audios.size} 个音频…")
+            val error = withContext(IO) {
+                SoundEffectFileManager.save(name, audios)
+            }
+            hideLoading()
+            if (error != null) {
+                toastOnUi(error)
+            } else {
+                toastOnUi("已保存「$name」，共 ${audios.size} 个音频\n规则中填写：($name)")
+            }
+        }
+    }
+
+    /**
+     * 批量添加音效：每个音频各自生成一个音效文件，文件名取自音频文件名。
+     */
+    private fun writeSoundEffectBatch(uris: List<Uri>) {
+        showLoading("正在处理 0/${uris.size}…")
+        lifecycleScope.launch {
+            var success = 0
+            val failed = mutableListOf<String>()
+            val names = mutableListOf<String>()
+            withContext(IO) {
+                uris.forEachIndexed { index, uri ->
+                    val name = SoundEffectFileManager.displayNameOf(
+                        this@SoundEffectRuleActivity, uri
+                    )
+                    val audio = SoundEffectFileManager.readBytes(
+                        this@SoundEffectRuleActivity, uri
+                    )
+                    withContext(Dispatchers.Main) {
+                        showLoading("正在处理 ${index + 1}/${uris.size}…")
+                    }
+                    if (audio == null) {
+                        failed.add(name)
+                        return@forEachIndexed
+                    }
+                    val error = SoundEffectFileManager.saveSingle(name, audio)
+                    if (error == null) {
+                        success++
+                        names.add(name)
+                    } else {
+                        failed.add(name)
+                    }
+                }
+            }
+            hideLoading()
+            val msg = buildString {
+                append("成功 $success 个")
+                if (failed.isNotEmpty()) {
+                    append("，失败 ${failed.size} 个：${failed.joinToString("、")}")
+                }
+            }
+            toastOnUi(msg)
+            if (names.isNotEmpty()) {
+                AppLog.put("[音效文件] 批量添加成功：${names.joinToString("、")}")
+            }
         }
     }
 
@@ -533,5 +642,10 @@ class SoundEffectRuleActivity :
     override fun onDestroy() {
         super.onDestroy()
         SoundEffectPlayer.stop()
+    }
+
+    companion object {
+        /** 选择音频文件时使用的 MIME，放开所有音频格式 */
+        private const val AUDIO_MIME = "audio/*"
     }
 }

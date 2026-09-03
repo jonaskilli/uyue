@@ -11,6 +11,18 @@
         tools:ignore="AlwaysShowAction" />
 
     <item
+        android:id="@+id/menu_add_sound_effect"
+        android:icon="@drawable/ic_add"
+        android:title="新增音效"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_batch_add_sound_effect"
+        android:icon="@drawable/ic_add"
+        android:title="批量添加音效"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_add_group"
         android:icon="@drawable/ic_add"
         android:title="新建分组"
