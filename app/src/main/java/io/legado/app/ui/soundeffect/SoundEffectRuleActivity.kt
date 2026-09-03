@@ -155,13 +155,15 @@ class SoundEffectRuleActivity :
 
     private fun initModeToggle() {
         binding.rgMode.setOnCheckedChangeListener { _, checkedId ->
-            val newMode = if (checkedId == R.id.rb_mode_normal) {
-                SoundEffectRuleManager.MODE_NORMAL
-            } else {
-                SoundEffectRuleManager.MODE_ALL
-            }
+            val newMode = modeOfCheckedId(checkedId)
             if (newMode != viewModel.mode) switchMode(newMode)
         }
+    }
+
+    private fun modeOfCheckedId(checkedId: Int): String = when (checkedId) {
+        R.id.rb_mode_normal -> SoundEffectRuleManager.MODE_NORMAL
+        R.id.rb_mode_transition -> SoundEffectRuleManager.MODE_TRANSITION
+        else -> SoundEffectRuleManager.MODE_ALL
     }
 
     // ---------------- 载入 / 切换模式 ----------------
@@ -207,13 +209,13 @@ class SoundEffectRuleActivity :
     }
 
     private fun revertToggle() {
-        binding.rgMode.check(
-            if (viewModel.mode == SoundEffectRuleManager.MODE_NORMAL) {
-                R.id.rb_mode_normal
-            } else {
-                R.id.rb_mode_all
-            }
-        )
+        binding.rgMode.check(checkedIdOfMode(viewModel.mode))
+    }
+
+    private fun checkedIdOfMode(mode: String): Int = when (mode) {
+        SoundEffectRuleManager.MODE_NORMAL -> R.id.rb_mode_normal
+        SoundEffectRuleManager.MODE_TRANSITION -> R.id.rb_mode_transition
+        else -> R.id.rb_mode_all
     }
 
     private fun upPathView() {

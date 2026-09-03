@@ -26,16 +26,21 @@ object SoundEffectRuleManager {
 
     const val MODE_ALL = "all"
     const val MODE_NORMAL = "normal"
+    const val MODE_TRANSITION = "transition"
 
     private const val BASE_URL = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/"
     private const val FILE_ALL = "ttsrv-replaces3.json"
     private const val FILE_NORMAL = "ttsrv-replaces5.json"
+    private const val FILE_TRANSITION = "ttsrv-replaces4.json"
 
     /** 默认分组名：文件为空或规则没有分组时使用 */
     const val DEFAULT_GROUP_NAME = "默认分组"
 
-    fun fileNameOf(mode: String): String =
-        if (mode == MODE_NORMAL) FILE_NORMAL else FILE_ALL
+    fun fileNameOf(mode: String): String = when (mode) {
+        MODE_NORMAL -> FILE_NORMAL
+        MODE_TRANSITION -> FILE_TRANSITION
+        else -> FILE_ALL
+    }
 
     fun fileOf(mode: String): File =
         File(EngineDataDir.baseDir() + fileNameOf(mode))
@@ -43,10 +48,14 @@ object SoundEffectRuleManager {
     fun urlOf(mode: String): String =
         BASE_URL + fileNameOf(mode) + "?download=true"
 
-    fun allModes(): List<String> = listOf(MODE_ALL, MODE_NORMAL)
+    /** 打开界面时需要检查的全部模式 */
+    fun allModes(): List<String> = listOf(MODE_ALL, MODE_NORMAL, MODE_TRANSITION)
 
-    fun modeTitle(mode: String): String =
-        if (mode == MODE_NORMAL) "普通音效" else "全部音效"
+    fun modeTitle(mode: String): String = when (mode) {
+        MODE_NORMAL -> "普通音效"
+        MODE_TRANSITION -> "衔接音效"
+        else -> "全部音效"
+    }
 
     /**
      * 确保规则文件存在且内容有效，否则下载。
