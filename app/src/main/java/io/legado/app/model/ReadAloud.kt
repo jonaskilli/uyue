@@ -54,7 +54,12 @@ object ReadAloud {
         play: Boolean = true,
         pageIndex: Int = ReadBook.durPageIndex,
         startPos: Int = 0,
-        singleParagraph: Boolean = false
+        singleParagraph: Boolean = false,
+        /**
+         * 从当前段落开头开始连续朗读：播完当前段不停止，继续朗读后续段落（可跨章节）。
+         * 与 [singleParagraph] 互斥，两者同时为 true 时以单段模式为准。
+         */
+        continueFromParagraph: Boolean = false
     ) {
         postEvent(EventBus.READ_ALOUD_STARTING, true)
         val intent = Intent(context, aloudClass)
@@ -63,6 +68,7 @@ object ReadAloud {
         intent.putExtra("pageIndex", pageIndex)
         intent.putExtra("startPos", startPos)
         intent.putExtra("singleParagraph", singleParagraph)
+        intent.putExtra("continueFromParagraph", continueFromParagraph)
         LogUtils.d("ReadAloud", intent.toString())
         try {
             context.startForegroundServiceCompat(intent)

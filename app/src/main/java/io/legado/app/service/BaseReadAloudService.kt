@@ -624,6 +624,12 @@ abstract class BaseReadAloudService : BaseService(),
     internal var pageIndex = 0
     /** 单段播放模式：只播放当前段落，播放完后自动暂停 */
     var singleParagraphMode = false
+    /**
+     * 从当前段落开头连续朗读模式（长按段落小喇叭触发）。
+     * 与 [singleParagraphMode] 的区别：播完当前段不暂停，继续朗读后续段落并可跨章节。
+     * 仅影响启动时的定位逻辑，开始播放后即复位。
+     */
+    var continueFromParagraph = false
     private var needResumeOnAudioFocusGain = false
     private var needResumeOnCallStateIdle = false
     private var registeredPhoneStateListener = false
@@ -1155,6 +1161,7 @@ abstract class BaseReadAloudService : BaseService(),
         when (intent?.action) {
             IntentAction.play -> {
                 singleParagraphMode = intent.getBooleanExtra("singleParagraph", false)
+                continueFromParagraph = intent.getBooleanExtra("continueFromParagraph", false)
                 newReadAloud(
                     intent.getBooleanExtra("play", true),
                     intent.getIntExtra("pageIndex", ReadBook.durPageIndex),
@@ -1208,7 +1215,8 @@ abstract class BaseReadAloudService : BaseService(),
                 }
             }
             nowSpeak = textChapter.getParagraphNum(readAloudNumber + 1, readAloudByPage) - 1
-            if (singleParagraphMode) {
+            if (singleParagraphMode || continueFromParagraph) {
+                // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
                 paragraphStartPos = 0
             } else {
                 if (!readAloudByPage && startPos == 0 && !toLast) {
@@ -1239,7 +1247,11 @@ abstract class BaseReadAloudService : BaseService(),
                     LogUtils.d(TAG, "nowSpeak=$nowSpeak")
                     // 简化逻辑：nowSpeak==0直接朗读，nowSpeak!=0跳过当前段
                     // gengxin 恢复时不跳过（要从恢复段重新朗读）
-                    if (!gengxinResuming && !singleParagraphMode && !AppConfig.readAloudStartFromFirst && !toLast && nowSpeak < contentList.size) {
+                    // continueFromParagraph 同样不跳过：长按小喇叭要求从当前段落开头开始连续朗读，
+                    // 若在此跳过，实际会从下一段开始，与预期不符。
+                    if (!gengxinResuming && !singleParagraphMode && !continueFromParagraph
+                        && !AppConfig.readAloudStartFromFirst && !toLast && nowSpeak < contentList.size
+                    ) {
                         if (nowSpeak != 0) {
                             LogUtils.d(TAG, "nowSpeak!=0，跳过当前段")
                             moveToNextParagraph()
@@ -1252,6 +1264,9 @@ abstract class BaseReadAloudService : BaseService(),
                     isAutoSwitchingChapter = false
                     upTtsProgress(readAloudNumber + 1)
                     play()
+                    // 仅用于启动定位，播完当前段要继续后续段落，故在此复位，
+                    // 避免影响之后恢复播放、翻章等逻辑
+                    continueFromParagraph = false
                     // 首次开始朗读时立即生成第一张AI图片，并预生成下一张
                     triggerFirstAiImageIfNeeded()
                 } else {

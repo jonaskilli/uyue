@@ -225,6 +225,9 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
         y: Float,
         select: (textPos: TextPos) -> Unit,
     ) {
+        // 长按段落末尾小喇叭：从该段开始连续朗读。
+        // 必须排在选词之前，否则长按喇叭会先触发选词而拿不到连续朗读。
+        if (checkParagraphSpeakerClick(x, y, continuePlay = true)) return
         touch(x, y) { _, textPos, _, _, column ->
             when (column) {
                 is ImageColumn -> callBack.onImageLongPress(x, y, column.src)
@@ -480,9 +483,12 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
     }
 
     /**
-     * 检测是否点击了段落末尾小喇叭（播放该段落音频）
+     * 检测段落末尾小喇叭的操作（播放该段落音频）
+     *
+     * @param continuePlay false=单击：有缓存直接播缓存，无缓存只合成当前段并自动停止；
+     *                     true =长按：从该段开头连续朗读，播完继续后续段落（可跨章节）
      */
-    private fun checkParagraphSpeakerClick(x: Float, y: Float): Boolean {
+    private fun checkParagraphSpeakerClick(x: Float, y: Float, continuePlay: Boolean = false): Boolean {
         if (!AppConfig.showAudioCacheIndicator) return false
         if (!visibleRect.contains(x, y)) return false
 
@@ -513,21 +519,34 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
                 val paragraphNum = textLine.paragraphNum
                 if (paragraphNum <= 0) continue
 
-                // 有缓存则直接播放缓存文件
+                val pageIndex = textLine.textPage.index
+                val pageStart = textChapter.getReadLength(pageIndex)
+                // 使用段落第一行的 chapterPosition 计算 startPos，确保从段落开头朗读
+                val paragraphFirstLine = textChapter.getParagraphs(false)
+                    .find { it.num == paragraphNum }?.firstLine
+                val paragraphStart = paragraphFirstLine?.chapterPosition ?: textLine.chapterPosition
+                val startPos = (paragraphStart - pageStart).coerceAtLeast(0)
+
+                if (continuePlay) {
+                    // 长按：从该段开头连续朗读，播完不停止，继续后续段落。
+                    // 走朗读服务而非直接播缓存文件，这样才能跨段落、跨章节持续播放；
+                    // 服务端合成前会检查缓存（hasSpeakFile），已缓存的段落不会重复请求网络。
+                    ReadAloud.play(
+                        context, true, pageIndex, startPos,
+                        continueFromParagraph = true
+                    )
+                    context.toastOnUi("从该段开始连续朗读")
+                    return true
+                }
+
+                // 单击：有缓存则直接播放缓存文件
                 val cacheFile = AudioCacheIndicatorManager.getCacheFile(textChapter, paragraphNum)
                 if (cacheFile != null) {
                     playCacheFile(cacheFile)
                     context.toastOnUi("播放该段音频")
                 } else {
                     // 无缓存：启动单段朗读模式，只合成并播放当前段落
-                    val pageIndex = textLine.textPage.index
-                    val pageStart = textChapter.getReadLength(pageIndex)
-                    // 使用段落第一行的 chapterPosition 计算 startPos，确保从段落开头朗读
-                    val paragraphFirstLine = textChapter.getParagraphs(false)
-                        .find { it.num == paragraphNum }?.firstLine
-                    val paragraphStart = paragraphFirstLine?.chapterPosition ?: textLine.chapterPosition
-                    val startPos = paragraphStart - pageStart
-                    ReadAloud.play(context, true, pageIndex, startPos.coerceAtLeast(0), singleParagraph = true)
+                    ReadAloud.play(context, true, pageIndex, startPos, singleParagraph = true)
                     context.toastOnUi("生成并播放该段音频")
                 }
                 return true
