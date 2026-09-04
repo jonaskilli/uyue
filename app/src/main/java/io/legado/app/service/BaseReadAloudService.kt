@@ -34,6 +34,7 @@ import io.legado.app.constant.AppPattern
 import io.legado.app.constant.EventBus
 import io.legado.app.constant.IntentAction
 import io.legado.app.constant.NotificationId
+import io.legado.app.constant.PageAnim
 import io.legado.app.constant.PreferKey
 import io.legado.app.constant.Status
 import io.legado.app.help.CacheManager
@@ -1249,8 +1250,19 @@ abstract class BaseReadAloudService : BaseService(),
                     // gengxin 恢复时不跳过（要从恢复段重新朗读）
                     // continueFromParagraph 同样不跳过：长按小喇叭要求从当前段落开头开始连续朗读，
                     // 若在此跳过，实际会从下一段开始，与预期不符。
+                    //
+                    // 「禁止跳下一段」开关（readAloudStartFromFirst）：
+                    // - 翻页模式：跟随开关，关闭时跳至下一段开头
+                    // - 滚动模式：强制等同于开关开启，即始终从当前段落开始
+                    //   因为该模式下起点由屏幕可见首行精确定位（见 ReadBookActivity 的
+                    //   scrollPageAnim 分支用 getReadAloudPos 取 pagePosition），
+                    //   再跳到下一段会漏读用户正在看的那一段。
+                    val isScrollMode = ReadBook.pageAnim() == PageAnim.scrollPageAnim
+                    val shouldSkipCurrentParagraph =
+                        !AppConfig.readAloudStartFromFirst && !isScrollMode
+
                     if (!gengxinResuming && !singleParagraphMode && !continueFromParagraph
-                        && !AppConfig.readAloudStartFromFirst && !toLast && nowSpeak < contentList.size
+                        && shouldSkipCurrentParagraph && !toLast && nowSpeak < contentList.size
                     ) {
                         if (nowSpeak != 0) {
                             LogUtils.d(TAG, "nowSpeak!=0，跳过当前段")
