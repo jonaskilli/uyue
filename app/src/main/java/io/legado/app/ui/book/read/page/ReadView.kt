@@ -73,9 +73,26 @@ class ReadView(context: Context, attrs: AttributeSet) :
     private var bottomSwipeUp = false
     //顶部下滑停止朗读手势（仅朗读中生效）
     private var topSwipeDown = false
+    //朗读界面（半屏）弹出时，穿透到阅读页的触摸：上滑 → 开始/暂停朗读
+    private var readAloudPanelSwipeUp = false
+    //朗读界面（半屏）弹出时，穿透到阅读页的触摸：下滑 → 关闭朗读界面
+    private var readAloudPanelSwipeDown = false
+    //注意：此处不再接管横向滑动。上半屏的横向滑动保留为翻页操作，
+    //模式切换只在朗读面板自身窗口内处理（见 ReadAloudDialog.installWindowGestures）。
     private val bottomSwipeSlop by lazy {
         (height * 0.08f).coerceAtLeast(ViewConfiguration.get(context).scaledTouchSlop * 4f)
     }
+
+    /**
+     * 朗读界面是否已弹出。
+     *
+     * 半屏模式下朗读界面窗口只占屏幕下半部分并开启触摸穿透，上半屏仍属阅读页，
+     * 触摸会直接落到本 View；此时需把手势接管为朗读专用：
+     * 上滑开始朗读、下滑关闭朗读界面、单击关闭朗读界面。
+     * 全屏模式窗口铺满整屏，触摸到不了这里，不受影响。
+     */
+    private val readAloudPanelShowing: Boolean
+        get() = kotlin.runCatching { callBack.isReadAloudDialogShowing() }.getOrDefault(false)
 
     //起始点
     var startX: Float = 0f
@@ -215,6 +232,8 @@ class ReadView(context: Context, attrs: AttributeSet) :
                 isMove = false
                 bottomSwipeUp = false
                 topSwipeDown = false
+                readAloudPanelSwipeUp = false
+                readAloudPanelSwipeDown = false
                 pageDelegate?.onTouch(event)
                 pageDelegate?.onDown()
                 setStartPoint(event.x, event.y, false)
@@ -230,6 +249,29 @@ class ReadView(context: Context, attrs: AttributeSet) :
                 if (isMove) {
                     longPressed = false
                     removeCallbacks(longPressRunnable)
+                    //朗读界面已弹出时，穿透到阅读页的触摸接管为朗读手势。
+                    //必须排在原上下滑手势之前，否则上滑会重复弹出朗读界面。
+                    //限定 !isScroll：上下滚动模式下纵向滑动即滚动正文，
+                    //与上下滑手势同义会互相冲突（与原生 bottomSwipeUp / topSwipeDown 保持一致）。
+                    if (!isScroll && !isTextSelected && readAloudPanelShowing) {
+                        if (!readAloudPanelSwipeUp && !readAloudPanelSwipeDown
+                            && event.y < startY - bottomSwipeSlop
+                            && absY >= absX * 0.9f
+                        ) {
+                            readAloudPanelSwipeUp = true
+                            pageDelegate?.abortAnim()
+                            return true
+                        }
+                        if (!readAloudPanelSwipeUp && !readAloudPanelSwipeDown
+                            && event.y > startY + bottomSwipeSlop
+                            && absY >= absX * 0.9f
+                        ) {
+                            readAloudPanelSwipeDown = true
+                            pageDelegate?.abortAnim()
+                            return true
+                        }
+                        if (readAloudPanelSwipeUp || readAloudPanelSwipeDown) return true
+                    }
                     //非滚动翻页模式下，从屏幕下半部分（竖直中线以下）任意位置向上滑动进入朗读界面
                     if (!isScroll
                         && !isTextSelected
@@ -279,6 +321,22 @@ class ReadView(context: Context, attrs: AttributeSet) :
                     if (BaseReadAloudService.isRun) {
                         ReadAloud.stop(context)
                     }
+                    return true
+                }
+                //朗读界面已弹出：上滑 → 开始/暂停朗读（与面板播放按钮行为一致）
+                if (readAloudPanelSwipeUp) {
+                    callBack.onClickReadAloud()
+                    return true
+                }
+                //朗读界面已弹出：下滑 → 关闭朗读界面
+                if (readAloudPanelSwipeDown) {
+                    callBack.dismissReadAloudDialog()
+                    return true
+                }
+                //朗读界面已弹出：单击穿透区 → 关闭朗读界面。
+                //限定 !isMove，避免横滑翻页时误关面板；长按与选中态仍走原逻辑
+                if (readAloudPanelShowing && !isMove && !longPressed && !pressOnTextSelected) {
+                    callBack.dismissReadAloudDialog()
                     return true
                 }
                 if (!pageDelegate!!.isMoved && !isMove) {
@@ -811,6 +869,12 @@ class ReadView(context: Context, attrs: AttributeSet) :
         val isInitFinish: Boolean
         fun showActionMenu()
         fun showReadAloudDialog()
+        /** 朗读界面是否已弹出（半屏时上半屏触摸会穿透到本 View） */
+        fun isReadAloudDialogShowing(): Boolean
+        /** 关闭朗读界面 */
+        fun dismissReadAloudDialog()
+        /** 开始/暂停朗读，与朗读界面播放按钮行为一致 */
+        fun onClickReadAloud()
         fun screenOffTimerStart()
         fun showTextActionMenu()
         fun autoPageStop()

@@ -1170,6 +1170,30 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     /**
+     * 朗读界面是否已弹出。
+     *
+     * 半屏模式下朗读界面窗口只占屏幕下半部分并开启触摸穿透，上半屏仍属阅读页。
+     * 阅读页据此把手势接管为朗读专用（上滑朗读 / 下滑关闭 / 单击关闭），
+     * 否则上半屏的滑动会去操作阅读页本身。
+     *
+     * 用类型查找而非 tag，避免与 [showDialogFragment] 内部使用的
+     * `T::class.simpleName` 标签产生耦合。
+     */
+    override fun isReadAloudDialogShowing(): Boolean {
+        val dialog = supportFragmentManager.fragments
+            .filterIsInstance<ReadAloudDialog>()
+            .firstOrNull() ?: return false
+        return dialog.dialog?.isShowing == true
+    }
+
+    override fun dismissReadAloudDialog() {
+        supportFragmentManager.fragments
+            .filterIsInstance<ReadAloudDialog>()
+            .firstOrNull()
+            ?.dismissAllowingStateLoss()
+    }
+
+    /**
      * 显示朗读引擎选择
      */
     override fun showSpeakEngineDialog() {
