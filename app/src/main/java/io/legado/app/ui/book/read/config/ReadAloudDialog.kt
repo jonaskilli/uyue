@@ -30,6 +30,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.loadGif
 import io.legado.app.lib.dialogs.selector
+import io.legado.app.lib.theme.ThemeStore
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.lib.theme.getPrimaryTextColor
 import io.legado.app.model.BookCover
@@ -68,6 +69,14 @@ import androidx.appcompat.app.AlertDialog
 
 class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
+    companion object {
+        /**
+         * 手势序列超时（毫秒）。
+         * 超过此间隔没有事件即视为新序列，用于 ACTION_UP 丢失后的状态自愈。
+         */
+        private const val GESTURE_SEQUENCE_TIMEOUT_MS = 400L
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 关键：使用 dialog_style_material（标准不透明主题），而非默认的 0（会继承
@@ -90,12 +99,16 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     private var aiHistoryIndex = -1
     /** 当前窗口是否为全屏模式（由 applyWindowMode 维护）；用于手势判定半屏专属操作 */
     private var isFullscreen = false
-    /** 下滑退出手势：已安装的 Window.Callback 包装，非 null 表示已挂载 */
+    /** 窗口级手势的 Window.Callback 包装，非 null 表示已挂载 */
     private var swipeWindowCallback: Window.Callback? = null
     /** 包装前的原始 Window.Callback，卸载时还原 */
     private var swipeBaseCallback: Window.Callback? = null
-    /** 下滑手势已触发：吞掉后续 MOVE/UP，避免子 View（图片/字幕）误响应 */
-    private var swipeHandled = false
+    /** 手势已触发：吞掉后续 MOVE/UP，避免子 View（图片/字幕）误响应 */
+    private var gestureHandled = false
+    /** 手势序列中最后一次事件的时间戳，用于手势异常中断后的超时自愈 */
+    private var gestureLastEventTime = 0L
+    /** 手势进行中（DOWN 之后、UP/CANCEL 之前）。用于模式切换重装手势时保留已触发状态 */
+    private var gestureInProgress = false
     /** 浏览历史图片后，30秒无操作自动回到最新图片的定时器 */
     private var aiHistoryResetTimer: Timer? = null
 
@@ -281,14 +294,17 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     override fun onStart() {
         super.onStart()
-        // 根据是否显示封面字幕面板，选择全屏延伸 / 底部面板两套窗口模式
-        applyWindowMode(BaseReadAloudService.isRun && AppConfig.showReadAloudCoverSubtitle)
+        // 根据是否显示封面字幕面板，选择全屏延伸 / 底部面板两套窗口模式。
+        // 不附加 isRun 条件：未朗读时也要能显示全屏界面并左右滑切换
+        applyWindowMode(AppConfig.showReadAloudCoverSubtitle)
         // 必须在 applyWindowMode 之后：isFullscreen 由它赋值，顺序颠倒会导致手势挂不上
-        installSwipeToDismiss()
+        installWindowGestures()
     }
 
     override fun onStop() {
-        uninstallSwipeToDismiss()
+        // 窗口即将销毁，强制结束手势状态
+        gestureInProgress = false
+        uninstallWindowGestures()
         super.onStop()
     }
 
@@ -305,10 +321,23 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setBackgroundDrawableResource(android.R.color.transparent)
             isFullscreen = showImage
+            // 根 view 背景必须按模式显式设置。
+            // 布局里 root_view 声明的是 @android:color/transparent（半屏时露出原文），
+            // 但 BaseDialogFragment.onViewCreated 会无条件改成不透明的
+            // ThemeStore.backgroundColor()，需要在此覆盖：
+            // - 全屏：根 view 铺满整屏，必须不透明才能遮住底层阅读页
+            // - 半屏：根 view 必须透明，否则它会铺满窗口把上半屏原文整个遮住
+            //   （从全屏切回半屏时窗口高度若未及时收缩，残留的不透明背景正好覆盖上半屏）
+            view?.setBackgroundColor(
+                if (showImage) ThemeStore.backgroundColor() else Color.TRANSPARENT
+            )
             val hideIcons = ReadBookConfig.hideStatusBar
             if (showImage) {
                 // 全屏延伸模式
                 decorView.setPadding(0, 0, 0, 0)
+                // 清掉半屏模式加的穿透标记：全屏时窗口铺满整屏，触摸应只由本窗口处理，
+                // 否则运行时由半屏切回全屏会残留该标记
+                clearFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
                 WindowCompat.setDecorFitsSystemWindows(this, false)
                 clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
                 addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
@@ -334,6 +363,16 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 // 上半屏空白不在窗口内，且通过 FLAG_NOT_TOUCH_MODAL 让窗口外触摸穿透到下层阅读页，
                 // 可直接点字翻页、操作原文。
                 // 必须彻底复位全屏延伸模式对 decorView / 系统栏的改动，否则穿透会失效：
+                //
+                // 关键：半屏必须用 GONE 彻底移除两个全屏专属元素，不能用 INVISIBLE。
+                // - ll_read_aloud_top 内的 NestedScrollView 是 0dp + weight=1，在 wrap_content 的
+                //   content_panel 里会被 weight 分配近乎整个屏幕高度；只要它仍参与测量，
+                //   content_panel 就维持全屏高度，其不透明背景整屏遮挡阅读页
+                //   —— 这就是全屏切回半屏出现白底的直接原因。
+                // - iv_fullscreen_bg 是 match_parent，残留可见同样会把窗口撑满。
+                // 放在此处（窗口模式的唯一入口）可确保任何调用顺序下都成立。
+                binding.llReadAloudTop.gone()
+                binding.ivFullscreenBg.gone()
                 WindowCompat.setDecorFitsSystemWindows(this, true)
                 decorView.setPadding(0, 0, 0, 0)
                 statusBarColor = Color.TRANSPARENT
@@ -353,6 +392,13 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 attributes = attr
                 setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             }
+        }
+        // 强制重新测量：窗口高度在 MATCH_PARENT 与 WRAP_CONTENT 之间切换时，
+        // 根 view 是 MATCH_PARENT，可能沿用上一次的窗口高度，导致切回半屏后
+        // 尺寸未收缩。post 到下一帧确保窗口 relayout 后再测量一次。
+        view?.post {
+            dialog?.window?.decorView?.requestLayout()
+            view?.requestLayout()
         }
     }
 
@@ -407,31 +453,39 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         applyChapterProgressVisibility()
         initData()
         initEvent()
-        // 注意：下滑退出手势不在此挂载。onFragmentCreated 由 onViewCreated 调用，
+        // 注意：窗口手势不在此挂载。onFragmentCreated 由 onViewCreated 调用，
         // 早于 onStart，此时 isFullscreen 还没被 applyWindowMode 赋值，挂上去会直接 return。
-        // 统一在 onStart 的 applyWindowMode 之后由 installSwipeToDismiss 挂载。
+        // 统一在 onStart 的 applyWindowMode 之后由 installWindowGestures 挂载。
         // 根据系统导航栏高度动态调整底部 padding，避免三键导航遮挡按钮
         binding.contentPanel.applyNavigationBarPadding(withInitialPadding = true)
     }
 
     /**
-     * 全屏模式的退出手势：自上而下滑动 → 退出朗读界面。
-     * 半屏模式不挂载（让上半屏触摸穿透到下层阅读页，可直接点字翻页、操作原文）。
+     * 安装窗口级手势，两种模式都会挂载：
+     * - 全屏模式：自上而下滑动 → 退出朗读界面
+     * - 两种模式通用：向左 / 向右滑动 → 在全屏（图片+字幕）与半屏（仅控制条）之间切换
+     *
+     * 只拦截"已确认命中"的手势，其余事件一律继续下发给视图树，
+     * 因此不会影响按钮点击、字幕点击、封面切图，也不影响半屏模式上半屏的触摸穿透。
      *
      * 必须在 [applyWindowMode] 之后调用：那时 [isFullscreen] 才被赋值。
      */
     @SuppressLint("ClickableViewAccessibility")
-    private fun installSwipeToDismiss() {
-        uninstallSwipeToDismiss()
+    private fun installWindowGestures() {
+        uninstallWindowGestures()
         val window = dialog?.window ?: return
-        if (!isFullscreen) return
         val touchSlop = ViewConfiguration.get(requireContext()).scaledTouchSlop
+        var startX = 0f
         var startY = 0f
-        swipeHandled = false
+        // 切换模式会在手势进行中重装本监听器，此时不能复位，
+        // 否则手指尚未抬起，残余的 MOVE/UP 会漏到新视图树造成误触
+        if (!gestureInProgress) gestureHandled = false
         val gestureDetector = GestureDetector(requireContext(), object : GestureDetector.SimpleOnGestureListener() {
             override fun onDown(e: MotionEvent): Boolean {
+                startX = e.x
                 startY = e.y
-                swipeHandled = false
+                gestureInProgress = true
+                gestureHandled = false
                 return true
             }
 
@@ -441,13 +495,24 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 distanceX: Float,
                 distanceY: Float
             ): Boolean {
-                if (swipeHandled) return false
+                if (gestureHandled) return false
                 val dy = e2.y - startY
-                val dx = e2.x - (e1?.x ?: e2.x)
-                // 明显向下、且以纵向为主 → 退出；避免误伤左右滑切图
-                if (dy > touchSlop * 3 && dy > abs(dx)) {
-                    swipeHandled = true
+                val dx = e2.x - startX
+                // 全屏模式：明显向下、且以纵向为主 → 退出
+                if (isFullscreen && dy > touchSlop * 3 && dy > abs(dx)) {
+                    gestureHandled = true
                     dismiss()
+                    return true
+                }
+                // 明显横向 → 切换朗读界面模式。
+                // 阈值取 4 倍 slop 并要求明显横向，避免误伤点击与斜向滚动；
+                // 封面（左右滑切图）与拖动条（调语速/定时/进度）区域内不触发。
+                if (!isInGestureExcludeZone(startX, startY)
+                    && abs(dx) > touchSlop * 4
+                    && abs(dx) > abs(dy) * 1.5f
+                ) {
+                    gestureHandled = true
+                    toggleReadAloudMode()
                     return true
                 }
                 return false
@@ -455,17 +520,37 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         })
         val base = window.callback ?: return
         val wrapper = SwipeWindowCallback(base) { event ->
+            val now = System.currentTimeMillis()
+            // 超时自愈：由全屏切回半屏时窗口会从全屏收缩到底部约一屏高的 1/4，
+            // 手指所在的中/上部瞬间落到窗口之外，后续 MOVE 与 ACTION_UP 都会因
+            // FLAG_NOT_TOUCH_MODAL 穿透到阅读页，本窗口再也收不到，
+            // 于是下面的 UP 复位永远执行不到，gestureInProgress 会永久卡在 true，
+            // 进而使 gestureHandled 永不复位、手势彻底失效。
+            // 因此不能只依赖 UP 复位：DOWN 距上次事件超过阈值即判定为新序列并强制复位。
+            if (event.actionMasked == MotionEvent.ACTION_DOWN
+                && now - gestureLastEventTime > GESTURE_SEQUENCE_TIMEOUT_MS
+            ) {
+                gestureInProgress = false
+                gestureHandled = false
+            }
+            gestureLastEventTime = now
+            // 手势结束（抬手 / 被父级取消）后复位
+            when (event.actionMasked) {
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    gestureInProgress = false
+                }
+            }
             gestureDetector.onTouchEvent(event)
-            // 只吞掉"已确认是下滑"的事件；ACTION_DOWN 等一律继续下发给子 View，
+            // 只吞掉"已确认命中手势"的事件；ACTION_DOWN 等一律继续下发给子 View，
             // 否则封面点击、字幕点击、左右滑切图会全部失效
-            swipeHandled
+            gestureHandled
         }
         window.callback = wrapper
         swipeBaseCallback = base
         swipeWindowCallback = wrapper
     }
 
-    private fun uninstallSwipeToDismiss() {
+    private fun uninstallWindowGestures() {
         val window = dialog?.window ?: return
         val wrapper = swipeWindowCallback ?: return
         if (window.callback === wrapper) {
@@ -473,7 +558,65 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         }
         swipeWindowCallback = null
         swipeBaseCallback = null
-        swipeHandled = false
+        // 切换模式时是在手势进行中重装的：此时不能复位 gestureHandled，
+        // 否则手指尚未抬起，残余的 MOVE/UP 会漏到新视图树造成误触或重复切换
+        if (!gestureInProgress) gestureHandled = false
+    }
+
+    /**
+     * 是否落在「横向手势已被占用」的区域：书籍封面（左右滑切图）与各个拖动条。
+     * 这些区域内的左右滑保留原有功能，不触发模式切换。
+     */
+    private fun isInGestureExcludeZone(x: Float, y: Float): Boolean = binding.run {
+        isPointInView(ivBookCover, x, y)
+            || isPointInView(seekChapterProgress, x, y)
+            || isPointInView(seekTtsSpeechRate, x, y)
+            || isPointInView(seekTimer, x, y)
+    }
+
+    /**
+     * 判断窗口坐标 (x, y) 是否落在 view 内。
+     * MotionEvent 坐标与 getLocationInWindow 同为窗口坐标，可直接比较。
+     */
+    private fun isPointInView(view: View, x: Float, y: Float): Boolean {
+        if (!isReallyVisible(view)) return false
+        val loc = IntArray(2)
+        view.getLocationInWindow(loc)
+        return x >= loc[0] && x <= loc[0] + view.width
+            && y >= loc[1] && y <= loc[1] + view.height
+    }
+
+    /**
+     * view 是否真正可见（自身与所有祖先均 VISIBLE，且已完成测量）。
+     *
+     * 不能只看自身的 visibility：ivBookCover 与 seekChapterProgress 位于
+     * ll_read_aloud_top 内，半屏模式下该容器被 GONE，但它俩自身仍是 VISIBLE，
+     * 且 width/height 保留着全屏时测量出的尺寸（约 240dp×340dp），
+     * getLocationInWindow 又返回残留位置。若仅按自身可见性判定，
+     * 这两个"已隐藏但仍带尺寸"的 View 会把几乎整个半屏面板误判为排除区，
+     * 导致半屏下横滑切换彻底失效。
+     */
+    private fun isReallyVisible(view: View): Boolean {
+        if (view.visibility != View.VISIBLE) return false
+        if (view.width <= 0 || view.height <= 0) return false
+        var parent = view.parent
+        while (parent is View) {
+            if (parent.visibility != View.VISIBLE) return false
+            parent = parent.parent
+        }
+        return true
+    }
+
+    /**
+     * 在全屏（图片+字幕）与半屏（仅控制条）朗读界面之间切换，
+     * 与设置里的开关 [AppConfig.showReadAloudCoverSubtitle] 完全等价、双向同步。
+     */
+    private fun toggleReadAloudMode() {
+        val toFullscreen = !AppConfig.showReadAloudCoverSubtitle
+        AppConfig.showReadAloudCoverSubtitle = toFullscreen
+        // 内部会重新 applyWindowMode 并重装手势
+        upTopSection()
+        toastOnUi(if (toFullscreen) "已切换到全屏朗读界面" else "已切换到半屏朗读界面")
     }
 
     /**
@@ -530,11 +673,18 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     }
 
     /**
-     * 初始化上半部分：仅 Http 转发器模式显示，且受设置开关控制
+     * 初始化上半部分：受「显示封面字幕」设置开关控制。
+     * 不附加 isRun 条件，这样未朗读时也能进入全屏界面并左右滑切换模式。
      */
     private fun upTopSection() = binding.run {
-        val show = BaseReadAloudService.isRun && AppConfig.showReadAloudCoverSubtitle
-        llReadAloudTop.visible(show)
+        val show = AppConfig.showReadAloudCoverSubtitle
+        // 必须用 gone(!show)，不能用 visible(show)：
+        // visible(false) 是 INVISIBLE，会保留占位并继续参与测量。
+        // ll_read_aloud_top 内的 NestedScrollView 是 0dp + weight=1，
+        // 在 wrap_content 的 content_panel 里会被 weight 分配几乎整个屏幕高度；
+        // 只要它仍参与测量，content_panel 就会维持全屏高度，
+        // 其不透明背景（applyTint 中设置的 bg）将整屏遮挡下方阅读页。
+        llReadAloudTop.gone(!show)
         if (show) {
             // 用户设定尺寸：不再限制图片最大高度，图片完全按设定宽度与比例显示，可设得更大。
             // llReadAloudTop 使用 layout_weight=1 自动占据屏幕剩余空间，下方内容不会被挤掉。
@@ -605,8 +755,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         // 根据开关切换窗口模式（全屏延伸 / 底部面板）
         if (dialog?.isShowing == true) {
             applyWindowMode(show)
-            // 模式可能已切换（全屏 ↔ 底部面板），同步重新挂载 / 卸载下滑退出手势
-            installSwipeToDismiss()
+            // 模式可能已切换（全屏 ↔ 底部面板），同步重装窗口手势
+            installWindowGestures()
         }
     }
 
