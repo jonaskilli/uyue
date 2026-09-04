@@ -63,6 +63,7 @@ import java.util.Timer
 import java.util.TimerTask
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.Window
 import androidx.appcompat.app.AlertDialog
 
 class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
@@ -89,6 +90,12 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     private var aiHistoryIndex = -1
     /** 当前窗口是否为全屏模式（由 applyWindowMode 维护）；用于手势判定半屏专属操作 */
     private var isFullscreen = false
+    /** 下滑退出手势：已安装的 Window.Callback 包装，非 null 表示已挂载 */
+    private var swipeWindowCallback: Window.Callback? = null
+    /** 包装前的原始 Window.Callback，卸载时还原 */
+    private var swipeBaseCallback: Window.Callback? = null
+    /** 下滑手势已触发：吞掉后续 MOVE/UP，避免子 View（图片/字幕）误响应 */
+    private var swipeHandled = false
     /** 浏览历史图片后，30秒无操作自动回到最新图片的定时器 */
     private var aiHistoryResetTimer: Timer? = null
 
@@ -276,6 +283,13 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         super.onStart()
         // 根据是否显示封面字幕面板，选择全屏延伸 / 底部面板两套窗口模式
         applyWindowMode(BaseReadAloudService.isRun && AppConfig.showReadAloudCoverSubtitle)
+        // 必须在 applyWindowMode 之后：isFullscreen 由它赋值，顺序颠倒会导致手势挂不上
+        installSwipeToDismiss()
+    }
+
+    override fun onStop() {
+        uninstallSwipeToDismiss()
+        super.onStop()
     }
 
     /**
@@ -393,26 +407,31 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         applyChapterProgressVisibility()
         initData()
         initEvent()
-        initSwipeToDismiss()
+        // 注意：下滑退出手势不在此挂载。onFragmentCreated 由 onViewCreated 调用，
+        // 早于 onStart，此时 isFullscreen 还没被 applyWindowMode 赋值，挂上去会直接 return。
+        // 统一在 onStart 的 applyWindowMode 之后由 installSwipeToDismiss 挂载。
         // 根据系统导航栏高度动态调整底部 padding，避免三键导航遮挡按钮
         binding.contentPanel.applyNavigationBarPadding(withInitialPadding = true)
     }
 
     /**
      * 全屏模式的退出手势：自上而下滑动 → 退出朗读界面。
-     * 半屏模式不挂任何 decorView 触摸监听（让上半屏空白触摸穿透到下层阅读页，
-     * 可直接点字翻页、操作原文），故不在此拦截。
+     * 半屏模式不挂载（让上半屏触摸穿透到下层阅读页，可直接点字翻页、操作原文）。
+     *
+     * 必须在 [applyWindowMode] 之后调用：那时 [isFullscreen] 才被赋值。
      */
     @SuppressLint("ClickableViewAccessibility")
-    private fun initSwipeToDismiss() {
+    private fun installSwipeToDismiss() {
+        uninstallSwipeToDismiss()
+        val window = dialog?.window ?: return
         if (!isFullscreen) return
         val touchSlop = ViewConfiguration.get(requireContext()).scaledTouchSlop
         var startY = 0f
-        var handled = false
+        swipeHandled = false
         val gestureDetector = GestureDetector(requireContext(), object : GestureDetector.SimpleOnGestureListener() {
             override fun onDown(e: MotionEvent): Boolean {
                 startY = e.y
-                handled = false
+                swipeHandled = false
                 return true
             }
 
@@ -422,20 +441,57 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 distanceX: Float,
                 distanceY: Float
             ): Boolean {
-                if (handled) return false
+                if (swipeHandled) return false
                 val dy = e2.y - startY
-                // 从上往下滑动 → 退出
-                if (dy > touchSlop * 3) {
+                val dx = e2.x - (e1?.x ?: e2.x)
+                // 明显向下、且以纵向为主 → 退出；避免误伤左右滑切图
+                if (dy > touchSlop * 3 && dy > abs(dx)) {
+                    swipeHandled = true
                     dismiss()
-                    handled = true
                     return true
                 }
                 return false
             }
         })
-        dialog?.window?.decorView?.setOnTouchListener { _, event ->
+        val base = window.callback ?: return
+        val wrapper = SwipeWindowCallback(base) { event ->
             gestureDetector.onTouchEvent(event)
-            false
+            // 只吞掉"已确认是下滑"的事件；ACTION_DOWN 等一律继续下发给子 View，
+            // 否则封面点击、字幕点击、左右滑切图会全部失效
+            swipeHandled
+        }
+        window.callback = wrapper
+        swipeBaseCallback = base
+        swipeWindowCallback = wrapper
+    }
+
+    private fun uninstallSwipeToDismiss() {
+        val window = dialog?.window ?: return
+        val wrapper = swipeWindowCallback ?: return
+        if (window.callback === wrapper) {
+            swipeBaseCallback?.let { window.callback = it }
+        }
+        swipeWindowCallback = null
+        swipeBaseCallback = null
+        swipeHandled = false
+    }
+
+    /**
+     * 只拦截 dispatchTouchEvent 的 Window.Callback 包装，其余方法全部委托给原始 callback。
+     *
+     * 用 Window.Callback 而非 decorView 的 OnTouchListener 的原因：
+     * DecorView.dispatchTouchEvent 会先把事件交给 Window.Callback（即 Dialog），
+     * 由它再下发给整个视图树；因此 DecorView 自己的 OnTouchListener
+     * 基本收不到事件，且子 View 消费后更不会回传。
+     */
+    private class SwipeWindowCallback(
+        private val base: Window.Callback,
+        private val shouldIntercept: (MotionEvent) -> Boolean
+    ) : Window.Callback by base {
+
+        override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+            if (shouldIntercept(event)) return true
+            return base.dispatchTouchEvent(event)
         }
     }
 
@@ -549,6 +605,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         // 根据开关切换窗口模式（全屏延伸 / 底部面板）
         if (dialog?.isShowing == true) {
             applyWindowMode(show)
+            // 模式可能已切换（全屏 ↔ 底部面板），同步重新挂载 / 卸载下滑退出手势
+            installSwipeToDismiss()
         }
     }
 
