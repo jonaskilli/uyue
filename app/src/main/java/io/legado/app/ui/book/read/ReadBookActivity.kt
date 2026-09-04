@@ -88,6 +88,7 @@ import io.legado.app.ui.book.changesource.ChangeBookSourceDialog
 import io.legado.app.ui.book.changesource.ChangeChapterSourceDialog
 import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.book.read.config.AutoReadDialog
+import io.legado.app.ui.book.read.config.CharacterManagerDialog
 import io.legado.app.ui.book.read.config.CharacterVoiceHelper
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.BG_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_ACCENT_COLOR
@@ -1795,6 +1796,13 @@ class ReadBookActivity : BaseReadBookActivity(),
         val dialog = AlertDialog.Builder(context)
             .setTitle("编辑角色")
             .setView(scrollView)
+            // Neutral 位于按钮栏最左侧（排列顺序为 Neutral | Negative | Positive），
+            // 即「角色管理 | 取消 | 保存」。
+            // 与「取消」一致：不保存当前修改，仅关闭本对话框后进入角色管理。
+            .setNeutralButton("角色管理") { _, _ ->
+                dialogRef.get()?.dismiss()
+                showDialogFragment(CharacterManagerDialog())
+            }
             .setPositiveButton("保存") { _, _ -> doSave() }
             .setNegativeButton("取消", null)
             .show()
