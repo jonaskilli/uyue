@@ -28,6 +28,7 @@ import io.legado.app.data.appDb
 import io.legado.app.databinding.DialogReadAloudBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
+import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.loadGif
 import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.theme.ThemeStore
@@ -608,6 +609,23 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     }
 
     /**
+     * 同步原「后台」按钮（已改为主题切换）的图标与文字。
+     *
+     * 图标与阅读菜单的 fabNightTheme 保持一致：
+     * - 当前夜间 → 显示太阳 + 「日间」，提示点击后切换到的模式
+     * - 当前白天 → 显示月亮 + 「夜间」，提示点击后切换到的模式
+     */
+    private fun upThemeButton() = binding.run {
+        if (AppConfig.isNightTheme) {
+            ivToBackstage.setImageResource(R.drawable.ic_daytime)
+            tvToBackstage.text = "日间"
+        } else {
+            ivToBackstage.setImageResource(R.drawable.ic_brightness)
+            tvToBackstage.text = "夜间"
+        }
+    }
+
+    /**
      * 在全屏（图片+字幕）与半屏（仅控制条）朗读界面之间切换，
      * 与设置里的开关 [AppConfig.showReadAloudCoverSubtitle] 完全等价、双向同步。
      */
@@ -860,7 +878,14 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         ivPlayNext.setOnClickListener { ReadAloud.nextParagraph(requireContext()) }
         llCatalog.setOnClickListener { callBack?.openChapterList() }
         llBgm.setOnClickListener { callBack?.showBgmConfig() }
-        llToBackstage.setOnClickListener { callBack?.finish() }
+        //原「后台」按钮改为主题切换（白天 / 夜间）。
+        //与阅读菜单的 fabNightTheme 行为完全一致。
+        llToBackstage.setOnClickListener {
+            AppConfig.isNightTheme = !AppConfig.isNightTheme
+            ThemeConfig.applyDayNight(requireContext())
+        }
+        // 每次进入界面时同步按钮的图标与文字
+        upThemeButton()
         llCharacterManager.setOnClickListener {
             CharacterManagerDialog().show(childFragmentManager, "characterManagerDialog")
         }
