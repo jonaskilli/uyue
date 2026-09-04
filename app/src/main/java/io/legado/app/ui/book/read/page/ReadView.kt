@@ -79,8 +79,10 @@ class ReadView(context: Context, attrs: AttributeSet) :
     private var readAloudPanelSwipeDown = false
     //注意：此处不再接管横向滑动。上半屏的横向滑动保留为翻页操作，
     //模式切换只在朗读面板自身窗口内处理（见 ReadAloudDialog.installWindowGestures）。
+    //触发上下滑手势所需的纵向位移。屏高占比越小越灵敏，
+    //但过小会与左右翻页争抢事件，4% 是实测后较平衡的取值。
     private val bottomSwipeSlop by lazy {
-        (height * 0.08f).coerceAtLeast(ViewConfiguration.get(context).scaledTouchSlop * 4f)
+        (height * 0.04f).coerceAtLeast(ViewConfiguration.get(context).scaledTouchSlop * 4f)
     }
 
     /**
