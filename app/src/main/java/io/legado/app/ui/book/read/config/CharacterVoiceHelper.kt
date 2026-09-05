@@ -1,9 +1,15 @@
 package io.legado.app.ui.book.read.config
 
 import android.content.Context
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.LifecycleOwner
+import io.legado.app.R
 import io.legado.app.data.appDb
 import io.legado.app.help.audiobook.JReadVoiceEngine
 import io.legado.app.model.ReadAloud
@@ -143,7 +149,11 @@ object CharacterVoiceHelper {
         return str.replace(Regex("[\u200B-\u200D\uFEFF]"), "").trim()
     }
 
-    fun showVoiceCategoryDialog(context: Context, onCategorySelected: (String) -> Unit) {
+    fun showVoiceCategoryDialog(
+        context: Context,
+        lifecycleOwner: LifecycleOwner,
+        onCategorySelected: (String) -> Unit
+    ) {
         val categories = arrayOf(
             "女童", "少女", "女青年", "女中年", "女老年",
             "男童", "少年", "男青年", "男中年", "男老年",
@@ -156,16 +166,20 @@ object CharacterVoiceHelper {
                 onCategorySelected(category)
             }
             .setNegativeButton("全部") { _, _ ->
-                showVoiceListDialog(context, "全部", onCategorySelected)
+                showVoiceListDialog(context, lifecycleOwner, "全部", onCategorySelected)
             }
             .setNeutralButton("搜索") { _, _ ->
-                showVoiceSearchDialog(context, onCategorySelected)
+                showVoiceSearchDialog(context, lifecycleOwner, onCategorySelected)
             }
             .setPositiveButton("取消", null)
             .show()
     }
 
-    fun showVoiceSearchDialog(context: Context, onVoiceSelected: (String) -> Unit) {
+    fun showVoiceSearchDialog(
+        context: Context,
+        lifecycleOwner: LifecycleOwner,
+        onVoiceSelected: (String) -> Unit
+    ) {
         val editText = androidx.appcompat.widget.AppCompatEditText(context).apply {
             hint = "输入关键词搜索发音人"
         }
@@ -175,14 +189,19 @@ object CharacterVoiceHelper {
             .setPositiveButton("搜索") { _, _ ->
                 val keyword = editText.text?.toString()?.trim() ?: ""
                 if (keyword.isNotEmpty()) {
-                    showVoiceListDialog(context, keyword, onVoiceSelected)
+                    showVoiceListDialog(context, lifecycleOwner, keyword, onVoiceSelected)
                 }
             }
             .setNegativeButton("取消", null)
             .show()
     }
 
-    fun showVoiceListDialog(context: Context, category: String, onVoiceSelected: (String) -> Unit) {
+    fun showVoiceListDialog(
+        context: Context,
+        lifecycleOwner: LifecycleOwner,
+        category: String,
+        onVoiceSelected: (String) -> Unit
+    ) {
         val allVoices = getVoiceList()
         val filteredVoices = when {
             category == "全部" -> allVoices
@@ -195,14 +214,79 @@ object CharacterVoiceHelper {
             return
         }
         val title = if (category == "全部") "选择发音人 (全部)" else "选择发音人 ($category)"
+        val adapter = buildVoiceListAdapter(context, lifecycleOwner, displayList)
         AlertDialog.Builder(context)
             .setTitle(title)
-            .setItems(displayList.toTypedArray()) { _, which ->
-                val voice = displayList[which]
-                onVoiceSelected(voice)
-            }
+            // 用自定义 Adapter 替代 setItems，使每行右侧可挂试听按钮。
+            // 点行本身 = 选中（dialog 自动关闭）；点试听按钮 = 试听且不关闭。
+            .setAdapter(adapter) { _, which -> onVoiceSelected(displayList[which]) }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    /**
+     * 发音人列表 Adapter：左侧名称，右侧试听按钮。
+     *
+     * 试听按钮设了 focusable=false，因此不会抢走 ListView 的条目焦点，
+     * 其点击事件在 getView 内单独消费，与条目的选中点击互不干扰。
+     */
+    private fun buildVoiceListAdapter(
+        context: Context,
+        lifecycleOwner: LifecycleOwner,
+        voices: List<String>
+    ): BaseAdapter {
+        return object : BaseAdapter() {
+            override fun getCount(): Int = voices.size
+            override fun getItem(position: Int): String = voices[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val view = convertView ?: LayoutInflater.from(context)
+                    .inflate(R.layout.item_voice_preview, parent, false)
+                val voice = getItem(position)
+                view.findViewById<TextView>(R.id.tv_voice_name).text = voice
+                view.findViewById<TextView>(R.id.btn_preview_voice).setOnClickListener {
+                    previewVoice(context, lifecycleOwner, voice) { msg ->
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                }
+                return view
+            }
+        }
+    }
+
+    /**
+     * 试听指定发音人。
+     *
+     * 发音人通过 `<<voice>>` 标记内嵌进文本传给引擎，与角色管理中点角色名试听
+     * （[CharacterManagerDialog.previewCharacterVoice]）保持同一套合成路径，
+     * 因此试听效果与实际朗读一致。
+     */
+    fun previewVoice(
+        context: Context,
+        lifecycleOwner: LifecycleOwner,
+        voice: String,
+        onToast: (String) -> Unit
+    ) {
+        if (voice.isBlank()) {
+            onToast("该发音人为空，无法试听")
+            return
+        }
+        TtsPreviewHelper.previewVoice(
+            context = context,
+            lifecycleOwner = lifecycleOwner,
+            previewText = buildPreviewText(context, voice),
+            voiceId = voice,
+            onToast = onToast
+        )
+    }
+
+    /** 拼装试听文本：`“ <<发音人>>自定义试听文本”` */
+    private fun buildPreviewText(context: Context, voice: String): String {
+        val prefs = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        val customText =
+            prefs.getString("tts_preview_text", "你好，这是一段试听语音") ?: "你好，这是一段试听语音"
+        return "\u201C <<$voice>>$customText\u201D"
     }
 
     /**

@@ -325,15 +325,8 @@ class CharacterManagerDialog : DialogFragment() {
             toast("该角色未设置发音人，无法试听")
             return
         }
-        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-        val customText = prefs.getString("tts_preview_text", "你好，这是一段试听语音") ?: "你好，这是一段试听语音"
-        val previewText = "\u201C <<$voice>>$customText\u201D"
-        TtsPreviewHelper.previewVoice(
-            fragment = this,
-            previewText = previewText,
-            voiceId = voice,
-            onToast = { msg -> toast(msg) }
-        )
+        // 与发音人列表里的试听按钮共用同一实现，保证两处试听效果一致
+        CharacterVoiceHelper.previewVoice(requireContext(), this, voice) { msg -> toast(msg) }
     }
 
     // 字符串标准化（去特殊字符、trim）
@@ -1161,76 +1154,22 @@ class CharacterManagerDialog : DialogFragment() {
         }
     }
 
-    // 发音人分类选择弹窗
+    // 以下三个发音人弹窗统一委托给 CharacterVoiceHelper 实现。
+    // 此处曾各有一份完全相同的副本，试听按钮需要在列表每行挂点击事件，
+    // 若两份实现不同步会出现「角色管理里能试听、编辑角色里不能」的不一致，
+    // 故收敛为单一实现，本 DialogFragment 作为 LifecycleOwner 传入。
+
     private fun showVoiceCategoryDialog(onCategorySelected: (String) -> Unit) {
-        val categories = arrayOf(
-            "女童", "少女", "女青年", "女中年", "女老年",
-            "男童", "少年", "男青年", "男中年", "男老年",
-            "男主", "女主", "特殊"
-        )
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("选择发音人分类")
-            .setItems(categories) { _, which ->
-                val category = categories[which]
-                onCategorySelected(category)
-            }
-            .setNegativeButton("全部") { _, _ ->
-                showVoiceListDialog("全部", onCategorySelected)
-            }
-            .setNeutralButton("搜索") { _, _ ->
-                showVoiceSearchDialog(onCategorySelected)
-            }
-            .setPositiveButton("取消", null)
-            .show()
+        CharacterVoiceHelper.showVoiceCategoryDialog(requireContext(), this, onCategorySelected)
     }
 
-    // 发音人搜索弹窗
     private fun showVoiceSearchDialog(onVoiceSelected: (String) -> Unit) {
-        val editText = androidx.appcompat.widget.AppCompatEditText(requireContext()).apply {
-            hint = "输入关键词搜索发音人"
-        }
-        AlertDialog.Builder(requireContext())
-            .setTitle("搜索发音人")
-            .setView(editText)
-            .setPositiveButton("搜索") { _, _ ->
-                val keyword = editText.text?.toString()?.trim() ?: ""
-                if (keyword.isNotEmpty()) {
-                    showVoiceListDialog(keyword, onVoiceSelected)
-                }
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        CharacterVoiceHelper.showVoiceSearchDialog(requireContext(), this, onVoiceSelected)
     }
 
-    // 发音人列表选择弹窗（根据分类筛选）
+    // 发音人列表选择弹窗（根据分类筛选，每行右侧带试听按钮）
     private fun showVoiceListDialog(category: String, onVoiceSelected: (String) -> Unit) {
-        val allVoices = getVoiceList()
-        // 根据关键词匹配发音人
-        val filteredVoices = when {
-            category == "全部" -> allVoices
-            category.isNotEmpty() -> allVoices.filter { v -> v.contains(category) }
-            else -> allVoices
-        }
-
-        // 如果筛选结果为空，显示全部列表
-        val displayList = if (filteredVoices.isEmpty()) allVoices else filteredVoices
-
-        if (displayList.isEmpty()) {
-            toast("发音人列表为空")
-            return
-        }
-
-        val title = if (category == "全部") "选择发音人 (全部)" else "选择发音人 ($category)"
-
-        AlertDialog.Builder(requireContext())
-            .setTitle(title)
-            .setItems(displayList.toTypedArray()) { _, which ->
-                val voice = displayList[which]
-                onVoiceSelected(voice)
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        CharacterVoiceHelper.showVoiceListDialog(requireContext(), this, category, onVoiceSelected)
     }
 
     private fun fixVoice(position: Int, voice: String) {
@@ -1782,11 +1721,6 @@ class CharacterManagerDialog : DialogFragment() {
         val arr = JSONArray()
         bookList.forEach { arr.put(it) }
         writeTxtFile("liebiao.json", arr.toString())
-    }
-
-    private fun getVoiceList(): List<String> {
-        // 内置TTS插件引擎：从内置配置列表实时提取；其他引擎：读 fayinren.json
-        return CharacterVoiceHelper.getAvailableVoices()
     }
 
     // ==================== 文件操作 ====================

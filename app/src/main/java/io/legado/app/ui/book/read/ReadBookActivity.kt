@@ -1587,8 +1587,8 @@ class ReadBookActivity : BaseReadBookActivity(),
                     Toast.makeText(context, "名字不能为空", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                CharacterVoiceHelper.showVoiceCategoryDialog(context) { category ->
-                    CharacterVoiceHelper.showVoiceListDialog(context, category) { voice ->
+                CharacterVoiceHelper.showVoiceCategoryDialog(context, this@ReadBookActivity) { category ->
+                    CharacterVoiceHelper.showVoiceListDialog(context, this@ReadBookActivity, category) { voice ->
                         CharacterVoiceHelper.saveCharacterVoice(bookName, currentName, voice)
                         text = voice
                         Toast.makeText(context, "已保存发音人: $voice", Toast.LENGTH_SHORT).show()

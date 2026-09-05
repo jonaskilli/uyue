@@ -389,10 +389,15 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
 
     // 通用：带搜索框的单行列表弹窗。items 为显示文本（顺序即原始索引）。
     // 点击时 onPick 收到的 position 即 items 中的原始索引。
+    //
+    // onPreview 非空时每行右侧多一个「试听」按钮：点它只试听、不关闭弹窗，
+    // 便于逐个试听后再决定选哪个。传 null 则维持原样（如选择标签，无需试听）。
+    // 该参数放在 onPick 之前，末尾仍是 onPick，因此既有调用点的尾随 lambda 不受影响。
     private fun showSearchListDialog(
         title: String,
         hint: String,
         items: List<String>,
+        onPreview: ((originalIndex: Int) -> Unit)? = null,
         onPick: (originalIndex: Int) -> Unit,
     ) {
         if (!isWindowUsable) return
@@ -422,15 +427,29 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
             override fun getItem(position: Int): Any = shown[position]
             override fun getItemId(position: Int): Long = position.toLong()
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                // 复用系统 simple_list_item_1，自动跟随主题文字颜色（深/浅色）
-                val textView = if (convertView is android.widget.TextView) convertView
-                else android.view.LayoutInflater.from(context)
-                    .inflate(android.R.layout.simple_list_item_1, parent, false) as android.widget.TextView
-                textView.setSingleLine(true)
-                textView.ellipsize = null
-                textView.setHorizontallyScrolling(false)
-                textView.text = items[shown[position]]
-                return textView
+                val originalIndex = shown[position]
+                val preview = onPreview
+                if (preview == null) {
+                    // 复用系统 simple_list_item_1，自动跟随主题文字颜色（深/浅色）
+                    val textView = if (convertView is android.widget.TextView) convertView
+                    else android.view.LayoutInflater.from(context)
+                        .inflate(android.R.layout.simple_list_item_1, parent, false) as android.widget.TextView
+                    textView.setSingleLine(true)
+                    textView.ellipsize = null
+                    textView.setHorizontallyScrolling(false)
+                    textView.text = items[originalIndex]
+                    return textView
+                }
+                // 带试听按钮的行。convertView 可能是上面那种纯 TextView，
+                // 用 btn_preview_voice 是否存在来判断能否复用，避免类型错配。
+                val view = convertView?.takeIf { it.findViewById<View>(R.id.btn_preview_voice) != null }
+                    ?: android.view.LayoutInflater.from(context)
+                        .inflate(R.layout.item_voice_preview, parent, false)
+                view.findViewById<android.widget.TextView>(R.id.tv_voice_name).text = items[originalIndex]
+                view.findViewById<android.widget.TextView>(R.id.btn_preview_voice).setOnClickListener {
+                    preview.invoke(originalIndex)
+                }
+                return view
             }
         }
         listView.adapter = adapter
@@ -469,9 +488,47 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
     private fun showVoiceSearchDialog() {
         if (voiceOptions.isEmpty()) { toastOnUi("请先选择插件和分类"); return }
         val voiceNames = voiceOptions.map { it.name.ifBlank { it.id } }
-        showSearchListDialog("选择音色", "搜索音色", voiceNames) { originalIndex ->
+        showSearchListDialog(
+            "选择音色",
+            "搜索音色",
+            voiceNames,
+            onPreview = { originalIndex -> previewVoiceAt(originalIndex) }
+        ) { originalIndex ->
             onVoiceSelected(originalIndex)
             binding.spinnerVoice.setSelection(originalIndex)
+        }
+    }
+
+    /**
+     * 试听列表里指定位置的音色。
+     *
+     * 与 [previewConfig] 的区别：[previewConfig] 试听的是 spinner 当前选中的音色，
+     * 而这里是用户刚点试听按钮的那一项 —— 此时用户尚未选定音色，
+     * 因此走 [buildConfig] 的 voiceOverride 直接注入音色 id，不动 spinner 选中态，
+     * 也不要求「先选音色」的前置校验。
+     */
+    private fun previewVoiceAt(voiceIndex: Int) {
+        val option = voiceOptions.getOrNull(voiceIndex) ?: return
+        val voiceName = option.name.ifBlank { option.id }
+        // 试听文本留空时退回默认文案，不打断试听流程（与预览按钮不同，这里无需强制输入）
+        val previewText = binding.etPreviewText.text.toString().trim().ifBlank { DEFAULT_PREVIEW_TEXT }
+        val tempConfig = buildConfig(requireTag = false, voiceOverride = option.id) ?: return
+        toastOnUi("正在试听: $voiceName")
+        lifecycleScope.launch {
+            val requestId = UUID.randomUUID().toString()
+            val pointerJson = JSONObject().put("voiceTag", tempConfig.voiceTag).toString()
+            val audioBytes = withContext(Dispatchers.IO) {
+                loadOrShowError("试听失败") {
+                    JReadVoiceEngine.synthesizeConfigLineAudio(
+                        this@TtsConfigEditorActivity, tempConfig, previewText, pointerJson, requestId
+                    )
+                }
+            }
+            if (audioBytes == null || audioBytes.isEmpty()) return@launch
+            if (!isWindowUsable) return@launch
+            val tempFile = java.io.File(cacheDir, "preview_${requestId}.wav")
+            tempFile.writeBytes(audioBytes)
+            playAudio(tempFile.absolutePath)
         }
     }
 
@@ -596,7 +653,12 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         return obj.toString()
     }
 
-    private fun buildConfig(requireTag: Boolean = true): JReadVoiceEngine.VoiceConfig? {
+    /**
+     * @param requireTag 为 true 时强制校验 voiceTag 非空（保存场景）。
+     * @param voiceOverride 非空时用它作为音色 id，忽略 spinner 选中项。
+     *   用于音色列表里的行内试听：用户此时尚未选定音色，spinner 可能没选或无有效项。
+     */
+    private fun buildConfig(requireTag: Boolean = true, voiceOverride: String? = null): JReadVoiceEngine.VoiceConfig? {
         val voiceTag = binding.etVoiceTag.text.toString().trim()
         // 试听时不需要强制填写标签（标签用于分组标识，与试听音色无关）；
         // 标签为空时用一个占位，避免下游合成因 voiceTag 为空出问题。
@@ -604,8 +666,11 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         val pluginIdx = binding.spinnerPlugin.selectedItemPosition
         val selectedPlugin = if (pluginIdx > 0) plugins.getOrNull(pluginIdx - 1) else null
         if (selectedPlugin == null) { toastOnUi("请选择一个插件"); return null }
-        if (selectedPlugin.code.isNotBlank() && voiceOptions.isNotEmpty() && binding.spinnerVoice.selectedItemPosition < 0) { toastOnUi("请先选择一个音色"); return null }
-        val voice = if (voiceOptions.isNotEmpty() && binding.spinnerVoice.selectedItemPosition in voiceOptions.indices) {
+        // 行内试听由 voiceOverride 提供音色，跳过「先选音色」校验
+        if (voiceOverride == null && selectedPlugin.code.isNotBlank()
+            && voiceOptions.isNotEmpty() && binding.spinnerVoice.selectedItemPosition < 0
+        ) { toastOnUi("请先选择一个音色"); return null }
+        val voice = voiceOverride ?: if (voiceOptions.isNotEmpty() && binding.spinnerVoice.selectedItemPosition in voiceOptions.indices) {
             voiceOptions[binding.spinnerVoice.selectedItemPosition].id
         } else { config.voice }
         val locale = if (localeOptions.isNotEmpty() && binding.spinnerLocale.selectedItemPosition < localeOptions.size && binding.spinnerLocale.visibility == View.VISIBLE) {
