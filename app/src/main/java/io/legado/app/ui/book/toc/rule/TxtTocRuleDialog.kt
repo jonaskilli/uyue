@@ -34,6 +34,7 @@ import io.legado.app.ui.widget.recycler.ItemTouchCallback
 import io.legado.app.ui.widget.recycler.VerticalDivider
 import io.legado.app.utils.ACache
 import io.legado.app.utils.applyTint
+import io.legado.app.utils.gone
 import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.launch
 import io.legado.app.utils.readText
@@ -124,8 +125,11 @@ class TxtTocRuleDialog() : BaseDialogFragment(R.layout.dialog_toc_regex),
             appDb.txtTocRuleDao.observeAll().catch {
                 AppLog.put("TXT目录规则对话框获取数据失败\n${it.localizedMessage}", it)
             }.flowOn(IO).conflate().collect { tocRules ->
-                initSelectedName(tocRules)
-                adapter.setItems(tocRules, adapter.diffItemCallBack)
+                // 内置「阅读导出书籍」规则不入库，这里插到列表首位，
+                // 便于用户手动改回：一旦误选了其他规则，仍可在此重新选中它。
+                val allRules = listOf(TextFile.legadoExportTocRule) + tocRules
+                initSelectedName(allRules)
+                adapter.setItems(allRules, adapter.diffItemCallBack)
             }
         }
     }
@@ -251,12 +255,17 @@ class TxtTocRuleDialog() : BaseDialogFragment(R.layout.dialog_toc_regex),
             payloads: MutableList<Any>
         ) {
             binding.apply {
+                val builtIn = TextFile.isBuiltInRule(item)
                 if (payloads.isEmpty()) {
                     root.setBackgroundColor(context.backgroundColor)
                     rbRegexName.text = item.name
                     titleExample.text = item.example
                     rbRegexName.isChecked = item.name == selectedName
                     swtEnabled.isChecked = item.enable
+                    // 内置规则不入库，启停/编辑/删除对它都无意义，隐藏对应控件
+                    swtEnabled.gone(builtIn)
+                    ivEdit.gone(builtIn)
+                    ivDelete.gone(builtIn)
                 } else {
                     for (i in payloads.indices) {
                         val bundle = payloads[i] as Bundle
@@ -284,16 +293,20 @@ class TxtTocRuleDialog() : BaseDialogFragment(R.layout.dialog_toc_regex),
                 swtEnabled.setOnCheckedChangeListener { buttonView, isChecked ->
                     if (buttonView.isPressed) {
                         getItem(holder.layoutPosition)?.let {
+                            if (TextFile.isBuiltInRule(it)) return@setOnCheckedChangeListener
                             it.enable = isChecked
                             viewModel.update(it)
                         }
                     }
                 }
                 ivEdit.setOnClickListener {
-                    showDialogFragment(TxtTocRuleEditDialog(getItem(holder.layoutPosition)?.id))
+                    val item = getItem(holder.layoutPosition) ?: return@setOnClickListener
+                    if (TextFile.isBuiltInRule(item)) return@setOnClickListener
+                    showDialogFragment(TxtTocRuleEditDialog(item.id))
                 }
                 ivDelete.setOnClickListener {
                     getItem(holder.layoutPosition)?.let { item ->
+                        if (TextFile.isBuiltInRule(item)) return@setOnClickListener
                         alert(R.string.draw) {
                             setMessage(getString(R.string.sure_del) + "\n" + item.name)
                             noButton()
@@ -309,6 +322,8 @@ class TxtTocRuleDialog() : BaseDialogFragment(R.layout.dialog_toc_regex),
         private var isMoved = false
 
         override fun swap(srcPosition: Int, targetPosition: Int): Boolean {
+            // 内置规则固定在首位，不允许被拖走，也不允许其他规则拖到它前面
+            if (srcPosition == 0 || targetPosition == 0) return false
             swapItem(srcPosition, targetPosition)
             isMoved = true
             return super.swap(srcPosition, targetPosition)
@@ -317,10 +332,13 @@ class TxtTocRuleDialog() : BaseDialogFragment(R.layout.dialog_toc_regex),
         override fun onClearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
             super.onClearView(recyclerView, viewHolder)
             if (isMoved) {
-                for ((index, item) in getItems().withIndex()) {
+                // 排除内置规则：它不入库，写入会把它变成一条可编辑的普通规则。
+                // 因此序号也从 1 开始单独编排，不受它在列表中占位的影响。
+                val dbRules = getItems().filterNot { TextFile.isBuiltInRule(it) }
+                dbRules.forEachIndexed { index, item ->
                     item.serialNumber = index + 1
                 }
-                viewModel.update(*getItems().toTypedArray())
+                viewModel.update(*dbRules.toTypedArray())
             }
             isMoved = false
         }

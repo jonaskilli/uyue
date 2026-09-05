@@ -7,6 +7,7 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.TxtTocRule
+import io.legado.app.R
 import io.legado.app.exception.EmptyFileException
 import io.legado.app.help.DefaultData
 import io.legado.app.help.book.isLocalModified
@@ -15,6 +16,7 @@ import io.legado.app.utils.EncodingDetect
 import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.StringUtils
 import io.legado.app.utils.Utf8BomUtils
+import splitties.init.appCtx
 import java.io.FileNotFoundException
 import java.nio.charset.Charset
 import java.util.regex.Matcher
@@ -30,6 +32,50 @@ class TextFile(private var book: Book) {
         const val spaceChars = "🫅🈳🏻"
         private const val txtBufferSize = 8 * 1024 * 1024
         private var textFile: TextFile? = null
+
+        /**
+         * 内置「阅读导出书籍」目录规则。
+         *
+         * 导出 txt 时（ContentProcessor.getContent）章节标题不带缩进、正文段落带缩进，
+         * 且每章之间有一个空行，据此可精确匹配标题行：
+         * - `(?:(?<=\n\n)|^)` 标题前是空行，或位于文件开头。
+         *   末尾的 `|^` 用于文件被手动删掉书名/作者/简介、直接从第一章开始的情况，
+         *   此时首个标题前没有空行，仅靠 lookbehind 会漏掉第一章。
+         *   lookbehind 为固定长度，在 Java 中合法且不消耗字符，matcher.start() 仍指向标题首字符。
+         * - `(?![\s　])` 排除带缩进的正文段落。
+         * - `(.*\S.*)` 排除空行。
+         * - `(?=\n[ \t　]|\s*\z)` 标题后必须紧跟带缩进的正文行，或已是文件结尾。
+         *   这一项抵消 `|^` 的副作用：文件开头的书名/作者/简介同样位于行首且无缩进，
+         *   但它们后面跟的是另一行无缩进元信息或空行，唯有真正的标题后面才跟缩进正文。
+         *
+         * 不入库：它是自动识别专用规则，不应被用户编辑或删除，
+         * 也不应影响 [getTocRules] 按序遍历的选优逻辑。
+         */
+        const val LEGADO_EXPORT_RULE_ID = -9999L
+
+        /** 是否为内置的「阅读导出书籍」规则。它不入库，编辑/删除/启停等操作对它无效。 */
+        fun isBuiltInRule(tocRule: TxtTocRule?): Boolean =
+            tocRule != null && tocRule.id == LEGADO_EXPORT_RULE_ID
+
+        val legadoExportTocRule: TxtTocRule by lazy {
+            TxtTocRule(
+                id = LEGADO_EXPORT_RULE_ID,
+                name = "阅读导出书籍",
+                rule = "(?:(?<=\\n\\n)|^)(?![\\s　])(.*\\S.*)(?=\\n[ \\t　]|\\s*\\z)",
+                example = "第一章 标题（自身无缩进，后一行是带缩进的正文）",
+                enable = true
+            )
+        }
+
+        // 以下为导出格式识别的阈值，只用于自动识别，不影响用户手动选择的规则
+        /** 最多检查的行数，避免大文件全量扫描 */
+        private const val MAX_FORMAT_CHECK_LINES = 3000
+        /** 少于此行数不判定为导出格式（内容太少，统计不可靠） */
+        private const val MIN_FORMAT_CHECK_LINES = 10
+        /** 缩进行占比需超过此值 */
+        private const val INDENT_RATIO_THRESHOLD = 0.5f
+        /** 至少要有这么多个候选标题 */
+        private const val MIN_CANDIDATE_TITLES = 3
 
         @Synchronized
         private fun getTextFile(book: Book): TextFile {
@@ -161,6 +207,8 @@ class TextFile(private var book: Book) {
         if (rr[0].isEmpty()) {
             return analyze()
         }
+        // 使用内置规则时，文件开头的书名/作者/简介属于书籍信息，不再生成「前言」章节
+        val useLegadoExportRule = rr[0] == legadoExportTocRule.rule
         lastVolumeTitle.value = ""
         val toc = arrayListOf<BookChapter>()
         var bookWordCount = 0
@@ -249,21 +297,34 @@ class TextFile(private var book: Book) {
                         if (toc.isEmpty()) { //如果当前没有章节，那么就是序章
                             //加入简介
                             if (chapterContent.isNotBlank()) {
-                                val title = replacement("前言", jsStr, toc)
-                                if (title.isNotEmpty()) {
-                                    //如果js把"前言"处理成空了，那么就不要前言,并且前言内容会全部放到简介里面去
-                                    val qyChapter = BookChapter()
-                                    qyChapter.title = title
-                                    qyChapter.start = curOffset
-                                    qyChapter.end = curOffset + chapterLength
-                                    qyChapter.wordCount =
-                                        StringUtils.wordCountFormat(chapterContentLength)
-                                    toc.add(qyChapter)
-                                }
-                                book.intro = if (chapterContentLength > 600 && title.isNotEmpty()) {
-                                    chapterContent.take(600)
+                                if (useLegadoExportRule) {
+                                    // 阅读导出的书籍：开头是书名/作者/简介，属于书籍信息。
+                                    // 与书源书籍保持一致，目录直接从第一章开始，不生成「前言」章节。
+                                    val (author, intro) = parseBookMetaInfo(chapterContent)
+                                    if (author.isNotBlank()) {
+                                        book.author = author
+                                    }
+                                    if (intro.isNotBlank()) {
+                                        book.intro = intro.take(600)
+                                    }
                                 } else {
-                                    chapterContent
+                                    val title = replacement("前言", jsStr, toc)
+                                    if (title.isNotEmpty()) {
+                                        //如果js把"前言"处理成空了，那么就不要前言,并且前言内容会全部放到简介里面去
+                                        val qyChapter = BookChapter()
+                                        qyChapter.title = title
+                                        qyChapter.start = curOffset
+                                        qyChapter.end = curOffset + chapterLength
+                                        qyChapter.wordCount =
+                                            StringUtils.wordCountFormat(chapterContentLength)
+                                        toc.add(qyChapter)
+                                    }
+                                    book.intro =
+                                        if (chapterContentLength > 600 && title.isNotEmpty()) {
+                                            chapterContent.take(600)
+                                        } else {
+                                            chapterContent
+                                        }
                                 }
                             }
                             val title = replacement(
@@ -489,9 +550,143 @@ class TextFile(private var book: Book) {
     }
 
     /**
+     * 判断文本是否**确定**为本应用导出的 txt。
+     *
+     * 用于自动识别，要求「百分百确认」，任一项不满足都返回 false 并回退到原有规则选优，
+     * 用户仍可在目录规则列表顶端手动选择内置规则。
+     *
+     * 导出文件的结构极其规整（见 [legadoExportTocRule]）：
+     * ```
+     * 书名 / 作者 / 简介（连续若干无缩进行）
+     * 空行
+     * 标题行（无缩进）
+     * 　　正文段（带缩进）
+     * 　　正文段（带缩进）
+     * 空行
+     * 标题行
+     * ...
+     * ```
+     * 据此逐行校验：一旦进入正文区，除「前面是空行的标题行」外，
+     * 任何无缩进行都说明不是导出格式。这能排除章节内夹杂小标题、
+     * 或仅部分段落缩进的普通 txt——它们缩进率可能同样很高，但结构不符。
+     */
+    private fun isStrictLegadoExportFormat(content: String): Boolean {
+        var totalLines = 0
+        var indentedLines = 0
+        // 文件开头连续的若干无缩进行视为头部元信息（书名/作者/简介），不受结构约束
+        var inHeader = true
+        var prevBlank = false
+
+        for (line in content.lineSequence()) {
+            if (line.isBlank()) {
+                prevBlank = true
+                inHeader = false
+                continue
+            }
+            if (++totalLines > MAX_FORMAT_CHECK_LINES) break
+            // 与导出时的缩进判定保持一致（ContentProcessor 的 trim 规则）
+            if (line[0].code <= 0x20 || line[0] == '　') {
+                indentedLines++
+                inHeader = false
+            } else {
+                // 正文区出现无缩进行且前面不是空行 → 不是导出格式
+                if (!inHeader && !prevBlank) return false
+            }
+            prevBlank = false
+        }
+
+        if (totalLines < MIN_FORMAT_CHECK_LINES) return false
+        if (indentedLines.toFloat() / totalLines <= INDENT_RATIO_THRESHOLD) return false
+        // 用内置规则实际试匹配，确认确实能分出足够多的章节
+        return countTitlesByLegadoRule(content) >= MIN_CANDIDATE_TITLES
+    }
+
+    /**
+     * 解析导出文件开头的书籍信息，返回 Pair(作者, 简介)。
+     *
+     * 对应 [ExportBookService.getAllContents] 写出的结构：
+     * ```
+     * 书名
+     * 作者：xxx
+     * 简介：
+     * <简介内容>
+     * ```
+     * 第一行是书名，此处不处理（书名由文件名决定）。
+     * 解析不到某一项时返回空串，调用方据此决定是否覆盖。
+     */
+    private fun parseBookMetaInfo(header: String): Pair<String, String> {
+        val authorPrefix = metaPrefix(R.string.author_show)
+        val introPrefix = metaPrefix(R.string.intro_show)
+        var author = ""
+        val introLines = arrayListOf<String>()
+        var inIntro = false
+
+        header.lineSequence().forEachIndexed { index, line ->
+            val trimmed = line.trim()
+            when {
+                // 第一行是书名
+                index == 0 -> return@forEachIndexed
+                // 进入简介后，其后所有行都归简介（简介支持多行）
+                inIntro -> introLines.add(line)
+                trimmed.startsWith(introPrefix) -> {
+                    inIntro = true
+                    val firstLine = trimmed.removePrefix(introPrefix)
+                        .trimStart('：', ':', ' ', '\t')
+                    if (firstLine.isNotEmpty()) {
+                        introLines.add(firstLine)
+                    }
+                }
+                author.isEmpty() && trimmed.startsWith(authorPrefix) -> {
+                    author = trimmed.removePrefix(authorPrefix)
+                        .trimStart('：', ':', ' ', '\t')
+                }
+            }
+        }
+        return author to introLines.joinToString("\n").trim()
+    }
+
+    /**
+     * 从形如「作者：%s」的资源串取出前缀（即「作者」）。
+     * 用资源串而非硬编码，以兼容当前语言下的导出格式（简体/繁体/英文等）。
+     * 同时去掉全角与半角冒号，匹配时再统一允许两种冒号。
+     */
+    private fun metaPrefix(resId: Int): String {
+        return appCtx.getString(resId, "")
+            .substringBefore('：')
+            .substringBefore(':')
+            .trim()
+    }
+
+    /**
+     * 用内置规则试匹配，统计能分出多少章节。
+     * 直接复用规则本身而非另行推导，避免「文件开头被删导致首个标题漏统计」。
+     */
+    private fun countTitlesByLegadoRule(content: String): Int {
+        val pattern = try {
+            legadoExportTocRule.rule.toPattern(Pattern.MULTILINE)
+        } catch (e: Exception) {
+            return 0
+        }
+        val matcher = pattern.matcher(content)
+        var count = 0
+        while (matcher.find()) {
+            if (++count >= MIN_CANDIDATE_TITLES) return count
+        }
+        return count
+    }
+
+    /**
      * 获取合适的目录规则
      */
     private fun getTocRule(content: String): TxtTocRule? {
+        // 仅当结构完全符合导出特征时才自动使用内置规则，优先级高于其后所有规则。
+        // 判定不通过一律回退到原有选优逻辑，用户可随时在规则列表顶端手动选择内置规则。
+        // 手动选定的规则保存在 book.tocUrl，只有其为空或文件被修改时才会走到这里，
+        // 因此手动选择的结果不会被这里的自动识别覆盖。
+        if (isStrictLegadoExportFormat(content)) {
+            AppLog.put("识别为阅读导出的TXT，使用内置目录规则")
+            return legadoExportTocRule
+        }
         val rules = getTocRules() //.reversed() 改动num >= maxNum条件，不需要再反转
         var maxNum = 1
         var mTocRule: TxtTocRule? = null
