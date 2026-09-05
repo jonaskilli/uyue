@@ -265,6 +265,7 @@ class ReadView(context: Context, attrs: AttributeSet) :
                             return true
                         }
                         if (!readAloudPanelSwipeUp && !readAloudPanelSwipeDown
+                            && startY > height * 0.1f
                             && event.y > startY + bottomSwipeSlop
                             && absY >= absX * 0.9f
                         ) {

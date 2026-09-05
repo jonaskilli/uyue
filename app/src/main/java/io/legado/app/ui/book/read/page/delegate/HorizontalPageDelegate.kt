@@ -81,7 +81,10 @@ abstract class HorizontalPageDelegate(readView: ReadView) : PageDelegate(readVie
             val deltaX = (focusX - startX).toInt()
             val deltaY = (focusY - startY).toInt()
             val distance = deltaX * deltaX + deltaY * deltaY
-            isMoved = distance > slopSquare
+            //起点落在屏幕顶部 10% 内时不翻页：该区域让给下拉状态栏，避免误触。
+            //注意只能在这里（!isMoved 分支）判定：一旦翻页开始，startY 会被
+            //setStartPoint 重置为当前触点，届时再判定会误伤正在进行的翻页。
+            isMoved = distance > slopSquare && startY >= viewHeight * 0.1f
             if (isMoved) {
                 if (sumX - startX > 0) {
                     //如果上一页不存在

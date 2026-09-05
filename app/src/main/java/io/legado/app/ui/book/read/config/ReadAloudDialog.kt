@@ -500,7 +500,14 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 val dy = e2.y - startY
                 val dx = e2.x - startX
                 // 全屏模式：明显向下、且以纵向为主 → 退出
-                if (isFullscreen && dy > touchSlop * 3 && dy > abs(dx)) {
+                // 排除顶部 10% 起手：该区域让给下拉状态栏，避免误触。
+                // 全屏时窗口铺满整屏，decorView 高度即屏幕高度，坐标原点为屏幕顶部；
+                // 半屏时该分支本就被 isFullscreen 挡掉，不受影响。
+                if (isFullscreen
+                    && startY > window.decorView.height * 0.1f
+                    && dy > touchSlop * 3
+                    && dy > abs(dx)
+                ) {
                     gestureHandled = true
                     dismiss()
                     return true

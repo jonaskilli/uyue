@@ -304,8 +304,14 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 val startY = e1?.y ?: downY
                 val dx = e2.x - startX
                 val dy = e2.y - startY
-                // 纵向向下位移需大于横向，且超过阈值即退出全屏
-                if (dy > 60 && Math.abs(dy) > Math.abs(dx)) {
+                // 纵向向下位移需大于横向，且超过阈值即退出全屏。
+                // 排除顶部 10% 起手：该区域让给下拉状态栏，避免误触。
+                // 手势挂在 ivFullscreenImage 上，其坐标原点即屏幕顶部（它是根布局首个子项），
+                // 但它的高度比屏幕少了底部字幕区，故用 rootView 高度计算 10%，与其余各处一致。
+                if (startY > binding.rootView.height * 0.1f
+                    && dy > 60
+                    && Math.abs(dy) > Math.abs(dx)
+                ) {
                     dismissAllowingStateLoss()
                     moved = true
                     return false

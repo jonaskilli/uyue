@@ -85,7 +85,10 @@ class ScrollPageDelegate(readView: ReadView) : PageDelegate(readView) {
             val deltaX = (pointX - startX).toInt()
             val deltaY = (pointY - startY).toInt()
             val distance = deltaX * deltaX + deltaY * deltaY
-            isMoved = distance > slopSquare
+            //起点落在屏幕顶部 10% 内时不滚动：该区域让给下拉状态栏，避免误触。
+            //注意只能在这里（!isMoved 分支）判定：一旦滚动开始，startY 会被
+            //setStartPoint 重置为当前触点，届时再判定会误伤正在进行的滚动。
+            isMoved = distance > slopSquare && startY >= viewHeight * 0.1f
             if (isMoved) {
                 readView.setStartPoint(event.x, event.y, false)
             }
