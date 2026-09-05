@@ -980,7 +980,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     // 6.1 超短音频判定阈值（秒），设为0表示不限制
     // 注意：EditTextPreference 存储的是 String，不能用 getFloat/putFloat
     var shortAudioMinDuration: Float
-        get() = appCtx.getPrefString(PreferKey.shortAudioMinDuration, "0.3")?.toFloatOrNull() ?: 0.3f
+        get() = appCtx.getPrefString(PreferKey.shortAudioMinDuration, "0.1")?.toFloatOrNull() ?: 0.1f
         set(value) = appCtx.putPrefString(PreferKey.shortAudioMinDuration, value.toString())
 
     // 7. 字幕每行最大中文字符数

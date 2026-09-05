@@ -171,7 +171,7 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
                 val current = AppConfig.shortAudioMinDuration
                 pref.summary = "当前阈值: ${current}秒，0表示不限制"
                 pref.setOnPreferenceChangeListener { _, newValue ->
-                    val value = (newValue as String).toFloatOrNull() ?: 0.3f
+                    val value = (newValue as String).toFloatOrNull() ?: 0.1f
                     AppConfig.shortAudioMinDuration = value
                     pref.summary = "当前阈值: ${value}秒，0表示不限制"
                     true

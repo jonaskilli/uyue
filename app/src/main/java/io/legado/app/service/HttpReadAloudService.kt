@@ -54,6 +54,7 @@ import io.legado.app.help.tts.TtsEngineActivator
 import io.legado.app.help.tts.TtsWebSocketHelper
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
+import io.legado.app.utils.AudioCacheValidator
 import io.legado.app.utils.AudioConcatUtil
 import io.legado.app.utils.AudioConvertUtil
 import io.legado.app.model.analyzeRule.AnalyzeUrl
@@ -471,15 +472,26 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                         removeLegacySegInfo(fileName)
                         val file = getSpeakFileAsMd5(fileName)
                         if (file.exists()) {
-                            val mediaItem = MediaItem.Builder()
-                                .setMediaId("$index")
-                                .setUri(Uri.fromFile(file))
-                                .build()
-                            launch(Dispatchers.Main) {
-                                exoPlayer.addMediaSource(createLocalMediaSource(mediaItem))
+                            // 校验缓存有效性：TTS 合成失败时可能留下空文件/残缺文件/静音文件，
+                            // 此前只判断 exists()，导致再次朗读到该段时直接播放静音，
+                            // 表现为「半章内容被快速跳过」。坏缓存删除后落到下面重新合成一次。
+                            // 只在这里（命中缓存的瞬间）检测：开始朗读/切章/翻页都会重新走到此处，
+                            // 队列内正常朗读时不做检测，合成失败就播过去，不打断朗读节奏。
+                            if (AudioCacheValidator.isBadCache(file)) {
+                                AppLog.put("HttpTTS缓存无效，删除重新合成: $fileName")
+                                file.delete()
+                            } else {
+                                val mediaItem = MediaItem.Builder()
+                                    .setMediaId("$index")
+                                    .setUri(Uri.fromFile(file))
+                                    .build()
+                                launch(Dispatchers.Main) {
+                                    exoPlayer.addMediaSource(createLocalMediaSource(mediaItem))
+                                }
+                                return@forEachIndexed
                             }
                         }
-                        return@forEachIndexed
+                        // 文件不存在或已删除 → 落到下面的合成流程
                     }
 
                     text = applyTtsScripts(text)

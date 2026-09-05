@@ -304,6 +304,69 @@ object AudioDecodeUtil {
         }
     }
 
+    /**
+     * 计算音频数据的归一化能量（RMS，0.0~1.0），用于静音/空音频检测。
+     *
+     * 只做「提取 PCM + 平方均值」，不重采样、不做增益与后处理，
+     * 因此比 [decodeToStandardWav] 轻得多，可安全用于缓存命中时的逐段校验。
+     *
+     * WAV 直接读 PCM 数据（无需解码）；其他格式先经 MediaCodec 解码。
+     * 采样时按 [step] 间隔抽样，大文件也不必遍历全部采样点。
+     *
+     * @return 归一化 RMS；样本为空或解码失败时返回 null
+     */
+    @Suppress("unused")
+    fun calculateNormalizedRms(audioData: ByteArray, step: Int = 8): Float? {
+        if (audioData.isEmpty()) return null
+        val isWav = audioData.size >= 12 &&
+                String(audioData.copyOfRange(0, 4)) == "RIFF" &&
+                String(audioData.copyOfRange(8, 12)) == "WAVE"
+
+        // WAV 直接读 PCM 失败时（非常规 chunk 布局）回退到解码
+        val pcmResult = try {
+            if (isWav) {
+                extractWavPcm(audioData) ?: decodeViaMediaCodec(audioData)
+            } else {
+                decodeViaMediaCodec(audioData)
+            }
+        } catch (e: Exception) {
+            null
+        } ?: return null
+
+        val (pcm, _, channels) = pcmResult
+        if (pcm.size < 2 || channels <= 0) return null
+
+        val frameSize = channels * 2
+        val frames = pcm.size / frameSize
+        if (frames <= 0) return null
+
+        // 抽样遍历：每 step 帧取一帧，降低大文件的检测开销
+        var sumSquares = 0.0
+        var count = 0
+        var frame = 0
+        while (frame < frames) {
+            val base = frame * frameSize
+            // 各通道取平均，得到该帧的单声道幅度
+            var sample = 0.0
+            for (ch in 0 until channels) {
+                val idx = base + ch * 2
+                if (idx + 1 >= pcm.size) break
+                val lo = pcm[idx].toInt() and 0xFF
+                val hi = pcm[idx + 1].toInt()
+                val raw = lo or (hi shl 8)
+                sample += if (raw > 32767) (raw - 65536).toDouble() else raw.toDouble()
+            }
+            sample /= channels
+            val normalized = sample / 32768.0
+            sumSquares += normalized * normalized
+            count++
+            frame += step
+        }
+
+        if (count == 0) return null
+        return kotlin.math.sqrt(sumSquares / count).toFloat()
+    }
+
     /** 从 WAV ByteArray 中提取 PCM 数据 */
     private fun extractWavPcm(data: ByteArray): Triple<ByteArray, Int, Int>? {
         return try {

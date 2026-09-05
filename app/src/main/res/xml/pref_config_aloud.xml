@@ -256,7 +256,7 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.EditTextPreference
-            android:defaultValue="0.3"
+            android:defaultValue="0.1"
             android:title="@string/short_audio_min_duration"
             android:summary="@string/short_audio_min_duration_summary"
             android:key="shortAudioMinDuration"
