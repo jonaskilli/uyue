@@ -34,6 +34,19 @@ object AiEffectAnalyzer {
     private const val MAX_KEYWORD_LEN = 2
 
     /**
+     * 候选少于这个数就启用高频单字兜底。
+     * AI 常给"目光""书册"这类整词检索不到、但含可用单字的关键字，
+     * 候选过少会让精选阶段没得选。
+     */
+    private const val FALLBACK_MIN_CANDIDATES = 35
+
+    /** 兜底时取出现次数最多的几个单字 */
+    private const val FALLBACK_TOP_CHARS = 10
+
+    /** 兜底检索的候选上限 */
+    private const val FALLBACK_POOL_LIMIT = 100
+
+    /**
      * 每多少字配 1 个关键字。即「每 100 字 12 个」（约每 8.3 字 1 个）。
      * 用整数分母避免浮点，取整为 8，略多于 12 个/100 字。
      */
@@ -63,6 +76,26 @@ object AiEffectAnalyzer {
 
     /** 每段最多选几个音效 */
     private fun pickLimit(): Int = AppConfig.aiEffectMaxPick.coerceAtLeast(1)
+
+    /**
+     * 统计关键字里出现次数最多的若干单字。
+     * 候选不足时用它兜底：整词无命中（如"书册"）时，单字（"书"）往往能命中
+     * "翻开一本书""书店翻书"等。只统计汉字。
+     */
+    private fun topFrequentChars(keywords: Collection<String>, topN: Int): List<String> {
+        val counter = LinkedHashMap<Char, Int>()
+        for (kw in keywords) {
+            for (ch in kw) {
+                if (ch in '\u4e00'..'\u9fa5') {
+                    counter[ch] = (counter[ch] ?: 0) + 1
+                }
+            }
+        }
+        return counter.entries
+            .sortedByDescending { it.value }
+            .take(topN)
+            .map { it.key.toString() }
+    }
 
     /**
      * 旧版内置提示词的特征串，用于 App 启动时判断是否需要升级。
@@ -118,11 +151,33 @@ object AiEffectAnalyzer {
         }
         // 候选池随段数放宽，但设上限避免 prompt 过长
         val poolLimit = (AppConfig.aiEffectMaxCandidates * paras.size).coerceAtMost(200)
-        val candidates = AiEffectIndex.searchByKeywords(
+        var candidates = AiEffectIndex.searchByKeywords(
             allKeywords,
             AppConfig.aiEffectCandidatesPerKeyword,
             poolLimit
         )
+        // 候选过少时启用高频单字兜底：
+        // AI 常给"书册"这类整词无命中、但单字"书"能命中"翻开一本书""书店翻书"的关键字。
+        if (candidates.size < FALLBACK_MIN_CANDIDATES) {
+            val topChars = topFrequentChars(allKeywords, FALLBACK_TOP_CHARS)
+            if (topChars.isNotEmpty()) {
+                val before = candidates.size
+                val extra = AiEffectIndex.searchByKeywords(
+                    topChars,
+                    AppConfig.aiEffectCandidatesPerKeyword,
+                    FALLBACK_POOL_LIMIT
+                )
+                // 先保留原候选（更精确），再补充兜底命中
+                val merged = LinkedHashMap<String, AiEffectIndex.Entry>()
+                candidates.forEach { merged[it.name] = it }
+                extra.forEach { merged.putIfAbsent(it.name, it) }
+                candidates = merged.values.toList()
+                AppLog.put(
+                    "$TAG: 候选不足($before<${FALLBACK_MIN_CANDIDATES})，" +
+                        "高频单字兜底 $topChars -> ${candidates.size}条"
+                )
+            }
+        }
         if (candidates.isEmpty()) {
             AppLog.put("$TAG: 关键字无候选命中: $allKeywords")
             return@withContext paras.associate { it.first to emptyList() }
