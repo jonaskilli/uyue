@@ -1,26 +1,40 @@
 package io.legado.app.service
 
 import io.legado.app.constant.AppLog
+import io.legado.app.help.config.AppConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import splitties.init.appCtx
+import java.io.File
 
 /**
  * 广播剧音效库索引。
  *
- * 数据来自内置 assets：`ai_effect_index.json`，结构为
+ * 结构为
  * ```json
  * { "01_通用母库": { "拟音": ["炒菜", ...], "环境声": [...] }, ... }
  * ```
- * 加载后展开为扁平列表 [Entry]，音效名全局唯一，因此可用名字直接反查路径。
+ *
+ * 数据源优先级：
+ * 1. 外部文件 [indexFile]（用户可在「音效规则管理」里编辑、增删）
+ * 2. 不存在时从 assets 内置文件导出一份到该路径，再加载
+ *
+ * 这样用户既能直接用内置库，也能自行裁剪（比如删掉用不上的音效、缩短 AI 候选范围）。
  */
 object AiEffectIndex {
 
     private const val TAG = "AiEffectIndex"
     private const val ASSET_FILE = "ai_effect_index.json"
+
+    /** 外部索引文件名，放在音效库根目录下 */
+    const val INDEX_FILE_NAME = "ai_effect_index.json"
+
+    /** 外部索引文件。可被用户编辑，优先于内置资源 */
+    fun indexFile(): File = File(AppConfig.aiEffectLocalDir, INDEX_FILE_NAME)
 
     /**
      * 一个音效条目。
@@ -46,24 +60,65 @@ object AiEffectIndex {
 
     fun size(): Int = entries.size
 
-    /** 加载索引，已加载则直接返回。可在任意线程调用，解析在 IO 线程执行。 */
+    /**
+     * 加载索引，已加载则直接返回。可在任意线程调用，IO 在 [Dispatchers.IO] 执行。
+     *
+     * 优先读外部文件；不存在或不可读时，把 assets 内置索引导出到该路径再加载。
+     */
     suspend fun ensureLoaded() {
         if (loaded) return
         lock.withLock {
             if (loaded) return
-            withContext(Dispatchers.IO) { loadFromAssets() }
+            withContext(Dispatchers.IO) { load() }
         }
     }
 
-    private fun loadFromAssets() {
-        try {
-            val text = appCtx.assets.open(ASSET_FILE).bufferedReader().use { it.readText() }
-            parse(text)
-            loaded = true
-            AppLog.put("$TAG: 索引加载完成，共 ${entries.size} 个音效")
-        } catch (e: Exception) {
-            AppLog.put("$TAG: 索引加载失败 ${e.localizedMessage}", e)
+    /**
+     * 丢弃内存数据并重新加载。
+     * 供用户在「音效规则管理」里编辑完索引后立即生效。
+     */
+    suspend fun reload() {
+        lock.withLock {
+            withContext(Dispatchers.IO) {
+                entries = emptyList()
+                byName = emptyMap()
+                loaded = false
+                load()
+            }
         }
+    }
+
+    private fun load() {
+        val file = indexFile()
+        // 1. 外部文件优先
+        if (file.exists() && file.length() > 0L) {
+            try {
+                parse(file.readText())
+                loaded = true
+                AppLog.put("$TAG: 从外部文件加载索引，共 ${entries.size} 个音效")
+                return
+            } catch (e: Exception) {
+                AppLog.put("$TAG: 外部索引解析失败，回退内置: ${e.localizedMessage}", e)
+            }
+        }
+        // 2. 导出内置索引到外部（便于用户查看与修改），失败则直接用内置
+        val text = try {
+            appCtx.assets.open(ASSET_FILE).bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            AppLog.put("$TAG: 内置索引读取失败 ${e.localizedMessage}", e)
+            return
+        }
+        try {
+            file.parentFile?.mkdirs()
+            file.writeText(text)
+            AppLog.put("$TAG: 已导出内置索引到 ${file.absolutePath}")
+        } catch (e: Exception) {
+            // 导出失败不致命（多为分区存储权限问题），仍用内置内容继续
+            AppLog.put("$TAG: 内置索引导出失败，仅使用内存数据: ${e.localizedMessage}")
+        }
+        parse(text)
+        loaded = true
+        AppLog.put("$TAG: 索引加载完成，共 ${entries.size} 个音效")
     }
 
     /** 解析索引 JSON，替换内存中的数据 */
@@ -96,6 +151,49 @@ object AiEffectIndex {
     fun findByName(name: String): Entry? {
         if (!loaded) return null
         return byName[name.trim()]
+    }
+
+    /** 所有音效条目，供界面展示与编辑 */
+    fun allEntries(): List<Entry> = entries
+
+    /**
+     * 用外界编辑好的条目整体替换索引并写入外部文件。
+     * 索引文件优先于内置资源，因此写盘后下次启动仍是这份。
+     * @return 成功返回 null，失败返回错误信息
+     */
+    fun replaceAll(newEntries: List<Entry>): String? {
+        val grouped = LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>>()
+        for (e in newEntries) {
+            val subs = grouped.getOrPut(e.category) { LinkedHashMap() }
+            val names = subs.getOrPut(e.sub) { ArrayList() }
+            if (e.name !in names) names.add(e.name)
+        }
+        val obj = JSONObject()
+        grouped.forEach { (cat, subs) ->
+            val subObj = JSONObject()
+            subs.forEach { (sub, names) ->
+                if (names.isNotEmpty()) subObj.put(sub, JSONArray(names))
+            }
+            if (subObj.length() > 0) obj.put(cat, subObj)
+        }
+        return try {
+            val file = indexFile()
+            file.parentFile?.mkdirs()
+            val tmp = File(file.absolutePath + ".tmp")
+            tmp.writeText(obj.toString())
+            if (file.exists()) file.delete()
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, true)
+                tmp.delete()
+            }
+            entries = newEntries
+            byName = newEntries.associateBy { it.name }
+            AppLog.put("$TAG: 索引已保存，共 ${entries.size} 个音效")
+            null
+        } catch (e: Exception) {
+            AppLog.put("$TAG: 索引保存失败 ${e.localizedMessage}", e)
+            "保存失败：${e.localizedMessage}"
+        }
     }
 
     /**

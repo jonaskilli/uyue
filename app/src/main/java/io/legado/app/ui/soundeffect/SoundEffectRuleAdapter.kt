@@ -47,6 +47,14 @@ class SoundEffectRuleAdapter(
 
     private val inflater = android.view.LayoutInflater.from(context)
 
+    /**
+     * AI 音效（广播剧音效库）模式。
+     * 该模式下列表展示的是音效库目录，而非规则：
+     * 分组名是「分类/子分类」，条目名是音效名、pattern 是音效相对路径。
+     * 试听直接按路径取文件，不走规则里的 JSON 索引轮换。
+     */
+    var aiMode: Boolean = false
+
     /** 当前模式的完整数据，直接被增删改操作就地修改 */
     var data: MutableList<SoundEffectGroupWithRules> = mutableListOf()
         private set
@@ -260,6 +268,19 @@ class SoundEffectRuleAdapter(
         }
     }
 
+    /** 试听一条。AI 模式按相对路径取文件，规则模式解析音效标记 */
+    private fun playItem(item: SoundEffectFlatItem.RuleItem, cb: CallBack) {
+        if (aiMode) {
+            SoundEffectPlayer.playAiEffect(item.rule.pattern) { error ->
+                error?.let { cb.onPlayError(it) }
+            }
+        } else {
+            SoundEffectPlayer.play(item.rule.replacement) { error ->
+                error?.let { cb.onPlayError(it) }
+            }
+        }
+    }
+
     inner class RuleViewHolder(private val binding: ItemSoundEffectRuleBinding) :
         RecyclerView.ViewHolder(binding.root) {
 
@@ -267,14 +288,13 @@ class SoundEffectRuleAdapter(
             binding.ivPlay.setOnClickListener {
                 val item = flatItems.getOrNull(bindingAdapterPosition)
                         as? SoundEffectFlatItem.RuleItem ?: return@setOnClickListener
-                SoundEffectPlayer.play(item.rule.replacement) { error ->
-                    error?.let { callBack.onPlayError(it) }
-                }
+                playItem(item, callBack)
             }
             binding.root.setOnClickListener {
                 val item = flatItems.getOrNull(bindingAdapterPosition)
                         as? SoundEffectFlatItem.RuleItem ?: return@setOnClickListener
-                callBack.edit(item.rule)
+                // AI 模式没有「编辑规则」的概念，整行点击直接试听
+                if (aiMode) playItem(item, callBack) else callBack.edit(item.rule)
             }
             binding.swtEnabled.setOnCheckedChangeListener { buttonView, isChecked ->
                 if (!buttonView.isPressed) return@setOnCheckedChangeListener
@@ -285,6 +305,7 @@ class SoundEffectRuleAdapter(
             binding.ivEdit.setOnClickListener {
                 val item = flatItems.getOrNull(bindingAdapterPosition)
                         as? SoundEffectFlatItem.RuleItem ?: return@setOnClickListener
+                // 编辑入口在 Activity 里按模式分流：AI 模式改名，规则模式打开编辑页
                 callBack.edit(item.rule)
             }
             binding.cbName.setOnClickListener {

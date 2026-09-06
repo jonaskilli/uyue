@@ -7,6 +7,7 @@ import android.view.MenuItem
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.PopupMenu
 import androidx.appcompat.widget.SearchView
 import androidx.lifecycle.lifecycleScope
@@ -17,6 +18,7 @@ import io.legado.app.base.VMBaseActivity
 import io.legado.app.constant.AppLog
 import io.legado.app.databinding.ActivitySoundEffectRuleBinding
 import io.legado.app.databinding.DialogEditTextBinding
+import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.lib.theme.primaryTextColor
@@ -163,6 +165,7 @@ class SoundEffectRuleActivity :
     private fun modeOfCheckedId(checkedId: Int): String = when (checkedId) {
         R.id.rb_mode_normal -> SoundEffectRuleManager.MODE_NORMAL
         R.id.rb_mode_transition -> SoundEffectRuleManager.MODE_TRANSITION
+        R.id.rb_mode_ai -> SoundEffectRuleManager.MODE_AI
         else -> SoundEffectRuleManager.MODE_ALL
     }
 
@@ -200,6 +203,7 @@ class SoundEffectRuleActivity :
                 busy = false
                 hideLoading()
                 error?.let { toastOnUi(it) }
+                invalidateOptionsMenu()
                 adapter.clearSelection()
                 searchView.setQuery("", false)
                 upPathView()
@@ -215,14 +219,22 @@ class SoundEffectRuleActivity :
     private fun checkedIdOfMode(mode: String): Int = when (mode) {
         SoundEffectRuleManager.MODE_NORMAL -> R.id.rb_mode_normal
         SoundEffectRuleManager.MODE_TRANSITION -> R.id.rb_mode_transition
+        SoundEffectRuleManager.MODE_AI -> R.id.rb_mode_ai
         else -> R.id.rb_mode_all
     }
 
     private fun upPathView() {
-        binding.tvPath.text = SoundEffectRuleManager.fileOf(viewModel.mode).absolutePath
+        binding.tvPath.text =
+            if (viewModel.mode == SoundEffectRuleManager.MODE_AI) {
+                SoundEffectRuleManager.aiIndexPath()
+            } else {
+                SoundEffectRuleManager.fileOf(viewModel.mode).absolutePath
+            }
     }
 
     private fun refreshList(keepExpanded: Boolean = true) {
+        // AI 模式改变试听与点击事件的行为，必须在提交数据前设置
+        adapter.aiMode = viewModel.mode == SoundEffectRuleManager.MODE_AI
         adapter.submit(viewModel.data, searchView.query?.toString().orEmpty(), keepExpanded)
     }
 
@@ -239,6 +251,17 @@ class SoundEffectRuleActivity :
 
     override fun onCompatCreateOptionsMenu(menu: android.view.Menu): Boolean {
         menuInflater.inflate(R.menu.sound_effect_rule, menu)
+        // AI 音效是音效库目录，不是规则文件：新增规则/分组、导入、
+        // 以及「新增音效」(写 base64 JSON) 都不适用，只保留展开收起与导出
+        if (viewModel.mode == SoundEffectRuleManager.MODE_AI) {
+            listOf(
+                R.id.menu_add_rule,
+                R.id.menu_add_group,
+                R.id.menu_add_sound_effect,
+                R.id.menu_batch_add_sound_effect,
+                R.id.menu_import_local
+            ).forEach { menu.findItem(it)?.isVisible = false }
+        }
         return super.onCompatCreateOptionsMenu(menu)
     }
 
@@ -355,7 +378,84 @@ class SoundEffectRuleActivity :
     }
 
     override fun edit(rule: SoundEffectRule) {
-        startEdit(rule, findGroupOfRule(rule.id)?.group?.id ?: defaultGroupId())
+        // AI 音效没有可编辑字段，编辑入口用于改名（会连同本地文件一起改）
+        if (viewModel.mode == SoundEffectRuleManager.MODE_AI) {
+            showRenameAiSoundDialog(rule)
+        } else {
+            startEdit(rule, findGroupOfRule(rule.id)?.group?.id ?: defaultGroupId())
+        }
+    }
+
+    // ---------------- AI 音效改名 ----------------
+
+    /**
+     * 改名并同步重命名本地音效文件。
+     *
+     * 顺序很重要：先改文件，成功后再更新内存数据与索引。
+     * 文件改名不可逆，若先改内存再改文件失败，索引会指向不存在的文件。
+     */
+    private fun showRenameAiSoundDialog(rule: SoundEffectRule) {
+        val oldName = rule.name
+        val oldPath = rule.pattern
+        val input = android.widget.EditText(this).apply {
+            setText(oldName)
+            setSelectAllOnFocus(true)
+            setSingleLine(true)
+        }
+        val padding = (16 * resources.displayMetrics.density).toInt()
+        val container = android.widget.FrameLayout(this).apply {
+            setPadding(padding, padding / 2, padding, 0)
+            addView(input)
+        }
+        alert("AI音效改名") {
+            customView { container }
+            neutralButton("重置为原名")
+            noButton()
+            yesButton {
+                val newName = input.text?.toString()?.trim().orEmpty()
+                if (newName.isEmpty() || newName == oldName) return@yesButton
+                renameAiSound(rule, oldPath, newName)
+            }
+        }.apply {
+            // 重置：把曾经改过的名字改回原名（原名在 pattern 的文件名部分丢失前可用）
+            getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
+                val original = oldPath.substringAfterLast('/').removeSuffix(".mp3")
+                if (original.isNotBlank() && original != oldName) {
+                    renameAiSound(rule, oldPath, original)
+                }
+                dismiss()
+            }
+        }
+    }
+
+    private fun renameAiSound(rule: SoundEffectRule, oldPath: String, newName: String) {
+        val safeName = newName.replace(Regex("[/\\\\:*?\"<>|]"), "_")
+        val prefix = oldPath.substringBeforeLast('/', "")
+        val newPath = if (prefix.isEmpty()) "$safeName.mp3" else "$prefix/$safeName.mp3"
+        showLoading("正在改名…")
+        lifecycleScope.launch {
+            val error = withContext(IO) {
+                runCatching {
+                    val oldFile = java.io.File(AppConfig.aiEffectLocalDir, oldPath)
+                    val newFile = java.io.File(AppConfig.aiEffectLocalDir, newPath)
+                    // 文件可能尚未下载（本地没有），此时只需改索引
+                    if (oldFile.exists() && !newFile.exists()) {
+                        newFile.parentFile?.mkdirs()
+                        if (!oldFile.renameTo(newFile)) {
+                            // 跨存储卷时 renameTo 会失败，退化为复制
+                            oldFile.copyTo(newFile)
+                            oldFile.delete()
+                        }
+                    }
+                }.exceptionOrNull()?.localizedMessage
+            }
+            hideLoading()
+            if (error != null) {
+                toastOnUi("改名失败：$error")
+                return@launch
+            }
+            update(rule.copy(name = safeName, pattern = newPath))
+        }
     }
 
     override fun delete(rule: SoundEffectRule) {
@@ -618,12 +718,25 @@ class SoundEffectRuleActivity :
     private fun exportCurrent() {
         showLoading("正在生成文件…")
         lifecycleScope.launch {
-            val json = withContext(IO) { SoundEffectRuleManager.toJson(viewModel.data) }
+            val isAi = viewModel.mode == SoundEffectRuleManager.MODE_AI
+            val fileName: String
+            val json = if (isAi) {
+                // AI 索引有自己的结构，直接导出索引文件原文，便于备份与在电脑上编辑
+                fileName = io.legado.app.service.AiEffectIndex.INDEX_FILE_NAME
+                withContext(IO) {
+                    runCatching {
+                        io.legado.app.service.AiEffectIndex.indexFile().readText()
+                    }.getOrDefault(SoundEffectRuleManager.toJson(viewModel.data))
+                }
+            } else {
+                fileName = SoundEffectRuleManager.fileNameOf(viewModel.mode)
+                withContext(IO) { SoundEffectRuleManager.toJson(viewModel.data) }
+            }
             hideLoading()
             exportDoc.launch {
                 mode = HandleFileContract.EXPORT
                 fileData = HandleFileContract.FileData(
-                    SoundEffectRuleManager.fileNameOf(viewModel.mode),
+                    fileName,
                     json.toByteArray(),
                     "application/json"
                 )

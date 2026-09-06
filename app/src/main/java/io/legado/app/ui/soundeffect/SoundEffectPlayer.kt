@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.audio.DefaultAudioSink
 import io.legado.app.constant.AppLog
 import io.legado.app.help.audio.GainAudioProcessor
 import io.legado.app.help.config.AppConfig
+import io.legado.app.service.AiEffectDownloader
 import io.legado.app.service.BaseReadAloudService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -79,6 +80,29 @@ object SoundEffectPlayer {
                 AppLog.put("[音效试听] 部分音效加载失败：${names.size} 个中成功 ${files.size} 个")
             }
             startPlay(files, onResult)
+        }
+    }
+
+    /**
+     * 试听广播剧音效库里的某个音效。
+     * 与 [play] 的区别：直接给相对路径（如 "01_通用母库/拟音/炒菜.mp3"），
+     * 由 [AiEffectDownloader] 负责本地优先/远端下载，不经 JSON 索引轮换。
+     *
+     * @param relativePath 音效在库中的相对路径
+     */
+    fun playAiEffect(relativePath: String, onResult: ((String?) -> Unit)? = null) {
+        loadJob?.cancel()
+        loadJob = scope.launch {
+            val file = withContext(Dispatchers.IO) {
+                runCatching { AiEffectDownloader.obtain(relativePath) }
+                    .onFailure { AppLog.put("[音效试听] AI音效加载失败：$relativePath, ${it.message}") }
+                    .getOrNull()
+            }
+            if (file == null) {
+                onResult?.invoke("音效加载失败：$relativePath")
+                return@launch
+            }
+            startPlay(listOf(file), onResult)
         }
     }
 

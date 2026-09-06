@@ -3,6 +3,7 @@ package io.legado.app.ui.soundeffect
 import io.legado.app.constant.AppLog
 import io.legado.app.help.EngineDataDir
 import io.legado.app.help.http.okHttpClient
+import io.legado.app.service.AiEffectIndex
 import io.legado.app.service.BaseReadAloudService
 import okhttp3.Request
 import org.json.JSONArray
@@ -28,6 +29,13 @@ object SoundEffectRuleManager {
     const val MODE_NORMAL = "normal"
     const val MODE_TRANSITION = "transition"
 
+    /**
+     * AI 音效（广播剧音效库）索引。
+     * 与其它模式不同：它不是规则列表，而是 `{分类: {子分类: [音效名]}}` 的目录索引，
+     * 由 [AiEffectIndex] 负责读写，这里只做导航与标题。
+     */
+    const val MODE_AI = "ai"
+
     private const val BASE_URL = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/"
     private const val FILE_ALL = "ttsrv-replaces3.json"
     private const val FILE_NORMAL = "ttsrv-replaces5.json"
@@ -48,14 +56,73 @@ object SoundEffectRuleManager {
     fun urlOf(mode: String): String =
         BASE_URL + fileNameOf(mode) + "?download=true"
 
-    /** 打开界面时需要检查的全部模式 */
+    /**
+     * 打开界面时需要检查的全部模式。
+     * [MODE_AI] 走内置索引导出流程（[AiEffectIndex.ensureLoaded]），不参与这里的下载。
+     */
     fun allModes(): List<String> = listOf(MODE_ALL, MODE_NORMAL, MODE_TRANSITION)
 
     fun modeTitle(mode: String): String = when (mode) {
         MODE_NORMAL -> "普通音效"
         MODE_TRANSITION -> "衔接音效"
+        MODE_AI -> "AI音效"
         else -> "全部音效"
     }
+
+    /**
+     * AI 音效模式：把音效库索引转成「分组 + 条目」结构供界面展示。
+     * 分组名是「分类/子分类」，条目名是音效名、pattern 是相对路径，
+     * 这样可以直接复用规则列表的分组展示、搜索、删除与多选能力。
+     */
+    fun loadAiIndex(): MutableList<SoundEffectGroupWithRules> {
+        val result = mutableListOf<SoundEffectGroupWithRules>()
+        var groupSeq = 0L
+        var ruleSeq = 0L
+        AiEffectIndex.allEntries()
+            .groupBy { "${it.category}/${it.sub}" }
+            .forEach { (groupName, list) ->
+                val group = SoundEffectRuleGroup(
+                    id = System.currentTimeMillis() + groupSeq++,
+                    name = groupName,
+                    order = result.size
+                )
+                val rules = list.map { entry ->
+                    SoundEffectRule(
+                        id = System.currentTimeMillis() + ruleSeq++,
+                        name = entry.name,
+                        // pattern 存相对路径，供试听与保存时还原
+                        pattern = entry.path
+                    )
+                }.toMutableList()
+                result.add(SoundEffectGroupWithRules(group, rules))
+            }
+        return result
+    }
+
+    /**
+     * AI 音效模式：把界面编辑后的结构写回索引文件。
+     * 被删掉的分类/条目即永久移除，下次 AI 检索不会再命中。
+     */
+    fun saveAiIndex(data: List<SoundEffectGroupWithRules>): String? {
+        val entries = ArrayList<AiEffectIndex.Entry>()
+        data.forEach { gwr ->
+            gwr.list.forEach { rule ->
+                val name = rule.name.trim()
+                if (name.isBlank()) return@forEach
+                // 路径形如 "分类/子分类/名字.mp3"，改名后 pattern 已是新名字，
+                // 这里再按 name 重建文件名，保证索引名与文件名始终一致
+                val prefix = rule.pattern.substringBeforeLast('/', "")
+                val path = if (prefix.isEmpty()) "$name.mp3" else "$prefix/$name.mp3"
+                val parts = path.split('/')
+                if (parts.size < 3) return@forEach
+                entries.add(AiEffectIndex.Entry(name, path, parts[0], parts[1]))
+            }
+        }
+        return AiEffectIndex.replaceAll(entries)
+    }
+
+    /** AI 音效索引文件的路径，供界面展示 */
+    fun aiIndexPath(): String = AiEffectIndex.indexFile().absolutePath
 
     /**
      * 确保规则文件存在且内容有效，否则下载。

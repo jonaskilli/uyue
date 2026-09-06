@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import io.legado.app.base.BaseViewModel
+import io.legado.app.service.AiEffectIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -65,7 +66,7 @@ class SoundEffectRuleViewModel(application: Application) : BaseViewModel(applica
      */
     fun switchMode(newMode: String, onDone: (String?) -> Unit) {
         execute {
-            val loaded = SoundEffectRuleManager.load(newMode)
+            val loaded = loadForMode(newMode)
             withContext(Dispatchers.Main) {
                 mode = newMode
                 data.clear()
@@ -80,6 +81,20 @@ class SoundEffectRuleViewModel(application: Application) : BaseViewModel(applica
     }
 
     /**
+     * 按模式载入数据。
+     * [SoundEffectRuleManager.MODE_AI] 走音效库索引（需先确保索引已加载），
+     * 其余走规则 JSON 文件。
+     */
+    private suspend fun loadForMode(targetMode: String): MutableList<SoundEffectGroupWithRules> {
+        if (targetMode == SoundEffectRuleManager.MODE_AI) {
+            // 外部索引不存在时会从内置导出一份，故这里必须等它完成
+            AiEffectIndex.ensureLoaded()
+            return SoundEffectRuleManager.loadAiIndex()
+        }
+        return SoundEffectRuleManager.load(targetMode)
+    }
+
+    /**
      * 把内存中的规则写回当前模式的文件。
      * @param onDone 参数为错误信息，成功为 null（主线程回调）
      */
@@ -90,7 +105,11 @@ class SoundEffectRuleViewModel(application: Application) : BaseViewModel(applica
         }
         val currentMode = mode
         execute {
-            SoundEffectRuleManager.save(currentMode, snapshot)
+            if (currentMode == SoundEffectRuleManager.MODE_AI) {
+                SoundEffectRuleManager.saveAiIndex(snapshot)
+            } else {
+                SoundEffectRuleManager.save(currentMode, snapshot)
+            }
         }.onError {
             onDone?.invoke(it.message ?: "保存失败")
         }.onSuccess {
