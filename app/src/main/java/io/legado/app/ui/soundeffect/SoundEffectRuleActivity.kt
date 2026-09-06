@@ -397,6 +397,23 @@ class SoundEffectRuleActivity :
     private fun showRenameAiSoundDialog(rule: SoundEffectRule) {
         val oldName = rule.name
         val oldPath = rule.pattern
+        // 本地没有音频文件时不允许改名：改名会同步改文件名，
+        // 而远端只存有原名的文件，改后 AI 再选中它就会按新名下载并 404。
+        // 先试听一次即可把文件下载到本地。
+        val localFile = java.io.File(AppConfig.aiEffectLocalDir, oldPath)
+        if (!localFile.exists()) {
+            alert("无法改名") {
+                setMessage(
+                    "本地还没有这个音效的音频文件，无法改名。\n\n" +
+                        "改名会同时修改本地文件名，而远端仓库只保存原名的文件，" +
+                        "直接改名会导致以后按新名字下载失败。\n\n" +
+                        "请先点试听把它下载到本地，再改名。"
+                )
+                noButton()
+                yesButton { }
+            }
+            return
+        }
         val input = android.widget.EditText(this).apply {
             setText(oldName)
             setSelectAllOnFocus(true)
@@ -438,7 +455,7 @@ class SoundEffectRuleActivity :
                 runCatching {
                     val oldFile = java.io.File(AppConfig.aiEffectLocalDir, oldPath)
                     val newFile = java.io.File(AppConfig.aiEffectLocalDir, newPath)
-                    // 文件可能尚未下载（本地没有），此时只需改索引
+                    // 调用前已确保 oldFile 存在（否则不允许改名）
                     if (oldFile.exists() && !newFile.exists()) {
                         newFile.parentFile?.mkdirs()
                         if (!oldFile.renameTo(newFile)) {
