@@ -1905,6 +1905,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         if (effectiveMode != "off") {
             scheduleSoundEffects(text, baseText, nowSpeak)
         }
+        // AI 音效：分析本段与下一段，下一段提前算好，播到时直接放
+        scheduleAiEffects(nowSpeak, nowSpeak + 1)
     }
 
     /**

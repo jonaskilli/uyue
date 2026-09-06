@@ -15,6 +15,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.lib.theme.getPrimaryTextColor
 import io.legado.app.model.ReadBook
+import io.legado.app.service.AiEffectIndex
 import io.legado.app.service.BgmManager
 import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.ui.file.HandleFileContract
@@ -165,6 +166,9 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         // 初始化「导出时混入背景音乐」：音频与视频共用，音量取朗读播放的 bgmVolume
         switchMixBgmOnMerge.isChecked = AppConfig.mixBgmOnMerge
         etBgmMinSegment.setText(AppConfig.bgmMinSegmentMs.toString())
+
+        // AI 音效总开关
+        switchAiEffectEnable.isChecked = AppConfig.aiEffectEnabled
     }
 
     private fun initEvent() = binding.run {
@@ -244,6 +248,17 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         // 导出（合并音频 / 合成视频）时混入背景音乐
         switchMixBgmOnMerge.setOnCheckedChangeListener { _, isChecked ->
             AppConfig.mixBgmOnMerge = isChecked
+        }
+
+        // AI 音效：朗读时用 AI 从广播剧音效库选音效。
+        // 打开时先把索引加载好，避免第一次朗读才解析造成卡顿。
+        switchAiEffectEnable.setOnCheckedChangeListener { _, isChecked ->
+            AppConfig.aiEffectEnabled = isChecked
+            if (isChecked) {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    AiEffectIndex.ensureLoaded()
+                }
+            }
         }
 
         // 单首最少持续时长：铺够该时长后才允许切下一首，避免音乐过碎

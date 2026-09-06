@@ -233,6 +233,15 @@ object PreferKey {
     const val soundEffectOffsetChars = "soundEffectOffsetChars"
     const val soundEffectVolume = "soundEffectVolume"
     const val mixSoundEffectOnMerge = "mixSoundEffectOnMerge"
+    // --- AI 音效（广播剧音效库）---
+    const val aiEffectEnabled = "aiEffectEnabled"
+    const val aiEffectLocalDir = "aiEffectLocalDir"
+    const val aiEffectKeywordCount = "aiEffectKeywordCount"
+    const val aiEffectMaxPick = "aiEffectMaxPick"
+    const val aiEffectCandidatesPerKeyword = "aiEffectCandidatesPerKeyword"
+    const val aiEffectMaxCandidates = "aiEffectMaxCandidates"
+
+    const val aiEffectMixOnMerge = "aiEffectMixOnMerge"
     // 合并章节音频/合成视频时是否混入背景音乐
     const val mixBgmOnMerge = "mixBgmOnMerge"
     // 混入背景音乐时单首最少持续时长(毫秒)，超过后才允许切换到下一首

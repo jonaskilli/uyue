@@ -24,6 +24,13 @@ interface BgmAIPromptDao {
     @Query("SELECT * FROM bgmAIPrompt WHERE isDefault = 1 LIMIT 1")
     fun getDefault(): BgmAIPrompt?
 
+    /**
+     * 按名称取提示词。
+     * 提示词不止 BGM 选曲一种（AI 音效分析也用这张表），故按 name 区分用途。
+     */
+    @Query("SELECT * FROM bgmAIPrompt WHERE name = :name LIMIT 1")
+    fun getByName(name: String): BgmAIPrompt?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insert(vararg prompt: BgmAIPrompt)
 

@@ -548,20 +548,45 @@ object HttpTtsAudioCache {
                     AppLog.put("混音: 段落数(${segments.size})与音频数(${audioFiles.size})不一致，跳过混音")
                     return@withContext false
                 }
+                // AI 音效识别记录：paraIndex -> 该段落选中的音效
+                val aiEffectRecords = if (withEffects && AppConfig.aiEffectMixOnMerge) {
+                    AiEffectStore.load(book.bookUrl, chapterIndex)
+                        .associateBy { it.paraIndex }
+                } else {
+                    emptyMap()
+                }
+                val aiEffectPaths = mutableSetOf<String>()
                 val segInfos = mutableListOf<AudioConcatUtil.SegmentInfo>()
-                segments.forEach { text ->
+                segments.forEachIndexed { index, text ->
                     if (!withEffects) {
                         // 不叠音效时无需解析/下载音效，字符数仅用于占位
                         segInfos.add(AudioConcatUtil.SegmentInfo(text.length, emptyList()))
-                        return@forEach
+                        return@forEachIndexed
                     }
                     val (clean, effects) = BaseReadAloudService.extractSoundEffectsForMerge(text)
+                    val segEffects = effects.map {
+                        AudioConcatUtil.SegmentEffect(it.fileName, it.charOffset)
+                    }.toMutableList()
+                    // AI 音效按净字数的比例换算偏移，与朗读时的 start/mid/end 一致
+                    aiEffectRecords[index]?.effects?.forEach { pick ->
+                        if (pick.path.isBlank()) return@forEach
+                        val ratio = when (pick.at) {
+                            "mid" -> 0.5f
+                            "end" -> 1.0f
+                            else -> 0f
+                        }
+                        segEffects.add(
+                            AudioConcatUtil.SegmentEffect(
+                                pick.path,
+                                (clean.length * ratio).toInt().coerceIn(0, clean.length)
+                            )
+                        )
+                        aiEffectPaths.add(pick.path)
+                    }
                     segInfos.add(
                         AudioConcatUtil.SegmentInfo(
                             textLength = clean.length,
-                            effects = effects.map {
-                                AudioConcatUtil.SegmentEffect(it.fileName, it.charOffset)
-                            }
+                            effects = segEffects
                         )
                     )
                 }
@@ -571,6 +596,11 @@ object HttpTtsAudioCache {
                     emptyList<BgmChapterMixer.Track>()
                 }
                 val wavFile = File(outputFolder, "${filePrefix}.wav")
+                // 提前下载 AI 音效，混音时直接取本地文件
+                val aiEffectFiles = HashMap<String, File>()
+                aiEffectPaths.forEach { path ->
+                    AiEffectDownloader.obtain(path)?.let { aiEffectFiles[path] = it }
+                }
                 AudioConcatUtil.mixChapterWithBgmAndEffects(
                     audioFiles = audioFiles,
                     segments = segInfos,
@@ -579,7 +609,15 @@ object HttpTtsAudioCache {
                     bgmWorkDir = bgmWorkDir,
                     volume = AppConfig.soundEffectVolume / 100f,
                     outputFile = wavFile,
-                    effectFileProvider = { fileName -> BaseReadAloudService.getSoundEffectAudioFile(fileName) }
+                    // AI 音效是相对路径（含"/"），规则音效是 JSON 文件名。
+                    // provider 不是 suspend，故 AI 音效在这里提前下载好，provider 只查表。
+                    effectFileProvider = { fileName ->
+                        if (fileName.contains('/')) {
+                            aiEffectFiles[fileName]
+                        } else {
+                            BaseReadAloudService.getSoundEffectAudioFile(fileName)
+                        }
+                    }
                 )
             } catch (e: Exception) {
                 AppLog.put("混音异常: ${e.localizedMessage}", e)

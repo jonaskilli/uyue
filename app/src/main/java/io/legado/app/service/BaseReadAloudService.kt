@@ -69,6 +69,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.ExoPlayer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -845,14 +846,20 @@ abstract class BaseReadAloudService : BaseService(),
      * 音效信息
      * @param charOffset 在净化后文本中的字符偏移位置
      * @param name 音效名称，如 "打雷"
-     * @param fileName 对应的 JSON 文件名，如 "打雷音效.json"
+     * @param fileName 对应的 JSON 文件名，如 "打雷音效.json"；
+     *                 AI 音效则为相对路径，如 "01_通用母库/拟音/炒菜.mp3"
      * @param triggered 是否已触发
+     * @param offsetRatio 触发位置占段落净字数的比例（0~1）。非空时用比例换算偏移，
+     *                    避免依赖段落实际字数，AI 音效的 start/mid/end 走这条路。
+     * @param isAiEffect true 表示来自广播剧音效库，按相对路径从 [AiEffectDownloader] 取文件
      */
     data class SoundEffect(
         val charOffset: Int,
         val name: String,
         val fileName: String,
-        var triggered: Boolean = false
+        var triggered: Boolean = false,
+        val offsetRatio: Float? = null,
+        val isAiEffect: Boolean = false
     )
 
     /**
@@ -867,9 +874,13 @@ abstract class BaseReadAloudService : BaseService(),
 
     /**
      * 重置所有音效触发状态，并清空播放队列。
+     * AI 音效的触发状态一并重置，但识别记录保存在文件中，不会重新调用 AI。
      */
     fun resetSoundEffects() {
         paragraphEffects.values.forEach { list ->
+            list.forEach { it.triggered = false }
+        }
+        aiEffects.values.forEach { list ->
             list.forEach { it.triggered = false }
         }
         effectPlayer?.run {
@@ -949,15 +960,20 @@ abstract class BaseReadAloudService : BaseService(),
     /**
      * 触发时下载/解码音效，然后加入播放队列。
      * ExoPlayer 播放列表会自动顺序播放，无需手动维护队列。
+     *
+     * AI 音效跳过 JSON 解码流程，直接取本地文件或下载远端 mp3。
      */
     protected fun loadAndPlayEffect(effect: SoundEffect) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = downloadAndDecodeEffect(effect.fileName, true)
-            if (result == null) {
+            val audioFile = if (effect.isAiEffect) {
+                AiEffectDownloader.obtain(effect.fileName)
+            } else {
+                downloadAndDecodeEffect(effect.fileName, true)?.first
+            }
+            if (audioFile == null) {
                 AppLog.put("[音效] 加载失败，跳过: ${effect.name}")
                 return@launch
             }
-            val (audioFile, _) = result
             withContext(Dispatchers.Main) {
                 enqueueOrPlayEffect(audioFile, effect.name)
             }
@@ -1007,15 +1023,23 @@ abstract class BaseReadAloudService : BaseService(),
     }
 
     /**
-     * 根据当前播放进度检查并触发音效
+     * 根据当前播放进度检查并触发音效。
+     * 规则音效与 AI 音效各有一套开关，互不影响。
      */
     protected fun checkAndPlayEffects(totalDuration: Long, currentPosition: Long) {
+        if (totalDuration <= 0L) return
+        checkRuleEffects(totalDuration, currentPosition)
+        checkAiEffects(totalDuration, currentPosition)
+    }
+
+    /** 规则音效：由 (xxx音效) 标记 + ttsrv-replaces 规则生成 */
+    private fun checkRuleEffects(totalDuration: Long, currentPosition: Long) {
         val effectiveMode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
             AppConfig.getEffectiveSoundEffectMode(it)
         } ?: AppConfig.soundEffectMode
         if (effectiveMode == "off") return
-        val effects = paragraphEffects[nowSpeak] ?: return
-        if (effects.isEmpty()) return
+        val effects = paragraphEffects[nowSpeak]
+        if (effects.isNullOrEmpty()) return
 
         val duration = totalDuration.coerceAtLeast(1)
         val totalChars = currentParagraphTotalChars.coerceAtLeast(1)
@@ -1028,6 +1052,196 @@ abstract class BaseReadAloudService : BaseService(),
                 loadAndPlayEffect(effect)
             }
         }
+    }
+
+    /** AI 音效：位置按段落净字数的比例换算，不依赖实际字数 */
+    private fun checkAiEffects(totalDuration: Long, currentPosition: Long) {
+        if (!AppConfig.aiEffectEnabled) return
+        val effects = aiEffects[nowSpeak]
+        if (effects.isNullOrEmpty()) return
+
+        val duration = totalDuration.coerceAtLeast(1)
+        val ratio = (currentPosition.toFloat() / duration).coerceIn(0f, 1f)
+
+        effects.forEach { effect ->
+            val target = (effect.offsetRatio ?: 0f).coerceIn(0f, 1f)
+            if (!effect.triggered && ratio >= target) {
+                effect.triggered = true
+                loadAndPlayEffect(effect)
+            }
+        }
+    }
+
+    // ========== AI 音效：预分析调度 ==========
+
+    /** 段落索引 -> 该段落 AI 选中的音效 */
+    private val aiEffects = mutableMapOf<Int, MutableList<SoundEffect>>()
+
+    /** 待分析的段落索引，串行处理，避免段落快速推进时丢任务 */
+    private val aiEffectPending = ArrayDeque<Int>()
+
+    private var aiEffectWorker: Job? = null
+
+    /** 首次进入是否已完成，用于保证开头第一段一定被分析 */
+    private var aiEffectStarted = false
+
+    /** worker 用的当前书与章节。跨章节后调度会刷新，避免记录写错章节 */
+    @Volatile
+    private var aiEffectBookUrl: String = ""
+
+    @Volatile
+    private var aiEffectChapterIndex: Int = 0
+
+    /**
+     * 安排分析若干段落。子类在准备字幕（段落切换）时调用。
+     *
+     * 攒够 [AppConfig.aiEffectCharInterval] 字就把这段时间里**所有未分析过的段落**
+     * 打包成一批，一次 AI 调用全部处理完（每段返回 0~3 个音效），
+     * 而不是每段各调一次——段落越碎省得越多。
+     *
+     * 下一段始终参与攒批，保证「播 A 时已算好 A+1」的提前量。
+     * 已分析过的段落会命中记录文件，不再进入批次。
+     */
+    protected fun scheduleAiEffects(vararg indices: Int) {
+        if (!AppConfig.aiEffectEnabled) return
+        if (indices.isEmpty()) return
+        val bookUrl = ReadBook.book?.bookUrl?.takeIf { it.isNotBlank() } ?: return
+        aiEffectBookUrl = bookUrl
+        aiEffectChapterIndex = ReadBook.durChapterIndex
+
+        val interval = AppConfig.aiEffectCharInterval
+        val first = !aiEffectStarted
+        aiEffectStarted = true
+
+        synchronized(aiEffectPending) {
+            for (i in indices) {
+                if (i < 0 || i >= contentList.size) continue
+                if (aiEffects.containsKey(i)) continue
+                if (aiEffectPending.contains(i)) continue
+                aiEffectPending.addLast(i)
+            }
+        }
+
+        // 首段立即分析，避免开头几段都没音效
+        val charSum = aiEffectPending.sumOf { contentList.getOrNull(it)?.length ?: 0 }
+        if (!first && interval > 0 && charSum < interval) return
+
+        if (aiEffectWorker?.isActive == true) return
+        aiEffectWorker = lifecycleScope.launch(Dispatchers.IO) {
+            AiEffectIndex.ensureLoaded()
+            while (isActive) {
+                val batch = synchronized(aiEffectPending) {
+                    if (aiEffectPending.isEmpty()) {
+                        null
+                    } else {
+                        val list = aiEffectPending.toList()
+                        aiEffectPending.clear()
+                        list
+                    }
+                } ?: break
+                try {
+                    analyzeAiEffectBatch(batch, aiEffectBookUrl, aiEffectChapterIndex)
+                } catch (e: CancellationException) {
+                    // 切章/停止导致的取消：放行，让协程正常结束。
+                    // 若在这里吞掉，取消会被当成普通异常继续跑后面的批次
+                    throw e
+                } catch (e: Exception) {
+                    AppLog.put("[AI音效] 批量分析异常: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    /**
+     * 分析一批段落。
+     * 已落盘的段落直接复用记录，只对未分析过的段落调 AI，且**整批只调一次**。
+     */
+    private suspend fun analyzeAiEffectBatch(
+        indices: List<Int>,
+        bookUrl: String,
+        chapterIndex: Int
+    ) {
+        val todo = ArrayList<Pair<Int, String>>()
+        for (i in indices) {
+            val text = contentList.getOrNull(i) ?: continue
+            val cached = AiEffectStore.loadParagraph(bookUrl, chapterIndex, i)
+            if (cached != null) {
+                applyAiPicks(i, cached)
+                prefetchAiEffects(cached)
+            } else {
+                todo.add(i to text)
+            }
+        }
+        if (todo.isEmpty()) return
+        val result = analyzeByAiBatch(todo, bookUrl, chapterIndex) ?: return
+        result.forEach { (index, picks) ->
+            applyAiPicks(index, picks)
+            prefetchAiEffects(picks)
+        }
+    }
+
+    /**
+     * 批量调 AI 并落盘。
+     * @return 段落索引 -> 音效，**保证包含 [paras] 的每个索引**；
+     *         null 表示整批失败（不落盘，允许下次重试）。
+     */
+    private suspend fun analyzeByAiBatch(
+        paras: List<Pair<Int, String>>,
+        bookUrl: String,
+        chapterIndex: Int
+    ): Map<Int, List<AiEffectPick>>? {
+        val prev = contentList.getOrNull((paras.firstOrNull()?.first ?: 0) - 1).orEmpty()
+        val result = AiEffectAnalyzer.analyzeBatch(paras, prev) ?: return null
+        // 整批落盘：AI 漏掉的段也会写空结果，下次不再重复分析
+        result.forEach { (index, picks) ->
+            AiEffectStore.mark(
+                bookUrl,
+                chapterIndex,
+                AiEffectRecord(paraIndex = index, effects = picks)
+            )
+        }
+        return result
+    }
+
+    /** 预下载音效，播到时直接用本地文件 */
+    private suspend fun prefetchAiEffects(picks: List<AiEffectPick>) {
+        picks.forEach { pick ->
+            if (pick.path.isNotBlank()) AiEffectDownloader.obtain(pick.path)
+        }
+    }
+
+    /** 把 AI 选中的音效转为播放任务（主线程） */
+    private suspend fun applyAiPicks(index: Int, picks: List<AiEffectPick>) {
+        if (picks.isEmpty()) return
+        val effects = picks.mapNotNull { pick ->
+            if (pick.name.isBlank()) return@mapNotNull null
+            SoundEffect(
+                charOffset = 0,
+                name = pick.name,
+                fileName = pick.path,
+                offsetRatio = ratioOfAt(pick.at),
+                isAiEffect = true
+            )
+        }
+        if (effects.isEmpty()) return
+        withContext(Dispatchers.Main) {
+            aiEffects[index] = effects.toMutableList()
+        }
+    }
+
+    private fun ratioOfAt(at: String): Float = when (at) {
+        "mid" -> 0.5f
+        "end" -> 0.98f
+        else -> 0f
+    }
+
+    /** 章节切换 / 停止时清空本轮状态，识别记录保留在文件中 */
+    protected fun clearAiEffectRuntime() {
+        aiEffectWorker?.cancel()
+        aiEffectWorker = null
+        synchronized(aiEffectPending) { aiEffectPending.clear() }
+        aiEffects.clear()
+        aiEffectStarted = false
     }
 
     /**
@@ -1156,6 +1370,7 @@ abstract class BaseReadAloudService : BaseService(),
         }
         ReadAloudFloatService.stop(this)
         AiImageGenerator.clearCache()
+        clearAiEffectRuntime()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1206,6 +1421,9 @@ abstract class BaseReadAloudService : BaseService(),
                 .filter { it.isNotEmpty() }
                 .toMutableList()
                 .apply { add(" ") }
+            // 换了内容就作废上一轮的分析任务：段落索引已指向新内容，
+            // 继续跑会把旧章节的结果写进新章节的记录文件
+            clearAiEffectRuntime()
             var pos = startPos
             val page = textChapter.getPage(pageIndex)!!
             if (pos > 0) {

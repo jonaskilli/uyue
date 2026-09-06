@@ -133,8 +133,10 @@ object BgmAIService {
 
     /**
      * 调用OpenAI格式的API
+     *
+     * 供 BGM 选曲与本文件的 AI 音效分析共用，故开放为 internal。
      */
-    private suspend fun callOpenAIApi(provider: BgmAIProvider, prompt: String): String = withContext(Dispatchers.IO) {
+    internal suspend fun callOpenAIApi(provider: BgmAIProvider, prompt: String): String = withContext(Dispatchers.IO) {
         val url = if (provider.url.endsWith("/")) {
             "${provider.url}chat/completions"
         } else {

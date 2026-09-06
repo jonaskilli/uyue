@@ -322,6 +322,48 @@ class App : Application() {
                 appDb.bgmAIPromptDao.insert(defaultPromptEntity)
                 LogUtils.d("App", "已初始化默认AI提示词")
             }
+            // AI 音效分析的两段式提示词。按 name 取用，与 BGM 选曲互不干扰。
+            upsertAiEffectPrompt(
+                io.legado.app.service.AiEffectAnalyzer.PROMPT_KEYWORD,
+                io.legado.app.service.AiEffectAnalyzer.KEYWORD_PROMPT
+            )
+            upsertAiEffectPrompt(
+                io.legado.app.service.AiEffectAnalyzer.PROMPT_PICK,
+                io.legado.app.service.AiEffectAnalyzer.PICK_PROMPT
+            )
+        }
+    }
+
+    /**
+     * 写入一条 AI 音效提示词。
+     * 不存在则插入；已存在且内容仍是内置旧版则升级，**用户改过的一律保留**。
+     *
+     * 旧版判定依据：内置提示词会带上 [AiEffectPromptMarker.outdatedMarkers] 中的特征串
+     * （例如"输出 4 个关键字"）。用户自写的提示词不会包含这些串，因此不会被覆盖。
+     */
+    private fun upsertAiEffectPrompt(name: String, prompt: String) {
+        val dao = appDb.bgmAIPromptDao
+        val existing = dao.getByName(name)
+        if (existing == null) {
+            dao.insert(
+                io.legado.app.data.entities.BgmAIPrompt(
+                    name = name,
+                    prompt = prompt,
+                    isDefault = false
+                )
+            )
+            LogUtils.d("App", "已初始化AI音效提示词: $name")
+            return
+        }
+        val isOutdatedBuiltin =
+            io.legado.app.service.AiEffectAnalyzer.outdatedMarkers.any {
+                existing.prompt.contains(it)
+            }
+        if (isOutdatedBuiltin) {
+            existing.prompt = prompt
+            existing.lastUpdateTime = System.currentTimeMillis()
+            dao.update(existing)
+            LogUtils.d("App", "已升级AI音效提示词: $name")
         }
     }
 

@@ -286,9 +286,11 @@ class SpeakEngineDialog() : BaseDialogFragment(R.layout.dialog_recycler_view),
                         when (which) {
                             0 -> {
                                 AppConfig.clearTtsCache()
-                                // 缓存音频已全部清除，BGM 播放记录失去对应的音频，
-                                // 留着只会让下次合并按已不存在的缓存选曲，故一并清掉。
+                                // 缓存音频已全部清除，BGM 播放记录与 AI 音效识别记录
+                                // 都失去了对应的音频，留着只会让下次合并按已不存在的缓存
+                                // 选曲/配音效，故一并清掉。
                                 io.legado.app.service.BgmTimelineStore.clearAll()
+                                io.legado.app.service.AiEffectStore.clearAll()
                                 withContext(Dispatchers.Main) {
                                     android.widget.Toast.makeText(
                                         context,
@@ -324,15 +326,20 @@ class SpeakEngineDialog() : BaseDialogFragment(R.layout.dialog_recycler_view),
                                 }
                             }
                             3 -> {
-                                // 清理当前章节的背景音乐识别记录（下次合并将重新选曲）
+                                // 清理当前章节的背景音乐与 AI 音效识别记录
+                                // （下次合并/朗读将重新选曲与配音效）
                                 val book = io.legado.app.model.ReadBook.book
                                 val deleted = if (book == null) {
                                     false
                                 } else {
-                                    io.legado.app.service.BgmTimelineStore.deleteChapter(
-                                        book.bookUrl,
-                                        io.legado.app.model.ReadBook.durChapterIndex
-                                    )
+                                    val url = book.bookUrl
+                                    val idx = io.legado.app.model.ReadBook.durChapterIndex
+                                    val bgmDeleted =
+                                        io.legado.app.service.BgmTimelineStore.deleteChapter(url, idx)
+                                    val effectDeleted =
+                                        io.legado.app.service.AiEffectStore.deleteChapter(url, idx)
+                                    // 任一存在即算删除成功，提示语只区分「有/无记录」
+                                    bgmDeleted || effectDeleted
                                 }
                                 withContext(Dispatchers.Main) {
                                     val msg = if (!deleted) {

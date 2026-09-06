@@ -1209,6 +1209,58 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.mixSoundEffectOnMerge, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.mixSoundEffectOnMerge, value)
 
+    // --- AI 音效（广播剧音效库）---
+
+    private const val DEFAULT_AI_EFFECT_DIR =
+        "/storage/emulated/0/Download/chajian/广播剧音效库"
+
+    /** AI 音效总开关 */
+    var aiEffectEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.aiEffectEnabled, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.aiEffectEnabled, value)
+
+    /** 音效库本地根目录，结构与远端仓库一致 */
+    var aiEffectLocalDir: String
+        get() = appCtx.getPrefString(PreferKey.aiEffectLocalDir, DEFAULT_AI_EFFECT_DIR)
+            ?: DEFAULT_AI_EFFECT_DIR
+        set(value) = appCtx.putPrefString(PreferKey.aiEffectLocalDir, value)
+
+    /**
+     * 阶段一每段提取关键字的**上限**，实际数量按段落字数递减（每 100 字约 12 个）。
+     * 关键字限制在 1~2 字（见 [AiEffectAnalyzer.KEYWORD_PROMPT]），检索命中率高。
+     */
+    var aiEffectKeywordCount: Int
+        get() = appCtx.getPrefInt(PreferKey.aiEffectKeywordCount, 12)
+        set(value) = appCtx.putPrefInt(PreferKey.aiEffectKeywordCount, value)
+
+    /** 阶段二最多选用几个音效 */
+    var aiEffectMaxPick: Int
+        get() = appCtx.getPrefInt(PreferKey.aiEffectMaxPick, 3)
+        set(value) = appCtx.putPrefInt(PreferKey.aiEffectMaxPick, value)
+
+    /** 每个关键字最多取几条候选 */
+    var aiEffectCandidatesPerKeyword: Int
+        get() = appCtx.getPrefInt(PreferKey.aiEffectCandidatesPerKeyword, 20)
+        set(value) = appCtx.putPrefInt(PreferKey.aiEffectCandidatesPerKeyword, value)
+
+    /** 候选总量上限，防止泛词撑爆 prompt */
+    var aiEffectMaxCandidates: Int
+        get() = appCtx.getPrefInt(PreferKey.aiEffectMaxCandidates, 60)
+        set(value) = appCtx.putPrefInt(PreferKey.aiEffectMaxCandidates, value)
+
+    /**
+     * AI 音效的攒批字数。**直接复用 BGM 的字数滑块** [bgmAICharInterval]
+     * （范围 100~1000，默认 350），不再单独存一份，避免两处设置不一致。
+     * 攒够这么多字就把期间所有未分析段落打包成一批，一次 AI 调用处理完。
+     */
+    val aiEffectCharInterval: Int
+        get() = bgmAICharInterval
+
+    /** 导出章节音频时是否混入 AI 选中的音效 */
+    var aiEffectMixOnMerge: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.aiEffectMixOnMerge, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.aiEffectMixOnMerge, value)
+
     var bgmPath: String?
         get() = appCtx.getPrefString(PreferKey.bgmPath)
         set(value) = appCtx.putPrefString(PreferKey.bgmPath, value)
