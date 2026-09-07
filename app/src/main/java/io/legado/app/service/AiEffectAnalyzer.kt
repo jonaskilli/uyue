@@ -161,8 +161,10 @@ object AiEffectAnalyzer {
             AppLog.put("$TAG: 整批未提取到关键字")
             return@withContext paras.associate { it.first to emptyList() }
         }
-        // 候选池随段数放宽，但设上限避免 prompt 过长
-        val poolLimit = (AppConfig.aiEffectMaxCandidates * paras.size).coerceAtMost(200)
+        // 候选池：所有段的关键字合并检索，共享同一个池子，去重后即为发给 AI 的候选列表。
+        // 总量固定为 aiEffectMaxCandidates（默认 300），不再随段数放大——
+        // 候选是整批共用的，段数多不代表需要更多候选，放大只会撑爆 prompt。
+        val poolLimit = AppConfig.aiEffectMaxCandidates.coerceAtLeast(1)
         var candidates = AiEffectIndex.searchByKeywords(
             allKeywords,
             AppConfig.aiEffectCandidatesPerKeyword,
@@ -183,10 +185,13 @@ object AiEffectAnalyzer {
                 val merged = LinkedHashMap<String, AiEffectIndex.Entry>()
                 candidates.forEach { merged[it.name] = it }
                 extra.forEach { merged.putIfAbsent(it.name, it) }
-                candidates = merged.values.toList()
+                // 合并后仍受总量约束：兜底单字命中面很广，不截断会远超 poolLimit
+                val mergedSize = merged.size
+                candidates = merged.values.take(poolLimit)
                 AppLog.put(
                     "$TAG: 候选不足($before<${FALLBACK_MIN_CANDIDATES})，" +
-                        "高频单字兜底 $topChars -> ${candidates.size}条"
+                        "高频单字兜底 $topChars -> ${candidates.size}条" +
+                        if (mergedSize > poolLimit) "（合并${mergedSize}条已截断）" else ""
                 )
             }
         }

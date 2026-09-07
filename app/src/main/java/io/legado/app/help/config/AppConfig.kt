@@ -1240,12 +1240,15 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     /** 每个关键字最多取几条候选 */
     var aiEffectCandidatesPerKeyword: Int
-        get() = appCtx.getPrefInt(PreferKey.aiEffectCandidatesPerKeyword, 20)
+        get() = appCtx.getPrefInt(PreferKey.aiEffectCandidatesPerKeyword, 40)
         set(value) = appCtx.putPrefInt(PreferKey.aiEffectCandidatesPerKeyword, value)
 
-    /** 候选总量上限，防止泛词撑爆 prompt */
+    /**
+     * 候选总量上限：**所有关键字的检索结果合并去重后**的最终条数。
+     * 也就是发给 AI 挑选的候选列表长度，防止泛词（如"声"）撑爆 prompt。
+     */
     var aiEffectMaxCandidates: Int
-        get() = appCtx.getPrefInt(PreferKey.aiEffectMaxCandidates, 60)
+        get() = appCtx.getPrefInt(PreferKey.aiEffectMaxCandidates, 300)
         set(value) = appCtx.putPrefInt(PreferKey.aiEffectMaxCandidates, value)
 
     /**
