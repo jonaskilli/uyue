@@ -31,6 +31,12 @@ object BgmAIService {
         .callTimeout(180, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * BGM 选曲的输出上限：只返回一个文件名，100 足够。
+     * AI 音效分析返回的是整批段落的 JSON，不能用这个值，见 [callOpenAIApi]。
+     */
+    private const val DEFAULT_MAX_TOKENS = 100
+
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
     /**
@@ -135,8 +141,16 @@ object BgmAIService {
      * 调用OpenAI格式的API
      *
      * 供 BGM 选曲与本文件的 AI 音效分析共用，故开放为 internal。
+     *
+     * @param maxTokens 输出 token 上限。**传 null 表示不限制**：不下发 max_tokens 字段，
+     * 由模型自行决定输出长度。AI 音效分析一次要返回整批段落的 JSON，
+     * 必须传 null，否则输出会被截断成半截 JSON 导致解析失败。
      */
-    internal suspend fun callOpenAIApi(provider: BgmAIProvider, prompt: String): String = withContext(Dispatchers.IO) {
+    internal suspend fun callOpenAIApi(
+        provider: BgmAIProvider,
+        prompt: String,
+        maxTokens: Int? = DEFAULT_MAX_TOKENS
+    ): String = withContext(Dispatchers.IO) {
         val url = if (provider.url.endsWith("/")) {
             "${provider.url}chat/completions"
         } else {
@@ -152,7 +166,10 @@ object BgmAIService {
                 })
             })
             put("temperature", 0.7)
-            put("max_tokens", 100)
+            // 不限制时整个字段都不下发，避免被服务端默认值截断
+            if (maxTokens != null && maxTokens > 0) {
+                put("max_tokens", maxTokens)
+            }
         }.toString()
 
         val request = Request.Builder()

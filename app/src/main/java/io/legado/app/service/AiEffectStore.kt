@@ -25,7 +25,10 @@ data class AiEffectPick(
 
 /**
  * 一个段落的 AI 识别结果。
- * [effects] 为空表示「AI 判断本段不需要音效」，同样不再重复分析。
+ *
+ * **只有真正配了音效的段落才会存成记录**：[effects] 为空的段不写入（并会删掉旧记录），
+ * 于是「无音效」等价于「没有这条记录」，下次朗读会重新识别，
+ * 不会因为一次判断失误就永久没有音效。
  */
 data class AiEffectRecord(
     val paraIndex: Int = 0,
@@ -112,14 +115,19 @@ object AiEffectStore {
 
     /**
      * 读取单个段落的结果。
-     * @return null 表示该段落尚未分析过；非 null（含空列表）表示已分析，不要重复调用 AI。
+     *
+     * **只记录真正配了音效的段落**，因此：
+     * @return null 表示该段落没有记录（从未分析过，或上次分析结果是「无音效」），
+     *         需要重新调用 AI 分析；非 null 表示已配音效，直接复用，不再重复调用 AI。
      */
     suspend fun loadParagraph(
         bookUrl: String,
         chapterIndex: Int,
         paraIndex: Int
     ): List<AiEffectPick>? = load(bookUrl, chapterIndex)
-        .firstOrNull { it.paraIndex == paraIndex }?.effects
+        .firstOrNull { it.paraIndex == paraIndex }
+        ?.effects
+        ?.takeIf { it.isNotEmpty() }
 
     private suspend fun save(
         bookUrl: String,
@@ -169,6 +177,26 @@ object AiEffectStore {
             list.add(record)
         }
         save(bookUrl, chapterIndex, list)
+    }
+
+    /**
+     * 删除单个段落的记录。
+     *
+     * 用途：某段分析结果为空（AI 判断不需要音效）时清掉可能存在的旧记录，
+     * 使该段落回到「未分析」状态，下次朗读仍有机会重新识别。
+     *
+     * @return 是否确实删掉了记录（false 表示本来就没有）
+     */
+    suspend fun deleteParagraph(
+        bookUrl: String,
+        chapterIndex: Int,
+        paraIndex: Int
+    ): Boolean = lock.withLock {
+        val list = load(bookUrl, chapterIndex).toMutableList()
+        if (list.none { it.paraIndex == paraIndex }) return@withLock false
+        save(bookUrl, chapterIndex, list.filter { it.paraIndex != paraIndex })
+        AppLog.put("$TAG: 删除段落记录 $chapterIndex/$paraIndex")
+        true
     }
 
     /** 删除指定章节的记录文件，返回是否确实删掉了 */

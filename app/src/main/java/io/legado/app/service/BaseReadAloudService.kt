@@ -1154,7 +1154,10 @@ abstract class BaseReadAloudService : BaseService(),
 
     /**
      * 分析一批段落。
-     * 已落盘的段落直接复用记录，只对未分析过的段落调 AI，且**整批只调一次**。
+     * 已落盘（且确实有音效）的段落直接复用记录，其余段落进入批次调 AI。
+     *
+     * 记录里只保留真正配了音效的段落，所以「没音效」== 「没有记录」，
+     * 这些段落每次朗读都会重新识别一次，不会因为一次判断失误就永久没有音效。
      */
     private suspend fun analyzeAiEffectBatch(
         indices: List<Int>,
@@ -1175,14 +1178,24 @@ abstract class BaseReadAloudService : BaseService(),
         if (todo.isEmpty()) return
         val result = analyzeByAiBatch(todo, bookUrl, chapterIndex) ?: return
         result.forEach { (index, picks) ->
-            applyAiPicks(index, picks)
-            prefetchAiEffects(picks)
+            if (picks.isEmpty()) {
+                // 没有音效的段不留记录：清掉可能存在的旧记录，下次可重新识别
+                clearAiPicks(index)
+            } else {
+                applyAiPicks(index, picks)
+                prefetchAiEffects(picks)
+            }
         }
     }
 
     /**
      * 批量调 AI 并落盘。
-     * @return 段落索引 -> 音效，**保证包含 [paras] 的每个索引**；
+     *
+     * **只记录真正配了音效的段落**：picks 为空的段不写记录（并清掉旧记录），
+     * 于是「无音效」等价于「无记录」，下次朗读会重新识别。
+     * 若把空结果也落盘，该段落会被永久标记为无音效——重听、重启都不会再分析。
+     *
+     * @return 段落索引 -> 音效，**保证包含 [paras] 的每个索引**（无音效的段为空列表）；
      *         null 表示整批失败（不落盘，允许下次重试）。
      */
     private suspend fun analyzeByAiBatch(
@@ -1192,13 +1205,17 @@ abstract class BaseReadAloudService : BaseService(),
     ): Map<Int, List<AiEffectPick>>? {
         val prev = contentList.getOrNull((paras.firstOrNull()?.first ?: 0) - 1).orEmpty()
         val result = AiEffectAnalyzer.analyzeBatch(paras, prev) ?: return null
-        // 整批落盘：AI 漏掉的段也会写空结果，下次不再重复分析
         result.forEach { (index, picks) ->
-            AiEffectStore.mark(
-                bookUrl,
-                chapterIndex,
-                AiEffectRecord(paraIndex = index, effects = picks)
-            )
+            if (picks.isEmpty()) {
+                // 空结果不落盘；顺带清掉历史遗留的空/旧记录，让该段回到未分析状态
+                AiEffectStore.deleteParagraph(bookUrl, chapterIndex, index)
+            } else {
+                AiEffectStore.mark(
+                    bookUrl,
+                    chapterIndex,
+                    AiEffectRecord(paraIndex = index, effects = picks)
+                )
+            }
         }
         return result
     }
@@ -1212,7 +1229,6 @@ abstract class BaseReadAloudService : BaseService(),
 
     /** 把 AI 选中的音效转为播放任务（主线程） */
     private suspend fun applyAiPicks(index: Int, picks: List<AiEffectPick>) {
-        if (picks.isEmpty()) return
         val effects = picks.mapNotNull { pick ->
             if (pick.name.isBlank()) return@mapNotNull null
             SoundEffect(
@@ -1223,10 +1239,21 @@ abstract class BaseReadAloudService : BaseService(),
                 isAiEffect = true
             )
         }
-        if (effects.isEmpty()) return
+        if (effects.isEmpty()) {
+            clearAiPicks(index)
+            return
+        }
         withContext(Dispatchers.Main) {
             aiEffects[index] = effects.toMutableList()
         }
+    }
+
+    /**
+     * 清掉某段已排期的 AI 音效。
+     * 用于段落重新分析后结果为空的场景，避免上一轮残留的音效继续播。
+     */
+    private suspend fun clearAiPicks(index: Int) = withContext(Dispatchers.Main) {
+        aiEffects.remove(index)
     }
 
     private fun ratioOfAt(at: String): Float = when (at) {

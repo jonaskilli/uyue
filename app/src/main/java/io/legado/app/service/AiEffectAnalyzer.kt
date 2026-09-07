@@ -33,6 +33,9 @@ object AiEffectAnalyzer {
     /** 关键字最大长度。音效库名字以 1~2 字为主，超过 2 字检索不到 */
     private const val MAX_KEYWORD_LEN = 2
 
+    /** 精选阶段模糊兜底的最小长度。1 个字太容易误配（"声"会命中"水声""风声"） */
+    private const val MIN_FUZZY_LEN = 2
+
     /**
      * 候选少于这个数就启用高频单字兜底。
      * AI 常给"目光""书册"这类整词检索不到、但含可用单字的关键字，
@@ -100,14 +103,22 @@ object AiEffectAnalyzer {
     /**
      * 旧版内置提示词的特征串，用于 App 启动时判断是否需要升级。
      * 命中说明这条提示词仍是内置旧版、用户没改过，可以安全覆盖。
-     * 旧版都是单段格式（含【本段】或"输出 4 个关键字"），新版改为批量格式。
+     *
+     * **每次改动内置提示词，都要把上一版的特征串加进来**，
+     * 否则老设备上的旧提示词匹配不上，会一直停在旧版（曾漏过"每 100 字给 12 个"这一版）。
+     * 特征串取该版独有、用户自写提示词里不太可能出现的话。
      */
     val outdatedMarkers: List<String> = listOf(
+        // 单段格式时期
         "【本段】",
         "输出 4 个关键字",
         "某段确实没有可识别声音就输出空数组",
         "每 100 字给 4 个",
-        "每 100 字给 8 个"
+        "每 100 字给 8 个",
+        // 批量格式：让 AI 自己按字数算数量（与实际配额算法不一致）
+        "每 100 字给 12 个",
+        // 精选提示词：数量写死 3，未跟随 aiEffectMaxPick
+        "每一段最多选 3 个"
     )
 
     /**
@@ -119,8 +130,9 @@ object AiEffectAnalyzer {
      * @param paras 待分析段落，(段落索引, 段落文本)。索引需在整章内唯一。
      * @param prevOfFirst 批次第一段的上一段，作为开头段落的上文
      * @return 段落索引 -> 选中的音效。**保证包含 [paras] 里的每一个索引**，
-     *         AI 漏掉的段补空列表（表示「看过，不需要音效」，会落盘避免重复分析）。
-     *         整批失败（AI 不可用/异常）时返回 null，不落盘，允许下次重试。
+     *         AI 漏掉的段补空列表。空列表由调用方决定如何处理
+     *         （当前策略：不落盘，下次可重新识别）。
+     *         整批失败（AI 不可用/异常/返回非法 JSON）时返回 null，不落盘，允许下次重试。
      */
     suspend fun analyzeBatch(
         paras: List<Pair<Int, String>>,
@@ -214,20 +226,23 @@ object AiEffectAnalyzer {
                 appDb.bgmAIPromptDao.getByName(PROMPT_KEYWORD)?.prompt
                     ?.takeIf { it.isNotBlank() } ?: KEYWORD_PROMPT
             )
-            append("\n\n【正文段落（编号即顺序，相邻编号互为上下文）】\n")
+            append("\n\n【正文段落（共${paras.size}段，编号即顺序，相邻编号互为上下文）】\n")
             if (prevOfFirst.isNotBlank()) {
                 append("（上文提示：这些段落之前的内容是）").append(clip(prevOfFirst)).append("\n")
             }
-            // 必须带编号：解析端用 p 对应段落，没有编号 AI 无从判断归属
+            // 必须带编号：解析端用 p 对应段落，没有编号 AI 无从判断归属。
+            // 字数用截断后的长度，数量由 keywordQuota 算好直接写明——
+            // 让 AI 自己按字数换算既容易算错，又会生成一截被 take 丢掉的关键字。
             paras.forEachIndexed { i, (_, text) ->
-                append("第${i + 1}段（${text.length}字）：").append(clip(text)).append("\n")
+                val clipped = clip(text)
+                append("第${i + 1}段（${clipped.length}字，请给${keywordQuota(clipped.length)}个）：")
+                    .append(clipped).append("\n")
             }
-            // 上限是配置项，动态告知，改配置立即生效
-            append("\n本次每段最多输出 ${keywordLimit()} 个关键字。\n")
-            append("请按段落顺序，为每一段各输出一组关键字，输出 JSON：")
+            append("\n请按段落顺序，为每一段各输出一组关键字，输出 JSON：")
         }
         val raw = try {
-            BgmAIService.callOpenAIApi(provider, prompt)
+            // 输出整批段落的 JSON，长度不可预估，必须不限制 token
+            BgmAIService.callOpenAIApi(provider, prompt, null)
         } catch (e: CancellationException) {
             // 切章/停止朗读导致的取消必须向上传播，否则会被当成「无关键字」落盘，
             // 把未分析的段落永久标记为无音效
@@ -236,7 +251,12 @@ object AiEffectAnalyzer {
             AppLog.put("$TAG: 批量关键字请求失败 ${e.localizedMessage}")
             return null
         }
-        return parseKeywordsBatch(raw, paras)
+        // null = 返回内容不是合法 JSON（多半被截断），按失败处理，不落盘
+        return parseKeywordsBatch(raw, paras).also {
+            if (it == null) {
+                AppLog.put("$TAG: 批量关键字解析失败，原始返回: ${raw.take(300)}")
+            }
+        }
     }
 
     // ---------------- 阶段二：批量精选 ----------------
@@ -253,28 +273,36 @@ object AiEffectAnalyzer {
                 appDb.bgmAIPromptDao.getByName(PROMPT_PICK)?.prompt
                     ?.takeIf { it.isNotBlank() } ?: PICK_PROMPT
             )
-            append("\n\n【候选音效列表】\n")
+            // 候选是全批次共享的，必须提前说清，否则 AI 会把别段的声音安到本段。
+            // 只发纯音效名：名字本身已能表达意思，分类（如"01_通用母库/拟音"）是音效库的
+            // 管理维度而非声音语义，带上只会增加识别负担、还可能干扰判断。
+            append("\n\n【候选音效列表（共${candidates.size}条，为所有段落共用）】\n")
             candidates.forEachIndexed { i, e ->
-                append("${i + 1}. ${e.name}（${e.category}/${e.sub}）\n")
+                append("${i + 1}. ${e.name}\n")
             }
-            append("\n【正文段落（编号即顺序）】\n")
+            append("\n【正文段落（共${paras.size}段，编号即顺序）】\n")
             if (prevOfFirst.isNotBlank()) {
                 append("（上文提示：这些段落之前的内容是）").append(clip(prevOfFirst)).append("\n")
             }
             paras.forEachIndexed { i, (_, text) ->
-                append("第${i + 1}段（${text.length}字）：").append(clip(text)).append("\n")
+                append("第${i + 1}段（${clip(text).length}字）：").append(clip(text)).append("\n")
             }
-            append("\n请为每一段各选 0~${pickLimit()} 个音效，用第几段标记归属，输出 JSON：")
+            append("\n请为每一段各选 0~${pickLimit()} 个音效，用 p 标记归属，输出 JSON：")
         }
         val raw = try {
-            BgmAIService.callOpenAIApi(provider, prompt)
+            // 输出整批段落的 JSON，长度不可预估，必须不限制 token
+            BgmAIService.callOpenAIApi(provider, prompt, null)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLog.put("$TAG: 批量精选请求失败 ${e.localizedMessage}")
             return null
         }
-        return parsePicksBatch(raw, paras, candidates)
+        return parsePicksBatch(raw, paras, candidates).also {
+            if (it == null) {
+                AppLog.put("$TAG: 批量精选解析失败，原始返回: ${raw.take(300)}")
+            }
+        }
     }
 
     // ---------------- 解析 ----------------
@@ -283,13 +311,17 @@ object AiEffectAnalyzer {
      * 解析批量关键字。
      * 期望 `{"paras":[{"p":1,"k":["雷","雨"]}, ...]}`，p 是 1 起的段序号。
      * AI 常把 p 写成字符串或漏掉某些段，这里都做容错；无法定位的段落按无关键字处理。
+     *
+     * @return null 表示**返回内容不是合法 JSON**（多半是输出被截断）。
+     *         这与「JSON 合法但某段 k 为空」是两回事：后者是 AI 的有效判断，
+     *         前者必须按失败处理，否则会把未分析的段落当作「无音效」落盘，永远不再重试。
      */
     private fun parseKeywordsBatch(
         raw: String,
         paras: List<Pair<Int, String>>
-    ): Map<Int, List<String>> {
-        val obj = extractJsonObject(raw) ?: return emptyMap()
-        val arr = obj.optJSONArray("paras") ?: return emptyMap()
+    ): Map<Int, List<String>>? {
+        val obj = extractJsonObject(raw) ?: return null
+        val arr = obj.optJSONArray("paras") ?: return null
         val out = HashMap<Int, List<String>>()
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue
@@ -307,8 +339,8 @@ object AiEffectAnalyzer {
                     if (s !in list) list.add(s)
                 }
             }
-            // 按该段字数截断：每 100 字 4 个，上限 aiEffectKeywordCount
-            out[paraIndex] = list.take(keywordQuota(paras[order - 1].second.length))
+            // 按该段配额截断。用截断后的长度，与提示词里告知 AI 的数字保持一致
+            out[paraIndex] = list.take(keywordQuota(clip(paras[order - 1].second).length))
         }
         return out
     }
@@ -317,14 +349,16 @@ object AiEffectAnalyzer {
      * 解析批量精选结果。
      * 期望 `{"picks":[{"p":1,"name":"雷","at":"start"}, ...]}`，p 是 1 起的段序号。
      * 同一段可能被重复提及，按 [AppConfig.aiEffectMaxPick] 截断并去重。
+     *
+     * @return null 表示**返回内容不是合法 JSON**（多半是输出被截断），按失败处理不落盘。
      */
     private fun parsePicksBatch(
         raw: String,
         paras: List<Pair<Int, String>>,
         candidates: List<AiEffectIndex.Entry>
-    ): Map<Int, List<AiEffectPick>> {
-        val obj = extractJsonObject(raw) ?: return emptyMap()
-        val arr = obj.optJSONArray("picks") ?: return emptyMap()
+    ): Map<Int, List<AiEffectPick>>? {
+        val obj = extractJsonObject(raw) ?: return null
+        val arr = obj.optJSONArray("picks") ?: return null
         val byName = HashMap<String, AiEffectIndex.Entry>()
         candidates.forEach { byName[it.name] = it }
         val maxPick = AppConfig.aiEffectMaxPick.coerceAtLeast(1)
@@ -335,7 +369,7 @@ object AiEffectAnalyzer {
             if (order < 1 || order > paras.size) continue
             val paraIndex = paras[order - 1].first
             val name = item.optString("name").trim().removeSuffix(".mp3").trim()
-            val entry = byName[name] ?: continue
+            val entry = matchCandidate(byName, candidates, name) ?: continue
             val list = out.getOrPut(paraIndex) { ArrayList() }
             if (list.size >= maxPick) continue
             if (list.any { it.name == entry.name }) continue
@@ -365,39 +399,112 @@ object AiEffectAnalyzer {
         else -> "start"
     }
 
+    /**
+     * 在候选里按名字查找 AI 回传的音效，三级递进：
+     *
+     * 1. **精确匹配**：AI 原样照抄候选名。
+     * 2. **清洗后再匹配**：候选行是 `12. 炒菜`，
+     *    AI 常把序号一起抄回来，去掉后重试。
+     * 3. **改写兜底**：AI 自己做了措辞调整，如库里叫"炒菜"它写"炒菜声"、
+     *    库里叫"雷声"它写"雷"。见 [matchByPrefix]。
+     *
+     * 兜底**只在候选范围内**查找，所以不会产生凭空的音效：
+     * 匹配不上的说明是 AI 幻觉出的名字，照旧返回 null 由调用方丢弃。
+     */
+    private fun matchCandidate(
+        byName: Map<String, AiEffectIndex.Entry>,
+        candidates: List<AiEffectIndex.Entry>,
+        rawName: String
+    ): AiEffectIndex.Entry? {
+        byName[rawName]?.let { return it }
+        val cleaned = cleanName(rawName)
+        if (cleaned.isEmpty()) return null
+        byName[cleaned]?.let { return it }
+        return matchByPrefix(candidates, cleaned)
+    }
+
+    /**
+     * 前缀方向匹配，处理 AI 的措辞改写。
+     *
+     * 只认**前缀**、不用 `contains`：后者会让泛词误中——AI 写"声"会命中"水声""风声"，
+     * 而"声"根本不是有效音效名。两个方向覆盖绝大多数改写：
+     * - AI 写简称（"雷"），库里是全称（"雷声"）→ 取**最短**的候选，最贴近原意
+     * - AI 写全称（"炒菜声"），库里是简称（"炒菜"）→ 取**最长**的候选，信息最全
+     */
+    private fun matchByPrefix(
+        candidates: List<AiEffectIndex.Entry>,
+        cleaned: String
+    ): AiEffectIndex.Entry? {
+        if (cleaned.length < MIN_FUZZY_LEN) return null
+        candidates.asSequence()
+            .filter { it.name.startsWith(cleaned) }
+            .minByOrNull { it.name.length }?.let { return it }
+        return candidates.asSequence()
+            .filter { cleaned.startsWith(it.name) && it.name.length >= MIN_FUZZY_LEN }
+            .maxByOrNull { it.name.length }
+    }
+
+    /**
+     * 清洗 AI 回传的音效名。
+     * 候选行是 `12. 炒菜`，AI 常把序号一起抄回来，这里去掉后只留纯音效名。
+     */
+    private fun cleanName(raw: String): String {
+        val noIndex = raw.replace(Regex("^\\d+\\s*[.、:：)\\]}]\\s*"), "")
+        return noIndex.substringBefore("（").substringBefore("(").trim()
+    }
+
     private fun clip(text: String): String =
         if (text.length <= MAX_CHARS_PER_PARA) text else text.take(MAX_CHARS_PER_PARA)
 
     /** 内置默认关键字提示词，App 启动时写入 bgmAIPrompt 表供用户修改 */
     const val KEYWORD_PROMPT = """你是广播剧音效设计师。下面有若干段小说正文，请**为每一段分别**提炼用于检索音效库的关键字。
 
-## 要求
-- 每一段都要输出一组关键字，段落数量必须与输入一致。
-- **不要轻易输出空数组**。只有纯粹的心理描写、抽象叙述、抒情议论才给空数组；只要段落里有任何动作、物体、环境、人声或可联想的声响，就给出关键字。理由是：给了关键字还有机会在后续筛选中剔除，给了空数组则完全失去检索机会。声音不明显时，给出最接近的 2 个即可。
-- 每段的关键字数量已在该段标题的"第N段（X字）"里给出字数，**按字数增减：每 100 字给 12 个**（100 字给 12 个、150 字给 18 个、50 字给 6 个），极短段落至少给 6 个。**总数量不得超过我给出的上限**。
+## 数量
+- 每段要几个，已直接写在该段标题里（"第N段（X字，请给Y个）"）。**严格按 Y 给，不多不少。**
+- 凑不满 Y 个时，给最接近的几个即可，不要为了凑数把同一个声音换个说法重复写。
+
+## 用词
 - **每个关键字严格只能 1~2 个字**，必须是具体名词或具体动作。
 - 1 个字：雷、雨、风、剑、门、马、火、水、钟、铃、枪、猫、狗、鸟、哭、笑、喘、咳。
-- 2 个字：脚步、开门、炒菜、倒水、玻璃、心跳、呼吸、雷声、马蹄、鸟鸣、水声、风声、关门、上楼、点火、写字、翻书、碗筷、车声、人群。
+- 2 个字：脚步、开门、炒菜、倒水、玻璃、心跳、呼吸、雷声、马蹄、鸟鸣、关门、上楼、点火、写字、翻书、碗筷、车声、人群。
 - **不要输出 3 个字及以上的词**。"炒菜声"要写成"炒菜"，"脚步声"要写成"脚步"，"雷声隆隆"要写成"雷"。
-- 禁止输出泛词："声音""音效""背景""气氛""环境"这类词没有检索价值。
-- 只关注该段自己真实发生的声音，不要凭相邻段落臆测。
-- 同一段内关键字尽量覆盖不同的声音事件，不要重复表达同一个声音，也不要凑数。
+- 禁止泛词："声音""音效""背景""气氛""环境""场景"这类词检索不到任何音效。
+
+## 取材
+- 只提炼**该段真实发生**的声音。
+- 相邻段落一并提供，是为了让你判断声音事件的**边界与是否重复**：上一段已经打雷、本段只是余波，本段就不要再给"雷"。不要把别段的声音算到本段头上。
+- 特别长的段落只取前 500 字，只按你看到的内容提炼，不要脑补被截掉的部分。
+- **不要轻易给空数组**。只有纯粹的心理描写、抽象叙述、抒情议论才给空数组；只要段落里有任何动作、物体、环境、人声或可联想的声响，就给关键字——给了关键字还有机会在后续筛选中剔除，给了空数组就完全失去检索机会。
 
 ## 输出格式
 严格只输出如下 JSON，不要解释、不要 markdown 代码块。
-p 是段落序号，从 1 开始；k 是该段的关键字数组：
+p 是段落序号，从 1 开始；k 是该段的关键字数组。每一段都要有一条：
 {"paras":[{"p":1,"k":["炒菜","油锅","脚步","雷","开门","雨"]},{"p":2,"k":[]}]}"""
 
     /** 内置默认精选提示词，App 启动时写入 bgmAIPrompt 表供用户修改 */
     const val PICK_PROMPT = """你是广播剧音效设计师。请为下面**每一段**正文分别从候选音效列表中挑选合适的音效。
 
-## 要求
-- 每一段最多选 3 个，最少选 0 个；某段没有合适的声音就不要为它输出任何条目。
+## 数量与归属
+- 每段最多选的个数已在末尾写明，最少选 0 个；某段没有合适的声音就不要为它输出任何条目。
 - **p 是段落序号，从 1 开始**，必须与输入段落标题"第N段"的编号对应。
-- 只能从【候选音效列表】中选择，名字必须原样照抄，不要改写、不要加扩展名。
-- 优先选择该段明确出现的声音，不要为了凑数选择勉强相关的。
-- 同一段内不要选择含义重复的音效（例如已有"脚步"就不要再选"走路"）。
-- 音效要在该段内触发，不要为某段选择实际发生在别的段落里的声音。
+- 输入有几段就要判断几段，不要只处理前几段。
+
+## 怎么挑（按意思挑）
+- 候选列表是**按关键词检索**出来的，只保证大致相关，里面必然混着对不上的噪声。
+  你的任务是：理解本段**实际发生了什么声音**，再从列表里挑意思最对得上的那个。
+- **按意思挑，不要求正文里出现候选名的字面**：
+  段落写"厨房里传来滋啦一声"，候选里有"炒菜"，就该挑"炒菜"；
+  段落写"他推门出去了"，候选里有"开门"或"关门"，按实际动作挑。
+- 反过来，**字面像但意思不对的不要挑**：段落只是"谈起去年那场雨"、当下并没下雨，就不要挑"雨"。
+- 只挑**该段实际发生**的声音。不要挑"氛围合适"的铺垫式音效（那是背景音乐的活，不是音效）。
+- 同一段内不要挑含义重复的（已有"脚步"就不要再挑"走路"）。
+- 【候选音效列表】是所有段落共用的，混有其它段落的声音。**只能挑本段真实发生的**，不要把别段的声音安到本段头上。
+- 相邻段落一并提供是为了判断边界：上一段已经响过、本段只是余波的，不要重复挑。
+- **只能从列表里挑，不能自己编名字**。就算你觉得有更贴切的音效，只要不在列表里就不能写。
+
+## 怎么写（照抄，不要改写）
+- name 只写纯音效名：照抄"N. "后面的那一个词，**不要带序号、不要加 .mp3**。
+- 不要在列表的名字上做任何修改：列表里是"炒菜"就写"炒菜"，不要写成"炒菜声"。
 - at 表示触发时机：start=段落开头，mid=段落中间，end=段落结尾。默认 start。
 
 ## 输出格式
