@@ -467,7 +467,9 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                     // seginfo 记录的是 WebSocket 网络分片边界而非真实音频段边界，
                     // 按其切段会在段边界处因子段无 RIFF 头导致 WavExtractor 解析失败报错）
                     if (hasSpeakFile(fileName)) {
-                        AppLog.put("HttpTTS缓存命中: $fileName")
+                        // 用 putDebug：缓存命中是常态，每段都打会淹没其它日志。
+                        // 仅在「记录日志」开关打开时才输出。
+                        AppLog.putDebug("HttpTTS缓存命中: $fileName")
                         // 自动清理历史遗留的 .seginfo（旧版分段机制产物，会导致切段播放报错）
                         removeLegacySegInfo(fileName)
                         val file = getSpeakFileAsMd5(fileName)
