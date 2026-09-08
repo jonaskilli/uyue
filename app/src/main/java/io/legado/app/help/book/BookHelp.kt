@@ -321,6 +321,35 @@ object BookHelp {
         }
     }
 
+    /**
+     * 章节改名后同步重命名已缓存的正文文件。
+     *
+     * 缓存文件名是 `index-标题MD5.nb`（见 [BookChapter.getFileName]），标题一变就对不上，
+     * 已下载的章节会显示成"未缓存"。改名时把文件一起改过去即可继续命中。
+     * 改名失败不影响重命名本身，最坏结果是该章重新下载一次。
+     */
+    fun renameChapterCacheFile(book: Book, oldFileName: String, newFileName: String) {
+        if (oldFileName == newFileName) return
+        val oldFile = downloadDir.getFile(
+            cacheFolderName,
+            book.getFolderName(),
+            oldFileName
+        )
+        if (!oldFile.exists()) return
+        val newFile = downloadDir.getFile(
+            cacheFolderName,
+            book.getFolderName(),
+            newFileName
+        )
+        if (newFile.exists()) return
+        if (!oldFile.renameTo(newFile)) {
+            runCatching {
+                oldFile.copyTo(newFile, true)
+                oldFile.delete()
+            }
+        }
+    }
+
     fun getChapterFiles(book: Book): HashSet<String> {
         val fileNames = hashSetOf<String>()
         if (book.isLocalTxt) {

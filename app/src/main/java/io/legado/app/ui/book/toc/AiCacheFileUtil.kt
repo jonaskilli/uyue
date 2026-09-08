@@ -81,6 +81,45 @@ object AiCacheFileUtil {
     }
 
     /**
+     * 章节改名：把记录姓名的 json 一起改名，并把文件里的 title 字段同步成新章节名。
+     *
+     * json 结构是 `{title: 章节名, results: {序号: {name...}}}`，姓名标注靠文件名定位，
+     * 章节一改名就找不到了，所以改名必须连文件一起改。
+     *
+     * @return 是否确实改名成功（文件不存在/无需改名返回 false）
+     */
+    fun renameChapterCache(
+        bookName: String,
+        oldChapterTitle: String,
+        newChapterTitle: String
+    ): Boolean {
+        if (oldChapterTitle == newChapterTitle) return false
+        val oldFile = getChapterCacheFileByName(bookName, oldChapterTitle)
+        if (!oldFile.exists()) return false
+        val newFile = getChapterCacheFileByName(bookName, newChapterTitle)
+        if (!newFile.exists() && !oldFile.renameTo(newFile)) {
+            runCatching {
+                oldFile.copyTo(newFile, true)
+                oldFile.delete()
+            }.getOrElse { return false }
+        }
+        updateCacheTitle(newFile, newChapterTitle)
+        return true
+    }
+
+    /** 把缓存 json 里的 title 字段改成新章节名，改写失败不影响改名结果 */
+    private fun updateCacheTitle(file: File, newTitle: String) {
+        runCatching {
+            if (!file.exists()) return
+            val json = JSONObject(file.readText())
+            if (json.optString("title").isNotEmpty()) {
+                json.put("title", newTitle)
+                file.writeText(json.toString())
+            }
+        }
+    }
+
+    /**
      * 删除章节的 AI 缓存文件
      */
     fun deleteChapterCache(book: Book, chapter: BookChapter): Boolean {

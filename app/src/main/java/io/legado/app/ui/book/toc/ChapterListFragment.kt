@@ -22,6 +22,7 @@ import io.legado.app.help.book.isVideo
 import io.legado.app.help.book.simulatedTotalChapterNum
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.bottomBackground
+import io.legado.app.model.AiImagePersistentCache
 import io.legado.app.lib.theme.getPrimaryTextColor
 import io.legado.app.ui.widget.recycler.UpLinearLayoutManager
 import io.legado.app.ui.widget.recycler.VerticalDivider
@@ -277,6 +278,84 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
                     .putExtra("chapterChanged", bookChapter.index != durChapterIndex)
             )
             finish()
+        }
+    }
+
+    /**
+     * 长按章节：弹出输入框改这一章的标题。
+     *
+     * 卷名不改：卷的 url 常常就是标题本身（见 [BookChapter.getAbsoluteURL]、
+     * BookHelp.hasContent 的 `url.startsWith(title)` 特判），改标题会让卷取不到链接。
+     */
+    override fun editChapterTitle(bookChapter: BookChapter) {
+        val book = book ?: return
+        if (bookChapter.isVolume) {
+            context?.longToastOnUi("卷名不支持改名")
+            return
+        }
+        val input = com.google.android.material.textfield.TextInputEditText(requireContext()).apply {
+            setText(bookChapter.title)
+            setSelection(bookChapter.title.length)
+            hint = "章节标题"
+            setPadding(50, 30, 50, 30)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("修改章节标题")
+            .setView(input)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("确定") { _, _ ->
+                val newTitle = input.text?.toString()?.trim().orEmpty()
+                if (newTitle.isEmpty() || newTitle == bookChapter.title) return@setPositiveButton
+                renameChapter(book, bookChapter, newTitle)
+            }
+            .show()
+    }
+
+    /**
+     * 真改名：写回数据库，并把依赖标题的缓存一起改过去，避免改名后缓存全部失联。
+     *
+     * 1. 正文缓存 `index-标题MD5.nb`（[BookHelp.renameChapterCacheFile]）
+     * 2. 记录姓名的 AI 缓存 json（[AiCacheFileUtil.renameChapterCache]）
+     * 3. AI 生图目录 `{index}_{章节名}`（[AiImagePersistentCache.renameChapter]）
+     */
+    private fun renameChapter(book: Book, chapter: BookChapter, newTitle: String) {
+        lifecycleScope.launch(IO) {
+            val oldTitle = chapter.title
+            val oldFileName = chapter.getFileName()
+            chapter.title = newTitle
+            // titleMD5 是惰性缓存，清掉才会按新标题重算文件名
+            chapter.titleMD5 = null
+            val newFileName = chapter.getFileName()
+
+            BookHelp.renameChapterCacheFile(book, oldFileName, newFileName)
+            AiCacheFileUtil.renameChapterCache(book.name, oldTitle, newTitle)
+            AiImagePersistentCache.renameChapter(book.name, chapter.index, oldTitle, newTitle)
+            appDb.bookChapterDao.update(chapter)
+
+            // 正在读的就是这一章时，同步书籍的进度标题
+            if (book.durChapterIndex == chapter.index) {
+                book.durChapterTitle = newTitle
+                appDb.bookDao.update(book)
+            }
+
+            withContext(Main) {
+                adapter.removeDisplayTitle(oldTitle)
+                adapter.cacheFileNames.remove(oldFileName)
+                adapter.cacheFileNames.add(newFileName)
+                adapter.aiCacheTitles.remove(oldTitle)
+                if (AiCacheFileUtil.hasChapterCache(book, chapter)) {
+                    adapter.aiCacheTitles.add(newTitle)
+                }
+                var pos = -1
+                adapter.getItems().forEachIndexed { index, ch ->
+                    if (ch.url == chapter.url) pos = index
+                }
+                if (pos >= 0) {
+                    adapter.notifyItemChanged(pos)
+                    adapter.upDisplayTitles(pos)
+                }
+                context?.longToastOnUi("已改名为：$newTitle")
+            }
         }
     }
 

@@ -92,6 +92,36 @@ object AiImagePersistentCache {
     private fun sanitize(name: String): String =
         name.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifEmpty { "unknown" }
 
+    /**
+     * 章节改名：把已生成的图片目录 `{index}_{旧章节名}` 改成 `{index}_{新章节名}`，
+     * 并同步 manifest.json 里的 chapterName，避免改名后已生成的图全部失效。
+     *
+     * 目录不存在（没生过图）或改名失败都直接返回，不影响改名流程。
+     */
+    fun renameChapter(
+        bookName: String,
+        chapterIndex: Int,
+        oldChapterName: String,
+        newChapterName: String
+    ) {
+        if (oldChapterName == newChapterName) return
+        val bookDir = File(ROOT_DIR, sanitize(bookName))
+        val oldDir = File(bookDir, "${chapterIndex}_${sanitize(oldChapterName)}")
+        if (!oldDir.exists()) return
+        val newDir = File(bookDir, "${chapterIndex}_${sanitize(newChapterName)}")
+        if (!newDir.exists() && !oldDir.renameTo(newDir)) {
+            AppLog.put("AI生图持久缓存: 章节目录改名失败 ${oldDir.absolutePath}")
+            return
+        }
+        // 内存里按目录绝对路径缓存了已扫描的图片，改名后旧 key 必须作废
+        chapterImagesCache.remove(oldDir.absolutePath)
+        chapterImagesCache.remove(newDir.absolutePath)
+        loadManifest(newDir)?.let { manifest ->
+            manifest.chapterName = newChapterName
+            saveManifest(newDir, manifest)
+        }
+    }
+
     /** 章节目录: {ROOT}/{bookName}/{chapterIndex}_{chapterName}/ */
     private fun chapterDir(bookName: String, chapterIndex: Int, chapterName: String): File {
         val bookDir = File(ROOT_DIR, sanitize(bookName))

@@ -18,7 +18,6 @@ import io.legado.app.lib.theme.ThemeUtils
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.utils.getCompatColor
 import io.legado.app.utils.gone
-import io.legado.app.utils.longToastOnUi
 import io.legado.app.utils.visible
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ensureActive
@@ -69,6 +68,11 @@ class ChapterListAdapter(context: Context, val callback: Callback) :
     fun clearDisplayTitle() {
         upDisplayTileJob?.cancel()
         displayTitleMap.clear()
+    }
+
+    /** 某章改名后：旧标题算出来的显示名已失效，去掉后由 [upDisplayTitles] 重新生成 */
+    fun removeDisplayTitle(oldTitle: String) {
+        displayTitleMap.remove(oldTitle)
     }
 
     fun upDisplayTitles(startIndex: Int) {
@@ -184,7 +188,7 @@ class ChapterListAdapter(context: Context, val callback: Callback) :
         }
         holder.itemView.setOnLongClickListener {
             getItem(holder.layoutPosition)?.let { item ->
-                context.longToastOnUi(getDisplayTitle(item))
+                callback.editChapterTitle(item)
             }
             true
         }
@@ -234,6 +238,8 @@ class ChapterListAdapter(context: Context, val callback: Callback) :
         fun onListChanged()
         fun downloadChapterAudio(bookChapter: BookChapter)
         fun deleteAiCache(bookChapter: BookChapter)
+        /** 长按章节：修改该章节标题 */
+        fun editChapterTitle(bookChapter: BookChapter)
     }
 
 }
