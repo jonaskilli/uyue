@@ -125,7 +125,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private var subtitleSyncJob: Job? = null
     /** 音效规则计算任务。与字幕同步循环解耦，避免长段落计算阻塞字幕显示 */
     private var effectCalcJob: Job? = null
-    private var lastNowSpeak: Int = -1
     private var currentSubtitles: List<String> = emptyList()
     private var currentSubtitleCharRanges: List<Pair<Int, Int>> = emptyList()
 

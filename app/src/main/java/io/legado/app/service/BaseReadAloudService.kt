@@ -1118,6 +1118,27 @@ abstract class BaseReadAloudService : BaseService(),
     /** 段落索引 -> 该段落 AI 选中的音效 */
     private val aiEffects = mutableMapOf<Int, MutableList<SoundEffect>>()
 
+    /**
+     * 字幕同步用：已经生成过字幕的段落号，-1 表示还没有。
+     *
+     * **必须在 [clearAiEffectRuntime] 里一起复位**：停止后重读同一个段落时段落号没变，
+     * 不复位的话字幕循环认为「这段字幕已经生成过了」而不再调 [prepareSubtitles]，
+     * [scheduleAiEffects] 就永远不会被调用，记录文件里已有的音效也没人去装载
+     * ——表现为「第一次有音效，停止后重读这一段反而没了」。
+     */
+    @Volatile
+    protected var lastNowSpeak: Int = -1
+
+    /**
+     * 本章 AI 音效记录缓存：段落索引 -> 音效。
+     * 开始朗读时整章只读一次文件，之后每段直接从内存取，
+     * 避免每段都读一次文件（写入是全量覆盖，读写交错会读到空文件）。
+     */
+    private val aiEffectCache = HashMap<Int, List<AiEffectPick>>()
+
+    /** 缓存对应的 "bookUrl/chapterIndex"，用来判断是否需要重新载入 */
+    private var aiEffectCacheKey: String = ""
+
     /** 待分析的段落索引，串行处理，避免段落快速推进时丢任务 */
     private val aiEffectPending = ArrayDeque<Int>()
 
@@ -1169,7 +1190,6 @@ abstract class BaseReadAloudService : BaseService(),
 
         if (aiEffectWorker?.isActive == true) return
         aiEffectWorker = lifecycleScope.launch(Dispatchers.IO) {
-            AiEffectIndex.ensureLoaded()
             while (isActive) {
                 val batch = synchronized(aiEffectPending) {
                     if (aiEffectPending.isEmpty()) {
@@ -1205,10 +1225,12 @@ abstract class BaseReadAloudService : BaseService(),
         bookUrl: String,
         chapterIndex: Int
     ) {
+        // 先把整章记录读进内存：有记录的段落直接复用，不再问 AI
+        ensureAiEffectCache(bookUrl, chapterIndex)
         val todo = ArrayList<Pair<Int, String>>()
         for (i in indices) {
             val text = contentList.getOrNull(i) ?: continue
-            val cached = AiEffectStore.loadParagraph(bookUrl, chapterIndex, i)
+            val cached = aiEffectCache[i]
             if (cached != null) {
                 applyAiPicks(i, cached)
                 prefetchAiEffects(cached)
@@ -1217,6 +1239,9 @@ abstract class BaseReadAloudService : BaseService(),
             }
         }
         if (todo.isEmpty()) return
+        // 音效索引六千多条，全部命中记录时不该为它多等——
+        // 加载慢的话段落可能已经念完，音效就永远排不上了。只在真要问 AI 时加载。
+        AiEffectIndex.ensureLoaded()
         val result = analyzeByAiBatch(todo, bookUrl, chapterIndex) ?: return
         result.forEach { (index, picks) ->
             if (picks.isEmpty()) {
@@ -1249,8 +1274,10 @@ abstract class BaseReadAloudService : BaseService(),
         result.forEach { (index, picks) ->
             if (picks.isEmpty()) {
                 // 空结果不落盘；顺带清掉历史遗留的空/旧记录，让该段回到未分析状态
+                aiEffectCache.remove(index)
                 AiEffectStore.deleteParagraph(bookUrl, chapterIndex, index)
             } else {
+                aiEffectCache[index] = picks
                 AiEffectStore.mark(
                     bookUrl,
                     chapterIndex,
@@ -1306,6 +1333,28 @@ abstract class BaseReadAloudService : BaseService(),
         synchronized(aiEffectPending) { aiEffectPending.clear() }
         aiEffects.clear()
         aiEffectStarted = false
+        // 见 [lastNowSpeak] 的注释：不复位会导致重读同一段时不再调度 AI 音效
+        lastNowSpeak = -1
+        // 记录文件可能已被外部改动（如设置里清除本章记录），下次重新载入
+        aiEffectCacheKey = ""
+    }
+
+    /**
+     * 把整章记录读入内存缓存。
+     * 只在切换书/章节时真正读文件，同一章内多次调用直接命中缓存。
+     */
+    private suspend fun ensureAiEffectCache(bookUrl: String, chapterIndex: Int) {
+        val key = "$bookUrl/$chapterIndex"
+        if (aiEffectCacheKey == key) return
+        aiEffectCache.clear()
+        aiEffectCacheKey = key
+        val records = AiEffectStore.load(bookUrl, chapterIndex)
+        records.forEach { r ->
+            if (r.effects.isNotEmpty()) aiEffectCache[r.paraIndex] = r.effects
+        }
+        if (records.isNotEmpty()) {
+            AppLog.put("[AI音效] 载入本章记录 ${records.size} 段")
+        }
     }
 
     /**

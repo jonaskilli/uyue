@@ -221,7 +221,6 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
     private var effectCalcJob: Job? = null
     private var currentSubtitles: List<String> = emptyList()
     private var currentSubtitleCharRanges: List<Pair<Int, Int>> = emptyList()
-    private var lastNowSpeak: Int = -1
 
     /**
      * TTS 音频获取结果

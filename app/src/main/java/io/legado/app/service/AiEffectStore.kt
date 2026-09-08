@@ -77,6 +77,13 @@ object AiEffectStore {
 
     /** 读取整章记录，按段落升序；无记录或解析失败返回空列表 */
     suspend fun load(bookUrl: String, chapterIndex: Int): List<AiEffectRecord> =
+        lock.withLock { readRecords(bookUrl, chapterIndex) }
+
+    /**
+     * 真正的读取，不持锁。供 [mark]/[deleteParagraph] 在已持锁时调用——
+     * [lock] 不可重入，那里再调 [load] 会死锁。
+     */
+    private suspend fun readRecords(bookUrl: String, chapterIndex: Int): List<AiEffectRecord> =
         withContext(Dispatchers.IO) {
             val f = chapterFile(bookUrl, chapterIndex)
             if (!f.exists() || f.length() == 0L) return@withContext emptyList()
@@ -112,7 +119,7 @@ object AiEffectStore {
                 }
                 list.sortedBy { it.paraIndex }
             } catch (e: Exception) {
-                AppLog.put("$TAG: 读取记录失败 ${f.name}, ${e.localizedMessage}")
+                AppLog.put("$TAG: 读取记录失败 $chapterIndex/${f.name}, ${e.localizedMessage}")
                 emptyList()
             }
         }
@@ -128,10 +135,12 @@ object AiEffectStore {
         bookUrl: String,
         chapterIndex: Int,
         paraIndex: Int
-    ): List<AiEffectPick>? = load(bookUrl, chapterIndex)
-        .firstOrNull { it.paraIndex == paraIndex }
-        ?.effects
-        ?.takeIf { it.isNotEmpty() }
+    ): List<AiEffectPick>? = lock.withLock {
+        readRecords(bookUrl, chapterIndex)
+            .firstOrNull { it.paraIndex == paraIndex }
+            ?.effects
+            ?.takeIf { it.isNotEmpty() }
+    }
 
     private suspend fun save(
         bookUrl: String,
@@ -162,7 +171,16 @@ object AiEffectStore {
                     }
                 )
             }
-            File(dir, "$chapterIndex.json").writeText(arr.toString())
+            // 先写临时文件再改名：直接覆盖写会在写入途中把文件截成空/半截，
+            // 此时别处读取会被当成「没有记录」，进而重复分析，甚至把旧记录删掉
+            val file = File(dir, "$chapterIndex.json")
+            val tmp = File(dir, "$chapterIndex.json.tmp")
+            tmp.writeText(arr.toString())
+            if (file.exists()) file.delete()
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, true)
+                tmp.delete()
+            }
         } catch (e: Exception) {
             AppLog.put("$TAG: 写入记录失败 $chapterIndex, ${e.localizedMessage}")
         }
@@ -174,7 +192,7 @@ object AiEffectStore {
         chapterIndex: Int,
         record: AiEffectRecord
     ) = lock.withLock {
-        val list = load(bookUrl, chapterIndex).toMutableList()
+        val list = readRecords(bookUrl, chapterIndex).toMutableList()
         val idx = list.indexOfFirst { it.paraIndex == record.paraIndex }
         if (idx >= 0) {
             list[idx] = record
@@ -197,7 +215,7 @@ object AiEffectStore {
         chapterIndex: Int,
         paraIndex: Int
     ): Boolean = lock.withLock {
-        val list = load(bookUrl, chapterIndex).toMutableList()
+        val list = readRecords(bookUrl, chapterIndex).toMutableList()
         if (list.none { it.paraIndex == paraIndex }) return@withLock false
         save(bookUrl, chapterIndex, list.filter { it.paraIndex != paraIndex })
         AppLog.put("$TAG: 删除段落记录 $chapterIndex/$paraIndex")
