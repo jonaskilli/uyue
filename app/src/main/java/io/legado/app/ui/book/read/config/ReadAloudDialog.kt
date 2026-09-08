@@ -22,6 +22,7 @@ import android.widget.ImageView
 import android.widget.SeekBar
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
+import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.constant.EventBus
 import io.legado.app.constant.Status
 import io.legado.app.data.appDb
@@ -442,8 +443,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             tvCatalog.setTextColor(textColor)
             ivMainMenu.setColorFilter(textColor)
             tvMainMenu.setTextColor(textColor)
-            ivToBackstage.setColorFilter(textColor)
-            tvToBackstage.setTextColor(textColor)
+            ivLog.setColorFilter(textColor)
+            tvLog.setTextColor(textColor)
             ivSetting.setColorFilter(textColor)
             tvSetting.setTextColor(textColor)
             cbTtsFollowSys.setTextColor(textColor)
@@ -613,23 +614,6 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             parent = parent.parent
         }
         return true
-    }
-
-    /**
-     * 同步原「后台」按钮（已改为主题切换）的图标与文字。
-     *
-     * 图标与阅读菜单的 fabNightTheme 保持一致：
-     * - 当前夜间 → 显示太阳 + 「日间」，提示点击后切换到的模式
-     * - 当前白天 → 显示月亮 + 「夜间」，提示点击后切换到的模式
-     */
-    private fun upThemeButton() = binding.run {
-        if (AppConfig.isNightTheme) {
-            ivToBackstage.setImageResource(R.drawable.ic_daytime)
-            tvToBackstage.text = "日间"
-        } else {
-            ivToBackstage.setImageResource(R.drawable.ic_brightness)
-            tvToBackstage.text = "夜间"
-        }
     }
 
     /**
@@ -885,14 +869,10 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         ivPlayNext.setOnClickListener { ReadAloud.nextParagraph(requireContext()) }
         llCatalog.setOnClickListener { callBack?.openChapterList() }
         llBgm.setOnClickListener { callBack?.showBgmConfig() }
-        //原「后台」按钮改为主题切换（白天 / 夜间）。
-        //与阅读菜单的 fabNightTheme 行为完全一致。
-        llToBackstage.setOnClickListener {
-            AppConfig.isNightTheme = !AppConfig.isNightTheme
-            ThemeConfig.applyDayNight(requireContext())
+        // 日志：查看运行日志（带筛选与刷新）
+        llLog.setOnClickListener {
+            AppLogDialog().show(childFragmentManager, "appLogDialog")
         }
-        // 每次进入界面时同步按钮的图标与文字
-        upThemeButton()
         llCharacterManager.setOnClickListener {
             CharacterManagerDialog().show(childFragmentManager, "characterManagerDialog")
         }
