@@ -33,6 +33,14 @@ object AiEffectAnalyzer {
     /** 关键字最大长度。音效库名字以 1~2 字为主，超过 2 字检索不到 */
     private const val MAX_KEYWORD_LEN = 2
 
+    /**
+     * 位置序号的锚点标点。
+     * 段首固定为 1 号，之后每出现一个这里的标点，就在**该标点之后**再插一个序号。
+     * 序号即「一句话的边界」，AI 挑中音效时回传序号，播放时就能落在对应的话上，
+     * 而不是像 start/mid/end 那样只能落在三等分的位置。
+     */
+    private val ANCHOR_PUNCT = setOf('，', '。', '！', '？', '；', '：', '、', '…')
+
     /** 精选阶段模糊兜底的最小长度。1 个字太容易误配（"声"会命中"水声""风声"） */
     private const val MIN_FUZZY_LEN = 2
 
@@ -118,7 +126,9 @@ object AiEffectAnalyzer {
         // 批量格式：让 AI 自己按字数算数量（与实际配额算法不一致）
         "每 100 字给 12 个",
         // 精选提示词：数量写死 3，未跟随 aiEffectMaxPick
-        "每一段最多选 3 个"
+        "每一段最多选 3 个",
+        // 精选提示词：只用 start/mid/end 三档，无法定位到具体句子
+        "at 表示触发时机"
     )
 
     /**
@@ -286,13 +296,16 @@ object AiEffectAnalyzer {
                 append("${i + 1}. ${e.name}\n")
             }
             append("\n【正文段落（共${paras.size}段，编号即顺序）】\n")
+            append("正文里 [n] 是位置序号：段首为 [1]，之后每个标点（，。！？；：、…）后面依次 +1。\n")
             if (prevOfFirst.isNotBlank()) {
                 append("（上文提示：这些段落之前的内容是）").append(clip(prevOfFirst)).append("\n")
             }
+            // 发带序号的正文：AI 直接看得到落点，回传的 pos 就是这个序号
             paras.forEachIndexed { i, (_, text) ->
-                append("第${i + 1}段（${clip(text).length}字）：").append(clip(text)).append("\n")
+                val marked = markText(clip(text))
+                append("第${i + 1}段（${clip(text).length}字）：").append(marked.first).append("\n")
             }
-            append("\n请为每一段各选 0~${pickLimit()} 个音效，用 p 标记归属，输出 JSON：")
+            append("\n请为每一段各选 0~${pickLimit()} 个音效，用 p 标记归属、用 pos 标出位置序号，输出 JSON：")
         }
         val raw = try {
             // 输出整批段落的 JSON，长度不可预估，必须不限制 token
@@ -303,7 +316,11 @@ object AiEffectAnalyzer {
             AppLog.put("$TAG: 批量精选请求失败 ${e.localizedMessage}")
             return null
         }
-        return parsePicksBatch(raw, paras, candidates).also {
+        // 序号是按 clip 后的正文生成的，解析时用它校验 AI 回的 pos 是否越界
+        val offsetsByPara = paras.associate { (idx, text) ->
+            idx to markOffsets(clip(text))
+        }
+        return parsePicksBatch(raw, paras, candidates, offsetsByPara).also {
             if (it == null) {
                 AppLog.put("$TAG: 批量精选解析失败，原始返回: ${raw.take(300)}")
             }
@@ -352,15 +369,19 @@ object AiEffectAnalyzer {
 
     /**
      * 解析批量精选结果。
-     * 期望 `{"picks":[{"p":1,"name":"雷","at":"start"}, ...]}`，p 是 1 起的段序号。
+     * 期望 `{"picks":[{"p":1,"name":"雷","pos":3}, ...]}`，p 是 1 起的段序号，
+     * pos 是正文里插入的位置序号（见 [markText]），决定音效落在哪句话上。
      * 同一段可能被重复提及，按 [AppConfig.aiEffectMaxPick] 截断并去重。
+     *
+     * pos 缺失或越界（AI 编的号）时置 0，由 [ratioOfPos] 回退到 at 的三档位置。
      *
      * @return null 表示**返回内容不是合法 JSON**（多半是输出被截断），按失败处理不落盘。
      */
     private fun parsePicksBatch(
         raw: String,
         paras: List<Pair<Int, String>>,
-        candidates: List<AiEffectIndex.Entry>
+        candidates: List<AiEffectIndex.Entry>,
+        offsetsByPara: Map<Int, List<Int>>
     ): Map<Int, List<AiEffectPick>>? {
         val obj = extractJsonObject(raw) ?: return null
         val arr = obj.optJSONArray("picks") ?: return null
@@ -378,7 +399,18 @@ object AiEffectAnalyzer {
             val list = out.getOrPut(paraIndex) { ArrayList() }
             if (list.size >= maxPick) continue
             if (list.any { it.name == entry.name }) continue
-            list.add(AiEffectPick(entry.name, entry.path, normalizeAt(item.optString("at"))))
+            // pos 只认本段真实存在的序号，越界视为没给，回退到 at
+            val posRaw = item.optInt("pos", 0)
+            val maxPos = offsetsByPara[paraIndex]?.size ?: 0
+            val pos = if (posRaw in 1..maxPos) posRaw else 0
+            list.add(
+                AiEffectPick(
+                    entry.name,
+                    entry.path,
+                    normalizeAt(item.optString("at")),
+                    pos
+                )
+            )
         }
         return out
     }
@@ -461,6 +493,72 @@ object AiEffectAnalyzer {
     private fun clip(text: String): String =
         if (text.length <= MAX_CHARS_PER_PARA) text else text.take(MAX_CHARS_PER_PARA)
 
+    // ---------------- 位置序号 ----------------
+
+    /**
+     * 段落内所有位置序号在**原文**中的字符偏移（序号从 1 起，故下标 0 对应 1 号）。
+     * 段首为 1 号（偏移 0），之后每个 [ANCHOR_PUNCT] 标点之后依次 +1。
+     */
+    fun markOffsets(text: String): List<Int> {
+        val offsets = ArrayList<Int>()
+        offsets.add(0)
+        for (i in text.indices) {
+            if (text[i] !in ANCHOR_PUNCT) continue
+            // 连续标点（"……"、"？？"、"。，"、"！！!")只认最后一个：
+            // 连着插两三个序号没有意义，反而让 AI 多出一堆同一位置的候选号
+            if (i + 1 < text.length && text[i + 1] in ANCHOR_PUNCT) continue
+            offsets.add(i + 1)
+        }
+        return offsets
+    }
+
+    /**
+     * 给段落插入位置序号，供第二次请求（精选）发给 AI。
+     *
+     * 例：`他推开门，外面在下雨。` → `[1]他推开门，[2]外面在下雨。[3]`
+     *
+     * @return (带序号的文本, 序号1起 -> 该序号在**原文本**中的字符偏移)。
+     *         偏移量以原文为准，序号本身不计入，方便换算播放位置。
+     */
+    fun markText(text: String): Pair<String, List<Int>> {
+        val offsets = markOffsets(text)
+        val sb = StringBuilder(text.length + offsets.size * 4)
+        var cursor = 0
+        offsets.forEachIndexed { i, off ->
+            if (off > cursor) {
+                sb.append(text, cursor, off)
+                cursor = off
+            }
+            sb.append('[').append(i + 1).append(']')
+        }
+        if (cursor < text.length) sb.append(text, cursor, text.length)
+        return sb.toString() to offsets
+    }
+
+    /**
+     * 位置序号 -> 段落内的触发比例（0~1）。
+     *
+     * 序号合法时按原文偏移换算，**与 [markText] 用的是同一套锚点**，因此
+     * AI 回哪个序号，音效就落在那句话上。
+     * 序号缺失或越界（AI 幻觉/旧记录）时回退到 [at] 的三档位置。
+     */
+    fun ratioOfPos(text: String, pos: Int, at: String): Float {
+        if (pos > 0) {
+            val clipped = clip(text)
+            if (clipped.isNotEmpty()) {
+                val offsets = markOffsets(clipped)
+                if (pos <= offsets.size) {
+                    return (offsets[pos - 1].toFloat() / clipped.length).coerceIn(0f, 1f)
+                }
+            }
+        }
+        return when (at) {
+            "mid" -> 0.5f
+            "end" -> 0.98f
+            else -> 0f
+        }
+    }
+
     /** 内置默认关键字提示词，App 启动时写入 bgmAIPrompt 表供用户修改 */
     const val KEYWORD_PROMPT = """你是广播剧音效设计师。下面有若干段小说正文，请**为每一段分别**提炼用于检索音效库的关键字。
 
@@ -510,9 +608,16 @@ p 是段落序号，从 1 开始；k 是该段的关键字数组。每一段都�
 ## 怎么写（照抄，不要改写）
 - name 只写纯音效名：照抄"N. "后面的那一个词，**不要带序号、不要加 .mp3**。
 - 不要在列表的名字上做任何修改：列表里是"炒菜"就写"炒菜"，不要写成"炒菜声"。
-- at 表示触发时机：start=段落开头，mid=段落中间，end=段落结尾。默认 start。
+
+## 位置：pos 填正文里的序号
+- 正文每个段落都插了位置序号：段首是 [1]，之后每个标点（，。！？；：、…）后面依次是 [2]、[3]……
+  例：[1]他推开门，[2]外面下起了雨。[3]
+- pos 填**这个声音应该响起时，朗读正读到几号**：音效要跟着"推开门"响就填 1，
+  要跟着"下起了雨"响就填 2。
+- pos 必须是**该段正文里真实出现过的序号**，不要自己编号、不要填别段的序号。
+- 拿不准就填该段声音所在那一句的开头序号，不要留空。
 
 ## 输出格式
 严格只输出如下 JSON，不要解释、不要 markdown 代码块：
-{"picks":[{"p":1,"name":"炒菜","at":"start"},{"p":1,"name":"雷","at":"mid"},{"p":2,"name":"脚步","at":"start"}]}"""
+{"picks":[{"p":1,"name":"炒菜","pos":3},{"p":1,"name":"雷","pos":7},{"p":2,"name":"脚步","pos":1}]}"""
 }

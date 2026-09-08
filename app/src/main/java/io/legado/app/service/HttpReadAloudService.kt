@@ -1891,9 +1891,15 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
 
     private fun prepareSubtitles() {
         if (nowSpeak >= contentList.size) return
-        var text = contentList[nowSpeak]
-        if (paragraphStartPos > 0 && paragraphStartPos < text.length) {
-            text = text.substring(paragraphStartPos)
+        val raw = contentList[nowSpeak]
+        var text = raw
+        // 短段落要靠上一段衔接才能匹配上正则；从段落中间起播时，上文就是本段被截掉的那部分
+        val prevText: String
+        if (paragraphStartPos > 0 && paragraphStartPos < raw.length) {
+            prevText = raw.substring(0, paragraphStartPos)
+            text = raw.substring(paragraphStartPos)
+        } else {
+            prevText = contentList.getOrNull(nowSpeak - 1).orEmpty()
         }
         // 字幕用原始文本立即构建并交给本轮 updateSubtitle 发送。
         // 注意本函数不能挂起：调用方 while 循环里 updateSubtitle 排在它之后，
@@ -1905,7 +1911,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
             AppConfig.getEffectiveSoundEffectMode(it)
         } ?: AppConfig.soundEffectMode
         if (effectiveMode != "off") {
-            scheduleSoundEffects(text, baseText, nowSpeak)
+            scheduleSoundEffects(text, baseText, nowSpeak, prevText)
         }
         // AI 音效：分析本段与下一段，下一段提前算好，播到时直接放
         scheduleAiEffects(nowSpeak, nowSpeak + 1)
@@ -1915,10 +1921,15 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
      * 异步计算音效规则，不阻塞字幕同步循环。
      * 替换结果只用于 MediaPlayer 音效播放，不影响合成文本。
      */
-    private fun scheduleSoundEffects(text: String, baseText: String, index: Int) {
+    private fun scheduleSoundEffects(
+        text: String,
+        baseText: String,
+        index: Int,
+        prevText: String = ""
+    ) {
         effectCalcJob?.cancel()
         effectCalcJob = lifecycleScope.launch(Dispatchers.IO) {
-            val (cleanText, effects) = parseSoundEffects(applySoundEffectRules(text))
+            val (cleanText, effects) = parseSoundEffects(applySoundEffectRules(text, prevText))
             val effectText = purifySpeakText(cleanText)
             withContext(Dispatchers.Main) {
                 // 计算期间段落已切换，丢弃结果，交由下一轮重新计算

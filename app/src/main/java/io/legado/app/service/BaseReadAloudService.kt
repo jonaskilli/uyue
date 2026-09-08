@@ -189,12 +189,33 @@ abstract class BaseReadAloudService : BaseService(),
         private val soundEffectPattern = Regex("\\(([\\u4e00-\\u9fa5]*音效)\\)")
 
         /**
+         * 少于这个字数的段落，正则容易匹配不上（很多规则要看完整的一句话），
+         * 此时用 [prevText] 衔接上来再匹配。
+         */
+        private const val MIN_MATCH_CHARS = 50
+
+        /** 补上下文时，上一段最多取末尾这么多字 */
+        private const val CONTEXT_CHARS = 50
+
+        /**
+         * 上一段与当前段的衔接符。
+         * 规则文件（ttsrv-replaces*.json）里有对应规则，会把衔接符连同前面的内容一并删掉，
+         * 所以替换完成后剩下的就是当前段落加音效标记；这里再兜底截一次，防止规则没生效。
+         */
+        private const val PARA_JOINER = "〉〉"
+
+        /**
          * 应用内置音效替换规则，在文本中插入 (音效) 标记。
          * 若文本中已存在音效标记，则跳过，避免重复。
          * 根据当前书籍生效的音效模式选择不同的规则文件。
+         *
+         * @param text 当前段落
+         * @param prevText 上一段落。当前段落不足 [MIN_MATCH_CHARS] 字时，
+         *                 取它的末尾 [CONTEXT_CHARS] 字用 [PARA_JOINER] 衔接到前面一起匹配，
+         *                 让跨句的规则也能命中；替换完成后该部分会被去掉，不影响本段正文。
          */
         @JvmStatic
-        protected fun applySoundEffectRules(text: String): String {
+        protected fun applySoundEffectRules(text: String, prevText: String = ""): String {
             if (text.isEmpty()) return text
             val mode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
                 AppConfig.getEffectiveSoundEffectMode(it)
@@ -206,9 +227,19 @@ abstract class BaseReadAloudService : BaseService(),
             val downloadUrl = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/$jsonFileName?download=true"
             val rules = getSoundEffectRules(file, downloadUrl) ?: return text
 
+            // 短段落补上文，原文两段之间是换行，这里换成衔接符，便于规则识别与删除
+            val withContext = prevText.isNotBlank() && text.length < MIN_MATCH_CHARS
+            val source = if (withContext) {
+                val head =
+                    if (prevText.length > CONTEXT_CHARS) prevText.takeLast(CONTEXT_CHARS) else prevText
+                head + PARA_JOINER + text
+            } else {
+                text
+            }
+
             return try {
-                val hasEffects = soundEffectPattern.containsMatchIn(text)
-                var result = text
+                val hasEffects = soundEffectPattern.containsMatchIn(source)
+                var result = source
                 var successRules = 0
                 var failRules = 0
                 for (rule in rules) {
@@ -234,7 +265,9 @@ abstract class BaseReadAloudService : BaseService(),
                 if (!hasEffects && nowHasEffects) {
                     AppLog.put("[ttsrv] 替换后生成了音效标记")
                 }
-                result
+                // 衔接进来的上文只是给正则看的，不属于本段：
+                // 规则文件里有对应规则删掉它，这里再兜底截一次，避免规则没命中时混进正文
+                if (withContext) result.substringAfterLast(PARA_JOINER) else result
             } catch (e: Exception) {
                 AppLog.put("[ttsrv] 整体异常: ${e.message}")
                 text
@@ -478,8 +511,11 @@ abstract class BaseReadAloudService : BaseService(),
          * 返回 (去掉标记后的净文本, 音效列表)，不依赖播放时的 paragraphEffects 状态。
          * 可在无 service 实例时静态调用（如目录界面手动保存）。
          */
-        fun extractSoundEffectsForMerge(text: String): Pair<String, List<SoundEffect>> {
-            return parseSoundEffects(applySoundEffectRules(text))
+        fun extractSoundEffectsForMerge(
+            text: String,
+            prevText: String = ""
+        ): Pair<String, List<SoundEffect>> {
+            return parseSoundEffects(applySoundEffectRules(text, prevText))
         }
 
         /**
@@ -1062,9 +1098,14 @@ abstract class BaseReadAloudService : BaseService(),
 
         val duration = totalDuration.coerceAtLeast(1)
         val ratio = (currentPosition.toFloat() / duration).coerceIn(0f, 1f)
+        // 与规则音效对齐：同样提前 soundEffectOffsetChars 个字起播，
+        // 让音效先起来一点再被声音盖住，不至于读完那句才响
+        val totalChars = currentParagraphTotalChars.coerceAtLeast(1)
+        val leadChars = AppConfig.soundEffectOffsetChars.coerceAtLeast(0)
+        val lead = (leadChars.toFloat() / totalChars).coerceAtMost(1f)
 
         effects.forEach { effect ->
-            val target = (effect.offsetRatio ?: 0f).coerceIn(0f, 1f)
+            val target = ((effect.offsetRatio ?: 0f) - lead).coerceIn(0f, 1f)
             if (!effect.triggered && ratio >= target) {
                 effect.triggered = true
                 loadAndPlayEffect(effect)
@@ -1229,13 +1270,15 @@ abstract class BaseReadAloudService : BaseService(),
 
     /** 把 AI 选中的音效转为播放任务（主线程） */
     private suspend fun applyAiPicks(index: Int, picks: List<AiEffectPick>) {
+        // 位置序号按段落原文换算，和发给 AI 时插入的 [n] 是同一套锚点
+        val text = contentList.getOrNull(index).orEmpty()
         val effects = picks.mapNotNull { pick ->
             if (pick.name.isBlank()) return@mapNotNull null
             SoundEffect(
                 charOffset = 0,
                 name = pick.name,
                 fileName = pick.path,
-                offsetRatio = ratioOfAt(pick.at),
+                offsetRatio = AiEffectAnalyzer.ratioOfPos(text, pick.pos, pick.at),
                 isAiEffect = true
             )
         }
@@ -1254,12 +1297,6 @@ abstract class BaseReadAloudService : BaseService(),
      */
     private suspend fun clearAiPicks(index: Int) = withContext(Dispatchers.Main) {
         aiEffects.remove(index)
-    }
-
-    private fun ratioOfAt(at: String): Float = when (at) {
-        "mid" -> 0.5f
-        "end" -> 0.98f
-        else -> 0f
     }
 
     /** 章节切换 / 停止时清空本轮状态，识别记录保留在文件中 */

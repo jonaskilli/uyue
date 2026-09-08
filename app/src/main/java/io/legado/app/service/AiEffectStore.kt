@@ -15,12 +15,15 @@ import java.io.File
  * AI 选定的一个音效。
  * @param name 音效名，如 "炒菜"
  * @param path 相对路径，如 "01_通用母库/拟音/炒菜.mp3"
- * @param at 触发位置：start / mid / end
+ * @param at 触发位置：start / mid / end。**仅在 [pos] 缺失时兜底**
+ * @param pos 位置序号（1 起），对应段落里插入的 [n] 序号。0 表示 AI 没给或给的非法，
+ *            此时回退到 [at]。见 [AiEffectAnalyzer.markText]
  */
 data class AiEffectPick(
     val name: String = "",
     val path: String = "",
-    val at: String = "start"
+    val at: String = "start",
+    val pos: Int = 0
 )
 
 /**
@@ -93,7 +96,8 @@ object AiEffectStore {
                                 AiEffectPick(
                                     name = name,
                                     path = e.optString("path", ""),
-                                    at = e.optString("at", "start")
+                                    at = e.optString("at", "start"),
+                                    pos = e.optInt("pos", 0)
                                 )
                             )
                         }
@@ -146,6 +150,7 @@ object AiEffectStore {
                             put("name", e.name)
                             put("path", e.path)
                             put("at", e.at)
+                            put("pos", e.pos)
                         }
                     )
                 }

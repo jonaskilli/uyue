@@ -563,18 +563,18 @@ object HttpTtsAudioCache {
                         segInfos.add(AudioConcatUtil.SegmentInfo(text.length, emptyList()))
                         return@forEachIndexed
                     }
-                    val (clean, effects) = BaseReadAloudService.extractSoundEffectsForMerge(text)
+                    // 短段落同样用上一段衔接后再匹配，与朗读时保持一致
+                    val (clean, effects) = BaseReadAloudService.extractSoundEffectsForMerge(
+                        text,
+                        segments.getOrNull(index - 1).orEmpty()
+                    )
                     val segEffects = effects.map {
                         AudioConcatUtil.SegmentEffect(it.fileName, it.charOffset)
                     }.toMutableList()
-                    // AI 音效按净字数的比例换算偏移，与朗读时的 start/mid/end 一致
+                    // AI 音效按净字数的比例换算偏移，与朗读时的位置序号/at 一致
                     aiEffectRecords[index]?.effects?.forEach { pick ->
                         if (pick.path.isBlank()) return@forEach
-                        val ratio = when (pick.at) {
-                            "mid" -> 0.5f
-                            "end" -> 1.0f
-                            else -> 0f
-                        }
+                        val ratio = AiEffectAnalyzer.ratioOfPos(text, pick.pos, pick.at)
                         segEffects.add(
                             AudioConcatUtil.SegmentEffect(
                                 pick.path,
