@@ -1,0 +1,14 @@
+{
+ "category": "N01",
+ "name": "厨事烹饪",
+ "domain": "N",
+ "effectCount": 23,
+ "paragraphs": 5074,
+ "blocked_common": 0,
+ "blocked_classify": 3564,
+ "blocked_block": 18,
+ "matched": 0,
+ "no_effect": 1492,
+ "seconds": 0.1,
+ "finishedAt": "2026-09-08 10:23:37"
+}

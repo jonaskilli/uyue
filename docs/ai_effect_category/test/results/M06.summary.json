@@ -1,0 +1,14 @@
+{
+ "category": "M06",
+ "name": "空旷回响",
+ "domain": "M",
+ "effectCount": 10,
+ "paragraphs": 4941,
+ "blocked_common": 0,
+ "blocked_classify": 4063,
+ "blocked_block": 17,
+ "matched": 0,
+ "no_effect": 861,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:37"
+}

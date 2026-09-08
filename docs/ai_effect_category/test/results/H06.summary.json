@@ -1,0 +1,14 @@
+{
+ "category": "H06",
+ "name": "金属器物",
+ "domain": "H",
+ "effectCount": 63,
+ "paragraphs": 2659,
+ "blocked_common": 0,
+ "blocked_classify": 2436,
+ "blocked_block": 7,
+ "matched": 1,
+ "no_effect": 215,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:36"
+}

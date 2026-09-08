@@ -1,0 +1,14 @@
+{
+ "category": "J02",
+ "name": "市井叫卖",
+ "domain": "J",
+ "effectCount": 14,
+ "paragraphs": 5010,
+ "blocked_common": 0,
+ "blocked_classify": 3510,
+ "blocked_block": 9,
+ "matched": 0,
+ "no_effect": 1491,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:36"
+}

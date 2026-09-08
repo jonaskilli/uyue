@@ -1,0 +1,14 @@
+{
+ "category": "A01",
+ "name": "刀剑挥击破空",
+ "domain": "A",
+ "effectCount": 159,
+ "paragraphs": 5221,
+ "blocked_common": 0,
+ "blocked_classify": 2575,
+ "blocked_block": 64,
+ "matched": 3,
+ "no_effect": 2579,
+ "seconds": 0.2,
+ "finishedAt": "2026-09-08 10:23:34"
+}

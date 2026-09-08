@@ -1,0 +1,14 @@
+{
+ "category": "I03",
+ "name": "汽车",
+ "domain": "I",
+ "effectCount": 30,
+ "paragraphs": 4159,
+ "blocked_common": 6,
+ "blocked_classify": 3472,
+ "blocked_block": 69,
+ "matched": 9,
+ "no_effect": 603,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:36"
+}

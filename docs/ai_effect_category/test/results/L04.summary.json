@@ -1,0 +1,14 @@
+{
+ "category": "L04",
+ "name": "情绪配乐",
+ "domain": "L",
+ "effectCount": 0,
+ "paragraphs": 3154,
+ "blocked_common": 0,
+ "blocked_classify": 3090,
+ "blocked_block": 0,
+ "matched": 0,
+ "no_effect": 64,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:37"
+}

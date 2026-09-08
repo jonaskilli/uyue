@@ -1,0 +1,14 @@
+{
+ "category": "F02",
+ "name": "雷电",
+ "domain": "F",
+ "effectCount": 10,
+ "paragraphs": 1738,
+ "blocked_common": 0,
+ "blocked_classify": 1611,
+ "blocked_block": 0,
+ "matched": 0,
+ "no_effect": 127,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

@@ -1,0 +1,14 @@
+{
+ "category": "C04",
+ "name": "阵法结界",
+ "domain": "C",
+ "effectCount": 14,
+ "paragraphs": 2428,
+ "blocked_common": 0,
+ "blocked_classify": 2291,
+ "blocked_block": 0,
+ "matched": 0,
+ "no_effect": 137,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

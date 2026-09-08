@@ -1,0 +1,14 @@
+{
+ "category": "H05",
+ "name": "杯碗茶酒",
+ "domain": "H",
+ "effectCount": 40,
+ "paragraphs": 3861,
+ "blocked_common": 0,
+ "blocked_classify": 2208,
+ "blocked_block": 74,
+ "matched": 0,
+ "no_effect": 1579,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:36"
+}

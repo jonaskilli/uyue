@@ -1,0 +1,14 @@
+{
+ "category": "H01",
+ "name": "门窗",
+ "domain": "H",
+ "effectCount": 201,
+ "paragraphs": 4425,
+ "blocked_common": 19,
+ "blocked_classify": 3085,
+ "blocked_block": 289,
+ "matched": 47,
+ "no_effect": 985,
+ "seconds": 0.2,
+ "finishedAt": "2026-09-08 10:23:36"
+}

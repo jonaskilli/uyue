@@ -1,0 +1,14 @@
+{
+ "category": "H09",
+ "name": "灯火光源",
+ "domain": "H",
+ "effectCount": 86,
+ "paragraphs": 1535,
+ "blocked_common": 0,
+ "blocked_classify": 1417,
+ "blocked_block": 0,
+ "matched": 0,
+ "no_effect": 118,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:36"
+}

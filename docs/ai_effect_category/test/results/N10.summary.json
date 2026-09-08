@@ -1,0 +1,14 @@
+{
+ "category": "N10",
+ "name": "撕剪掰折",
+ "domain": "N",
+ "effectCount": 68,
+ "paragraphs": 3955,
+ "blocked_common": 0,
+ "blocked_classify": 2269,
+ "blocked_block": 352,
+ "matched": 0,
+ "no_effect": 1334,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:37"
+}
