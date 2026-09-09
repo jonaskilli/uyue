@@ -378,7 +378,8 @@ class SoundEffectRuleActivity :
     }
 
     override fun edit(rule: SoundEffectRule) {
-        // AI 音效没有可编辑字段，编辑入口用于改名（会连同本地文件一起改）
+        // AI 音效没有正则类字段，编辑入口就是「正名 + 检索关键词」这一行，
+        // 改了正名会连同本地文件一起改名（见 [showRenameAiSoundDialog]）
         if (viewModel.mode == SoundEffectRuleManager.MODE_AI) {
             showRenameAiSoundDialog(rule)
         } else {
@@ -394,74 +395,104 @@ class SoundEffectRuleActivity :
      * 顺序很重要：先改文件，成功后再更新内存数据与索引。
      * 文件改名不可逆，若先改内存再改文件失败，索引会指向不存在的文件。
      */
+    /**
+     * AI 音效的编辑入口：改的是**一整行** `正名|关键词|关键词…`。
+     *
+     * - `|` 之前是正名，同时是音频文件名，改了会同步重命名本地 mp3；
+     * - `|` 之后是检索关键词，只写进索引，不碰文件。
+     *
+     * 两样放在一个输入框里，是因为它们本来就是同一条索引记录的两半，
+     * 分开两个框反而容易改了一个忘了另一个。
+     */
     private fun showRenameAiSoundDialog(rule: SoundEffectRule) {
-        val oldName = rule.name
         val oldPath = rule.pattern
-        // 本地没有音频文件时不允许改名：改名会同步改文件名，
-        // 而远端只存有原名的文件，改后 AI 再选中它就会按新名下载并 404。
-        // 先试听一次即可把文件下载到本地。
-        val localFile = java.io.File(AppConfig.aiEffectLocalDir, oldPath)
-        if (!localFile.exists()) {
-            alert("无法改名") {
-                setMessage(
-                    "本地还没有这个音效的音频文件，无法改名。\n\n" +
-                        "改名会同时修改本地文件名，而远端仓库只保存原名的文件，" +
-                        "直接改名会导致以后按新名字下载失败。\n\n" +
-                        "请先点试听把它下载到本地，再改名。"
-                )
-                noButton()
-                yesButton { }
-            }
-            return
-        }
+        val oldKeywords = SoundEffectRuleManager.parseAiKeywords(rule.sampleText)
+        val oldText = SoundEffectRuleManager.joinAiName(rule.name, oldKeywords)
         val input = android.widget.EditText(this).apply {
-            setText(oldName)
+            setText(oldText)
             setSelectAllOnFocus(true)
-            setSingleLine(true)
+            setSingleLine(false)
+            setMaxLines(3)
+            hint = "正名|关键词|关键词"
         }
         val padding = (16 * resources.displayMetrics.density).toInt()
         val container = android.widget.FrameLayout(this).apply {
             setPadding(padding, padding / 2, padding, 0)
             addView(input)
         }
-        alert("AI音效改名") {
+        alert("AI音效（改名与关键词）") {
             customView { container }
             neutralButton("重置为原名")
             noButton()
             yesButton {
-                val newName = input.text?.toString()?.trim().orEmpty()
-                if (newName.isEmpty() || newName == oldName) return@yesButton
-                renameAiSound(rule, oldPath, newName)
+                val newText = input.text?.toString()?.trim().orEmpty()
+                if (newText.isEmpty() || newText == oldText) return@yesButton
+                renameAiSound(rule, oldPath, newText)
             }
         }.apply {
-            // 重置：把曾经改过的名字改回原名（原名在 pattern 的文件名部分丢失前可用）
+            // 重置：把曾经改过的名字改回原名（原名在 pattern 的文件名部分丢失前可用），
+            // 关键词保持当前这版不动
             getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
                 val original = oldPath.substringAfterLast('/').removeSuffix(".mp3")
-                if (original.isNotBlank() && original != oldName) {
-                    renameAiSound(rule, oldPath, original)
+                val reset = SoundEffectRuleManager.joinAiName(original, oldKeywords)
+                if (original.isNotBlank() && reset != oldText) {
+                    renameAiSound(rule, oldPath, reset)
                 }
                 dismiss()
             }
         }
     }
 
-    private fun renameAiSound(rule: SoundEffectRule, oldPath: String, newName: String) {
-        val safeName = newName.replace(Regex("[/\\\\:*?\"<>|]"), "_")
+    /**
+     * 应用编辑结果：先重命名本地文件（仅在正名真的变了时），再更新索引。
+     *
+     * **只改关键词时不需要本地音频文件**——不碰文件名就谈不上远端 404，
+     * 所以文件是否存在的校验推迟到这里，按是否改名决定。
+     */
+    private fun renameAiSound(rule: SoundEffectRule, oldPath: String, rawText: String) {
+        val (rawName, keywords) = SoundEffectRuleManager.splitAiName(rawText)
+        if (rawName.isBlank()) {
+            toastOnUi("名字不能为空")
+            return
+        }
+        val safeName = rawName.replace(Regex("[/\\\\:*?\"<>|]"), "_")
+        val nameChanged = safeName != rule.name
+        if (nameChanged) {
+            // 改名会同步改本地文件名，而远端只存有原名的文件，
+            // 改后 AI 再选中它就会按新名下载并 404。先试听一次即可把文件下载到本地。
+            val localFile = java.io.File(AppConfig.aiEffectLocalDir, oldPath)
+            if (!localFile.exists()) {
+                alert("无法改名") {
+                    setMessage(
+                        "本地还没有这个音效的音频文件，无法改名。\n\n" +
+                            "改名会同时修改本地文件名，而远端仓库只保存原名的文件，" +
+                            "直接改名会导致以后按新名字下载失败。\n\n" +
+                            "请先点试听把它下载到本地，再改名。\n" +
+                            "（只改关键词不受影响，可以照常保存。）"
+                    )
+                    noButton()
+                    yesButton { }
+                }
+                return
+            }
+        }
         val prefix = oldPath.substringBeforeLast('/', "")
         val newPath = if (prefix.isEmpty()) "$safeName.mp3" else "$prefix/$safeName.mp3"
-        showLoading("正在改名…")
+        showLoading(if (nameChanged) "正在改名…" else "正在保存…")
         lifecycleScope.launch {
             val error = withContext(IO) {
                 runCatching {
-                    val oldFile = java.io.File(AppConfig.aiEffectLocalDir, oldPath)
-                    val newFile = java.io.File(AppConfig.aiEffectLocalDir, newPath)
-                    // 调用前已确保 oldFile 存在（否则不允许改名）
-                    if (oldFile.exists() && !newFile.exists()) {
-                        newFile.parentFile?.mkdirs()
-                        if (!oldFile.renameTo(newFile)) {
-                            // 跨存储卷时 renameTo 会失败，退化为复制
-                            oldFile.copyTo(newFile)
-                            oldFile.delete()
+                    if (nameChanged) {
+                        val oldFile = java.io.File(AppConfig.aiEffectLocalDir, oldPath)
+                        val newFile = java.io.File(AppConfig.aiEffectLocalDir, newPath)
+                        // 调用前已确保 oldFile 存在（否则不允许改名）
+                        if (oldFile.exists() && !newFile.exists()) {
+                            newFile.parentFile?.mkdirs()
+                            if (!oldFile.renameTo(newFile)) {
+                                // 跨存储卷时 renameTo 会失败，退化为复制
+                                oldFile.copyTo(newFile)
+                                oldFile.delete()
+                            }
                         }
                     }
                 }.exceptionOrNull()?.localizedMessage
@@ -471,7 +502,13 @@ class SoundEffectRuleActivity :
                 toastOnUi("改名失败：$error")
                 return@launch
             }
-            update(rule.copy(name = safeName, pattern = newPath))
+            update(
+                rule.copy(
+                    name = safeName,
+                    pattern = newPath,
+                    sampleText = keywords.joinToString("|")
+                )
+            )
         }
     }
 

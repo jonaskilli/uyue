@@ -69,6 +69,36 @@ object SoundEffectRuleManager {
         else -> "全部音效"
     }
 
+    /** AI 音效模式：正名与关键词的分隔符，与索引文件里的写法一致（见 [AiEffectIndex]） */
+    private const val AI_KEYWORD_SEP = "|"
+
+    /** 关键词文本 -> 列表。兼容 `|`、空格、逗号、顿号换行等随手写法 */
+    fun parseAiKeywords(raw: String): List<String> =
+        raw.split('|', ' ', ',', '，', '、', '\n', '\t')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
+    /**
+     * 界面里编辑的**一整行**：`正名|关键词|关键词…`。
+     * AI 模式的编辑入口就改这一行——改名默认连同关键词一起改。
+     */
+    fun joinAiName(name: String, keywords: List<String>): String =
+        if (keywords.isEmpty()) name else name + AI_KEYWORD_SEP + keywords.joinToString(AI_KEYWORD_SEP)
+
+    /**
+     * [joinAiName] 的反向：拆出 (正名, 关键词)。
+     * 正名只取第一段——它同时是音频文件名，绝不能把关键词并进去。
+     */
+    fun splitAiName(raw: String): Pair<String, List<String>> {
+        val segs = raw.split(AI_KEYWORD_SEP).toMutableList()
+        val name = segs.removeAt(0).trim()
+        val keywords = segs
+            .flatMap { it.split(' ', ',', '，', '、') }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        return name to keywords
+    }
+
     /**
      * AI 音效模式：把音效库索引转成「分组 + 条目」结构供界面展示。
      * 分组名是「分类/子分类」，条目名是音效名、pattern 是相对路径，
@@ -91,7 +121,10 @@ object SoundEffectRuleManager {
                         id = System.currentTimeMillis() + ruleSeq++,
                         name = entry.name,
                         // pattern 存相对路径，供试听与保存时还原
-                        pattern = entry.path
+                        pattern = entry.path,
+                        // AI 模式下 sampleText（正则测试文本）空着没用，借它携带检索关键词，
+                        // 保存时再取回来，避免用户改一条就把全部关键词冲掉
+                        sampleText = entry.keywords.joinToString("|")
                     )
                 }.toMutableList()
                 result.add(SoundEffectGroupWithRules(group, rules))
@@ -107,15 +140,18 @@ object SoundEffectRuleManager {
         val entries = ArrayList<AiEffectIndex.Entry>()
         data.forEach { gwr ->
             gwr.list.forEach { rule ->
-                val name = rule.name.trim()
+                // 正名不含分隔符：万一有人把带关键词的整串粘进名字里，只取前一段
+                val name = splitAiName(rule.name).first
                 if (name.isBlank()) return@forEach
+                val keywords = parseAiKeywords(rule.sampleText)
                 // 路径形如 "分类/子分类/名字.mp3"，改名后 pattern 已是新名字，
-                // 这里再按 name 重建文件名，保证索引名与文件名始终一致
+                // 这里再按 name 重建文件名，保证索引名与文件名始终一致。
+                // 只用正名，关键词绝不进路径，否则远端 404
                 val prefix = rule.pattern.substringBeforeLast('/', "")
                 val path = if (prefix.isEmpty()) "$name.mp3" else "$prefix/$name.mp3"
                 val parts = path.split('/')
                 if (parts.size < 3) return@forEach
-                entries.add(AiEffectIndex.Entry(name, path, parts[0], parts[1]))
+                entries.add(AiEffectIndex.Entry(name, path, parts[0], parts[1], keywords))
             }
         }
         return AiEffectIndex.replaceAll(entries)

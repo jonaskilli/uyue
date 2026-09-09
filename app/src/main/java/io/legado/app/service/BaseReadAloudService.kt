@@ -240,12 +240,9 @@ abstract class BaseReadAloudService : BaseService(),
             return try {
                 val hasEffects = soundEffectPattern.containsMatchIn(source)
                 var result = source
-                var successRules = 0
-                var failRules = 0
                 for (rule in rules) {
                     if (rule.isRegex && rule.regex == null) {
                         // 正则编译失败：保持原有行为，跳过该条
-                        failRules++
                         continue
                     }
                     try {
@@ -254,13 +251,12 @@ abstract class BaseReadAloudService : BaseService(),
                         } else {
                             result.replace(rule.pattern, rule.replacement)
                         }
-                        successRules++
                     } catch (e: Exception) {
-                        failRules++
                         AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message} pattern=${rule.pattern}")
                     }
                 }
-                AppLog.put("[ttsrv] 规则执行: ${rules.size}条, 成功${successRules}条, 失败${failRules}条, 原文本${text.length}字, 结果${result.length}字")
+                // 只有"替换后确实配出了音效"才值得记一条：
+                // 规则跑完但没配上音效是常态，每段落打一条汇总会把有用的日志全淹掉
                 val nowHasEffects = soundEffectPattern.containsMatchIn(result)
                 if (!hasEffects && nowHasEffects) {
                     AppLog.put("[ttsrv] 替换后生成了音效标记")
@@ -1064,8 +1060,55 @@ abstract class BaseReadAloudService : BaseService(),
      */
     protected fun checkAndPlayEffects(totalDuration: Long, currentPosition: Long) {
         if (totalDuration <= 0L) return
+        // 段落切走了：上一段里没赶上的音效不能就这么丢掉，收进兜底队列补播
+        flushMissedAiEffects()
         checkRuleEffects(totalDuration, currentPosition)
         checkAiEffects(totalDuration, currentPosition)
+    }
+
+    /**
+     * 段落切换时，把上一段**尚未触发**的 AI 音效按落点顺序收进兜底队列并补播。
+     *
+     * 不这么做的话，只要 AI 结果晚于段落读完，这些音效就再也没有人会去检查，
+     * 变成"识别出来了但没响"。
+     */
+    private fun flushMissedAiEffects() {
+        val current = nowSpeak
+        if (lastAiFlushedPara == current) return
+        lastAiFlushedPara = current
+        // 取所有已经读过的段落，而不是只取上一段——跳段/快进时会一次跨过好几段
+        val overdue = aiEffects.keys.filter { it < current }.sorted()
+        if (overdue.isEmpty()) return
+        var count = 0
+        for (para in overdue) {
+            val missed = aiEffects.remove(para)
+                ?.filter { !it.triggered }
+                ?.sortedBy { it.offsetRatio ?: 0f }
+            if (missed.isNullOrEmpty()) continue
+            missed.forEach { offerMissedAiEffect(it) }
+            count += missed.size
+        }
+        if (count == 0) return
+        AppLog.put(
+            "[AI音效] 段落 ${overdue.joinToString(",")} 已读完，" +
+                "$count 条未触发，转入补播队列"
+        )
+        drainMissedAiEffects()
+    }
+
+    /** 收进兜底队列。超过上限就丢弃，避免队列越积越长、音效永远追不上朗读 */
+    private fun offerMissedAiEffect(effect: SoundEffect) {
+        if (aiMissedQueue.size >= aiMissedMax) return
+        if (aiMissedQueue.any { it === effect }) return
+        effect.triggered = true
+        aiMissedQueue.addLast(effect)
+    }
+
+    /** 把兜底队列交给播放器。ExoPlayer 的 playlist 会按加入顺序依次播完 */
+    private fun drainMissedAiEffects() {
+        while (aiMissedQueue.isNotEmpty()) {
+            loadAndPlayEffect(aiMissedQueue.removeFirst())
+        }
     }
 
     /** 规则音效：由 (xxx音效) 标记 + ttsrv-replaces 规则生成 */
@@ -1119,6 +1162,24 @@ abstract class BaseReadAloudService : BaseService(),
     private val aiEffects = mutableMapOf<Int, MutableList<SoundEffect>>()
 
     /**
+     * 错过触发窗口的 AI 音效，按原顺序补播。
+     *
+     * 由来：AI 分析是异步的，结果常常在段落读到一半甚至读完之后才落地，
+     * 而 [checkAiEffects] 只认 `aiEffects[nowSpeak]`、且要求进度已过落点，
+     * 于是落点靠后的音效会被静默丢弃——"明明识别出来了却只响一个"就是这么来的。
+     *
+     * 这里把它们收进队列按原顺序补播：**宁可晚一点响，也不要整个丢掉**。
+     * ExoPlayer 的 playlist 本身就是队列，顺序 addMediaItem 即可顺序播放。
+     */
+    private val aiMissedQueue = ArrayDeque<SoundEffect>()
+
+    /** 兜底队列上限：分析一直落后时防止无限堆积，否则音效永远追不上朗读 */
+    private val aiMissedMax = 12
+
+    /** 上一次做过"过期清理"的段落号，用于检测段落切换 */
+    private var lastAiFlushedPara = -1
+
+    /**
      * 字幕同步用：已经生成过字幕的段落号，-1 表示还没有。
      *
      * **必须在 [clearAiEffectRuntime] 里一起复位**：停止后重读同一个段落时段落号没变，
@@ -1139,13 +1200,23 @@ abstract class BaseReadAloudService : BaseService(),
     /** 缓存对应的 "bookUrl/chapterIndex"，用来判断是否需要重新载入 */
     private var aiEffectCacheKey: String = ""
 
-    /** 待分析的段落索引，串行处理，避免段落快速推进时丢任务 */
-    private val aiEffectPending = ArrayDeque<Int>()
+    /**
+     * 待分析的**区间队列**，元素为 (起始段落, 结束段落)，串行处理。
+     * 队列里放的是区间而不是单段，一次 AI 调用处理整个区间。
+     */
+    private val aiEffectPending = ArrayDeque<Pair<Int, Int>>()
 
     private var aiEffectWorker: Job? = null
 
     /** 首次进入是否已完成，用于保证开头第一段一定被分析 */
     private var aiEffectStarted = false
+
+    /** 已安排过分析的区间终点（含）。下一个区间从这里 +1 开始，保证区间不重叠 */
+    private var aiEffectScheduledMaxPara = -1
+
+    /** 当前正在朗读的区间 [start, end]，读完就切到下一个已备好的区间 */
+    private var aiEffectCurrentStartPara = -1
+    private var aiEffectCurrentEndPara = -1
 
     /** worker 用的当前书与章节。跨章节后调度会刷新，避免记录写错章节 */
     @Volatile
@@ -1155,59 +1226,105 @@ abstract class BaseReadAloudService : BaseService(),
     private var aiEffectChapterIndex: Int = 0
 
     /**
-     * 安排分析若干段落。子类在准备字幕（段落切换）时调用。
+     * 按**字数区间**安排 AI 音效分析。子类在段落切换时调用。
      *
-     * 攒够 [AppConfig.aiEffectCharInterval] 字就把这段时间里**所有未分析过的段落**
-     * 打包成一批，一次 AI 调用全部处理完（每段返回 0~3 个音效），
-     * 而不是每段各调一次——段落越碎省得越多。
+     * 一个区间 = 从某一段起往后累计够 [AppConfig.aiEffectCharInterval] 字所覆盖的段落。
+     * 边界永远落在段落结尾（复用 [calculateEndParagraphByCharCount]，与 AI 生图
+     * 切场景是同一套算法），所以设定字数只是目标值，实际会略多——最多多一整段。
      *
-     * 下一段始终参与攒批，保证「播 A 时已算好 A+1」的提前量。
-     * 已分析过的段落会命中记录文件，不再进入批次。
+     * 策略照抄 AI 生图的「预生成」：**永远多备一个区间**。
+     * - 开始朗读：安排「当前区间」+「下一个区间」
+     * - 每读完一个区间：已备好的下一个转为当前，同时再补一个
+     *
+     * 于是从第二个区间起，结果在读到之前就已经算好了，不会再出现
+     * 「结果落地时段落已读完」。第一个区间的结果可能晚一点，出来就播（走补播队列）。
+     *
+     * 已有记录的段落直接复用、不再问 AI，见 [analyzeAiEffectBatch]。
      */
-    protected fun scheduleAiEffects(vararg indices: Int) {
+    protected fun scheduleAiEffects() {
         if (!AppConfig.aiEffectEnabled) return
-        if (indices.isEmpty()) return
         val bookUrl = ReadBook.book?.bookUrl?.takeIf { it.isNotBlank() } ?: return
         aiEffectBookUrl = bookUrl
         aiEffectChapterIndex = ReadBook.durChapterIndex
 
-        val interval = AppConfig.aiEffectCharInterval
-        val first = !aiEffectStarted
-        aiEffectStarted = true
+        when {
+            !aiEffectStarted -> {
+                aiEffectStarted = true
+                // 首次：当前区间 + 下一个区间，一开始就领先一个
+                startRangeAt(nowSpeak)
+                enqueueNextRange()
+            }
 
-        synchronized(aiEffectPending) {
-            for (i in indices) {
-                if (i < 0 || i >= contentList.size) continue
-                if (aiEffects.containsKey(i)) continue
-                if (aiEffectPending.contains(i)) continue
-                aiEffectPending.addLast(i)
+            aiEffectCurrentStartPara in 0..aiEffectCurrentEndPara &&
+                nowSpeak !in aiEffectCurrentStartPara..aiEffectCurrentEndPara -> {
+                // 离开了当前区间
+                if (nowSpeak == aiEffectCurrentEndPara + 1 &&
+                    aiEffectScheduledMaxPara > aiEffectCurrentEndPara
+                ) {
+                    // 正常往下读：把已备好的下一个区间转为当前
+                    aiEffectCurrentStartPara = aiEffectCurrentEndPara + 1
+                    aiEffectCurrentEndPara = aiEffectScheduledMaxPara
+                } else {
+                    // 跳段 / 回退：已安排的区间对不上，从当前位置重开。
+                    // 重复涉及的段落会命中记录缓存，不会重复问 AI
+                    startRangeAt(nowSpeak)
+                }
+                enqueueNextRange()
             }
         }
+        ensureAiEffectWorker()
+    }
 
-        // 首段立即分析，避免开头几段都没音效
-        val charSum = aiEffectPending.sumOf { contentList.getOrNull(it)?.length ?: 0 }
-        if (!first && interval > 0 && charSum < interval) return
+    /** 以 from 为起点开一个新区间并入队 */
+    private fun startRangeAt(from: Int) {
+        if (from < 0 || from >= contentList.size) return
+        val end = calculateEndParagraphByCharCount(AppConfig.aiEffectCharInterval, from)
+        if (end < from) return
+        aiEffectCurrentStartPara = from
+        aiEffectCurrentEndPara = end
+        enqueueRange(from, end)
+    }
 
+    /** 安排「下一个还没安排过的区间」，使队列始终比朗读领先一个区间 */
+    private fun enqueueNextRange() {
+        val start = aiEffectScheduledMaxPara + 1
+        if (start >= contentList.size) return
+        val end = calculateEndParagraphByCharCount(AppConfig.aiEffectCharInterval, start)
+        if (end < start) return
+        enqueueRange(start, end)
+    }
+
+    private fun enqueueRange(start: Int, end: Int) {
+        if (start < 0 || end < start) return
+        synchronized(aiEffectPending) { aiEffectPending.addLast(start to end) }
+        if (end > aiEffectScheduledMaxPara) aiEffectScheduledMaxPara = end
+    }
+
+    private fun ensureAiEffectWorker() {
         if (aiEffectWorker?.isActive == true) return
         aiEffectWorker = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
-                val batch = synchronized(aiEffectPending) {
+                val range = synchronized(aiEffectPending) {
                     if (aiEffectPending.isEmpty()) {
                         null
                     } else {
-                        val list = aiEffectPending.toList()
-                        aiEffectPending.clear()
-                        list
+                        val r = aiEffectPending.first()
+                        aiEffectPending.removeFirst()
+                        r
                     }
                 } ?: break
                 try {
-                    analyzeAiEffectBatch(batch, aiEffectBookUrl, aiEffectChapterIndex)
+                    analyzeAiEffectBatch(
+                        (range.first..range.second).toList(),
+                        aiEffectBookUrl,
+                        aiEffectChapterIndex
+                    )
                 } catch (e: CancellationException) {
                     // 切章/停止导致的取消：放行，让协程正常结束。
                     // 若在这里吞掉，取消会被当成普通异常继续跑后面的批次
                     throw e
                 } catch (e: Exception) {
-                    AppLog.put("[AI音效] 批量分析异常: ${e.localizedMessage}")
+                    AppLog.put("[AI音效] 区间分析异常: ${e.localizedMessage}")
                 }
             }
         }
@@ -1314,7 +1431,16 @@ abstract class BaseReadAloudService : BaseService(),
             return
         }
         withContext(Dispatchers.Main) {
-            aiEffects[index] = effects.toMutableList()
+            if (index < nowSpeak) {
+                // 结果落地时这一段已经读完了：再排期也没人去检查，
+                // 直接按落点顺序进补播队列，保证识别出来的音效都会响
+                effects.sortedBy { it.offsetRatio ?: 0f }.forEach { offerMissedAiEffect(it) }
+                aiEffects.remove(index)
+                AppLog.put("[AI音效] 段落$index 落地时已读完，${effects.size}条直接补播")
+                drainMissedAiEffects()
+            } else {
+                aiEffects[index] = effects.toMutableList()
+            }
         }
     }
 
@@ -1332,6 +1458,11 @@ abstract class BaseReadAloudService : BaseService(),
         aiEffectWorker = null
         synchronized(aiEffectPending) { aiEffectPending.clear() }
         aiEffects.clear()
+        aiMissedQueue.clear()
+        lastAiFlushedPara = -1
+        aiEffectScheduledMaxPara = -1
+        aiEffectCurrentStartPara = -1
+        aiEffectCurrentEndPara = -1
         aiEffectStarted = false
         // 见 [lastNowSpeak] 的注释：不复位会导致重读同一段时不再调度 AI 音效
         lastNowSpeak = -1

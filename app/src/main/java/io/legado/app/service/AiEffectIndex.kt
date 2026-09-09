@@ -19,13 +19,22 @@ import java.util.concurrent.TimeUnit
  *
  * 结构为
  * ```json
- * { "01_通用母库": { "拟音": ["炒菜", ...], "环境声": [...] }, ... }
+ * { "01_通用母库": { "拟音": ["炒菜|烹饪|做饭|热油", ...], "环境声": [...] }, ... }
  * ```
+ *
+ * 每个条目形如 `正名|关键词|关键词…`：
+ * - **正名**（`|` 之前）即音频文件名，`路径 = 分类/子分类/正名.mp3`，**永不改动**；
+ * - **关键词**（`|` 之后）只参与检索打分，不进文件名、不发给 AI 挑选。
+ *   存在的意义：AI 第一次只吐 1~2 字关键字，而音效名中位数 4 字，
+ *   靠「字面子串」检索会漏掉所有同义改写（AI 给"走路"、库里叫"脚步声"）。
+ *   挂上同义/关联词后，这类改写也能命中。
+ * - 没有 `|` 的条目按「无关键词」处理，与老格式完全兼容。
  *
  * 数据源优先级（**本地文件优先，不是远端优先**）：
  * 1. 外部文件 [indexFile] —— 存在就直接用，**不联网**（用户可在「音效规则管理」里编辑、增删）
- * 2. 外部文件不存在（或损坏）时，从远端直链下载到该目录，再使用
- * 3. 下载失败（无网/超时）时，把 assets 内置索引导出到该目录，再使用
+ * 2. 外部文件不存在（或损坏）时，先把老版本文件迁移过来并补关键词（见 [migrateFromOld]）
+ * 3. 仍拿不到时，从远端直链下载到该目录，再使用
+ * 4. 下载失败（无网/超时）时，把 assets 内置索引导出到该目录，再使用
  *
  * 这样：已有文件的用户不受影响、不耗流量、编辑不会被覆盖；
  * 新装/清过目录的用户能拿到最新的远端索引，而不是 APK 里可能过期的一份。
@@ -33,10 +42,32 @@ import java.util.concurrent.TimeUnit
 object AiEffectIndex {
 
     private const val TAG = "AiEffectIndex"
-    private const val ASSET_FILE = "ai_effect_index.json"
+    private const val ASSET_FILE = "ai_effect_index_kw.json"
 
-    /** 外部索引文件名，放在音效库根目录下 */
-    const val INDEX_FILE_NAME = "ai_effect_index.json"
+    /**
+     * 外部索引文件名，放在音效库根目录下。
+     *
+     * 带 `_kw` 后缀是**有意为之**：本版索引在音效名后用 `|` 挂了检索关键词
+     * （如 `炒菜|烹饪|做饭|热油`）。老版本会把整串当音效名去拼 `.mp3` 路径，
+     * 结果远端 404、该音效静默失效。换文件名让新旧版本各读各的、互不干扰，
+     * 需要回滚时删掉本文件即可回到老版本的行为。
+     */
+    const val INDEX_FILE_NAME = "ai_effect_index_kw.json"
+
+    /**
+     * 老版本索引文件名。**只读不写、永不删除**，仅用于一次性迁移：
+     * 新文件不存在而它存在时，以它为基础生成新文件（见 [migrateFromOld]），
+     * 保住用户在老文件里的增删改名。
+     */
+    private const val OLD_INDEX_FILE_NAME = "ai_effect_index.json"
+
+    /**
+     * 正名与关键词的分隔符。
+     * 选 `|` 是因为：音效库 4524 个名字里不含它，
+     * 且界面改名逻辑（`renameAiSound`）会把 `|` 过滤成 `_`，
+     * 等于从源头保证了正名里不会出现分隔符。
+     */
+    private const val KEYWORD_SEP = '|'
 
     /**
      * 外部索引文件，位于音效库目录下。
@@ -46,12 +77,17 @@ object AiEffectIndex {
 
     /**
      * 远端索引直链（中文文件名已 percent-encode）。
-     * 仅在外部文件不存在时下载，作为「比 APK 内置更新」的默认来源。
+     * 仅在外部文件不存在（且迁移也没产出）时下载，作为「比 APK 内置更新」的默认来源。
+     *
+     * 指向的是**带关键词的新版** `广播剧音效库_目录索引_带关键词.json`，
+     * 与老版本下载的 `广播剧音效库_目录索引.json` 是两个文件：
+     * 老版本即便全新安装也只会拿到老格式，不会碰到带 `|` 的名字。
      */
     private const val REMOTE_INDEX_URL =
         "https://cnb.cool/mingwuyan/cnb-chat/-/git/raw/main/" +
             "%E5%B9%BF%E6%92%AD%E5%89%A7%E9%9F%B3%E6%95%88%E5%BA%93_" +
-            "%E7%9B%AE%E5%BD%95%E7%B4%A2%E5%BC%95.json?download=true"
+            "%E7%9B%AE%E5%BD%95%E7%B4%A2%E5%BC%95_" +
+            "%E5%B8%A6%E5%85%B3%E9%94%AE%E8%AF%8D.json?download=true"
 
     /**
      * 拉取索引用的短超时客户端。
@@ -67,14 +103,17 @@ object AiEffectIndex {
 
     /**
      * 一个音效条目。
-     * @param name 音效名，如 "炒菜"
-     * @param path 相对路径（含文件名），如 "01_通用母库/拟音/炒菜.mp3"
+     * @param name 音效**正名**（不含关键词），如 "炒菜"。它同时是音频文件名，不可随意改动
+     * @param path 相对路径（含文件名），如 "01_通用母库/拟音/炒菜.mp3"，由 [name] 拼成
+     * @param keywords 检索关键词（2 字为主），只参与 [search] 打分，
+     *                 不进文件名、不发给 AI 挑选。如 ["烹饪", "做饭", "热油", "厨房"]
      */
     data class Entry(
         val name: String,
         val path: String,
         val category: String,
-        val sub: String
+        val sub: String,
+        val keywords: List<String> = emptyList()
     )
 
     @Volatile
@@ -121,7 +160,7 @@ object AiEffectIndex {
     }
 
     /**
-     * 加载索引：外部文件 -> 远端下载 -> 内置导出。
+     * 加载索引：外部文件 -> 老版本迁移 -> 远端下载 -> 内置导出。
      *
      * 前一级成功就直接用，不再走后面的分支。
      */
@@ -139,7 +178,18 @@ object AiEffectIndex {
                 AppLog.put("$TAG: 外部索引解析失败，重新获取: ${e.localizedMessage}", e)
             }
         }
-        // 2. 外部文件不存在或已损坏：从远端下载到该目录
+        // 2. 新文件还没有：把老版本那份迁过来，别让用户之前的编辑白做
+        if (migrateFromOld()) {
+            try {
+                parse(file.readText())
+                loaded = true
+                AppLog.put("$TAG: 已从老版本索引迁移，共 ${entries.size} 个音效")
+                return
+            } catch (e: Exception) {
+                AppLog.put("$TAG: 迁移结果解析失败，继续取远端: ${e.localizedMessage}", e)
+            }
+        }
+        // 3. 仍然没有：从远端下载到该目录
         val remote = downloadRemote()
         if (remote != null) {
             try {
@@ -152,9 +202,68 @@ object AiEffectIndex {
                 AppLog.put("$TAG: 远端索引解析失败，回退内置: ${e.localizedMessage}", e)
             }
         }
-        // 3. 下载失败（无网等）：导出内置索引到该目录
+        // 4. 下载失败（无网等）：导出内置索引到该目录
         loadFromAssets(file)
     }
+
+    /**
+     * 把老版本索引文件（[OLD_INDEX_FILE_NAME]）迁成新版文件。
+     *
+     * 只在**新文件不存在**时执行，因此天然幂等：迁移过一次之后就不会再跑。
+     * 做法是「以老文件的条目为准 + 从内置资源按正名补关键词」——
+     * 老文件里用户删掉的条目不会被远端/内置塞回来，改过名也不会被冲掉，
+     * 迁完之后再走 [load] 的正常读取，等于只多做了一次关键词补全。
+     *
+     * 关键词取自内置资源而不是远端，是为了**离线也能迁**，
+     * 且不因为一次迁移就触发联网。
+     *
+     * 老文件保持只读，不删不改，随时可回滚。
+     * @return 是否成功写出了新文件
+     */
+    private fun migrateFromOld(): Boolean {
+        val file = indexFile()
+        if (file.exists() && file.length() > 0L) return false
+        val old = File(AppConfig.aiEffectLocalDir, OLD_INDEX_FILE_NAME)
+        if (!old.exists() || old.length() == 0L) return false
+        return try {
+            val oldEntries = parseToEntries(old.readText())
+            if (oldEntries.isEmpty()) return false
+            val kwMap = assetKeywordMap()
+            val grouped = LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>>()
+            oldEntries.forEach { e ->
+                val subs = grouped.getOrPut(e.category) { LinkedHashMap() }
+                val list = subs.getOrPut(e.sub) { ArrayList() }
+                // 老文件里的名字本身就是正名（没有 |），直接查表补关键词
+                val kws = kwMap["${e.category}/${e.sub}/${e.name}"].orEmpty()
+                list.add(serialize(e.name, kws))
+            }
+            val obj = JSONObject()
+            grouped.forEach { (cat, subs) ->
+                val subObj = JSONObject()
+                subs.forEach { (sub, list) -> if (list.isNotEmpty()) subObj.put(sub, JSONArray(list)) }
+                if (subObj.length() > 0) obj.put(cat, subObj)
+            }
+            writeExternal(obj.toString())
+            AppLog.put("$TAG: 已迁移老版本索引 ${oldEntries.size} 条 -> ${file.absolutePath}")
+            true
+        } catch (e: Exception) {
+            AppLog.put("$TAG: 老版本索引迁移失败 ${e.localizedMessage}", e)
+            false
+        }
+    }
+
+    /** 内置索引里「分类/子分类/正名 -> 关键词」的查表，供迁移补关键词用 */
+    private fun assetKeywordMap(): Map<String, List<String>> = try {
+        val text = appCtx.assets.open(ASSET_FILE).bufferedReader().use { it.readText() }
+        parseToEntries(text).associate { "${it.category}/${it.sub}/${it.name}" to it.keywords }
+    } catch (e: Exception) {
+        AppLog.put("$TAG: 内置关键词表读取失败 ${e.localizedMessage}")
+        emptyMap()
+    }
+
+    /** 条目序列化回索引里的字符串：`正名|关键词|关键词…`，无关键词时只有正名 */
+    private fun serialize(name: String, keywords: List<String>): String =
+        if (keywords.isEmpty()) name else name + "|" + keywords.joinToString("|")
 
     /** 从 assets 读出内置索引，导出到外部文件并加载 */
     private fun loadFromAssets(file: File) {
@@ -229,9 +338,22 @@ object AiEffectIndex {
 
     /** 解析索引 JSON，替换内存中的数据 */
     fun parse(raw: String) {
+        val list = parseToEntries(raw)
+        val map = HashMap<String, Entry>(7000)
+        list.forEach { e -> if (!map.containsKey(e.name)) map[e.name] = e }
+        entries = list
+        byName = map
+    }
+
+    /**
+     * 解析索引文本为条目列表，不改动内存状态（供 [parse] 与迁移复用）。
+     *
+     * 单条格式 `正名|关键词|关键词…`：`|` 之前是正名（= 文件名），之后是检索关键词。
+     * 没有 `|` 就是老格式，关键词为空。
+     */
+    fun parseToEntries(raw: String): List<Entry> {
         val obj = JSONObject(raw)
         val list = ArrayList<Entry>(7000)
-        val map = HashMap<String, Entry>(7000)
         val cats = obj.keys()
         while (cats.hasNext()) {
             val cat = cats.next()
@@ -241,16 +363,20 @@ object AiEffectIndex {
                 val sub = subs.next()
                 val arr = subObj.optJSONArray(sub) ?: continue
                 for (i in 0 until arr.length()) {
-                    val name = arr.optString(i).trim()
+                    val rawName = arr.optString(i).trim()
+                    if (rawName.isEmpty()) continue
+                    val parts = rawName.split(KEYWORD_SEP)
+                    val name = parts[0].trim()
                     if (name.isEmpty()) continue
-                    val entry = Entry(name, "$cat/$sub/$name.mp3", cat, sub)
+                    val keywords = parts.drop(1)
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                    val entry = Entry(name, "$cat/$sub/$name.mp3", cat, sub, keywords)
                     list.add(entry)
-                    if (!map.containsKey(name)) map[name] = entry
                 }
             }
         }
-        entries = list
-        byName = map
+        return list
     }
 
     /** 按音效名精确查找，未加载或找不到返回 null */
@@ -269,10 +395,14 @@ object AiEffectIndex {
      */
     fun replaceAll(newEntries: List<Entry>): String? {
         val grouped = LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>>()
+        val seen = HashSet<String>()
         for (e in newEntries) {
+            if (!seen.add("${e.category}/${e.sub}/${e.name}")) continue
             val subs = grouped.getOrPut(e.category) { LinkedHashMap() }
             val names = subs.getOrPut(e.sub) { ArrayList() }
-            if (e.name !in names) names.add(e.name)
+            // 必须把关键词一起写回，否则用户在界面里改一条再保存，
+            // 四千多条音效的关键词会被整批冲掉
+            names.add(serialize(e.name, e.keywords))
         }
         val obj = JSONObject()
         grouped.forEach { (cat, subs) ->
@@ -303,8 +433,8 @@ object AiEffectIndex {
     }
 
     /**
-     * 按单个关键字搜索。
-     * 打分：完全相等 3 > 名字包含关键字 2 > 关键字包含名字 1；同分按名字长度升序。
+     * 按单个关键字搜索。同分按名字长度升序。
+     * 打分见 [scoreOf]。
      */
     fun search(keyword: String, limit: Int): List<Entry> {
         if (!loaded || entries.isEmpty()) return emptyList()
@@ -312,7 +442,7 @@ object AiEffectIndex {
         if (kw.isEmpty()) return emptyList()
         val hits = ArrayList<Pair<Entry, Int>>()
         for (e in entries) {
-            val s = scoreOf(e.name, kw)
+            val s = scoreOf(e, kw)
             if (s > 0) hits.add(e to s)
         }
         hits.sortWith(
@@ -367,10 +497,31 @@ object AiEffectIndex {
         return result
     }
 
-    private fun scoreOf(name: String, keyword: String): Int = when {
-        name == keyword -> 3
-        name.contains(keyword) -> 2
-        keyword.contains(name) -> 1
-        else -> 0
+    /**
+     * 单个关键字对单个音效的打分，**名字命中永远压过关键词命中**。
+     *
+     * ```
+     * 3  正名 == 关键字        （最准：AI 给的正是库里的名字）
+     * 2  正名 包含 关键字      （"脚步" -> "木地板脚步声"）
+     * 2  某个关键词 == 关键字  （"走路" -> "脚步声|走路|步行"）
+     * 1  某个关键词 包含 关键字（"走路" -> "…|走路声|…"）
+     * 1  关键字 包含 正名      （正名 1~2 字时的兜底，沿用旧行为）
+     * 0  无关
+     * ```
+     *
+     * 为什么关键词命中必须低于同级的名字命中：候选池只有
+     * `aiEffectMaxCandidates`（默认 300）、每个关键字取前
+     * `aiEffectCandidatesPerKeyword`（默认 40）条。加了关键词后命中面变宽，
+     * 若不给名字命中优先权，泛词关键字（"厨房""声音"）会靠关键词命中挤掉
+     * 名字直接命中的结果，加了关键词反而更不准。
+     */
+    private fun scoreOf(e: Entry, keyword: String): Int {
+        val name = e.name
+        if (name == keyword) return 3
+        if (name.contains(keyword)) return 2
+        if (e.keywords.isEmpty()) return if (keyword.contains(name)) 1 else 0
+        if (e.keywords.any { it == keyword }) return 2
+        if (e.keywords.any { it.contains(keyword) }) return 1
+        return if (keyword.contains(name)) 1 else 0
     }
 }

@@ -103,6 +103,8 @@ class SoundEffectRuleAdapter(
                     || rule.name.lowercase().contains(lower)
                     || rule.pattern.lowercase().contains(lower)
                     || rule.replacement.lowercase().contains(lower)
+                    // AI 模式下这里存的是检索关键词，一起搜，方便按同义词找音效
+                    || rule.sampleText.lowercase().contains(lower)
                 ) {
                     result.add(rule.id)
                 }

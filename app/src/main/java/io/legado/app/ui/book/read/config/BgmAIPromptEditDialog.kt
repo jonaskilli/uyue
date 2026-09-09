@@ -23,11 +23,26 @@ class BgmAIPromptEditDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_prompt_e
 
     companion object {
         private const val ARG_PROMPT_ID = "prompt_id"
+        private const val ARG_SHOW_AUDIO_LIST = "show_audio_list"
+        private const val ARG_LOCK_NAME = "lock_name"
 
-        fun newInstance(prompt: BgmAIPrompt?, onSaved: () -> Unit): BgmAIPromptEditDialog {
+        /**
+         * @param showAudioList BGM 选曲提示词编辑时附带"可用音频文件列表"预览；
+         *                      AI 音效提示词不需要，传 false
+         * @param lockName 名称是运行时按名查表的键（AI 音效提示词就是），
+         *                 改了会导致取不到而回退到内置默认，故锁住不让改
+         */
+        fun newInstance(
+            prompt: BgmAIPrompt?,
+            showAudioList: Boolean = true,
+            lockName: Boolean = false,
+            onSaved: () -> Unit
+        ): BgmAIPromptEditDialog {
             return BgmAIPromptEditDialog().apply {
                 arguments = Bundle().apply {
                     prompt?.id?.let { putLong(ARG_PROMPT_ID, it) }
+                    putBoolean(ARG_SHOW_AUDIO_LIST, showAudioList)
+                    putBoolean(ARG_LOCK_NAME, lockName)
                 }
                 onSavedCallback = onSaved
             }
@@ -41,6 +56,9 @@ class BgmAIPromptEditDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_prompt_e
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
         val promptId = arguments?.getLong(ARG_PROMPT_ID, 0) ?: 0
+        val showAudioList = arguments?.getBoolean(ARG_SHOW_AUDIO_LIST, true) ?: true
+        val lockName = arguments?.getBoolean(ARG_LOCK_NAME, false) ?: false
+        binding.etName.isEnabled = !lockName
         if (promptId > 0) {
             execute {
                 appDb.bgmAIPromptDao.getById(promptId)
@@ -48,8 +66,10 @@ class BgmAIPromptEditDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_prompt_e
                 it?.let { loadedPrompt ->
                     prompt = loadedPrompt
                     binding.etName.setText(loadedPrompt.name)
-                    // 显示提示词时，添加音频文件列表预览（仅用于显示，保存时不会保存）
-                    val audioFileList = BgmManager.getAudioFileList()
+                    // 显示提示词时，添加音频文件列表预览（仅用于显示，保存时不会保存）。
+                    // 只有 BGM 选曲提示词需要，AI 音效提示词传 showAudioList=false 跳过
+                    val audioFileList =
+                        if (showAudioList) BgmManager.getAudioFileList() else emptyList()
                     val displayPrompt = if (audioFileList.isNotEmpty()) {
                         val listSection = "\n\n可用文件列表（已排除当前播放）：\n${audioFileList.joinToString("、")}"
                         if (!loadedPrompt.prompt.contains("可用文件列表")) {
