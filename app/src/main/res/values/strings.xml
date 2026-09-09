@@ -353,6 +353,15 @@
     <string name="auto_next_page_stop">Stop Auto scroll</string>
     <string name="auto_next_page_speed">Auto scroll speed</string>
     <string name="book_info">Book information</string>
+    <string name="generate_cover">Generate cover</string>
+    <string name="cover_prompt_setting">Cover prompt</string>
+    <string name="cover_generating">Generating cover…</string>
+    <string name="cover_generate_success">Cover generated</string>
+    <string name="cover_switch_prev">Previous cover</string>
+    <string name="cover_switch_next">Next cover</string>
+    <string name="cover_delete">Delete current cover</string>
+    <string name="cover_deleted">Cover deleted</string>
+    <string name="cover_cannot_delete_original">Original cover cannot be deleted</string>
     <string name="book_info_edit">Edit book information</string>
     <string name="ps_default_read">Use Bookshelf as start page</string>
     <string name="pt_default_read">Auto jump to Recent list</string>

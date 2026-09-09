@@ -21,13 +21,16 @@
         android:background="#50000000"
         android:orientation="vertical">
 
+        <!-- 原标题「书籍信息」已去掉，位置让给 AI 生图模板下拉框 + 生成封面按钮 -->
         <io.legado.app.ui.widget.TitleBar
             android:id="@+id/title_bar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            app:contentInsetEndWithActions="0dp"
+            app:contentInsetStartWithNavigation="0dp"
+            app:contentLayout="@layout/view_ai_cover_bar"
             app:layout_constraintTop_toTopOf="parent"
-            app:themeMode="dark"
-            app:title="@string/book_info" />
+            app:themeMode="dark" />
 
         <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
             android:id="@+id/refresh_layout"
@@ -84,6 +87,57 @@
                                 android:src="@drawable/image_cover_default" />
 
                         </androidx.cardview.widget.CardView>
+
+                        <!-- 封面左右切换：在原封面与所有 AI 生成的封面之间翻 -->
+                        <ImageButton
+                            android:id="@+id/btn_cover_prev"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:layout_alignParentStart="true"
+                            android:layout_centerVertical="true"
+                            android:layout_marginStart="12dp"
+                            android:background="?android:attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/cover_switch_prev"
+                            android:src="@drawable/ic_arrow_back"
+                            android:visibility="visible"
+                            app:tint="@color/primaryText" />
+
+                        <!--
+                          删除 + 下一张 竖直排在一起整体居中。
+                          不能写成 delete 用 layout_above 锚定 next：next 是 centerVertical 定位的，
+                          该约束在后续 pass 才解析，above 拿到未解析的位置会把删除按钮顶出父布局，
+                          表现为「有左右箭头时反而看不到删除按钮」。
+                        -->
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_alignParentEnd="true"
+                            android:layout_centerVertical="true"
+                            android:layout_marginEnd="8dp"
+                            android:gravity="center_horizontal"
+                            android:orientation="vertical">
+
+                            <ImageButton
+                                android:id="@+id/btn_cover_delete"
+                                android:layout_width="32dp"
+                                android:layout_height="32dp"
+                                android:background="?android:attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/cover_delete"
+                                android:src="@drawable/ic_delete"
+                                android:visibility="visible"
+                                app:tint="@color/primaryText" />
+
+                            <ImageButton
+                                android:id="@+id/btn_cover_next"
+                                android:layout_width="36dp"
+                                android:layout_height="36dp"
+                                android:background="?android:attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/cover_switch_next"
+                                android:src="@drawable/ic_arrow_right"
+                                android:visibility="visible"
+                                app:tint="@color/primaryText" />
+
+                        </LinearLayout>
 
                     </RelativeLayout>
 

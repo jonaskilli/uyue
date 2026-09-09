@@ -16,6 +16,7 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookProgress
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
+import io.legado.app.help.book.AiAutoCover
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.isLocal
@@ -122,6 +123,8 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
             ReadBook.resetData(book)
         }
         isInitFinish = true
+        // 打开这本书开始阅读：没有真实封面就后台自动生成一张（每本每次进程只试一次）
+        AiAutoCover.maybeGenerate(book)
         if (!book.isLocal && book.tocUrl.isEmpty() && !loadBookInfo(book)) {
             return
         }

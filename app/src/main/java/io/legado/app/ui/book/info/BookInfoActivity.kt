@@ -9,14 +9,20 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.textclassifier.TextClassifier
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.Spinner
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
 import io.legado.app.R
 import io.legado.app.base.VMBaseActivity
+import io.legado.app.constant.AppLog
 import io.legado.app.constant.BookType
 import io.legado.app.constant.EventBus
 import io.legado.app.constant.Theme
@@ -29,6 +35,7 @@ import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.GlideImageGetter
 import io.legado.app.help.TextViewTagHandler
+import io.legado.app.help.book.AiAutoCover
 import io.legado.app.help.book.addType
 import io.legado.app.help.book.getRemoteUrl
 import io.legado.app.help.book.isAudio
@@ -46,8 +53,13 @@ import io.legado.app.lib.theme.accentColor
 import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.lib.theme.getPrimaryTextColor
+import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.BookCover
 import io.legado.app.model.remote.RemoteBookWebDav
+import io.legado.app.data.entities.AiImageTemplate
+import io.legado.app.utils.MD5Utils
+import io.legado.app.utils.externalFiles
+import splitties.init.appCtx
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.book.audio.AudioPlayActivity
 import io.legado.app.ui.book.changecover.ChangeCoverDialog
@@ -187,6 +199,27 @@ class BookInfoActivity :
         })
     }
 
+    // ====== AI 生成封面 ======
+
+    /** 模板下拉框与生成按钮挂进 TitleBar（contentLayout），ViewBinding 取不到，需 findViewById */
+    private val spAiTemplate: Spinner? by lazy {
+        binding.titleBar.toolbar.findViewById(R.id.sp_ai_template)
+    }
+    private val btnGenerateCover: android.view.View? by lazy {
+        binding.titleBar.toolbar.findViewById(R.id.btn_generate_cover)
+    }
+
+    /** 下拉框里的模板，与显示的文字一一对应。为空表示只有「内置默认」可选 */
+    private var aiTemplates: List<AiImageTemplate> = emptyList()
+    private var generatingCover = false
+
+    /** 正在恢复上次选中的模板，此时的 onItemSelected 不算用户选择，不记录 */
+    private var restoringTemplate = false
+
+
+    /** 一个模板都没有时下拉框显示的唯一一项 */
+    private val BUILTIN_TEMPLATE_LABEL = "内置默认"
+
     @SuppressLint("PrivateResource")
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         binding.titleBar.setBackgroundResource(R.color.transparent)
@@ -206,6 +239,7 @@ class BookInfoActivity :
         viewModel.waitDialogData.observe(this) { upWaitDialogStatus(it) }
         viewModel.initData(intent)
         initViewEvent()
+        initAiCoverBar()
     }
 
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
@@ -310,6 +344,7 @@ class BookInfoActivity :
                 }
             }
 
+            R.id.menu_cover_prompt -> showEditCoverPromptDialog()
             R.id.menu_clear_cache -> viewModel.clearCache()
             R.id.menu_log -> showDialogFragment<AppLogDialog>()
             R.id.menu_split_long_chapter -> {
@@ -481,6 +516,9 @@ class BookInfoActivity :
                     .into(binding.bgBook)
             }
         }
+        // 进界面就要按当前已有封面数决定箭头显不显示，
+        // 之前只在生成/切换后调用，导致之前生成过封面的书进来也看不到箭头
+        upCoverSwitchButtons()
     }
 
     private fun upLoading(isLoading: Boolean, chapterList: List<BookChapter>? = null) {
@@ -880,6 +918,234 @@ class BookInfoActivity :
                 viewModel.saveBook(book)
             }
         }
+        upCoverSwitchButtons()
+    }
+
+    // ==================== AI 生成封面 ====================
+
+    /** 初始化顶部的模板下拉框与生成按钮，以及封面左右切换箭头 */
+    private fun initAiCoverBar() {
+        btnGenerateCover?.setOnClickListener { generateCover() }
+        // 长按改封面提示词：它是单独的一套，跟朗读生图的模板提示词无关
+        btnGenerateCover?.setOnLongClickListener {
+            showEditCoverPromptDialog()
+            true
+        }
+        binding.btnCoverPrev?.setOnClickListener { switchCover(-1) }
+        binding.btnCoverNext?.setOnClickListener { switchCover(1) }
+        binding.btnCoverDelete?.setOnClickListener { deleteCurrentCover() }
+        loadAiTemplates()
+    }
+
+    private fun loadAiTemplates() {
+        lifecycleScope.launch {
+            val list = withContext(IO) { appDb.aiImageTemplateDao.getAllList() }
+            aiTemplates = list
+            val spinner = spAiTemplate ?: return@launch
+            // 一个模板都没有时也要有得选：显示「内置默认」，
+            // 选中它时 selectedTemplate() 返回 null，生成时回退到内置接口
+            val names = if (list.isEmpty()) {
+                listOf(BUILTIN_TEMPLATE_LABEL)
+            } else {
+                list.map { if (it.isDefault) "${it.name}（默认）" else it.name }
+            }
+            // 用自定义布局：ellipsize=none，宽度不够就直接掐断，不用省略号
+            val adapter = ArrayAdapter(
+                this@BookInfoActivity,
+                R.layout.item_ai_template_spinner,
+                names
+            )
+            adapter.setDropDownViewResource(R.layout.item_ai_template_spinner)
+            spinner.adapter = adapter
+
+            // 恢复上次手动选的模板；没选过或那个模板已被删，就停在第一个
+            val savedId = AppConfig.aiCoverTemplateId
+            val savedIndex = if (savedId > 0) list.indexOfFirst { it.id == savedId } else -1
+            restoringTemplate = true
+            spinner.setSelection(if (savedIndex >= 0) savedIndex else 0)
+            spinner.post { restoringTemplate = false }
+
+            // 用户手动改选后才记下来。恢复选中时不能记，
+            // 否则"没选过"会被记成第一个模板
+            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: android.widget.AdapterView<*>?,
+                    view: android.view.View?,
+                    position: Int,
+                    id: Long
+                ) {
+                    if (restoringTemplate) return
+                    aiTemplates.getOrNull(position)?.let {
+                        AppConfig.aiCoverTemplateId = it.id
+                    }
+                }
+
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            }
+        }
+    }
+
+    private fun selectedTemplate(): AiImageTemplate? {
+        val spinner = spAiTemplate ?: return null
+        val i = spinner.selectedItemPosition
+        return aiTemplates.getOrNull(i)
+    }
+
+    private fun generateCover() {
+        if (generatingCover) {
+            toastOnUi("正在生成中，请稍候")
+            return
+        }
+        // 没选模板（或一个模板都没有）就用内置默认：混元太极的智谱生图
+        val template = selectedTemplate() ?: AiImageGenerator.builtinTemplate()
+        val book = viewModel.getBook() ?: return
+        val prompt = AppConfig.aiCoverPrompt
+            .replace("{name}", book.name)
+            .replace("{intro}", book.getDisplayIntro().orEmpty().take(600))
+        generatingCover = true
+        btnGenerateCover?.isEnabled = false
+        waitDialog.setText(R.string.cover_generating)
+        waitDialog.show()
+        AppLog.put("生成封面: 开始《${book.name}》模板=${template.name} 接口=${template.modelUrl}")
+        lifecycleScope.launch {
+            val result = try {
+                withContext(IO) {
+                    AiImageGenerator.generateImageDirect(template, prompt)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 退出界面会让 lifecycleScope 整体取消，生成随之中断——这是设计如此，
+                // 打一条日志方便和"接口失败"区分开
+                AppLog.put("生成封面: 任务被取消（多半是退出了本界面）")
+                generatingCover = false
+                btnGenerateCover?.isEnabled = true
+                waitDialog.dismiss()
+                return@launch
+            }
+            generatingCover = false
+            btnGenerateCover?.isEnabled = true
+            waitDialog.dismiss()
+            result.onSuccess { file ->
+                val path = withContext(IO) { saveAsBookCover(book, file) }
+                AppLog.put("生成封面: 成功《${book.name}》-> $path")
+                showCover(book)
+                if (viewModel.inBookshelf) viewModel.saveBook(book)
+                upCoverSwitchButtons()
+                toastOnUi(R.string.cover_generate_success)
+            }.onFailure {
+                AppLog.put("生成封面: 失败《${book.name}》${it.localizedMessage}")
+                longToastOnUi("生成封面失败：${it.localizedMessage}")
+            }
+        }
+    }
+
+    /**
+     * 把生成出来的图片存进这本书的封面目录。
+     * 与原封面同一个目录（externalFiles/covers），命名带书 URL 的 md5，
+     * 这样按前缀就能列出这本书所有生成的封面。
+     */
+    private fun saveAsBookCover(book: Book, file: java.io.File): String? {
+        return AiAutoCover.saveAsBookCover(book, file)
+    }
+
+    /** 这本书所有 AI 生成的封面，新的在前 */
+    private fun aiCovers(book: Book): List<java.io.File> {
+        val dir = java.io.File(appCtx.externalFiles, "covers")
+        if (!dir.exists()) return emptyList()
+        val prefix = "ai_cover_${MD5Utils.md5Encode16(book.bookUrl)}_"
+        return dir.listFiles()
+            ?.filter { it.isFile && it.name.startsWith(prefix) && it.name.endsWith(".png") }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
+    }
+
+    /**
+     * 当前可选的封面列表：第 0 项是原封面（customCoverUrl 置空），
+     * 之后是这本书生成过的封面，新的在前。
+     */
+    private fun coverOptions(book: Book): List<String?> {
+        return listOf<String?>(null) + aiCovers(book).map { it.absolutePath }
+    }
+
+    private fun currentCoverIndex(book: Book): Int {
+        val current = book.customCoverUrl
+        if (current.isNullOrBlank()) return 0
+        val opts = coverOptions(book)
+        val i = opts.indexOf(current)
+        return if (i >= 0) i else 0
+    }
+
+    /** 左右切换封面，delta 为 -1 / +1，循环翻 */
+    private fun switchCover(delta: Int) {
+        val book = viewModel.getBook() ?: return
+        val opts = coverOptions(book)
+        if (opts.size < 2) return
+        val next = (currentCoverIndex(book) + delta + opts.size) % opts.size
+        book.customCoverUrl = opts[next]
+        showCover(book)
+        if (viewModel.inBookshelf) viewModel.saveBook(book)
+        upCoverSwitchButtons()
+    }
+
+    /**
+     * 三个按钮都常驻显示，这里只保留一个空实现供 [showCover] 调用。
+     *
+     * 之前按条件控制显隐，结果删除按钮看不到：
+     * 删除按钮靠 `layout_above` 锚定「下一张」，而「下一张」在没有可切换封面时是 GONE，
+     * RelativeLayout 对 GONE 的锚点会**忽略该约束**，删除按钮就飘到别处被遮住了。
+     * 所以三个按钮统一常驻，能不能切 / 能不能删由点击时判断。
+     */
+    private fun upCoverSwitchButtons() = Unit
+
+    /** 这张封面是不是本书 AI 生成的（用于禁止删除原封面） */
+    private fun isAiCover(book: Book, path: String?): Boolean {
+        if (path.isNullOrBlank()) return false
+        val prefix = "ai_cover_${MD5Utils.md5Encode16(book.bookUrl)}_"
+        return java.io.File(path).name.startsWith(prefix)
+    }
+
+    /** 删掉当前这张生成的封面，删完自动落到相邻的一张（没有就回原封面） */
+    private fun deleteCurrentCover() {
+        val book = viewModel.getBook() ?: return
+        val path = book.customCoverUrl
+        if (!isAiCover(book, path)) {
+            toastOnUi(R.string.cover_cannot_delete_original)
+            return
+        }
+        val opts = coverOptions(book)
+        val idx = currentCoverIndex(book)
+        // 先算好要落到哪张，再删，避免删完当前没得显示
+        val nextIdx = when {
+            opts.size <= 2 -> 0
+            idx + 1 < opts.size -> idx + 1
+            else -> idx - 1
+        }
+        book.customCoverUrl = opts[nextIdx]
+        showCover(book)
+        if (viewModel.inBookshelf) viewModel.saveBook(book)
+        runCatching { java.io.File(path!!).delete() }
+        toastOnUi(R.string.cover_deleted)
+    }
+
+    private fun showEditCoverPromptDialog() {
+        val input = EditText(this).apply {
+            setText(AppConfig.aiCoverPrompt)
+            setSelection(text.length)
+            setSingleLine(false)
+            maxLines = 8
+        }
+        AlertDialog.Builder(this)
+            .setTitle("封面提示词")
+            .setMessage("可用占位符：{name} 书名，{intro} 简介")
+            .setView(input)
+            .setPositiveButton("保存") { _, _ ->
+                AppConfig.aiCoverPrompt = input.text?.toString()?.trim().orEmpty()
+                    .ifEmpty { AiImageGenerator.DEFAULT_COVER_PROMPT }
+            }
+            .setNegativeButton("取消", null)
+            .setNeutralButton("恢复默认") { _, _ ->
+                AppConfig.aiCoverPrompt = AiImageGenerator.DEFAULT_COVER_PROMPT
+            }
+            .show()
     }
 
     override fun upGroup(requestCode: Int, groupId: Long) {

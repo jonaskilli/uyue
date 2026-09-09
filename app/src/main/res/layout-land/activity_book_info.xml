@@ -24,13 +24,16 @@
         android:background="#50000000"
         android:orientation="vertical">
 
+        <!-- 原标题「书籍信息」已去掉，位置让给 AI 生图模板下拉框 + 生成封面按钮 -->
         <io.legado.app.ui.widget.TitleBar
             android:id="@+id/title_bar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            app:contentInsetEndWithActions="0dp"
+            app:contentInsetStartWithNavigation="0dp"
+            app:contentLayout="@layout/view_ai_cover_bar"
             app:layout_constraintTop_toTopOf="parent"
-            app:themeMode="dark"
-            app:title="@string/book_info" />
+            app:themeMode="dark" />
 
         <LinearLayout
             android:id="@+id/ll_info"
@@ -54,24 +57,76 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
 
-                    <androidx.cardview.widget.CardView
-                        android:id="@+id/iv_cover_c"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="center_horizontal"
-                        android:layout_marginBottom="8dp"
-                        app:cardCornerRadius="5dp"
-                        app:cardElevation="8dp">
+                    <RelativeLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content">
 
-                        <io.legado.app.ui.widget.image.CoverImageView
-                            android:id="@+id/iv_cover"
-                            android:layout_width="165dp"
-                            android:layout_height="240dp"
-                            android:contentDescription="@string/img_cover"
-                            android:scaleType="centerCrop"
-                            android:src="@drawable/image_cover_default" />
+                        <androidx.cardview.widget.CardView
+                            android:id="@+id/iv_cover_c"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_centerHorizontal="true"
+                            android:layout_marginBottom="8dp"
+                            app:cardCornerRadius="5dp"
+                            app:cardElevation="8dp">
 
-                    </androidx.cardview.widget.CardView>
+                            <io.legado.app.ui.widget.image.CoverImageView
+                                android:id="@+id/iv_cover"
+                                android:layout_width="165dp"
+                                android:layout_height="240dp"
+                                android:contentDescription="@string/img_cover"
+                                android:scaleType="centerCrop"
+                                android:src="@drawable/image_cover_default" />
+
+                        </androidx.cardview.widget.CardView>
+
+                        <!-- 封面左右切换：在原封面与所有 AI 生成的封面之间翻 -->
+                        <ImageButton
+                            android:id="@+id/btn_cover_prev"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:layout_alignParentStart="true"
+                            android:layout_centerVertical="true"
+                            android:layout_marginStart="12dp"
+                            android:background="?android:attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/cover_switch_prev"
+                            android:src="@drawable/ic_arrow_back"
+                            android:visibility="visible"
+                            app:tint="@color/primaryText" />
+
+                        <!-- 删除 + 下一张 竖直排在一起整体居中，避免 layout_above 锚定 centerVertical 的坑 -->
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_alignParentEnd="true"
+                            android:layout_centerVertical="true"
+                            android:layout_marginEnd="8dp"
+                            android:gravity="center_horizontal"
+                            android:orientation="vertical">
+
+                            <ImageButton
+                                android:id="@+id/btn_cover_delete"
+                                android:layout_width="32dp"
+                                android:layout_height="32dp"
+                                android:background="?android:attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/cover_delete"
+                                android:src="@drawable/ic_delete"
+                                android:visibility="visible"
+                                app:tint="@color/primaryText" />
+
+                            <ImageButton
+                                android:id="@+id/btn_cover_next"
+                                android:layout_width="36dp"
+                                android:layout_height="36dp"
+                                android:background="?android:attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/cover_switch_next"
+                                android:src="@drawable/ic_arrow_right"
+                                android:visibility="visible"
+                                app:tint="@color/primaryText" />
+
+                        </LinearLayout>
+
+                    </RelativeLayout>
 
                     <LinearLayout
                         android:layout_width="match_parent"

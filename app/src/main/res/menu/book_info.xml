@@ -2,11 +2,17 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
+    <!-- 收进溢出菜单：右上角要腾出宽度给 AI 模板下拉框 -->
     <item
         android:id="@+id/menu_custom_btn"
         android:icon="@drawable/ic_custom"
         android:title="@string/custom_button"
-        app:showAsAction="ifRoom" />
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_cover_prompt"
+        android:title="@string/cover_prompt_setting"
+        app:showAsAction="never" />
 
     <item
         android:id="@+id/menu_edit"

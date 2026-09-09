@@ -116,6 +116,8 @@ interface BookDao {
     @get:Query("SELECT * FROM books")
     val all: List<Book>
 
+
+
     @Query("SELECT * FROM books where type & :type > 0 and type & ${BookType.local} = 0")
     fun getByTypeOnLine(type: Int): List<Book>
 

@@ -347,6 +347,15 @@
     <string name="auto_next_page_stop">停止自动翻页</string>
     <string name="auto_next_page_speed">自动翻页间隔</string>
     <string name="book_info">书籍信息</string>
+    <string name="generate_cover">生成封面</string>
+    <string name="cover_prompt_setting">封面提示词设置</string>
+    <string name="cover_generating">正在生成封面…</string>
+    <string name="cover_generate_success">封面已生成</string>
+    <string name="cover_switch_prev">上一张封面</string>
+    <string name="cover_switch_next">下一张封面</string>
+    <string name="cover_delete">删除当前封面</string>
+    <string name="cover_deleted">已删除这张封面</string>
+    <string name="cover_cannot_delete_original">原封面不能删除</string>
     <string name="book_info_edit">书籍信息编辑</string>
     <string name="ps_default_read">默认打开书架</string>
     <string name="pt_default_read">自动跳转最近阅读</string>

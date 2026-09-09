@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  模板下拉框的文字。
+  ellipsize="none" + singleLine：空间不够时**直接掐断**，不用省略号——
+  省略号本身要占两个字的宽度，反而让能看到的字更少。
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:ellipsize="none"
+    android:gravity="center_vertical"
+    android:minHeight="36dp"
+    android:paddingStart="2dp"
+    android:paddingEnd="2dp"
+    android:singleLine="true"
+    android:textColor="?android:attr/textColorPrimary"
+    android:textSize="14sp" />

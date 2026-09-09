@@ -21,3 +21,6 @@ app/schemas/
 !/依赖/sdk-packages/**
 !/依赖/打包文档.md
 build_release*.log
+
+# Linux 回收站目录（非项目文件）
+.Trash-*/

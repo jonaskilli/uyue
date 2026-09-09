@@ -1395,6 +1395,25 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefInt(PreferKey.aiImageCacheCount, 50)
         set(value) = appCtx.putPrefInt(PreferKey.aiImageCacheCount, value.coerceAtLeast(1))
 
+    /**
+     * 书籍信息界面「生成封面」用的提示词，**与朗读生图的模板提示词分开**。
+     * 占位符：{name} 书名，{intro} 简介。
+     * 长按「生成封面」按钮可编辑。
+     */
+    var aiCoverPrompt: String
+        get() = appCtx.getPrefString(PreferKey.aiCoverPrompt)
+            ?: io.legado.app.model.AiImageGenerator.DEFAULT_COVER_PROMPT
+        set(value) = appCtx.putPrefString(PreferKey.aiCoverPrompt, value)
+
+    /**
+     * 书籍信息界面里**手动选中的**封面模板 id（-1 表示没选过）。
+     * 选过就一直记住，重启 App 也保持手动选的那个，不回退到默认模板。
+     * 自动补封面也优先用它。
+     */
+    var aiCoverTemplateId: Long
+        get() = appCtx.getPrefLong(PreferKey.aiCoverTemplateId, -1L)
+        set(value) = appCtx.putPrefLong(PreferKey.aiCoverTemplateId, value)
+
     // AI 生图分析字数（每读多少字触发一次生图，默认200）
     var aiImageCharCount: Int
         get() = appCtx.getPrefInt(PreferKey.aiImageCharCount, 200)

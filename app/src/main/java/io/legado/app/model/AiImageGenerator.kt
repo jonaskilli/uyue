@@ -1405,6 +1405,137 @@ object AiImageGenerator {
         }
     }
 
+    /**
+     * 用**指定模板** + **自定义提示词**生成一张图片，返回本地文件。
+     *
+     * 与朗读生图完全解耦：不写场景缓存、不参与模板轮换、不管段落区间，
+     * 只负责"拿这个模板、用这段提示词、出一张图"。
+     * 书籍信息界面生成封面走的就是这条路。
+     *
+     * @param prompt 已经替换好占位符的最终提示词，直接发给模型
+     */
+    suspend fun generateImageDirect(
+        template: AiImageTemplate,
+        prompt: String
+    ): Result<File> {
+        val modelUrl = template.modelUrl
+        val modelName = template.modelName
+        val modelKey = template.modelKey
+        val useGradioFallback =
+            modelUrl.isBlank() && modelName.isBlank() && modelKey.isBlank()
+        return try {
+            if (useGradioFallback) {
+                val file = callGradioApi(
+                    prompt,
+                    template.imageSize,
+                    "cover_${System.currentTimeMillis()}"
+                )
+                if (file != null) Result.success(file)
+                else Result.failure(Exception("魔搭生图失败，请稍后重试"))
+            } else {
+                if (modelUrl.isBlank() || modelName.isBlank()) {
+                    return Result.failure(Exception("模板的接口地址或模型名为空"))
+                }
+                val url = normalizeImageApiUrl(modelUrl.trim())
+                val key = parseKeys(modelKey).firstOrNull() ?: ""
+                val authHeader = if (key.isNotBlank()) "Bearer ${key.trim()}" else null
+                val body = buildImageRequestBody(
+                    modelName = modelName.trim(),
+                    imageSize = template.imageSize,
+                    prompt = prompt,
+                    negativePrompt = template.negativePrompt,
+                    useBase64Response = template.useBase64Response,
+                    strictFormat = template.strictFormat,
+                    modelUrl = url,
+                )
+                val requestBody = GSON.toJson(body)
+                    .toRequestBody("application/json; charset=utf-8".toMediaType())
+                val requestBuilder = Request.Builder()
+                    .url(url)
+                    .post(requestBody)
+                    .header("Content-Type", "application/json")
+                if (authHeader != null) {
+                    requestBuilder.header("Authorization", authHeader)
+                }
+                val response = imageClient.newCall(requestBuilder.build()).execute()
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string()?.take(500) ?: "未知错误"
+                    return Result.failure(Exception("HTTP ${response.code}: $errorBody"))
+                }
+                val responseBody =
+                    response.body?.string() ?: return Result.failure(Exception("响应体为空"))
+                val json = JsonParser.parseString(responseBody).asJsonObject
+                val imageBytes = extractImageBytes(json)
+                    ?: return Result.failure(Exception("无法解析图片数据，请确认 API 和模型名称正确"))
+                val cacheDir = File(appCtx.cacheDir, CACHE_DIR_NAME)
+                if (!cacheDir.exists()) cacheDir.mkdirs()
+                val imageFile = File(cacheDir, "cover_${System.currentTimeMillis()}.png")
+                imageFile.writeBytes(imageBytes)
+                Result.success(imageFile)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * **没选模板时的内置默认**：混元太极本地网关的智谱生图接口。
+     *
+     * 走的是进程内直连（`HunyuanLocalGateway` 已在 [imageClient] 的拦截器链里），
+     * 不需要真有个服务监听在这个端口上。
+     */
+    const val BUILTIN_MODEL_URL = "http://localhost:8801/v1"
+    const val BUILTIN_MODEL_NAME = "glm-image-hd"
+    const val BUILTIN_MODEL_KEY = "123"
+
+    /** 生成封面用的图片尺寸（竖版，接近书封比例） */
+    const val COVER_IMAGE_SIZE = "1024x1536"
+
+    /**
+     * 没选模板（或一个模板都没有）时用它兜底，
+     * 免得用户还得先去建模板才能生成封面。
+     */
+    fun builtinTemplate(): io.legado.app.data.entities.AiImageTemplate =
+        io.legado.app.data.entities.AiImageTemplate(
+            id = 0L,
+            name = "内置默认",
+            modelUrl = BUILTIN_MODEL_URL,
+            modelName = BUILTIN_MODEL_NAME,
+            modelKey = BUILTIN_MODEL_KEY,
+            imageSize = COVER_IMAGE_SIZE,
+            imageStyle = DEFAULT_STYLE_SUFFIX,
+            negativePrompt = DEFAULT_NEGATIVE_PROMPT
+        )
+
+    /**
+     * 生成封面用的默认提示词。{name} 书名，{intro} 简介。
+     *
+     * **封面必须带书名**——真实的小说封面（起点/番茄/晋江那种）都是
+     * 「题材插画 + 醒目的书名大字 + 小号作者名」，
+     * 只有插画没有书名的那叫插图，不叫封面。
+     */
+    const val DEFAULT_COVER_PROMPT =
+        "请生成一张中文网络小说的竖版书籍封面。\n" +
+            "书名：{name}\n" +
+            "小说简介：{intro}\n" +
+            "【内容】\n" +
+            "1. 根据书名与简介判断题材（玄幻/都市/言情/悬疑/历史等），" +
+            "画一幅贴合该题材的精美插画作为封面主体，氛围感强、细节丰富；\n" +
+            "2. 主体人物占画面中下部，上方留出干净的背景区域用于放书名。\n" +
+            "【文字】\n" +
+            "3. 必须在画面显著位置用醒目、工整的字体写出书名「{name}」，" +
+            "字要清晰可辨、笔画正确、与画面风格协调；\n" +
+            "4. 书名是这段文字中唯一需要出现的标题文字，不要另外编造别的标题、副标题或宣传语；\n" +
+            "5. 除书名外不要出现其它文字、水印、Logo、签名、二维码。\n" +
+            "【画面色调】\n" +
+            "6. 整体画面**明亮通透**，光线充足、色彩鲜明饱和，不要灰暗、阴沉、过曝或黑压压；" +
+            "即使题材本身偏暗（悬疑 / 恐怖 / 末世），也要做成明亮清透的商业封面质感。\n" +
+            "【版式】\n" +
+            "7. 竖版 3:4，标准书籍封面比例，四周留白合理；\n" +
+            "8. **书名的位置不要太靠上**：放在画面中部偏上（从上往下约 30%~45% 处）、横向居中，" +
+            "与顶部边缘至少留出一整个书名的距离——封面装帧时上下会裁掉一部分，" +
+            "书名贴顶会被裁掉；底部同理也不要贴边。"
+
     private fun normalizeImageApiUrl(url: String): String {
         val trimmed = url.trimEnd('/')
         // 已是完整生图接口，直接用

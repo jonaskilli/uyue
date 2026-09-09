@@ -326,6 +326,10 @@ object PreferKey {
     const val aiImageTemplateBindPrefix = "aiImageTemplateBind_"
     // 上次编辑的模板 id（记住用户上次编辑哪个模板，下次打开设置时恢复）
     const val aiImageLastEditTemplateId = "aiImageLastEditTemplateId"
+    // 书籍信息界面「生成封面」用的提示词（与朗读生图的模板提示词分开）
+    const val aiCoverPrompt = "aiCoverPrompt"
+    // 书籍信息界面手动选中的封面模板 id，记住它，重启后仍是这个
+    const val aiCoverTemplateId = "aiCoverTemplateId"
     // AI 生图分析字数（每读多少字触发一次，默认200）
     const val aiImageCharCount = "aiImageCharCount"
     // AI 生图上下文字数（正文前/后的上文与后续字数，默认50）
