@@ -349,7 +349,7 @@ class CharacterManagerDialog : DialogFragment() {
             "设为主角",
             "固定发音人",
             "固定当前发音人",
-            "固定性别年龄",
+            "修改性别年龄",
             "释放角色",
             "执行合并",
             "取消所有标记",
@@ -365,7 +365,7 @@ class CharacterManagerDialog : DialogFragment() {
                     2 -> setMainCharacter(position)
                     3 -> showFixVoiceDialog(position)
                     4 -> fixCurrentVoice(position)
-                    5 -> fixGenderAge(position)
+                    5 -> showGenderAgeDialog(position)
                     6 -> releaseCharacter(position)
                     7 -> doMerge()
                     8 -> clearAllMarks()
@@ -1190,12 +1190,52 @@ class CharacterManagerDialog : DialogFragment() {
         toast("已固定当前发音人: $currentVoice")
     }
 
-    private fun fixGenderAge(position: Int) {
+    /**
+     * 修改性别年龄：弹出选择框，选中后写入角色的 gender / age 并标记为已固定。
+     * 选项与「编辑角色」对话框的年龄段保持一致，便于两处取值互认。
+     */
+    private fun showGenderAgeDialog(position: Int) {
         val character = characterRecords.optJSONObject(position) ?: return
+        val name = character.optString("name", "")
+        val options = listOf(
+            "男童", "少年", "男青年", "男中年", "男老年",
+            "女童", "少女", "女青年", "女中年", "女老年",
+            "男主", "女主", "主角", "特殊", "旁白", "系统"
+        )
+        val current = character.optString("age", "").ifBlank {
+            character.optString("gender", "")
+        }
+        val checkedIndex = if (current.isBlank()) -1 else options.indexOf(current)
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("修改性别年龄: $name")
+            .setSingleChoiceItems(options.toTypedArray(), checkedIndex) { dialog, which ->
+                applyGenderAge(position, options[which])
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 写入性别年龄：选项字符串 -> gender / age 两个字段 */
+    private fun applyGenderAge(position: Int, value: String) {
+        val character = characterRecords.optJSONObject(position) ?: return
+        val gender = when {
+            value.startsWith("女") -> "女"
+            value.startsWith("男") || value == "少年" -> "男"
+            value == "特殊" || value == "旁白" || value == "系统" -> value
+            else -> ""
+        }
+        // 男主 / 女主 的年龄段统一记为主角
+        val age = if (value == "男主" || value == "女主") "主角" else value
+        character.put("gender", gender)
+        character.put("age", age)
+        // 主角权重最高，其余按常规权重，与「设为主角」逻辑保持一致
+        character.put("usageCount", if (age == "主角") 100 else 50)
         character.put("fixedGenderAge", true)
         saveCharacters()
         updateCharacterList()
-        toast("已固定性别年龄")
+        toast("已修改性别年龄: $value")
     }
 
     private fun releaseCharacter(position: Int) {
