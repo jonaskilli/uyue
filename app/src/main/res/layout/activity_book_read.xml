@@ -14,8 +14,8 @@
         <!-- 尺寸由代码按朗读界面的「图片宽度」设置计算，宽高比 240:340 -->
         <androidx.appcompat.widget.AppCompatImageView
             android:id="@+id/read_ai_image"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="240dp"
+            android:layout_height="340dp"
             android:layout_gravity="center_horizontal"
             android:adjustViewBounds="false"
             android:contentDescription="@string/read_aloud_image_in_read_page"

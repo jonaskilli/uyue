@@ -1063,6 +1063,10 @@ class ReadBookActivity : BaseReadBookActivity(),
      * 内容加载完成
      */
     override fun contentLoadFinish() {
+        // 书籍加载完成时再应用一次：进入界面时 ReadBook.book 可能还是 null，
+        // 那时图片区域会被跳过，导致"打开书是全屏文字、没有图片"。
+        // 该回调可能在后台线程触发，必须切回主线程再操作 View。
+        runOnUiThread { upReadAiImageBar() }
         if (intent.getBooleanExtra("readAloud", false)) {
             intent.removeExtra("readAloud")
             ReadBook.readAloud()
@@ -2270,24 +2274,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             setReadAiImageVisible(false)
             return
         }
-        // 尺寸使用「阅读界面AI图片宽度」独立设置，高度按 340/240 比例。
-        // 加上限保护：宽度设得很大时高度会超过屏幕，导致图片占满整屏遮挡正文，
-        // 因此限制图片高度最多占屏幕高度的 45%，并按比例回缩宽度。
-        val metrics = resources.displayMetrics
-        val screenHeightDp = (metrics.heightPixels / metrics.density).toInt()
-        val maxHeightDp = (screenHeightDp * 0.45f).toInt().coerceAtLeast(80)
-        var widthDp = AppConfig.readAloudImageInReadPageWidth.coerceIn(80, 600)
-        var heightDp = (widthDp * 340f / 240f).toInt()
-        if (heightDp > maxHeightDp) {
-            heightDp = maxHeightDp
-            widthDp = (heightDp * 240f / 340f).toInt()
-        }
-        val lp = (iv.layoutParams as? LinearLayout.LayoutParams)
-            ?: LinearLayout.LayoutParams(widthDp.dpToPx(), heightDp.dpToPx())
-        lp.width = widthDp.dpToPx()
-        lp.height = heightDp.dpToPx()
-        lp.gravity = Gravity.CENTER_HORIZONTAL
-        iv.layoutParams = lp
+        applyReadAiImageSize()
 
         // 与朗读界面同逻辑：优先最近生成的 AI 图，没有则显示书籍封面
         val aiImage = if (AppConfig.readAloudAiImage) {
@@ -2306,6 +2293,37 @@ class ReadBookActivity : BaseReadBookActivity(),
             // 请求 Service 同步当前场景图片，避免显示过期图片
             postEvent(EventBus.AI_IMAGE_REQUEST, "0")
         }
+    }
+
+    /**
+     * 计算并应用顶部图片的显示尺寸：宽度取「阅读界面AI图片宽度」，高度按 340/240 比例。
+     * 高度上限为屏幕高度的 45%，超限则按比例回缩宽度，避免图片占满整屏遮挡正文。
+     *
+     * 注意：显示图片前必须先调用本方法。ImageView 布局是 wrap_content，
+     * 未设定尺寸就加载图片时会按原图像素尺寸撑开，表现为一张超大图覆盖全屏。
+     */
+    private fun applyReadAiImageSize() {
+        // 后台线程调用会抛 CalledFromWrongThreadException，这里统一切回主线程
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            binding.readAiImage.post { applyReadAiImageSize() }
+            return
+        }
+        val iv = binding.readAiImage
+        val metrics = resources.displayMetrics
+        val screenHeightDp = (metrics.heightPixels / metrics.density).toInt()
+        val maxHeightDp = (screenHeightDp * 0.45f).toInt().coerceAtLeast(80)
+        var widthDp = AppConfig.readAloudImageInReadPageWidth.coerceIn(80, 600)
+        var heightDp = (widthDp * 340f / 240f).toInt()
+        if (heightDp > maxHeightDp) {
+            heightDp = maxHeightDp
+            widthDp = (heightDp * 240f / 340f).toInt()
+        }
+        val lp = (iv.layoutParams as? LinearLayout.LayoutParams)
+            ?: LinearLayout.LayoutParams(widthDp.dpToPx(), heightDp.dpToPx())
+        lp.width = widthDp.dpToPx()
+        lp.height = heightDp.dpToPx()
+        lp.gravity = Gravity.CENTER_HORIZONTAL
+        iv.layoutParams = lp
     }
 
     /**
@@ -2408,8 +2426,16 @@ class ReadBookActivity : BaseReadBookActivity(),
      * 由 ContentTextView.onSizeChanged -> ChapterProvider.upViewSize 自动重新分页。
      */
     private fun setReadAiImageVisible(show: Boolean) {
+        // 同样防后台线程调用
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            binding.readAiImage.post { setReadAiImageVisible(show) }
+            return
+        }
         val iv = binding.readAiImage
         val target = if (show) View.VISIBLE else View.GONE
+        // 显示前必须先确定尺寸：ImageView 是 wrap_content，
+        // 未设定尺寸就加载会按原图像素尺寸撑开成一张超大图。
+        if (show) applyReadAiImageSize()
         if (iv.visibility == target) return
         iv.visibility = target
         iv.requestLayout()
