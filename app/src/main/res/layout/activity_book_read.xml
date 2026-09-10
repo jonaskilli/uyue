@@ -4,10 +4,30 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <io.legado.app.ui.book.read.page.ReadView
-        android:id="@+id/read_view"
+    <!-- 正文区域：顶部为可选的 AI 图片（与朗读界面同源），下方为正常阅读正文 -->
+    <LinearLayout
+        android:id="@+id/ll_read_content"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <!-- 尺寸由代码按朗读界面的「图片宽度」设置计算，宽高比 240:340 -->
+        <androidx.appcompat.widget.AppCompatImageView
+            android:id="@+id/read_ai_image"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:adjustViewBounds="false"
+            android:contentDescription="@string/read_aloud_image_in_read_page"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
+
+        <io.legado.app.ui.book.read.page.ReadView
+            android:id="@+id/read_view"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
 
     <View
         android:id="@+id/text_menu_position"

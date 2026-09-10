@@ -143,6 +143,17 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
                 }
             }
 
+            // "阅读界面AI图片宽度"
+            findPreference<EditTextPreference>(PreferKey.readAloudImageInReadPageWidth)?.let { pref ->
+                pref.summary = "当前宽度: ${AppConfig.readAloudImageInReadPageWidth}dp"
+                pref.setOnPreferenceChangeListener { _, newValue ->
+                    val width = (newValue as String).toIntOrNull()?.coerceIn(80, 600) ?: 240
+                    AppConfig.readAloudImageInReadPageWidth = width
+                    pref.summary = "当前宽度: ${width}dp"
+                    true
+                }
+            }
+
             // "跑马灯速度"
             findPreference<EditTextPreference>(PreferKey.readAloudCoverMarqueeSpeed)?.let { pref ->
                 pref.summary = "当前速度: ${AppConfig.readAloudCoverMarqueeSpeed}ms"
@@ -271,7 +282,8 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
 
                 PreferKey.showReadAloudCoverSubtitle, PreferKey.readAloudCoverWidth,
                 PreferKey.readAloudCoverMarqueeEnabled, PreferKey.readAloudCoverMarqueeSpeed,
-                PreferKey.marqueeBgmLinkEnabled -> {
+                PreferKey.marqueeBgmLinkEnabled,
+                PreferKey.readAloudImageInReadPage, PreferKey.readAloudImageInReadPageWidth -> {
                     postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)
                 }
 

@@ -1390,6 +1390,24 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             if (bookUrl.isBlank()) return
             appCtx.putPrefBoolean(PreferKey.aiImageEnablePrefix + bookUrl, value)
         }
+    // 阅读界面顶部是否显示朗读 AI 图片（默认关闭）
+    var readAloudImageInReadPage: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.readAloudImageInReadPage, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.readAloudImageInReadPage, value)
+
+    // 阅读界面顶部 AI 图片宽度（dp，默认 240，范围 80-600），独立于朗读界面图片宽度
+    var readAloudImageInReadPageWidth: Int
+        get() = appCtx.getPrefInt(PreferKey.readAloudImageInReadPageWidth, 240)
+        set(value) = appCtx.putPrefInt(PreferKey.readAloudImageInReadPageWidth, value.coerceIn(80, 600))
+
+    // 显示图片界面时正文字号减小量（sp，默认 2，范围 0-10，0 表示不减小）
+    var readAloudImageInReadPageTextSizeReduce: Int
+        get() = appCtx.getPrefInt(PreferKey.readAloudImageInReadPageTextSizeReduce, 2)
+        set(value) = appCtx.putPrefInt(
+            PreferKey.readAloudImageInReadPageTextSizeReduce,
+            value.coerceIn(0, 10)
+        )
+
     // AI 生图临时缓存保留数量上限（默认 50，至少为 1）
     var aiImageCacheCount: Int
         get() = appCtx.getPrefInt(PreferKey.aiImageCacheCount, 50)

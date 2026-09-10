@@ -303,6 +303,23 @@
 
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="false"
+            android:title="@string/read_aloud_image_in_read_page"
+            android:summary="@string/read_aloud_image_in_read_page_summary"
+            android:key="readAloudImageInReadPage"
+            app:iconSpaceReserved="false" />
+
+        <io.legado.app.lib.prefs.EditTextPreference
+            android:defaultValue="240"
+            android:title="@string/read_aloud_image_in_read_page_width"
+            android:summary="@string/read_aloud_image_in_read_page_width_summary"
+            android:key="readAloudImageInReadPageWidth"
+            android:dependency="readAloudImageInReadPage"
+            android:inputType="number"
+            android:maxLines="1"
+            app:iconSpaceReserved="false" />
+
+        <io.legado.app.lib.prefs.SwitchPreference
+            android:defaultValue="false"
             android:title="@string/read_aloud_hide_status_bar_icons"
             android:summary="@string/read_aloud_hide_status_bar_icons_summary"
             android:key="hideStatusBar"

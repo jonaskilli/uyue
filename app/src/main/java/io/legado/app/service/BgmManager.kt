@@ -271,11 +271,23 @@ object BgmManager {
         try {
             val txtFileName = "背景音乐的名字.txt"
             val names = collectAudioFileNames(uriStr)
-            writeBgmNamesTxt(uriStr, txtFileName, names)
+            // 扫描结果为 0 时不覆盖：多半是目录不可访问/路径不对，避免把已有清单清空
+            if (names.isEmpty()) {
+                io.legado.app.constant.AppLog.put("AI背景音乐: ⚠️ 扫描到 0 个音频，已跳过写入，保留原「$txtFileName」，目录=$uriStr")
+            } else {
+                val ok = writeBgmNamesTxt(uriStr, txtFileName, names)
+                io.legado.app.constant.AppLog.put(
+                    "AI背景音乐: 扫描到 ${names.size} 个音频，写入「$txtFileName」${if (ok) "成功" else "失败❌(目录无写权限或路径不对)"}"
+                )
+                io.legado.app.utils.LogUtils.d(
+                    "BgmManager", "刷新BGM清单: 扫描=${names.size}, 写入成功=$ok, 目录=$uriStr"
+                )
+            }
             // 重新加载内存列表，使后续播放使用最新清单
             loadBgmFiles()
         } catch (e: Exception) {
             e.printStackTrace()
+            io.legado.app.constant.AppLog.put("AI背景音乐: 刷新BGM清单异常 ${e.localizedMessage}")
             // 即使写入失败，也尝试重新加载，保证不崩溃
             runCatching { loadBgmFiles() }
         }
@@ -310,26 +322,86 @@ object BgmManager {
 
     /**
      * 将音频文件名列表写入“背景音乐的名字.txt”（每行一个完整文件名）。
+     * @return 是否真的写入成功；失败时调用方可以提示用户，而不是让用户以为清单已刷新。
      */
-    private fun writeBgmNamesTxt(uriStr: String, txtFileName: String, names: List<String>) {
+    private fun writeBgmNamesTxt(uriStr: String, txtFileName: String, names: List<String>): Boolean {
         val content = names.joinToString("\n")
-        if (uriStr.startsWith("content://")) {
-            val docFile = DocumentFile.fromTreeUri(appCtx, Uri.parse(uriStr))
-            var txtDoc = docFile?.findFile(txtFileName)
-            if (txtDoc == null) {
-                txtDoc = docFile?.createFile("text/plain", txtFileName)
-            }
-            txtDoc?.uri?.let { uri ->
-                appCtx.contentResolver.openOutputStream(uri)?.use { out ->
-                    out.write(content.toByteArray(Charsets.UTF_8))
+        return try {
+            if (uriStr.startsWith("content://")) {
+                val docFile = DocumentFile.fromTreeUri(appCtx, Uri.parse(uriStr))
+                if (docFile == null || !docFile.isDirectory) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: BGM目录不可访问，写入失败，uri=$uriStr")
+                    return false
                 }
+                // 必须先删掉旧文件再新建：
+                // 1) SAF 的 createFile 遇到同名存在时会自动改名成「xxx (1).txt」，新清单会写进副本；
+                // 2) 只覆盖不删除时，新内容比旧内容短，尾部会残留旧行（已删除的音频仍在清单里）。
+                deleteBgmTxt(docFile, txtFileName)
+                if (docFile.findFile(txtFileName) != null) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: ⚠️ 旧「$txtFileName」删除失败，改为截断覆盖")
+                }
+                val txtDoc = docFile.findFile(txtFileName) ?: docFile.createFile("text/plain", txtFileName)
+                if (txtDoc == null) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: 创建「$txtFileName」失败")
+                    return false
+                }
+                if (txtDoc.name != txtFileName) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: ⚠️ SAF 生成了副本「${txtDoc.name}」，请手动清理")
+                }
+                writeTextToDoc(txtDoc.uri, content)
+            } else {
+                val dir = File(uriStr)
+                if (!dir.exists() || !dir.isDirectory) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: BGM目录不存在，写入失败，path=$uriStr")
+                    return false
+                }
+                // 同样先删后写，杜绝旧内容残留
+                val txtFile = File(dir, txtFileName)
+                if (txtFile.exists() && !txtFile.delete()) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: 旧「$txtFileName」删除失败，改为覆盖写入")
+                }
+                txtFile.writeText(content, Charsets.UTF_8)
+                true
             }
-        } else {
-            val dir = File(uriStr)
-            if (dir.exists() && dir.isDirectory) {
-                File(dir, txtFileName).writeText(content, Charsets.UTF_8)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            io.legado.app.constant.AppLog.put("AI背景音乐: 写入「$txtFileName」异常 ${e.localizedMessage}")
+            false
+        }
+    }
+
+    /**
+     * 删除 BGM 目录下已存在的清单文件，失败时再用 DocumentsContract 兜底删一次。
+     */
+    private fun deleteBgmTxt(docFile: DocumentFile, txtFileName: String) {
+        val old = docFile.findFile(txtFileName) ?: return
+        if (old.delete()) return
+        runCatching {
+            android.provider.DocumentsContract.deleteDocument(appCtx.contentResolver, old.uri)
+        }.onFailure {
+            io.legado.app.constant.AppLog.put("AI背景音乐: 删除旧清单失败 ${it.localizedMessage}")
+        }
+    }
+
+    /**
+     * 把文本真正"截断后写入"到文档：优先用文件描述符的 TRUNCATE（由系统 ftruncate 保证清空），
+     * 失败再退回 openOutputStream("rwt")。
+     */
+    private fun writeTextToDoc(uri: Uri, content: String): Boolean {
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        runCatching {
+            appCtx.contentResolver.openFileDescriptor(uri, "wt")?.use { pfd ->
+                java.io.FileOutputStream(pfd.fileDescriptor).use { it.write(bytes) }
+                return true
             }
         }
+        val out = appCtx.contentResolver.openOutputStream(uri, "rwt")
+        if (out == null) {
+            io.legado.app.constant.AppLog.put("AI背景音乐: 打开清单输出流失败(无写权限?)")
+            return false
+        }
+        out.use { it.write(bytes) }
+        return true
     }
 
     /**

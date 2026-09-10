@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
 import android.os.Looper
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -12,15 +13,22 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import com.bumptech.glide.Glide
+import java.io.File
+import java.util.Timer
+import java.util.TimerTask
+import kotlin.math.abs
 import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -60,12 +68,16 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ReadTipConfig
 import io.legado.app.help.coroutine.Coroutine
+import io.legado.app.help.loadGif
 import io.legado.app.help.source.getSourceType
 import io.legado.app.help.storage.Backup
 import io.legado.app.lib.dialogs.SelectItem
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.theme.accentColor
+import io.legado.app.help.loadGif
+import io.legado.app.model.AiImageGenerator
+import io.legado.app.model.BookCover
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.model.analyzeRule.AnalyzeRule
@@ -94,6 +106,7 @@ import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.BG_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_ACCENT_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_COLOR
 import io.legado.app.ui.book.read.config.BgmConfigDialog
+import io.legado.app.ui.book.read.config.FullscreenAiImageDialog
 import io.legado.app.ui.book.read.config.MoreConfigDialog
 import io.legado.app.ui.book.read.config.ReadAloudDialog
 import io.legado.app.ui.book.read.config.ReadStyleDialog
@@ -131,6 +144,7 @@ import io.legado.app.utils.StartActivityContract
 import io.legado.app.utils.applyOpenTint
 import io.legado.app.utils.buildMainHandler
 import io.legado.app.utils.dismissDialogFragment
+import io.legado.app.utils.getCompatColor
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefString
 import io.legado.app.utils.hexString
@@ -263,6 +277,18 @@ class ReadBookActivity : BaseReadBookActivity(),
     private val nextPageDebounce by lazy { Debounce { keyPage(PageDirection.NEXT) } }
     private val prevPageDebounce by lazy { Debounce { keyPage(PageDirection.PREV) } }
     private var bookChanged = false
+
+    // ===== 阅读界面顶部 AI 图片（与朗读界面同源）=====
+    /** 可切换的历史图片列表 */
+    private var readAiImages: List<File> = emptyList()
+    /** 当前显示的历史图片下标 */
+    private var readAiImageIndex = -1
+    /** 手动切换后 30 秒自动回到最新图片的定时器 */
+    private var readAiImageResetTimer: Timer? = null
+    /** 当前显示的图片路径，避免重复加载 */
+    private var lastReadAiImagePath: String = ""
+    /** 图片界面当前已减小的字号量（sp），退出界面时按此值还原 */
+    private var readAiImageTextSizeReduced = 0
     private var pageChanged = false
     private val handler by lazy { buildMainHandler() }
     private val screenOffRunnable by lazy { Runnable { keepScreenOn(false) } }
@@ -289,6 +315,8 @@ class ReadBookActivity : BaseReadBookActivity(),
         binding.cursorRight.setColorFilter(accentColor)
         binding.cursorLeft.setOnTouchListener(this)
         binding.cursorRight.setOnTouchListener(this)
+        setupReadAiImageGesture()
+        upReadAiImageBar()
         window.setBackgroundDrawable(null)
         upScreenTimeOut()
         ReadBook.register(this)
@@ -368,6 +396,7 @@ class ReadBookActivity : BaseReadBookActivity(),
         super.onResume()
         ReadAloudFloatService.isReadBookActivityForeground = true
         ReadAloudFloatService.updateVisibility(this)
+        upReadAiImageBar()
         ReadBook.readStartTime = System.currentTimeMillis()
         if (bookChanged) {
             bookChanged = false
@@ -397,6 +426,8 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     override fun onPause() {
         super.onPause()
+        // 离开界面前还原被减小的字号，避免进程被杀后小字号被写进配置
+        applyTextSizeForImageMode(false)
         ReadAloudFloatService.isReadBookActivityForeground = false
         ReadAloudFloatService.updateVisibility(this)
         autoPageStop()
@@ -2148,7 +2179,10 @@ class ReadBookActivity : BaseReadBookActivity(),
             it.forEach { value ->
                 when (value) {
                     0 -> upSystemUiVisibility()
-                    1 -> readView.upBg()
+                    1 -> {
+                        readView.upBg()
+                        upReadAiImageBg()
+                    }
                     2 -> readView.upStyle()
                     3 -> readView.upBgAlpha()
                     4 -> readView.upPageSlopSquare()
@@ -2208,6 +2242,400 @@ class ReadBookActivity : BaseReadBookActivity(),
         observeEvent<Boolean>(EventBus.UP_SEEK_BAR) {
             readMenu.upSeekBar()
         }
+        // 朗读界面同源的 AI 图片：随朗读进度自动切换到阅读界面顶部
+        observeEvent<String>(EventBus.AI_IMAGE_CHANGED) {
+            updateReadAiImage(it)
+        }
+        observeEvent<Boolean>(EventBus.READ_ALOUD_CONFIG_CHANGED) {
+            upReadAiImageBar()
+        }
+    }
+
+    // ==================================================================
+    // 阅读界面顶部 AI 图片（数据来源与朗读界面完全一致：AiImageGenerator）
+    // 上半屏显示图片，下半屏仍是正常正文，翻页/滚动/选中等操作均不受影响
+    // ==================================================================
+
+    /** 应用开关与尺寸：顶部图片区域显示与朗读界面同款图片 */
+    private fun upReadAiImageBar() {
+        val iv = binding.readAiImage
+        if (!AppConfig.readAloudImageInReadPage) {
+            setReadAiImageVisible(false)
+            return
+        }
+        val book = ReadBook.book
+        if (book == null) {
+            setReadAiImageVisible(false)
+            return
+        }
+        // 尺寸使用「阅读界面AI图片宽度」独立设置，高度按 340/240 比例
+        val widthDp = AppConfig.readAloudImageInReadPageWidth.coerceIn(80, 600)
+        val heightDp = (widthDp * 340f / 240f).toInt()
+        val lp = (iv.layoutParams as? LinearLayout.LayoutParams)
+            ?: LinearLayout.LayoutParams(widthDp.dpToPx(), heightDp.dpToPx())
+        lp.width = widthDp.dpToPx()
+        lp.height = heightDp.dpToPx()
+        lp.gravity = Gravity.CENTER_HORIZONTAL
+        iv.layoutParams = lp
+
+        // 与朗读界面同逻辑：优先最近生成的 AI 图，没有则显示书籍封面
+        val aiImage = if (AppConfig.readAloudAiImage) {
+            lastReadAiImagePath.takeIf { it.isNotBlank() }
+                ?.let { File(it) }?.takeIf { it.exists() }
+                ?: AiImageGenerator.getLastGeneratedImage()
+        } else null
+        if (aiImage != null) {
+            loadReadAiImage(aiImage)
+        } else {
+            loadReadBookCover()
+        }
+        upReadAiImageBg()
+        setReadAiImageVisible(true)
+        if (AppConfig.readAloudAiImage) {
+            // 请求 Service 同步当前场景图片，避免显示过期图片
+            postEvent(EventBus.AI_IMAGE_REQUEST, "0")
+        }
+    }
+
+    /**
+     * 顶部下滑手势：完全进入图片界面。
+     * 等价于把「阅读界面显示AI图片」开关打开，状态持久化，不会因为重新朗读而恢复。
+     */
+    override fun onTopSwipeDown() {
+        if (AppConfig.readAloudImageInReadPage
+            && binding.readAiImage.visibility == View.VISIBLE
+        ) return
+        AppConfig.readAloudImageInReadPage = true
+        upReadAiImageBar()
+        toastOnUi("已进入图片界面")
+    }
+
+    /**
+     * 图片上滑手势：完全退出图片界面。
+     * 等价于把「阅读界面显示AI图片」开关关闭，状态持久化，直到再次下滑进入。
+     */
+    private fun exitReadAiImageBar() {
+        if (binding.readAiImage.visibility != View.VISIBLE) return
+        AppConfig.readAloudImageInReadPage = false
+        setReadAiImageVisible(false)
+        toastOnUi("已退出图片界面")
+    }
+
+    /**
+     * 顶部图片区域的底色跟随阅读界面背景，避免出现黑色底色。
+     * 纯色背景直接取该颜色；图片背景取其均值色（bgMeanColor，由 ReadBookConfig.upBg 计算）。
+     * 强制不透明：阅读背景有「背景透明度」设置（bgAlpha 可低于 100），
+     * 若沿用半透明色，图片两侧仍会透出下层内容，这里统一置为全不透明。
+     */
+    private fun upReadAiImageBg() {
+        val color = (ReadBookConfig.bg as? ColorDrawable)?.color ?: ReadBookConfig.bgMeanColor
+        binding.llReadContent.setBackgroundColor(
+            if (color != 0) color or 0xFF000000.toInt() else getCompatColor(R.color.background)
+        )
+    }
+
+    /** 显示书籍封面（无 AI 图片时的兜底，与朗读界面一致） */
+    private fun loadReadBookCover() {
+        val book = ReadBook.book ?: return
+        BookCover.load(this, book.getDisplayCover()).into(binding.readAiImage)
+    }
+
+    /** 收到生图事件后更新顶部图片 */
+    private fun updateReadAiImage(imagePath: String) {
+        if (!AppConfig.readAloudImageInReadPage) return
+        if (imagePath.isBlank()) {
+            // 无 AI 图片时回退到书籍封面，保持与朗读界面一致
+            lastReadAiImagePath = ""
+            readAiImages = emptyList()
+            readAiImageIndex = -1
+            loadReadBookCover()
+            setReadAiImageVisible(true)
+            return
+        }
+        val file = File(imagePath)
+        if (!file.exists()) return
+        lastReadAiImagePath = imagePath
+        readAiImages = AiImageGenerator.getDisplayGallery()
+        readAiImageIndex = 0
+        loadReadAiImage(file)
+        setReadAiImageVisible(true)
+        cancelReadAiImageReset()
+    }
+
+    private fun loadReadAiImage(file: File) {
+        val iv = binding.readAiImage
+        if (file.extension.equals("gif", ignoreCase = true)) {
+            iv.loadGif(file, ImageView.ScaleType.CENTER_CROP)
+        } else {
+            Glide.with(iv).load(file).into(iv)
+        }
+    }
+
+    /**
+     * 显隐顶部图片区域。高度变化会让 ReadView 重新测量，
+     * 由 ContentTextView.onSizeChanged -> ChapterProvider.upViewSize 自动重新分页。
+     */
+    private fun setReadAiImageVisible(show: Boolean) {
+        val iv = binding.readAiImage
+        val target = if (show) View.VISIBLE else View.GONE
+        if (iv.visibility == target) return
+        iv.visibility = target
+        iv.requestLayout()
+        applyTextSizeForImageMode(show)
+    }
+
+    /**
+     * 图片界面显示时按「半屏字号减小」把正文字号调小，让下半屏尽量多显示文字；
+     * 退出界面时按已减小的量还原，避免把减小后的字号写进配置。
+     */
+    private fun applyTextSizeForImageMode(show: Boolean) {
+        if (show) {
+            val reduce = AppConfig.readAloudImageInReadPageTextSizeReduce
+            if (reduce <= 0 || readAiImageTextSizeReduced > 0) return
+            val base = ReadBookConfig.textSize
+            val target = (base - reduce).coerceAtLeast(8)
+            if (target == base) return
+            ReadBookConfig.textSize = target
+            readAiImageTextSizeReduced = base - target
+        } else {
+            if (readAiImageTextSizeReduced <= 0) return
+            ReadBookConfig.textSize = ReadBookConfig.textSize + readAiImageTextSizeReduced
+            readAiImageTextSizeReduced = 0
+        }
+        // 8: 重新生成画笔(字号)  5: 重新分页
+        postEvent(EventBus.UP_CONFIG, arrayListOf(8, 5))
+    }
+
+    /** 快捷设置「半屏字号减小」 */
+    private fun showReadAiImageTextSizeReduceSetting() {
+        val current = AppConfig.readAloudImageInReadPageTextSizeReduce
+        val editText = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(current.toString())
+            hint = "字号减小量（sp），默认2，范围0-10，0为不减小"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("半屏字号减小（sp）")
+            .setView(editText)
+            .setPositiveButton("确定") { _, _ ->
+                val value = editText.text.toString().toIntOrNull()?.coerceIn(0, 10) ?: 2
+                AppConfig.readAloudImageInReadPageTextSizeReduce = value
+                // 先还原再按新值生效
+                applyTextSizeForImageMode(false)
+                applyTextSizeForImageMode(true)
+                toastOnUi("半屏字号减小已设为 ${value}sp")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 切换历史图片。direction: -1 更新的一张，1 更旧的一张 */
+    private fun switchReadAiImage(direction: Int) {
+        if (readAiImages.isEmpty()) {
+            readAiImages = AiImageGenerator.getDisplayGallery()
+            if (readAiImages.isEmpty()) {
+                toastOnUi("暂无历史图片")
+                return
+            }
+            readAiImageIndex = 0
+        }
+        val newIndex = readAiImageIndex + direction
+        if (newIndex < 0) {
+            toastOnUi("已是最新一张")
+            return
+        }
+        if (newIndex >= readAiImages.size) {
+            toastOnUi("已是最早一张")
+            return
+        }
+        readAiImageIndex = newIndex
+        val file = readAiImages[readAiImageIndex]
+        if (file.exists()) {
+            lastReadAiImagePath = file.absolutePath
+            loadReadAiImage(file)
+        }
+        scheduleReadAiImageReset()
+    }
+
+    /** 手动切换后 30 秒无操作，自动回到最新图片并恢复自动切换 */
+    private fun scheduleReadAiImageReset() {
+        readAiImageResetTimer?.cancel()
+        readAiImageResetTimer = Timer().apply {
+            schedule(object : TimerTask() {
+                override fun run() {
+                    runOnUiThread {
+                        readAiImages = AiImageGenerator.getDisplayGallery()
+                        readAiImageIndex = 0
+                        readAiImages.firstOrNull()?.let { latest ->
+                            if (latest.exists()) {
+                                lastReadAiImagePath = latest.absolutePath
+                                loadReadAiImage(latest)
+                            }
+                        }
+                        readAiImageResetTimer?.cancel()
+                        readAiImageResetTimer = null
+                    }
+                }
+            }, 30000L)
+        }
+    }
+
+    private fun cancelReadAiImageReset() {
+        readAiImageResetTimer?.cancel()
+        readAiImageResetTimer = null
+    }
+
+    /**
+     * 顶部图片手势（与朗读界面保持一致）：
+     * - 左右滑动：切换上一张 / 下一张
+     * - 单击左 1/3：上一张；单击右 1/3：下一张；单击中 1/3：全屏预览
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupReadAiImageGesture() {
+        val iv = binding.readAiImage
+        var downX = 0f
+        var downY = 0f
+        var moved = false
+        val gesture = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent): Boolean = true
+
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                if (moved) return false
+                val viewWidth = iv.width.takeIf { it > 0 } ?: return false
+                when {
+                    e.x < viewWidth / 3f -> switchReadAiImage(1)
+                    e.x > viewWidth * 2f / 3f -> switchReadAiImage(-1)
+                    else -> showDialogFragment(FullscreenAiImageDialog())
+                }
+                return true
+            }
+
+            override fun onScroll(
+                e1: MotionEvent?,
+                e2: MotionEvent,
+                distanceX: Float,
+                distanceY: Float
+            ): Boolean {
+                if (moved) return false
+                val startX = e1?.x ?: downX
+                val dx = e2.x - startX
+                val dy = e2.y - (e1?.y ?: downY)
+                if (abs(dx) > 50 && abs(dx) > abs(dy)) {
+                    switchReadAiImage(if (dx > 0) 1 else -1)
+                    moved = true
+                }
+                // 从下向上滑动：退出图片界面，正文恢复整屏
+                if (dy < -50 && abs(dy) > abs(dx)) {
+                    exitReadAiImageBar()
+                    moved = true
+                }
+                return false
+            }
+
+            override fun onLongPress(e: MotionEvent) {
+                // 发生滑动则不弹菜单
+                if (moved) return
+                showReadAiImageMenu()
+            }
+        })
+        iv.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    moved = false
+                }
+            }
+            gesture.onTouchEvent(event)
+            true
+        }
+    }
+
+    /** 当前显示的图片文件（历史浏览中的优先） */
+    private fun currentReadAiImageFile(): File? {
+        return readAiImages.getOrNull(readAiImageIndex)
+            ?: AiImageGenerator.getCurrentDisplayImage()
+            ?: lastReadAiImagePath.takeIf { it.isNotBlank() }
+                ?.let { File(it) }?.takeIf { it.exists() }
+    }
+
+    /** 长按图片弹出的菜单 */
+    private fun showReadAiImageMenu() {
+        val items = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+        items.add("图片宽度设置")
+        actions.add { showReadAiImageWidthSetting() }
+        items.add("半屏字号减小（当前 ${AppConfig.readAloudImageInReadPageTextSizeReduce}sp）")
+        actions.add { showReadAiImageTextSizeReduceSetting() }
+        items.add("退出图片界面")
+        actions.add { exitReadAiImageBar() }
+        if (AppConfig.readAloudAiImage) {
+            items.add("保存当前图片")
+            actions.add { saveReadAiImage(currentReadAiImageFile()) }
+            items.add("保存全部图片")
+            actions.add { saveAllReadAiImages() }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("图片设置")
+            .setItems(items.toTypedArray()) { _, which -> actions[which].invoke() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 快捷设置阅读界面图片宽度 */
+    private fun showReadAiImageWidthSetting() {
+        val editText = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(AppConfig.readAloudImageInReadPageWidth.toString())
+            hint = "宽度（dp），范围 80~600"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("阅读界面图片宽度（dp）")
+            .setView(editText)
+            .setPositiveButton("确定") { _, _ ->
+                val width = editText.text.toString().toIntOrNull()?.coerceIn(80, 600) ?: 240
+                AppConfig.readAloudImageInReadPageWidth = width
+                upReadAiImageBar()
+                toastOnUi("图片宽度已设为 ${width}dp")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 保存单张图片到 /Download/AI生图/ */
+    private fun saveReadAiImage(file: File?) {
+        if (file == null || !file.exists()) {
+            toastOnUi("图片不存在")
+            return
+        }
+        val targetDir = File("/storage/emulated/0/Download/AI生图/")
+        if (!targetDir.exists()) targetDir.mkdirs()
+        val target = File(targetDir, "${file.lastModified()}.png")
+        try {
+            file.copyTo(target, overwrite = true)
+            toastOnUi("已保存到 ${target.absolutePath}")
+        } catch (e: Exception) {
+            toastOnUi("保存失败：${e.localizedMessage}")
+        }
+    }
+
+    /** 保存全部历史图片 */
+    private fun saveAllReadAiImages() {
+        val allImages = AiImageGenerator.getDisplayGallery()
+        if (allImages.isEmpty()) {
+            toastOnUi("暂无 AI 生图可保存")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("保存所有 AI 生图")
+            .setMessage("将保存 ${allImages.size} 张历史图片到 /storage/emulated/0/Download/AI生图/，是否继续？")
+            .setPositiveButton("保存全部") { _, _ ->
+                var count = 0
+                allImages.forEach { if (it.exists()) { saveReadAiImage(it); count++ } }
+                toastOnUi("已保存 $count 张")
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun upScreenTimeOut() {

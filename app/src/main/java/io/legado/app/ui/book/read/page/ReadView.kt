@@ -321,9 +321,9 @@ class ReadView(context: Context, attrs: AttributeSet) :
                     return true
                 }
                 if (topSwipeDown) {
-                    if (BaseReadAloudService.isRun) {
-                        ReadAloud.stop(context)
-                    }
+                    // 顶部下滑：进入/显示阅读界面顶部的图片界面
+                    //（开关关闭时由 CallBack 内部判断，该手势无效）
+                    callBack.onTopSwipeDown()
                     return true
                 }
                 //朗读界面已弹出：上滑 → 开始/暂停朗读（与面板播放按钮行为一致）
@@ -878,6 +878,11 @@ class ReadView(context: Context, attrs: AttributeSet) :
         fun dismissReadAloudDialog()
         /** 开始/暂停朗读，与朗读界面播放按钮行为一致 */
         fun onClickReadAloud()
+        /**
+         * 阅读页顶部向下滑动：显示阅读界面顶部的图片界面。
+         * 开关关闭时该手势无效（默认空实现，不影响其它实现者）。
+         */
+        fun onTopSwipeDown() {}
         fun screenOffTimerStart()
         fun showTextActionMenu()
         fun autoPageStop()

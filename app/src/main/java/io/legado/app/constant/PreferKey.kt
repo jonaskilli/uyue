@@ -242,6 +242,12 @@ object PreferKey {
     const val aiEffectMaxCandidates = "aiEffectMaxCandidates"
 
     const val aiEffectMixOnMerge = "aiEffectMixOnMerge"
+    // 阅读界面顶部显示朗读AI图片（与朗读界面同源，随朗读进度切换）
+    const val readAloudImageInReadPage = "readAloudImageInReadPage"
+    // 阅读界面顶部AI图片宽度（dp），独立于朗读界面的图片宽度
+    const val readAloudImageInReadPageWidth = "readAloudImageInReadPageWidth"
+    // 显示图片界面时正文字号减小量（sp），0 表示不减小，默认 2
+    const val readAloudImageInReadPageTextSizeReduce = "readAloudImageInReadPageTextSizeReduce"
     // 合并章节音频/合成视频时是否混入背景音乐
     const val mixBgmOnMerge = "mixBgmOnMerge"
     // 混入背景音乐时单首最少持续时长(毫秒)，超过后才允许切换到下一首
