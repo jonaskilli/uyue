@@ -361,6 +361,19 @@ object AiImagePersistentCache {
         val file: File
     )
 
+    /**
+     * 内部缓存中某章节的图片（按起始段落升序，即朗读顺序）。
+     * 供手动左右切换图库使用，保证已生成但尚未显示过的后续场景也能被翻到。
+     * 注意：这里不复用 [internalChapterDir]，避免为空章节凭空创建目录。
+     */
+    fun getInternalChapterImageTracks(bookUrl: String, chapterIndex: Int): List<SavedImageTrack> {
+        val dir = File(File(appCtx.cacheDir, INTERNAL_DIR_NAME), "${bookUrl.hashCode()}/$chapterIndex")
+        if (!dir.exists()) return emptyList()
+        return scanChapterImages(dir)
+            .map { SavedImageTrack(it.startPara, it.endPara, it.file) }
+            .sortedBy { it.startPara }
+    }
+
     /** 切换章节时清理对应章节游标与图片缓存 */
     fun resetChapterCursor(bookUrl: String, chapterIndex: Int) {
         usedSeqsByKey.remove(cursorKey(bookUrl, chapterIndex))

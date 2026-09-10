@@ -50,7 +50,17 @@ fun ImageView.loadGif(file: File, scaleType: ImageView.ScaleType) {
         }
     } catch (e: Exception) {
         Log.e("loadGif", "系统解码 GIF 失败，回退静态首帧: ${file.name} (size=${file.length()}B)", e)
-        post { Glide.with(this).asBitmap().load(file).into(this) }
+        // post 之后 Activity 可能已销毁，Glide 会抛
+        // "You cannot start a load for a destroyed activity"，这里先判活再回退
+        post {
+            val activity = this.context as? android.app.Activity
+            if (activity != null && (activity.isFinishing || activity.isDestroyed)) return@post
+            runCatching {
+                Glide.with(this).asBitmap().load(file).into(this)
+            }.onFailure {
+                Log.e("loadGif", "Glide 回退加载失败，已忽略: ${it.message}")
+            }
+        }
         return
     }
 

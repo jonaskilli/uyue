@@ -106,6 +106,16 @@ object AiImageGenerator {
     private var lastGeneratedImagePath: String? = null
 
     /**
+     * 最近一次生图的章节上下文。用于按「当前章节」汇总已生成的图片，
+     * 供手动左右切换图库使用（只读取已存在的图片，不触发生成）。
+     */
+    private var lastCacheCtx: PersistentCacheContext? = null
+
+    /** 缓存文件名格式: 001_p012_p018_c200.png */
+    private val CHAPTER_FILE_RE =
+        Regex("(\\d+)_p(\\d+)_p(\\d+)_c(\\d+)\\.png", RegexOption.IGNORE_CASE)
+
+    /**
      * 显示顺序记录（含命中复用的旧图），最新在前，用于左右切换图库。
      * 与 getHistoryImages()（仅新生成图）不同，这里还包含持久缓存命中复用的旧图，
      * 使命中图也能进入左右切换的图库。
@@ -347,6 +357,8 @@ object AiImageGenerator {
         cacheCtxProvider: (() -> PersistentCacheContext?)? = null,
     ) {
         AppLog.put("AI生图[DEBUG] generateForScene入口: sceneIndex=$sceneIndex, enabled=$enabled, sourceTextLen=${sourceText.length}")
+        // 记录当前章节上下文，供手动切换图库按本章汇总已生成的图片
+        if (cacheCtx != null) lastCacheCtx = cacheCtx
         if (!enabled) {
             AppLog.put("AI生图[DEBUG] generateForScene: enabled=false, 直接返回")
             return
@@ -754,15 +766,156 @@ object AiImageGenerator {
      * 若按 lastModified 倒序再 take(50)，会被大量新生成图挤掉、永远进不了切换列表。
      * 因此这里以"显示顺序优先"排列，保证命中图一定保留在列表内、且排在最前（与当前显示一致）。
      */
+    /**
+     * 左右切换用的图库，整体按「朗读顺序」排列：
+     * 1. 当前章节已生成的全部图片（按起始段落升序：先场景1、再场景2…）
+     *    —— 这样当前图处在它真实的位置，它后面的就是尚未读到的后续场景，
+     *       即使这些图从未自动显示过也能手动翻到。
+     * 2. 显示过的图（displaySequence，最新在前）兜底，保证命中旧图不被时间排序挤掉
+     * 3. 其他历史图
+     *
+     * 调用方【必须】用 [getGalleryIndexOfCurrent] 定位当前图，不能再假设下标 0 是当前图。
+     */
     fun getDisplayGallery(): List<File> {
-        val result = LinkedHashSet<File>()
-        // 显示顺序优先（最新显示在前），命中旧图一定保留，不会被时间排序丢弃
-        displaySequence.forEach { result.add(it) }
-        // 再补充新生成图（getHistoryImages 已自行限长并清理超量旧图）
-        getHistoryImages().forEach { result.add(it) }
-        // 整体限长，但命中图因排在前面而优先保留
-        return result.take(maxHistoryImages)
+        // 按「场景」去重：同一张图在持久缓存与内部缓存各存一份，路径不同但内容相同，
+        // 只按路径去重会让同一张图出现两次，表现为"切一次还是原图、点两次才换一张"。
+        val result = LinkedHashMap<String, File>()
+        fun addAll(list: List<File>) {
+            list.forEach { f -> if (f.exists()) result.putIfAbsent(sceneKeyOf(f), f) }
+        }
+        // 本章按朗读顺序优先
+        addAll(getChapterGallery())
+        // 再补充显示过的图（命中旧图位于持久缓存目录，mtime 很老，靠这里兜底保留）
+        addAll(displaySequence)
+        // 再补充其他历史图（getHistoryImages 已自行限长并清理超量旧图）
+        addAll(getHistoryImages())
+        return result.values.take(maxHistoryImages)
     }
+
+    /**
+     * 场景去重键：文件名里的 起始段_结束段_字数。
+     * 持久缓存与内部缓存的命名规则完全一致，据此可判定是同一张图。
+     */
+    private fun sceneKeyOf(file: File): String {
+        val m = CHAPTER_FILE_RE.find(file.name)
+        return if (m != null) "p${m.groupValues[2]}_${m.groupValues[3]}_c${m.groupValues[4]}"
+        else file.absolutePath
+    }
+
+    /**
+     * 当前正在显示的图片在图库中的真实下标（按朗读顺序定位）。
+     * 找不到时返回 0。
+     */
+    fun getGalleryIndexOfCurrent(gallery: List<File>): Int {
+        val path = lastGeneratedImagePath
+        if (!path.isNullOrBlank()) {
+            // 1) 路径完全一致
+            val idx = gallery.indexOfFirst { it.absolutePath == path }
+            if (idx >= 0) return idx
+            // 2) 同一场景：图库去重后只保留一份（持久缓存优先），
+            //    而当前图路径可能是被去重掉的另一份（内部缓存），必须按场景键兜底匹配，
+            //    否则会返回 0，导致手动切换从第 0 张开始、所有图都被当成"后续"。
+            val key = sceneKeyOf(File(path))
+            val idx2 = gallery.indexOfFirst { sceneKeyOf(it) == key }
+            if (idx2 >= 0) return idx2
+        }
+        return 0
+    }
+
+    /**
+     * 当前章节已生成的全部图片（持久缓存 /Download/AI生图 + 内部缓存 cacheDir/ai_images），
+     * 按朗读顺序（起始段落升序）返回。
+     *
+     * 说明：只做只读汇总，不触发生成、不做任何提示；
+     * 正在合成中的图片仍按原有流程合成，朗读到对应位置时会自动切回该图。
+     */
+    fun getChapterGallery(): List<File> {
+        return chapterImagesWithRange().map { it.file }
+    }
+
+    /**
+     * 当前章节上下文：以「当前正在阅读的章节」为准。
+     * lastCacheCtx 只在生成时才更新，刚切章节还没生图时它会停留在上一章，
+     * 导致"本章图库"实际列出上一章的图，因此这里以 ReadBook 当前进度为准。
+     */
+    private fun currentChapterCtx(): PersistentCacheContext? {
+        val book = io.legado.app.model.ReadBook.book ?: return lastCacheCtx
+        val chapterIndex = io.legado.app.model.ReadBook.durChapterIndex
+        val last = lastCacheCtx
+        if (last != null && last.bookUrl == book.bookUrl && last.chapterIndex == chapterIndex) {
+            return last
+        }
+        return PersistentCacheContext(
+            bookUrl = book.bookUrl,
+            bookName = book.name,
+            chapterIndex = chapterIndex,
+            chapterName = io.legado.app.model.ReadBook.curTextChapter?.title ?: "",
+            startPara = 0,
+            endPara = 0,
+            charCount = AppConfig.aiImageCharCount,
+        )
+    }
+
+    /**
+     * 当前章节已缓存的图片及其段落区间，按段落升序。
+     * 以本地持久缓存（/Download/AI生图/）为主：同一场景两边都有时取持久缓存那份；
+     * 只有本地没有的场景，才用内部缓存（cacheDir/ai_images）补齐。
+     */
+    private fun chapterImagesWithRange(): List<AiImagePersistentCache.SavedImageTrack> {
+        val ctx = currentChapterCtx() ?: return emptyList()
+        return try {
+            val persisted = AiImagePersistentCache.getChapterImageTracks(
+                ctx.bookName, ctx.chapterIndex, ctx.chapterName
+            )
+            val internal = AiImagePersistentCache.getInternalChapterImageTracks(
+                ctx.bookUrl, ctx.chapterIndex
+            )
+            // persisted 在前，去重时保留的就是本地持久缓存那份
+            (persisted + internal)
+                .filter { it.file.exists() }
+                .distinctBy { sceneKeyOf(it.file) }
+                .sortedBy { it.startPara }
+        } catch (e: Exception) {
+            AppLog.put("AI生图: 汇总本章图片失败 ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * 按当前朗读段落在本章已缓存图片里定位：
+     * 先精确匹配包含该段落的图，再按距离向外扩散 p±1 … p±10（同距离先往后、再往前）。
+     * 只在当前章节内查找，不触发生成。
+     */
+    fun findChapterImageByParagraph(paragraph: Int): File? {
+        if (paragraph < 0) return null
+        val images = chapterImagesWithRange()
+        if (images.isEmpty()) return null
+        for (d in 0..10) {
+            val candidates = if (d == 0) listOf(paragraph) else listOf(paragraph + d, paragraph - d)
+            for (p in candidates) {
+                if (p < 0) continue
+                val hit = images.firstOrNull { p >= it.startPara && p <= it.endPara }
+                if (hit != null) return hit.file
+            }
+        }
+        return null
+    }
+
+    /**
+     * 开始朗读/切章节时，按当前段落就近找一张已缓存的图**暂时显示并定位**。
+     * 只负责显示与图库锚点，不触发生成、不写缓存；
+     * 后续真正生成/命中当前场景的图时，AI_IMAGE_CHANGED 会把它切过去。
+     * @return 是否定位成功
+     */
+    fun showNearestChapterImage(paragraph: Int): Boolean {
+        val file = findChapterImageByParagraph(paragraph) ?: return false
+        lastGeneratedImagePath = file.absolutePath
+        recordDisplay(file.absolutePath)
+        AppLog.put("AI生图: 按段落 $paragraph 就近定位到 ${file.name}")
+        postEvent(EventBus.AI_IMAGE_CHANGED, file.absolutePath)
+        return true
+    }
+
 
 
     /**

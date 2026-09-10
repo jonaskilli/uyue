@@ -99,6 +99,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     /** AI 生图历史浏览：当前显示的历史图片索引（在 aiHistoryImages 中的位置） */
     private var aiHistoryImages: List<File> = emptyList()
     private var aiHistoryIndex = -1
+    /** 用户是否正在手动浏览历史图片（图库已按朗读顺序排列，不能再用 index>0 判断） */
+    private var aiUserBrowsing = false
     /** 当前窗口是否为全屏模式（由 applyWindowMode 维护）；用于手势判定半屏专属操作 */
     private var isFullscreen = false
     /** 窗口级手势的 Window.Callback 包装，非 null 表示已挂载 */
@@ -154,6 +156,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     // 全屏背景图与主预览同步显示同一张图（延伸到状态栏）
     private fun loadIntoBoth(file: File) {
+        // 界面已销毁/未挂载时 Glide 会抛 "You cannot start a load for a destroyed activity"
+        if (!isAdded || activity?.isDestroyed == true) return
         loadImageWithCenterCrop(binding.ivBookCover, file)
         binding.ivFullscreenBg.let { bg ->
             if (isGifFile(file)) bg.loadGif(file, ImageView.ScaleType.CENTER_CROP)
@@ -1043,12 +1047,12 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 val viewWidth = iv.width.takeIf { it > 0 } ?: return false
                 when {
                     e.x < viewWidth / 3f -> {
-                        // 左 1/3：上一张图片（AI/本地通用）
-                        if (AppConfig.readAloudAiImage) switchAiHistoryImage(1) else switchLocalImage(1)
+                        // 左 1/3：前一张（朗读顺序上一张，已读过的场景）
+                        if (AppConfig.readAloudAiImage) switchAiHistoryImage(-1) else switchLocalImage(1)
                     }
                     e.x > viewWidth * 2f / 3f -> {
-                        // 右 1/3：下一张图片（AI/本地通用）
-                        if (AppConfig.readAloudAiImage) switchAiHistoryImage(-1) else switchLocalImage(-1)
+                        // 右 1/3：后一张（朗读顺序下一张，通常是后续场景）
+                        if (AppConfig.readAloudAiImage) switchAiHistoryImage(1) else switchLocalImage(-1)
                     }
                     else -> {
                         // 中 1/3：进入全屏图片预览（两种模式通用）
@@ -1070,11 +1074,11 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
                     if (AppConfig.readAloudAiImage) {
                         if (dx > 0) {
-                            // 从左向右滑：查看之前生成的图片（更旧的）
-                            switchAiHistoryImage(1)
-                        } else {
-                            // 从右向左滑：查看后面的图片（更新的）
+                            // 从左向右滑：前一张（朗读顺序上一张，已读过的场景）
                             switchAiHistoryImage(-1)
+                        } else {
+                            // 从右向左滑：后一张（朗读顺序下一张，后续场景）
+                            switchAiHistoryImage(1)
                         }
                     } else {
                         if (dx > 0) switchLocalImage(1) else switchLocalImage(-1)
@@ -1124,8 +1128,11 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     }
 
     /**
-     * 切换 AI 历史图片。direction: -1 上一张，1 下一张。
-     * 滑动后停留在目标图片，并启动 30 秒倒计时，无操作则自动回到最新图片恢复自动生成切换。
+     * 切换 AI 历史图片。图库按朗读顺序排列：
+     * direction = +1 后一张（朗读顺序的下一张，通常是尚未读到的后续场景）
+     * direction = -1 前一张（朗读顺序的上一张，已读过的场景）
+     *
+     * 滑动后停留在目标图片，并启动 30 秒倒计时，无操作则自动回到当前图片恢复自动生成切换。
      */
     private fun switchAiHistoryImage(direction: Int) {
         if (aiHistoryImages.isEmpty()) {
@@ -1134,29 +1141,30 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 toastOnUi("暂无历史图片")
                 return
             }
-            // 当前显示的是最新一张
-            aiHistoryIndex = 0
+            // 按朗读顺序定位当前显示的那张，不能再假设下标 0
+            aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
         }
         val newIndex = aiHistoryIndex + direction
         if (newIndex < 0) {
-            toastOnUi("已是最新一张")
+            toastOnUi("已是第一张")
             return
         }
         if (newIndex >= aiHistoryImages.size) {
-            toastOnUi("已是最早一张")
+            toastOnUi("已是最后一张")
             return
         }
         aiHistoryIndex = newIndex
+        aiUserBrowsing = true
         val file = aiHistoryImages[aiHistoryIndex]
         if (file.exists()) {
             loadIntoBoth(file)
         }
-        // 停留在滑动到的图片，启动 30 秒后回最新的定时器
+        // 停留在滑动到的图片，启动 30 秒后回当前图片的定时器
         scheduleAiHistoryReset()
     }
 
     /**
-     * 启动 30 秒定时器，到期后回到最新图片并恢复自动生成切换。
+     * 启动 30 秒定时器，到期后回到当前图片（朗读进度对应的那张）并恢复自动生成切换。
      */
     private fun scheduleAiHistoryReset() {
         aiHistoryResetTimer?.cancel()
@@ -1164,12 +1172,13 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             schedule(object : TimerTask() {
                 override fun run() {
                     activity?.runOnUiThread {
-                        // 回到最新一张
+                        // 回到朗读进度对应的那张（按朗读顺序重新定位，不是下标 0）
                         aiHistoryImages = AiImageGenerator.getDisplayGallery()
-                        aiHistoryIndex = 0
-                        val latest = aiHistoryImages.firstOrNull()
-                        if (latest != null && latest.exists()) {
-                            loadIntoBoth(latest)
+                        aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
+                        aiUserBrowsing = false
+                        val current = aiHistoryImages.getOrNull(aiHistoryIndex)
+                        if (current != null && current.exists()) {
+                            loadIntoBoth(current)
                         }
                         aiHistoryResetTimer?.cancel()
                         aiHistoryResetTimer = null
@@ -1179,10 +1188,11 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         }
     }
 
-    /** 取消历史浏览回最新定时器 */
+    /** 取消历史浏览回当前图片定时器 */
     private fun cancelAiHistoryReset() {
         aiHistoryResetTimer?.cancel()
         aiHistoryResetTimer = null
+        aiUserBrowsing = false
     }
 
     /**
@@ -1251,6 +1261,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 // 重置画廊，回退到书籍封面（与「AI 生图开启但无缓存」一致）
                 aiHistoryImages = emptyList()
                 aiHistoryIndex = -1
+                aiUserBrowsing = false
                 stopImageTimer()
                 ReadBook.book?.let { book ->
                     loadWithCrossFade(binding.ivBookCover, BookCover.load(requireContext(), book.getDisplayCover()))
@@ -1464,17 +1475,17 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         }
         observeEvent<String>(EventBus.AI_IMAGE_CHANGED) { imagePath ->
             if (imagePath.isNotBlank() && File(imagePath).exists()) {
-                // 用户正在浏览历史图片时不打断，仅刷新列表数据，不重置索引和显示
-                if (aiHistoryIndex > 0) {
+                // 用户正在手动浏览历史图片时不打断，仅刷新列表数据
+                if (aiUserBrowsing) {
                     aiHistoryImages = AiImageGenerator.getDisplayGallery()
                     return@observeEvent
                 }
                 stopImageTimer() // AI 生图开启时不进行本地图片轮换
                 loadIntoBoth(File(imagePath))
-                // 新图片生成，重置历史浏览到最新一张，并取消回最新定时器
+                // 新图片生成，按朗读顺序重新定位当前图，并取消回最新定时器
                 cancelAiHistoryReset()
                 aiHistoryImages = AiImageGenerator.getDisplayGallery()
-                aiHistoryIndex = 0
+                aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
             } else {
                 // 恢复书籍封面或本地图片
                 ReadBook.book?.let { book ->

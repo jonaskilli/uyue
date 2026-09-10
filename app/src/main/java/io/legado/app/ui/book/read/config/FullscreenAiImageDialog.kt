@@ -63,6 +63,8 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
     /** AI 生图历史浏览：当前显示的历史图片索引（在 aiHistoryImages 中的位置） */
     private var aiHistoryImages: List<File> = emptyList()
     private var aiHistoryIndex = -1
+    /** 用户是否正在手动浏览（图库已按朗读顺序排列，不能再用 index>0 判断） */
+    private var aiUserBrowsing = false
     /** 浏览历史图片后，30秒无操作自动回到最新图片的定时器 */
     private var aiHistoryResetTimer: Timer? = null
 
@@ -156,17 +158,17 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
         observeEvent<String>(EventBus.AI_IMAGE_CHANGED) { imagePath ->
             if (useLocalImages) return@observeEvent
             if (imagePath.isNotBlank() && File(imagePath).exists()) {
-                // 用户正在浏览历史图片时不打断，仅刷新列表数据
-                if (aiHistoryIndex > 0) {
+                // 用户正在手动浏览历史图片时不打断，仅刷新列表数据
+                if (aiUserBrowsing) {
                     aiHistoryImages = AiImageGenerator.getDisplayGallery()
                     return@observeEvent
                 }
                 currentImageFile = File(imagePath)
                 loadImage(binding.ivFullscreenImage, currentImageFile!!)
-                // 新图片生成，重置历史浏览到最新一张
+                // 新图片生成，按朗读顺序重新定位当前图
                 cancelAiHistoryReset()
                 aiHistoryImages = AiImageGenerator.getDisplayGallery()
-                aiHistoryIndex = 0
+                aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
             }
         }
     }
@@ -189,7 +191,7 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 showBookCover()
             }
             aiHistoryImages = AiImageGenerator.getDisplayGallery()
-            aiHistoryIndex = 0
+            aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
         } else {
             useLocalImages = true
             cancelAiHistoryReset()
@@ -280,12 +282,12 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 val viewWidth = binding.ivFullscreenImage.width.takeIf { it > 0 } ?: return false
                 when {
                     e.x < viewWidth / 3f -> {
-                        // 左 1/3：上一张图片（本地/AI 通用）
-                        switchImage(1)
+                        // 左 1/3：前一张（AI 为朗读顺序上一张；本地图片保持原语义）
+                        switchImage(if (useLocalImages) 1 else -1)
                     }
                     e.x > viewWidth * 2f / 3f -> {
-                        // 右 1/3：下一张图片（本地/AI 通用）
-                        switchImage(-1)
+                        // 右 1/3：后一张（AI 为朗读顺序下一张；本地图片保持原语义）
+                        switchImage(if (useLocalImages) -1 else 1)
                     }
                     else -> {
                         // 中 1/3：切换小说朗读/暂停
@@ -318,12 +320,12 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 }
                 // 横向位移需大于纵向，且超过阈值即切换
                 if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
-                    if (dx > 0) {
-                        // 从左向右滑：查看之前生成的图片（更旧的）
-                        switchImage(1)
+                    if (useLocalImages) {
+                        // 本地图片：保持原有语义
+                        if (dx > 0) switchImage(1) else switchImage(-1)
                     } else {
-                        // 从右向左滑：查看后面的图片（更新的）
-                        switchImage(-1)
+                        // AI 生图：从右向左滑 = 后一张（后续场景）；从左向右滑 = 前一张（已读场景）
+                        if (dx > 0) switchImage(-1) else switchImage(1)
                     }
                     moved = true
                 }
@@ -372,8 +374,9 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
     }
 
     /**
-     * 切换 AI 历史图片。direction: -1 上一张，1 下一张。
-     * 滑动后停留在目标图片，并启动 30 秒倒计时，无操作则自动回到最新图片。
+     * 切换 AI 历史图片。图库按朗读顺序排列：
+     * direction = +1 后一张（后续场景），-1 前一张（已读过的场景）。
+     * 滑动后停留在目标图片，并启动 30 秒倒计时，无操作则自动回到当前图片。
      */
     private fun switchAiHistoryImage(direction: Int) {
         if (aiHistoryImages.isEmpty()) {
@@ -382,18 +385,20 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 toastOnUi("暂无历史图片")
                 return
             }
-            aiHistoryIndex = 0
+            // 按朗读顺序定位当前显示的那张
+            aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
         }
         val newIndex = aiHistoryIndex + direction
         if (newIndex < 0) {
-            toastOnUi("已是最新一张")
+            toastOnUi("已是第一张")
             return
         }
         if (newIndex >= aiHistoryImages.size) {
-            toastOnUi("已是最早一张")
+            toastOnUi("已是最后一张")
             return
         }
         aiHistoryIndex = newIndex
+        aiUserBrowsing = true
         val file = aiHistoryImages[aiHistoryIndex]
         if (file.exists()) {
             loadImage(binding.ivFullscreenImage, file)
@@ -411,12 +416,13 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
             schedule(object : TimerTask() {
                 override fun run() {
                     activity?.runOnUiThread {
-                        // 回到最新一张
+                        // 回到朗读进度对应的那张（按朗读顺序定位，不是下标 0）
                         aiHistoryImages = AiImageGenerator.getDisplayGallery()
-                        aiHistoryIndex = 0
-                        val latest = aiHistoryImages.firstOrNull()
-                        if (latest != null && latest.exists()) {
-                            loadImage(binding.ivFullscreenImage, latest)
+                        aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
+                        aiUserBrowsing = false
+                        val current = aiHistoryImages.getOrNull(aiHistoryIndex)
+                        if (current != null && current.exists()) {
+                            loadImage(binding.ivFullscreenImage, current)
                         }
                         aiHistoryResetTimer?.cancel()
                         aiHistoryResetTimer = null
@@ -426,10 +432,11 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
         }
     }
 
-    /** 取消历史浏览回最新定时器 */
+    /** 取消历史浏览回当前图片定时器 */
     private fun cancelAiHistoryReset() {
         aiHistoryResetTimer?.cancel()
         aiHistoryResetTimer = null
+        aiUserBrowsing = false
     }
 
     /**
@@ -646,6 +653,8 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
      * 静态图仍用 Glide into(view)；placeholder 保留当前图，避免切换时短暂空白。
      */
     private fun loadImage(iv: ImageView, file: File) {
+        // 界面已销毁/未挂载时 Glide 会抛 "You cannot start a load for a destroyed activity"
+        if (!isAdded || activity?.isDestroyed == true) return
         if (isGifFile(file)) {
             // GIF：复用书架封面同款 Glide 加载链路（ImageLoader + into(view)），会自动播放动画
             iv.loadGif(file, ImageView.ScaleType.FIT_CENTER)

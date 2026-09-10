@@ -2396,7 +2396,15 @@ abstract class BaseReadAloudService : BaseService(),
         val startPara = cacheCtx?.startPara ?: -1
         val endPara = cacheCtx?.endPara ?: -1
         // 1. 先尝试显示已缓存的图片（内部缓存按段落区间匹配）
-        AiImageGenerator.notifyImageIfReady(book.bookUrl, chapterIndex, aiImageSceneIndex, startPara, endPara)
+        val notified = AiImageGenerator.notifyImageIfReady(
+            book.bookUrl, chapterIndex, aiImageSceneIndex, startPara, endPara
+        )
+        // 1.1 精确匹配不到时：按当前段落在本章已缓存图片里就近（p±10）找一张，
+        //     暂时显示并定位图库锚点。只负责显示/定位，不触发生成；
+        //     后续真正生成或命中当前场景的图时会自动切过去。
+        if (!notified && startPara >= 0) {
+            AiImageGenerator.showNearestChapterImage(startPara)
+        }
         // 2. 如果缓存不存在，实时生成（首次或预生成失败时）
         if (AiImageGenerator.getCachedImage(book.bookUrl, chapterIndex, aiImageSceneIndex, startPara, endPara) == null) {
             // 防重入：如果已有生成任务在跑或本方法已启动过实时生成，跳过重复启动

@@ -2151,6 +2151,8 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     override fun onDestroy() {
         super.onDestroy()
+        // 先停掉图片回位定时器，避免销毁后仍在 runOnUiThread 里触发 Glide 加载
+        cancelReadAiImageReset()
         tts?.clearTts()
         textActionMenu.dismiss()
         popupAction.dismiss()
@@ -2268,9 +2270,18 @@ class ReadBookActivity : BaseReadBookActivity(),
             setReadAiImageVisible(false)
             return
         }
-        // 尺寸使用「阅读界面AI图片宽度」独立设置，高度按 340/240 比例
-        val widthDp = AppConfig.readAloudImageInReadPageWidth.coerceIn(80, 600)
-        val heightDp = (widthDp * 340f / 240f).toInt()
+        // 尺寸使用「阅读界面AI图片宽度」独立设置，高度按 340/240 比例。
+        // 加上限保护：宽度设得很大时高度会超过屏幕，导致图片占满整屏遮挡正文，
+        // 因此限制图片高度最多占屏幕高度的 45%，并按比例回缩宽度。
+        val metrics = resources.displayMetrics
+        val screenHeightDp = (metrics.heightPixels / metrics.density).toInt()
+        val maxHeightDp = (screenHeightDp * 0.45f).toInt().coerceAtLeast(80)
+        var widthDp = AppConfig.readAloudImageInReadPageWidth.coerceIn(80, 600)
+        var heightDp = (widthDp * 340f / 240f).toInt()
+        if (heightDp > maxHeightDp) {
+            heightDp = maxHeightDp
+            widthDp = (heightDp * 240f / 340f).toInt()
+        }
         val lp = (iv.layoutParams as? LinearLayout.LayoutParams)
             ?: LinearLayout.LayoutParams(widthDp.dpToPx(), heightDp.dpToPx())
         lp.width = widthDp.dpToPx()
@@ -2336,9 +2347,20 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     /** 显示书籍封面（无 AI 图片时的兜底，与朗读界面一致） */
     private fun loadReadBookCover() {
+        if (!isActivityAlive()) return
         val book = ReadBook.book ?: return
-        BookCover.load(this, book.getDisplayCover()).into(binding.readAiImage)
+        val iv = binding.readAiImage
+        // 用 applicationContext 加载，避免与 Activity 生命周期绑定导致销毁后加载崩溃
+        // 同样用当前图占位，避免切回封面时闪烁
+        val placeholder = iv.drawable
+        BookCover.load(applicationContext, book.getDisplayCover())
+            .placeholder(placeholder)
+            .error(placeholder)
+            .into(iv)
     }
+
+    /** Activity 是否仍可用于图片加载（定时任务/回调可能在销毁之后才触发） */
+    private fun isActivityAlive(): Boolean = !isFinishing && !isDestroyed
 
     /** 收到生图事件后更新顶部图片 */
     private fun updateReadAiImage(imagePath: String) {
@@ -2356,19 +2378,29 @@ class ReadBookActivity : BaseReadBookActivity(),
         if (!file.exists()) return
         lastReadAiImagePath = imagePath
         readAiImages = AiImageGenerator.getDisplayGallery()
-        readAiImageIndex = 0
+        // 按朗读顺序定位当前图，不能再假设下标 0
+        readAiImageIndex = AiImageGenerator.getGalleryIndexOfCurrent(readAiImages)
         loadReadAiImage(file)
         setReadAiImageVisible(true)
         cancelReadAiImageReset()
     }
 
     private fun loadReadAiImage(file: File) {
+        // Activity 已销毁时 Glide 会抛 "You cannot start a load for a destroyed activity"
+        if (!isActivityAlive()) return
         val iv = binding.readAiImage
         if (file.extension.equals("gif", ignoreCase = true)) {
             iv.loadGif(file, ImageView.ScaleType.CENTER_CROP)
-        } else {
-            Glide.with(iv).load(file).into(iv)
+            return
         }
+        // 以当前图作为占位：Glide 无占位时会先清空 ImageView 再加载，
+        // 表现为"先露出背景再显示新图"的闪烁；与全屏大图界面保持一致。
+        val placeholder = iv.drawable
+        Glide.with(iv)
+            .load(file)
+            .placeholder(placeholder)
+            .error(placeholder)
+            .into(iv)
     }
 
     /**
@@ -2429,7 +2461,10 @@ class ReadBookActivity : BaseReadBookActivity(),
             .show()
     }
 
-    /** 切换历史图片。direction: -1 更新的一张，1 更旧的一张 */
+    /**
+     * 切换历史图片。图库按朗读顺序排列：
+     * direction = +1 后一张（后续场景），-1 前一张（已读过的场景）
+     */
     private fun switchReadAiImage(direction: Int) {
         if (readAiImages.isEmpty()) {
             readAiImages = AiImageGenerator.getDisplayGallery()
@@ -2437,15 +2472,16 @@ class ReadBookActivity : BaseReadBookActivity(),
                 toastOnUi("暂无历史图片")
                 return
             }
-            readAiImageIndex = 0
+            // 按朗读顺序定位当前显示的那张
+            readAiImageIndex = AiImageGenerator.getGalleryIndexOfCurrent(readAiImages)
         }
         val newIndex = readAiImageIndex + direction
         if (newIndex < 0) {
-            toastOnUi("已是最新一张")
+            toastOnUi("已是第一张")
             return
         }
         if (newIndex >= readAiImages.size) {
-            toastOnUi("已是最早一张")
+            toastOnUi("已是最后一张")
             return
         }
         readAiImageIndex = newIndex
@@ -2465,11 +2501,11 @@ class ReadBookActivity : BaseReadBookActivity(),
                 override fun run() {
                     runOnUiThread {
                         readAiImages = AiImageGenerator.getDisplayGallery()
-                        readAiImageIndex = 0
-                        readAiImages.firstOrNull()?.let { latest ->
-                            if (latest.exists()) {
-                                lastReadAiImagePath = latest.absolutePath
-                                loadReadAiImage(latest)
+                        readAiImageIndex = AiImageGenerator.getGalleryIndexOfCurrent(readAiImages)
+                        readAiImages.getOrNull(readAiImageIndex)?.let { current ->
+                            if (current.exists()) {
+                                lastReadAiImagePath = current.absolutePath
+                                loadReadAiImage(current)
                             }
                         }
                         readAiImageResetTimer?.cancel()
@@ -2503,8 +2539,9 @@ class ReadBookActivity : BaseReadBookActivity(),
                 if (moved) return false
                 val viewWidth = iv.width.takeIf { it > 0 } ?: return false
                 when {
-                    e.x < viewWidth / 3f -> switchReadAiImage(1)
-                    e.x > viewWidth * 2f / 3f -> switchReadAiImage(-1)
+                    // 左 1/3：前一张（已读过的场景）；右 1/3：后一张（后续场景）
+                    e.x < viewWidth / 3f -> switchReadAiImage(-1)
+                    e.x > viewWidth * 2f / 3f -> switchReadAiImage(1)
                     else -> showDialogFragment(FullscreenAiImageDialog())
                 }
                 return true
@@ -2521,7 +2558,8 @@ class ReadBookActivity : BaseReadBookActivity(),
                 val dx = e2.x - startX
                 val dy = e2.y - (e1?.y ?: downY)
                 if (abs(dx) > 50 && abs(dx) > abs(dy)) {
-                    switchReadAiImage(if (dx > 0) 1 else -1)
+                    // 从右向左滑 = 后一张（后续场景）；从左向右滑 = 前一张（已读过的场景）
+                    switchReadAiImage(if (dx > 0) -1 else 1)
                     moved = true
                 }
                 // 从下向上滑动：退出图片界面，正文恢复整屏
