@@ -81,6 +81,7 @@ object PreferKey {
     const val changeSourceLoadToc = "changeSourceLoadToc"
     const val changeSourceLoadInfo = "changeSourceLoadInfo"
     const val changeSourceLoadWordCount = "changeSourceLoadWordCount"
+    const val changeSourceShowCacheCount = "changeSourceShowCacheCount"
     const val chineseConverterType = "chineseConverterType"
     const val launcherIcon = "launcherIcon"
     const val textSelectAble = "selectText"
@@ -346,6 +347,16 @@ object PreferKey {
     const val aiImageRequestInterval = "aiImageRequestInterval"
     // 是否保存AI生图到持久目录（每本书单独设置），key = aiImageSavePrefix_${bookUrl}
     const val aiImageSavePrefix = "aiImageSave_"
+
+    // --- AI 章节修复（去广告/错别字）---
+    // AI 接口配置，格式与 AI 切歌一致：接口地址@@模型名@@密钥
+    const val aiChapterFixApi = "aiChapterFixApi"
+    // AI 章节修复提示词，为空时用内置默认
+    const val aiChapterFixPrompt = "aiChapterFixPrompt"
+    // 自动处理开关：切换章节时自动处理后续章节
+    const val aiChapterFixAuto = "aiChapterFixAuto"
+    // 每次处理的章节数量（自动处理与批量处理共用）
+    const val aiChapterFixCount = "aiChapterFixCount"
 
     // --- AI 生图「按书名」绑定（新版）---
     // 旧版按 bookUrl 存储，换书源后 bookUrl 变化会导致绑定失效；新版改按书名存储。

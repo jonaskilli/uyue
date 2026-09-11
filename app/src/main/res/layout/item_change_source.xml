@@ -56,7 +56,7 @@
         android:singleLine="true"
         tools:text="author"
         android:textColor="@color/secondaryText"
-        app:layout_constraintRight_toLeftOf="@+id/iv_checked"
+        app:layout_constraintRight_toLeftOf="@+id/tv_cache_count"
         app:layout_constraintTop_toTopOf="parent" />
 
     <TextView
@@ -69,7 +69,7 @@
         tools:text="latest chapter name"
         android:textColor="@color/secondaryText"
         app:layout_constraintLeft_toLeftOf="parent"
-        app:layout_constraintRight_toLeftOf="@+id/iv_checked"
+        app:layout_constraintRight_toLeftOf="@+id/tv_cache_count"
         app:layout_constraintTop_toBottomOf="@+id/tv_origin" />
 
     <TextView
@@ -82,7 +82,7 @@
         tools:text="word count"
         android:textColor="@color/secondaryText"
         app:layout_constraintLeft_toLeftOf="parent"
-        app:layout_constraintRight_toLeftOf="@+id/iv_checked"
+        app:layout_constraintRight_toLeftOf="@+id/tv_cache_count"
         app:layout_constraintTop_toBottomOf="@+id/tv_last" />
 
     <TextView
@@ -96,8 +96,35 @@
         android:textColor="@color/secondaryText"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintLeft_toLeftOf="parent"
-        app:layout_constraintRight_toLeftOf="@+id/iv_checked"
+        app:layout_constraintRight_toLeftOf="@+id/tv_cache_count"
         app:layout_constraintTop_toBottomOf="@+id/tv_current_chapter_word_count" />
+
+    <TextView
+        android:id="@+id/tv_cache_count"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:singleLine="true"
+        android:visibility="gone"
+        android:textColor="@color/secondaryText"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintRight_toLeftOf="@+id/iv_delete_cache"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="缓存12章"
+        tools:visibility="visible" />
+
+    <androidx.appcompat.widget.AppCompatImageView
+        android:id="@+id/iv_delete_cache"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:padding="8dp"
+        android:src="@drawable/ic_delete"
+        android:contentDescription="@string/delete_cached_chapters"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintRight_toLeftOf="@+id/iv_checked"
+        app:layout_constraintTop_toTopOf="parent"
+        app:tint="@color/secondaryText"
+        tools:visibility="visible" />
 
     <androidx.appcompat.widget.AppCompatImageView
         android:id="@+id/iv_checked"

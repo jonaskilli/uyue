@@ -1023,6 +1023,7 @@
     <string name="menu_refresh_after">Refresh the chapter after</string>
     <string name="menu_refresh_all">Refresh all chapters</string>
     <string name="edit_content">Edit Content</string>
+    <string name="ai_fix_chapter">AI Process Chapter</string>
     <string name="chapter_change_source">Single chapter source switching</string>
     <string name="book_change_source">Change the source of the whole book</string>
     <string name="sort_by_time">Sort by time</string>
@@ -1262,6 +1263,10 @@
     <string name="webdav_application_authorization_error">Fail to authorize WebDav application</string>
     <string name="respondTime">respondTime: %1$d ms</string>
     <string name="load_word_count">Load word count</string>
+    <string name="show_cache_count">Show cached chapter count</string>
+    <string name="cache_chapter_count">%1$d cached</string>
+    <string name="delete_cached_chapters">Delete cached chapters</string>
+    <string name="sure_del_cached_chapters">Delete cached chapters of "%1$s"?</string>
     <string name="replace_exclude_scope">Exclude range, optional title or source URL</string>
     <string name="format_js_rule">格式化规则(formatJs)</string>
     <string name="adjust_pos">Adjustment position</string>

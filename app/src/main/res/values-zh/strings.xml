@@ -1010,6 +1010,7 @@
     <string name="menu_refresh_after">刷新之后章节</string>
     <string name="menu_refresh_all">刷新全部章节</string>
     <string name="edit_content">编辑内容</string>
+    <string name="ai_fix_chapter">AI处理章节</string>
     <string name="chapter_change_source">单章换源</string>
     <string name="book_change_source">整书换源</string>
     <string name="sort_by_time">时间排序</string>
@@ -1176,6 +1177,10 @@
     <string name="only_latest_backup_s">本地备份仅保留最新备份文件</string>
     <string name="webdav_application_authorization_error">webDav应用验证失败</string>
     <string name="load_word_count">加载字数</string>
+    <string name="show_cache_count">显示本地缓存章节数</string>
+    <string name="cache_chapter_count">缓存%1$d章</string>
+    <string name="delete_cached_chapters">删除已缓存章节</string>
+    <string name="sure_del_cached_chapters">确定删除「%1$s」已缓存的章节吗？</string>
     <string name="replace_exclude_scope">排除范围，选填书名或者书源 URL</string>
     <string name="format_js_rule">格式化规则(formatJs)</string>
     <string name="adjust_pos">调整位置</string>

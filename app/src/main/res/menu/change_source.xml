@@ -51,6 +51,13 @@
         android:title="@string/load_toc"
         android:checkable="true"
         app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_show_cache_count"
+        android:title="@string/show_cache_count"
+        android:checkable="true"
+        app:showAsAction="never" />
+
     <item
         android:id="@+id/menu_group"
         android:title="@string/group">

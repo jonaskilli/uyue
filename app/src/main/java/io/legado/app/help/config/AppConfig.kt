@@ -565,6 +565,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.changeSourceLoadWordCount, value)
         }
 
+    var changeSourceShowCacheCount: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.changeSourceShowCacheCount)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.changeSourceShowCacheCount, value)
+        }
+
     var openBookInfoByClickTitle: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.openBookInfoByClickTitle, true)
         set(value) {
@@ -1228,6 +1234,36 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefString(PreferKey.aiEffectLocalDir, DEFAULT_AI_EFFECT_DIR)
             ?: DEFAULT_AI_EFFECT_DIR
         set(value) = appCtx.putPrefString(PreferKey.aiEffectLocalDir, value)
+
+    /** 单次最多处理的章节数量，防止误填把整本书都跑一遍 */
+    private const val MAX_AI_CHAPTER_FIX_COUNT = 50
+
+    /** AI 章节处理的默认接口（本地网关），格式：接口地址@@模型名@@密钥 */
+    private const val DEFAULT_AI_CHAPTER_FIX_API = "http://localhost:8801/v1@@g3@@00"
+
+    /**
+     * AI 章节修复（去广告/错别字）的接口配置，
+     * 格式与「AI 切歌」一致：接口地址@@模型名@@密钥
+     */
+    var aiChapterFixApi: String
+        get() = appCtx.getPrefString(PreferKey.aiChapterFixApi)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_AI_CHAPTER_FIX_API
+        set(value) = appCtx.putPrefString(PreferKey.aiChapterFixApi, value)
+
+    /** AI 章节修复提示词，为空表示用内置默认 */
+    var aiChapterFixPrompt: String
+        get() = appCtx.getPrefString(PreferKey.aiChapterFixPrompt) ?: ""
+        set(value) = appCtx.putPrefString(PreferKey.aiChapterFixPrompt, value)
+
+    /** AI 章节处理：自动处理开关。开启后每次切换章节，自动处理后续章节 */
+    var aiChapterFixAuto: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.aiChapterFixAuto, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.aiChapterFixAuto, value)
+
+    /** AI 章节处理：每次处理的章节数量（自动处理与批量处理共用） */
+    var aiChapterFixCount: Int
+        get() = appCtx.getPrefInt(PreferKey.aiChapterFixCount, 1)
+        set(value) = appCtx.putPrefInt(PreferKey.aiChapterFixCount, value.coerceIn(1, MAX_AI_CHAPTER_FIX_COUNT))
 
     /**
      * 阶段一每段提取关键字的**上限**，实际数量按段落字数递减（每 100 字约 12 个）。

@@ -237,6 +237,37 @@ object ReadBook : CoroutineScope by MainScope() {
     }
 
     /**
+     * 章节正文被外部改写后（例如 AI 处理章节），
+     * 丢弃该章已经排好版的旧内容，重新从缓存里读一遍，
+     * 否则界面会一直显示修改前的正文，要重启 APP 才能看到改动。
+     *
+     * 只处理当前章和前后一章（阅读器只缓存这三章）。
+     */
+    fun reloadChapter(index: Int) {
+        if (book == null) return
+        if (index !in durChapterIndex - 1..durChapterIndex + 1) return
+        // 取消该章可能仍在跑的旧加载：否则 addLoading 会把新的加载直接挡掉
+        chapterLoadingJobs.remove(index)?.cancel()
+        removeLoading(index)
+        when (index) {
+            durChapterIndex -> {
+                // 正在显示的章节：重新排版，保持阅读进度
+                loadContent(index, upContent = true, resetPageOffset = false)
+            }
+
+            durChapterIndex + 1 -> {
+                nextTextChapter = null
+                loadContent(index, upContent = false)
+            }
+
+            else -> {
+                prevTextChapter = null
+                loadContent(index, upContent = false)
+            }
+        }
+    }
+
+    /**
      * 异步加载指定章节的角色标注，并在完成后刷新视图。
      * 切换章节时调用，可确保读取到 AI 最新保存的数据。
      */

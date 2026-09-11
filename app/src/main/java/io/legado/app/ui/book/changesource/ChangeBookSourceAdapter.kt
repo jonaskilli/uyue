@@ -13,7 +13,9 @@ import io.legado.app.base.adapter.DiffRecyclerAdapter
 import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.databinding.ItemChangeSourceBinding
+import io.legado.app.help.book.BookHelp
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.utils.getCompatColor
 import io.legado.app.utils.gone
@@ -45,6 +47,106 @@ class ChangeBookSourceAdapter(
 
     override fun getViewBinding(parent: ViewGroup): ItemChangeSourceBinding {
         return ItemChangeSourceBinding.inflate(inflater, parent, false)
+    }
+
+    // bookUrl -> 本地已缓存章节数
+    private val cacheCountMap = HashMap<String, Int>()
+    private val cacheCountLoading = HashSet<String>()
+
+    // 未经缓存排序的原始列表，用于关闭开关时恢复原顺序
+    private var sourceItems: List<SearchBook>? = null
+
+    // 提交列表后是否需要在列表生效时强制刷新一遍条目。
+    // RecyclerView 对"移动"的 ViewHolder 只移动位置不会重新绑定(onBindViewHolder)，
+    // 缓存统计完成后有缓存的条目会被移动到顶部，只移动不刷新会导致缓存数量显示不出来。
+    private var cacheRefreshPending = false
+
+    /**
+     * 设置条目列表。
+     * 开启“显示本地缓存章节数”时，有缓存的条目按缓存数量倒序置顶，
+     * 并后台统计各条目的缓存章节数，统计完成后再重新排序。
+     */
+    fun setItemsWithCacheSort(items: List<SearchBook>?) {
+        sourceItems = items
+        submitItemsAndRefresh(sortedByCacheCount(items))
+        if (AppConfig.changeSourceShowCacheCount) {
+            scanCacheCount(items ?: emptyList())
+        }
+    }
+
+    /**
+     * 缓存数量显示开关变化时调用，开启时置顶排序，关闭时恢复原顺序
+     */
+    fun resortByCacheCount() {
+        val items = sourceItems ?: getItems().toList()
+        submitItemsAndRefresh(sortedByCacheCount(items))
+        if (AppConfig.changeSourceShowCacheCount) {
+            scanCacheCount(items)
+        }
+    }
+
+    /**
+     * 提交列表，并在列表生效后强制刷新一遍可见条目。
+     * 否则被"移动"到顶部的条目不会重新绑定，缓存数量不会显示。
+     */
+    private fun submitItemsAndRefresh(items: List<SearchBook>?) {
+        if (items != null && items == getItems()) {
+            // 列表内容没变化时 submitList 会被直接短路，不会触发回调，这里直接刷新
+            if (AppConfig.changeSourceShowCacheCount) {
+                notifyItemRangeChanged(0, itemCount)
+            }
+            return
+        }
+        cacheRefreshPending = AppConfig.changeSourceShowCacheCount
+        setItems(items)
+    }
+
+    override fun onCurrentListChanged() {
+        if (cacheRefreshPending) {
+            cacheRefreshPending = false
+            notifyItemRangeChanged(0, itemCount)
+        }
+    }
+
+    /**
+     * 开启开关时按缓存章节数倒序排列，有缓存的条目集中在最上面。
+     * 排序稳定，缓存数相同的条目保持原相对顺序。
+     */
+    private fun sortedByCacheCount(items: List<SearchBook>?): List<SearchBook>? {
+        items ?: return null
+        if (!AppConfig.changeSourceShowCacheCount) return items
+        return items.sortedByDescending { cacheCountMap[it.bookUrl] ?: 0 }
+    }
+
+    /**
+     * 获取条目对应书源/书籍的本地已缓存章节数（仅读取已统计结果）
+     */
+    private fun getCachedChapterCount(item: SearchBook): Int {
+        return cacheCountMap[item.bookUrl] ?: 0
+    }
+
+    /**
+     * 后台统计未统计过的条目的缓存章节数。
+     * 统计出有缓存的条目时重新排序，使有缓存的条目集中置顶。
+     */
+    private fun scanCacheCount(items: List<SearchBook>) {
+        val uncounted = items.filter {
+            it.bookUrl !in cacheCountMap && cacheCountLoading.add(it.bookUrl)
+        }
+        if (uncounted.isEmpty()) return
+        Coroutine.async {
+            uncounted.forEach { item ->
+                val count = BookHelp.getCachedChapterCount(item.toBook())
+                cacheCountMap[item.bookUrl] = count
+                cacheCountLoading.remove(item.bookUrl)
+            }
+        }.onSuccess {
+            if (AppConfig.changeSourceShowCacheCount) {
+                submitItemsAndRefresh(sortedByCacheCount(getItems().toList()))
+            }
+        }.onError {
+            uncounted.forEach { cacheCountLoading.remove(it.bookUrl) }
+        }
     }
 
     override fun convert(
@@ -128,6 +230,21 @@ class ChangeBookSourceAdapter(
             } else {
                 tvRespondTime.gone()
             }
+
+            if (AppConfig.changeSourceShowCacheCount) {
+                val cacheCount = getCachedChapterCount(item)
+                if (cacheCount > 0) {
+                    tvCacheCount.visible()
+                    tvCacheCount.text = context.getString(R.string.cache_chapter_count, cacheCount)
+                    ivDeleteCache.visible()
+                } else {
+                    tvCacheCount.gone()
+                    ivDeleteCache.gone()
+                }
+            } else {
+                tvCacheCount.gone()
+                ivDeleteCache.gone()
+            }
         }
     }
 
@@ -181,6 +298,26 @@ class ChangeBookSourceAdapter(
                 }
             }
         }
+        binding.ivDeleteCache.setOnClickListener {
+            getItem(holder.layoutPosition)?.let { item ->
+                context.alert(R.string.delete_cached_chapters) {
+                    setMessage(
+                        context.getString(R.string.sure_del_cached_chapters, item.originName)
+                    )
+                    noButton()
+                    yesButton {
+                        callBack.deleteCache(item)
+                        cacheCountMap[item.bookUrl] = 0
+                        if (AppConfig.changeSourceShowCacheCount) {
+                            // 缓存已清除，取消置顶并恢复排序
+                            submitItemsAndRefresh(sortedByCacheCount(getItems().toList()))
+                        } else {
+                            notifyItemChanged(holder.layoutPosition)
+                        }
+                    }
+                }
+            }
+        }
         holder.itemView.onLongClick {
             showMenu(holder.itemView, getItem(holder.layoutPosition))
         }
@@ -230,6 +367,7 @@ class ChangeBookSourceAdapter(
         fun editSource(searchBook: SearchBook)
         fun disableSource(searchBook: SearchBook)
         fun deleteSource(searchBook: SearchBook)
+        fun deleteCache(searchBook: SearchBook)
         fun setBookScore(searchBook: SearchBook, score: Int)
         fun getBookScore(searchBook: SearchBook): Int
     }

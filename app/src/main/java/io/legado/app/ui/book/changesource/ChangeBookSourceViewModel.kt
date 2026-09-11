@@ -531,6 +531,15 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
         searchCallback?.upAdapter()
     }
 
+    /**
+     * 删除该书源条目对应书籍的本地已缓存章节
+     */
+    fun deleteCache(searchBook: SearchBook) {
+        execute {
+            BookHelp.clearCache(searchBook.toBook())
+        }
+    }
+
     fun autoChangeSource(
         bookType: Int?,
         onSuccess: (book: Book, toc: List<BookChapter>, source: BookSource) -> Unit

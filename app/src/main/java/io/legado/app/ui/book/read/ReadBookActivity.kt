@@ -59,6 +59,7 @@ import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isEpub
+import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isLocalTxt
 import io.legado.app.help.book.isMobi
@@ -92,6 +93,7 @@ import io.legado.app.model.localBook.EpubFile
 import io.legado.app.model.localBook.MobiFile
 import io.legado.app.receiver.NetworkChangedListener
 import io.legado.app.receiver.TimeBatteryReceiver
+import io.legado.app.service.AiChapterFixService
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.service.ReadAloudFloatService
 import io.legado.app.ui.about.AppLogDialog
@@ -99,6 +101,7 @@ import io.legado.app.ui.book.bookmark.BookmarkDialog
 import io.legado.app.ui.book.changesource.ChangeBookSourceDialog
 import io.legado.app.ui.book.changesource.ChangeChapterSourceDialog
 import io.legado.app.ui.book.info.BookInfoActivity
+import io.legado.app.ui.book.read.config.AiChapterFixDialog
 import io.legado.app.ui.book.read.config.AutoReadDialog
 import io.legado.app.ui.book.read.config.CharacterManagerDialog
 import io.legado.app.ui.book.read.config.CharacterVoiceHelper
@@ -136,6 +139,7 @@ import io.legado.app.ui.replace.ReplaceRuleActivity
 import io.legado.app.ui.replace.edit.ReplaceEditActivity
 import io.legado.app.ui.widget.PopupAction
 import io.legado.app.ui.widget.dialog.PhotoDialog
+import io.legado.app.ui.widget.dialog.WaitDialog
 import io.legado.app.utils.ACache
 import io.legado.app.utils.Debounce
 import io.legado.app.utils.LogUtils
@@ -270,6 +274,10 @@ class ReadBookActivity : BaseReadBookActivity(),
     private val timeBatteryReceiver = TimeBatteryReceiver()
     private var screenTimeOut: Long = 0
     private var loadStates: Boolean = false
+    // AI处理章节：是否有任务在跑
+    private var aiFixRunning = false
+    // AI自动处理：上一次触发时的章节下标，避免翻页时重复触发
+    private var lastAiAutoChapterIndex = -1
     override val pageFactory get() = binding.readView.pageFactory
     override val pageDelegate get() = binding.readView.pageDelegate
     override val headerHeight: Int get() = binding.readView.curPage.headerHeight
@@ -504,6 +512,9 @@ class ReadBookActivity : BaseReadBookActivity(),
 //                    }
 
                     R.id.menu_reverse_content -> item.isVisible = onLine
+                    // AI处理章节只对在线文字书有意义
+                    R.id.menu_ai_fix_chapter ->
+                        item.isVisible = onLine && !book.isImage && !book.isAudio
                     R.id.menu_del_ruby_tag -> item.isChecked = book.getDelTag(Book.rubyTag)
                     R.id.menu_del_h_tag -> item.isChecked = book.getDelTag(Book.hTag)
                 }
@@ -582,6 +593,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             R.id.menu_add_bookmark -> addBookmark()
             R.id.menu_simulated_reading -> showSimulatedReading()
             R.id.menu_edit_content -> showDialogFragment(ContentEditDialog())
+            R.id.menu_ai_fix_chapter -> showAiChapterFixDialog()
             R.id.menu_update_toc -> ReadBook.book?.let {
                 if (it.isEpub) {
                     BookHelp.clearCache(it)
@@ -698,6 +710,86 @@ class ReadBookActivity : BaseReadBookActivity(),
         ReadBook.clearTextChapter()
         binding.readView.upContent()
         viewModel.refreshContentAll(book)
+    }
+
+    /**
+     * AI处理章节：弹框填接口、提示词、处理数量
+     */
+    private fun showAiChapterFixDialog() {
+        val book = ReadBook.book ?: return
+        binding.readMenu.runMenuOut()
+        AiChapterFixDialog().apply {
+            onConfirm = { api, prompt, count, fromCurrent, force ->
+                val start = ReadBook.durChapterIndex + if (fromCurrent) 0 else 1
+                startAiChapterFix(book, start, count, api, prompt, force, silent = false)
+            }
+        }.let { showDialogFragment(it) }
+    }
+
+    /**
+     * AI处理章节。
+     * 数量为 1 时处理单章（没缓存会自动下载）；大于 1 时批量处理，只处理已缓存的章节。
+     *
+     * @param silent 自动处理时不弹等待框，免得挡着阅读
+     */
+    private fun startAiChapterFix(
+        book: Book,
+        startIndex: Int,
+        count: Int,
+        api: String,
+        prompt: String,
+        force: Boolean,
+        silent: Boolean
+    ) {
+        if (aiFixRunning) {
+            if (!silent) toastOnUi("上一个AI处理任务还没结束")
+            return
+        }
+        if (startIndex >= ReadBook.chapterSize) {
+            if (!silent) toastOnUi("后面没有章节了")
+            return
+        }
+        val n = count.coerceIn(1, AiChapterFixService.MAX_COUNT)
+        aiFixRunning = true
+        val onlyCached = n > 1
+        val startTitle = appDb.bookChapterDao.getChapter(book.bookUrl, startIndex)?.title.orEmpty()
+        val waitDialog = if (silent) null else {
+            WaitDialog(this).setText("AI处理《$startTitle》…").apply {
+                setCancelable(true)
+                show()
+            }
+        }
+        val job = lifecycleScope.launch {
+            val result = AiChapterFixService.fixChapters(
+                book, ReadBook.bookSource, startIndex, n, api, prompt, force, onlyCached
+            )
+            waitDialog?.dismiss()
+            // 改过的章节要丢弃旧排版重新读取，否则界面还是修改前的正文
+            result.changedIndexes.forEach { ReadBook.reloadChapter(it) }
+            toastOnUi(result.message)
+        }
+        // 调用可能比较久，允许返回键中断
+        waitDialog?.setOnCancelListener { job.cancel() }
+        job.invokeOnCompletion { aiFixRunning = false }
+    }
+
+    /**
+     * 自动处理：章节一切换就处理后续章节（下标没变时不重复触发）。
+     */
+    private fun autoAiFixChapter() {
+        if (!AppConfig.aiChapterFixAuto) return
+        val index = ReadBook.durChapterIndex
+        if (index == lastAiAutoChapterIndex) return
+        lastAiAutoChapterIndex = index
+        val book = ReadBook.book ?: return
+        val api = AppConfig.aiChapterFixApi
+        if (api.isBlank()) return
+        val start = index + 1
+        if (start >= ReadBook.chapterSize) return
+        startAiChapterFix(
+            book, start, AppConfig.aiChapterFixCount, api, AppConfig.aiChapterFixPrompt,
+            force = false, silent = true
+        )
     }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
@@ -1091,6 +1183,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             loadStates = false
             success?.invoke()
         }
+        autoAiFixChapter()
     }
 
     override suspend fun upContentAwait(
@@ -1256,7 +1349,6 @@ class ReadBookActivity : BaseReadBookActivity(),
             autoPageStop()
         } else {
             binding.readView.autoPager.start()
-            binding.readMenu.setAutoPage(true)
             screenTimeOut = -1L
             screenOffTimerStart()
         }
@@ -1265,7 +1357,6 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun autoPageStop() {
         if (isAutoPage) {
             binding.readView.autoPager.stop()
-            binding.readMenu.setAutoPage(false)
             dismissDialogFragment<AutoReadDialog>()
             upScreenTimeOut()
         }

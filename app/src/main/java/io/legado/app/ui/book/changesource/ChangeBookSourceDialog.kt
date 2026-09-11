@@ -140,6 +140,8 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
             ?.isChecked = AppConfig.changeSourceLoadToc
         binding.toolBar.menu.findItem(R.id.menu_load_word_count)
             ?.isChecked = AppConfig.changeSourceLoadWordCount
+        binding.toolBar.menu.findItem(R.id.menu_show_cache_count)
+            ?.isChecked = AppConfig.changeSourceShowCacheCount
     }
 
     private fun initRecyclerView() {
@@ -235,7 +237,7 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
         lifecycleScope.launch {
             lifecycle.currentStateFlow.first { it.isAtLeast(STARTED) }
             viewModel.searchDataFlow.conflate().collect {
-                adapter.setItems(it)
+                adapter.setItemsWithCacheSort(it)
                 delay(1000)
             }
         }
@@ -292,6 +294,12 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
                 AppConfig.changeSourceLoadWordCount = !item.isChecked
                 item.isChecked = !item.isChecked
                 viewModel.onLoadWordCountChecked(item.isChecked)
+            }
+
+            R.id.menu_show_cache_count -> {
+                AppConfig.changeSourceShowCacheCount = !item.isChecked
+                item.isChecked = !item.isChecked
+                adapter.resortByCacheCount()
             }
 
             R.id.menu_start_stop -> viewModel.startOrStopSearch()
@@ -376,6 +384,10 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
                 callBack?.changeTo(source, book, toc)
             }
         }
+    }
+
+    override fun deleteCache(searchBook: SearchBook) {
+        viewModel.deleteCache(searchBook)
     }
 
     override fun setBookScore(searchBook: SearchBook, score: Int) {

@@ -96,15 +96,27 @@ object BookHelp {
     suspend fun clearInvalidCache() {
         withContext(IO) {
             val bookFolderNames = hashSetOf<String>()
+            // 同一本书在其它书源下的缓存目录前缀(书名前9字),
+            // 换源后旧书源的缓存目录要保留, 不能当成垃圾清掉
+            val bookFolderPrefixes = hashSetOf<String>()
             val originNames = hashSetOf<String>()
             appDb.bookDao.all.forEach {
                 clearComicCache(it)
                 bookFolderNames.add(it.getFolderName())
+                it.name.replace(AppPattern.fileNameRegex, "")
+                    .take(9)
+                    .takeIf { prefix -> prefix.isNotEmpty() }
+                    ?.let { prefix -> bookFolderPrefixes.add(prefix) }
                 if (it.isEpub) originNames.add(it.originName)
             }
             downloadDir.getFile(cacheFolderName)
                 .listFiles()?.forEach { bookFile ->
-                    if (!bookFolderNames.contains(bookFile.name)) {
+                    // 目录名 = 书名前9字 + 16位md5(bookUrl)
+                    val isSameBookFolder = bookFolderPrefixes.any { prefix ->
+                        bookFile.name.length == prefix.length + 16 &&
+                                bookFile.name.startsWith(prefix)
+                    }
+                    if (!bookFolderNames.contains(bookFile.name) && !isSameBookFolder) {
                         FileUtils.delete(bookFile.absolutePath)
                     }
                 }
@@ -362,6 +374,22 @@ object BookHelp {
             fileNames.addAll(it)
         }
         return fileNames
+    }
+
+    private val chapterFileNameRegex by lazy { Regex("^\\d{5}-.+\\.nb$") }
+
+    /**
+     * 统计书籍缓存目录中已缓存的章节数量。
+     *
+     * 正文缓存文件形如 `00001-<标题MD5>.nb`（见 [BookChapter.getFileName]），
+     * 这里只统计该形式的文件，不含去除重复标题等辅助标记文件。
+     * 本地 txt 按整本处理，不存在独立的章节缓存，返回 0。
+     */
+    fun getCachedChapterCount(book: Book): Int {
+        if (book.isLocalTxt) return 0
+        val files = downloadDir.getFile(cacheFolderName, book.getFolderName())
+            .listFiles() ?: return 0
+        return files.count { it.isFile && chapterFileNameRegex.matches(it.name) }
     }
 
     /**

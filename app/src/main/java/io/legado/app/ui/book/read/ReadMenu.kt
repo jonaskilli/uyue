@@ -24,6 +24,7 @@ import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.source.getSourceType
+import io.legado.app.utils.toastOnUi
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.Selector
 import io.legado.app.lib.theme.accentColor
@@ -297,6 +298,7 @@ class ReadMenu @JvmOverloads constructor(
 
     fun runMenuIn(anim: Boolean = !AppConfig.isEInkMode) {
         callBack.onMenuShow()
+        upAiAutoFixFab()
         this.visible()
         binding.titleBar.visible()
         binding.bottomMenu.visible()
@@ -461,11 +463,25 @@ class ReadMenu @JvmOverloads constructor(
             }
         }
 
-        //自动翻页
+        //AI自动处理开关（原来的「自动翻页」移到长按）
         fabAutoPage.setOnClickListener {
+            val on = !AppConfig.aiChapterFixAuto
+            AppConfig.aiChapterFixAuto = on
+            upAiAutoFixFab()
+            context.toastOnUi(
+                if (on) {
+                    "AI自动处理：已开启（切换章节时自动处理后续章节）"
+                } else {
+                    "AI自动处理：已关闭"
+                }
+            )
+        }
+        //长按：自动翻页（原按钮功能保留，免得没入口）
+        fabAutoPage.setOnLongClickListener {
             runMenuOut {
                 callBack.autoPage()
             }
+            true
         }
 
         //替换
@@ -574,15 +590,15 @@ class ReadMenu @JvmOverloads constructor(
         binding.seekReadPage.progress = seek
     }
 
-    fun setAutoPage(autoPage: Boolean) = binding.run {
-        if (autoPage) {
-            fabAutoPage.setImageResource(R.drawable.ic_auto_page_stop)
-            fabAutoPage.contentDescription = context.getString(R.string.auto_next_page_stop)
-        } else {
-            fabAutoPage.setImageResource(R.drawable.ic_auto_page)
-            fabAutoPage.contentDescription = context.getString(R.string.auto_next_page)
-        }
-        fabAutoPage.setColorFilter(textColor)
+    /**
+     * 刷新「AI自动处理」开关的显示状态：开启时用强调色，关闭时用普通文字色。
+     * 该按钮原来是「自动翻页」，现改为 AI 自动处理开关，自动翻页保留在长按上。
+     */
+    fun upAiAutoFixFab() = binding.run {
+        val on = AppConfig.aiChapterFixAuto
+        fabAutoPage.setColorFilter(if (on) context.accentColor else textColor)
+        fabAutoPage.contentDescription = if (on) "AI自动处理已开启" else "AI自动处理"
+        fabAutoPage.tooltipText = if (on) "AI自动处理：已开启（点击关闭）" else "AI自动处理：已关闭（点击开启）"
     }
 
     private fun upBrightnessVwPos() {
