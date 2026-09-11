@@ -63,6 +63,8 @@ import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isLocalTxt
 import io.legado.app.help.book.isMobi
+import io.legado.app.help.book.isPdf
+import io.legado.app.help.book.isVideo
 import io.legado.app.help.book.removeType
 import io.legado.app.help.book.update
 import io.legado.app.help.config.AppConfig
@@ -512,9 +514,11 @@ class ReadBookActivity : BaseReadBookActivity(),
 //                    }
 
                     R.id.menu_reverse_content -> item.isVisible = onLine
-                    // AI处理章节只对在线文字书有意义
+                    // AI处理章节：只要是文字正文都能处理（在线文字书、本地 txt/epub 等），
+                    // 音频/视频/图片/PDF 没有可处理的正文，隐藏
                     R.id.menu_ai_fix_chapter ->
-                        item.isVisible = onLine && !book.isImage && !book.isAudio
+                        item.isVisible = !book.isAudio && !book.isVideo &&
+                                !book.isImage && !book.isPdf
                     R.id.menu_del_ruby_tag -> item.isChecked = book.getDelTag(Book.rubyTag)
                     R.id.menu_del_h_tag -> item.isChecked = book.getDelTag(Book.hTag)
                 }
