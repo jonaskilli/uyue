@@ -378,10 +378,19 @@ object AiImageGenerator {
         }
 
         val cacheKey = "${bookUrl}_${chapterIndex}_${sceneIndex}"
-        // 已缓存则直接通知
-        if (sceneCache.containsKey(cacheKey)) {
+        // 已缓存则直接通知。
+        // 注意：朗读中手动翻页会把 sceneIndex 重置为 0，此时 sceneCache 里可能仍是开始朗读时那张图。
+        // 不校验就复用会把刚按段落定位好的图覆盖回旧图，而且这里 return 会跳过后面的
+        // 持久缓存命中与真正生成，导致该场景永远停在旧图上。故与 notifyImageIfReady 一样做区间校验。
+        val cachedScene = sceneCache[cacheKey]
+        if (cachedScene != null && isSceneCacheValid(
+                cachedScene,
+                cacheCtx?.startPara ?: -1,
+                cacheCtx?.endPara ?: -1
+            )
+        ) {
             AppLog.put("AI生图[DEBUG] generateForScene: 命中内存缓存, 直接通知")
-            val cachedPath = sceneCache[cacheKey]?.absolutePath ?: ""
+            val cachedPath = cachedScene.absolutePath
             // 同步更新 lastGeneratedImagePath，确保退出重进朗读界面时 getLastGeneratedImage 能取到最新图片
             if (cachedPath.isNotBlank()) {
                 lastGeneratedImagePath = cachedPath
@@ -671,7 +680,7 @@ object AiImageGenerator {
         endPara: Int = -1,
     ): File? {
         val cacheKey = "${bookUrl}_${chapterIndex}_${sceneIndex}"
-        sceneCache[cacheKey]?.let { return it }
+        sceneCache[cacheKey]?.let { if (isSceneCacheValid(it, startPara, endPara)) return it }
         if (startPara >= 0 && endPara >= startPara) {
             val file = AiImagePersistentCache.findInternalHit(bookUrl, chapterIndex, startPara, endPara)
             if (file != null) {
@@ -803,6 +812,33 @@ object AiImageGenerator {
     }
 
     /**
+     * 从缓存文件名解析段落区间。
+     * 文件名不符合命名规则（如临时 hash 命名）时返回 null，表示无法校验。
+     */
+    private fun paragraphRangeOf(file: File): Pair<Int, Int>? {
+        val m = CHAPTER_FILE_RE.find(file.name) ?: return null
+        val start = m.groupValues[2].toIntOrNull() ?: return null
+        val end = m.groupValues[3].toIntOrNull() ?: return null
+        return start to end
+    }
+
+    /**
+     * 场景缓存里的图是否仍属于当前朗读区间。
+     *
+     * 同一章内手动翻页后，朗读会重置 sceneIndex=0，但 sceneCache 里存的仍是开始朗读时那张图，
+     * 直接返回会把画面切回旧图（翻页定位好的图被覆盖）。
+     * 这里用文件名里的段落区间做重叠校验，判定规则与内部缓存命中一致
+     * （[AiImagePersistentCache.rangeOverlapHit]）。
+     *
+     * 无法校验（段落号缺失或文件名不规则）时按命中处理，保持原有行为。
+     */
+    private fun isSceneCacheValid(cached: File, startPara: Int, endPara: Int): Boolean {
+        if (startPara < 0 || endPara < startPara) return true
+        val range = paragraphRangeOf(cached) ?: return true
+        return AiImagePersistentCache.rangeOverlapHit(range.first, range.second, startPara, endPara)
+    }
+
+    /**
      * 当前正在显示的图片在图库中的真实下标（按朗读顺序定位）。
      * 找不到时返回 0。
      */
@@ -916,6 +952,43 @@ object AiImageGenerator {
         return true
     }
 
+    /**
+     * 当前屏幕显示的正文里用于定位的段落号。
+     *
+     * 优先取当前页第二个段落的段落号：第一段的开头往往被截在上一页，
+     * 语义不完整，第二段更能代表本页内容。当前页只有一个段落时退回第一个段落号。
+     *
+     * 段落号取自 TextLine.paragraphNum（章节内编号，从 1 开始，标题等未参与编号的行为 0）。
+     * @return 段落号，取不到返回 null
+     */
+    fun currentDisplayParagraph(): Int? {
+        val page = io.legado.app.model.ReadBook.curTextChapter
+            ?.getPage(io.legado.app.model.ReadBook.durPageIndex) ?: return null
+        val numList = page.lines
+            .map { it.paragraphNum }
+            .filter { it > 0 }
+            .distinct()
+            .take(2)
+        return when {
+            numList.isEmpty() -> null
+            numList.size >= 2 -> numList[1]
+            else -> numList[0]
+        }
+    }
+
+    /**
+     * 按当前屏幕显示的段落重新定位图片，翻页时调用（朗读中不依赖朗读流程，立刻生效）。
+     * 只负责显示与图库锚点，不触发生成、不写缓存；后续真正生成/命中当前场景的图时会自动切过去。
+     *
+     * 未命中任何已缓存图片时不发事件，保持当前显示不变。
+     * @return 是否定位成功
+     */
+    fun locateImageByCurrentPage(): Boolean {
+        if (!AppConfig.readAloudAiImage) return false
+        val paragraph = currentDisplayParagraph() ?: return false
+        return showNearestChapterImage(paragraph)
+    }
+
 
 
     /**
@@ -967,6 +1040,26 @@ object AiImageGenerator {
         displaySequence.clear()
         lastGeneratedImagePath = null
         return deleted
+    }
+
+    /**
+     * 清除指定章节的场景缓存（内存），使后续场景按新的朗读起点重新匹配/生成。
+     *
+     * 场景缓存以 `bookUrl_chapterIndex_sceneIndex` 为键，而 sceneIndex 是**相对于朗读起点**的序号。
+     * 同一章内手动翻页后朗读会重置 sceneIndex=0，但缓存里仍是按旧起点生成的图：
+     * scene 0 还能靠段落区间校验纠正，scene 1、2… 却会被自动切换原样取出，
+     * 表现为「翻了好几页，自动切换却切到开始朗读那张的下一张」。
+     * 因此朗读起点变化时必须让本章场景缓存整体失效。
+     *
+     * 磁盘上的内部缓存与持久缓存不受影响，重新匹配时仍会按段落区间命中，不会重复调 API。
+     */
+    fun clearChapterSceneCache(bookUrl: String, chapterIndex: Int) {
+        val prefix = "${bookUrl}_${chapterIndex}_"
+        try {
+            sceneCache.keys.filter { it.startsWith(prefix) }.forEach { sceneCache.remove(it) }
+        } catch (_: Exception) {
+            sceneCache.clear()
+        }
     }
 
     /**
@@ -1076,7 +1169,11 @@ object AiImageGenerator {
         endPara: Int = -1,
     ): Boolean {
         val cacheKey = "${bookUrl}_${chapterIndex}_${sceneIndex}"
-        val imageFile = sceneCache[cacheKey] ?: run {
+        // 翻页后 sceneIndex 会重置，缓存里的图可能属于其它段落，必须校验区间再复用
+        val cached = sceneCache[cacheKey]
+        val imageFile = if (cached != null && isSceneCacheValid(cached, startPara, endPara)) {
+            cached
+        } else {
             if (startPara >= 0 && endPara >= startPara) {
                 AiImagePersistentCache.findInternalHit(bookUrl, chapterIndex, startPara, endPara)
                     ?.also { sceneCache[cacheKey] = it }

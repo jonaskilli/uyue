@@ -1128,6 +1128,9 @@ class ReadBookActivity : BaseReadBookActivity(),
      */
     override fun pageChanged() {
         pageChanged = true
+        // 翻页后立刻按当前屏幕显示的段落重新定位 AI 图片。
+        // 不依赖「阅读界面显示AI图片」开关：朗读界面、全屏大图等其它显示点共用同一定位结果。
+        AiImageGenerator.locateImageByCurrentPage()
         binding.readView.onPageChange()
         handler.post {
             upSeekBarProgress()

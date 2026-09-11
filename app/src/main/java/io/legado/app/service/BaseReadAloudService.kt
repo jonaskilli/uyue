@@ -2378,7 +2378,13 @@ abstract class BaseReadAloudService : BaseService(),
      * 优先显示预生成的图片，若不存在则实时生成
      * 含防重入保护：避免 triggerFirst 和 AI_IMAGE_REQUEST 同时触发导致重复生成
      */
-    fun displayCurrentAiImage() {
+    /**
+     * @param skipLocateDisplay 为 true 时跳过「按朗读位置定位并推送图片」这一步，
+     *        只做缓存判定与预生成。用于朗读起点变化（手动翻页/跳转）的场景：
+     *        阅读页已经按「当前屏幕第二个段落号」定位并推送过了，
+     *        这里再按 nowSpeak 定位一次会因锚点不同而推出另一张图，表现为"闪一下再切回"。
+     */
+    fun displayCurrentAiImage(skipLocateDisplay: Boolean = false) {
         if (!AppConfig.readAloudAiImage) {
             AppLog.put("AI生图[DEBUG] displayCurrentAiImage: readAloudAiImage=false, 跳过")
             return
@@ -2396,14 +2402,16 @@ abstract class BaseReadAloudService : BaseService(),
         val startPara = cacheCtx?.startPara ?: -1
         val endPara = cacheCtx?.endPara ?: -1
         // 1. 先尝试显示已缓存的图片（内部缓存按段落区间匹配）
-        val notified = AiImageGenerator.notifyImageIfReady(
-            book.bookUrl, chapterIndex, aiImageSceneIndex, startPara, endPara
-        )
-        // 1.1 精确匹配不到时：按当前段落在本章已缓存图片里就近（p±10）找一张，
-        //     暂时显示并定位图库锚点。只负责显示/定位，不触发生成；
-        //     后续真正生成或命中当前场景的图时会自动切过去。
-        if (!notified && startPara >= 0) {
-            AiImageGenerator.showNearestChapterImage(startPara)
+        if (!skipLocateDisplay) {
+            val notified = AiImageGenerator.notifyImageIfReady(
+                book.bookUrl, chapterIndex, aiImageSceneIndex, startPara, endPara
+            )
+            // 1.1 精确匹配不到时：按当前段落在本章已缓存图片里就近（p±10）找一张，
+            //     暂时显示并定位图库锚点。只负责显示/定位，不触发生成；
+            //     后续真正生成或命中当前场景的图时会自动切过去。
+            if (!notified && startPara >= 0) {
+                AiImageGenerator.showNearestChapterImage(startPara)
+            }
         }
         // 2. 如果缓存不存在，实时生成（首次或预生成失败时）
         if (AiImageGenerator.getCachedImage(book.bookUrl, chapterIndex, aiImageSceneIndex, startPara, endPara) == null) {
@@ -2454,12 +2462,17 @@ abstract class BaseReadAloudService : BaseService(),
             return
         }
         val startPara = nowSpeak
+        // 朗读起点变化（手动翻页/跳转）导致的重启。此时阅读页已按「当前屏幕第二个段落号」
+        // 定位并推送过图片，本流程不能再按 nowSpeak 定位一次，否则两次锚点不同
+        // 会推出另一张图，表现为"闪一下再切回"。
+        var restartedByStartParaChange = false
         // 同一章内从中间重新开始朗读：起点段落变了就必须重新触发。
         // 否则 aiImageFirstGenerated 为 true 会直接 return，
         // 画面一直停在上次位置那张图上（即“总是显示前面的图片”）。
         if (aiImageFirstGenerated && aiImageLastStartPara != startPara) {
             AppLog.put("AI生图: 检测到朗读起点变化 $aiImageLastStartPara -> $startPara，重置生图状态重新触发")
             resetAiImageState()
+            restartedByStartParaChange = true
         }
         if (aiImageFirstGenerated) {
             AppLog.put("AI生图[DEBUG] triggerFirst: 已首次生成过, 跳过 (sceneIndex=$aiImageSceneIndex, accumulated=$aiImageAccumulatedChars)")
@@ -2470,7 +2483,7 @@ abstract class BaseReadAloudService : BaseService(),
         aiImageAccumulatedChars = 0
         aiImageLastStartPara = startPara
         AppLog.put("AI生图: 首次触发，开始生成第一张图片(sceneIndex=0, startPara=$startPara)")
-        displayCurrentAiImage()
+        displayCurrentAiImage(skipLocateDisplay = restartedByStartParaChange)
     }
 
     /**
@@ -2921,9 +2934,14 @@ abstract class BaseReadAloudService : BaseService(),
         aiImageFirstGenerated = false
         aiImageRealtimeGenerating = false
         aiImageLastStartPara = -1
-        // 清理持久缓存游标，使新章节从头按序轮换复用旧图
+        // 场景缓存以 sceneIndex 为键，而 sceneIndex 是相对朗读起点的序号。
+        // 起点变化（同章手动翻页）后旧缓存的语义已经错位，必须整体失效，
+        // 否则自动切换会取到按旧起点生成的图（翻页后却切到开始朗读那张的下一张）。
         ReadBook.book?.let { book ->
-            AiImagePersistentCache.resetChapterCursor(book.bookUrl, ReadBook.durChapterIndex)
+            val chapterIndex = ReadBook.durChapterIndex
+            AiImageGenerator.clearChapterSceneCache(book.bookUrl, chapterIndex)
+            // 清理持久缓存游标，使新章节从头按序轮换复用旧图
+            AiImagePersistentCache.resetChapterCursor(book.bookUrl, chapterIndex)
         }
     }
 
