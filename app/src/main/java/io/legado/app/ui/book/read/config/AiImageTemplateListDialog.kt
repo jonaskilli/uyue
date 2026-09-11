@@ -81,12 +81,15 @@ class AiImageTemplateListDialog : BaseDialogFragment(R.layout.dialog_ai_image_te
     }
 
     private fun loadTemplates() {
-        val bookUrl = ReadBook.book?.bookUrl.orEmpty()
+        val book = ReadBook.book
+        val bookName = book?.name.orEmpty()
+        val bookUrl = book?.bookUrl.orEmpty()
         execute {
             appDb.aiImageTemplateDao.getAllList()
         }.onSuccess(Dispatchers.Main) { list ->
             val adapter = AiImageTemplateListAdapter(
                 selectedId = currentEditId,
+                bookName = bookName,
                 bookUrl = bookUrl,
                 onSelect = { template ->
                     onSelectCallback?.invoke(template)
@@ -96,12 +99,12 @@ class AiImageTemplateListDialog : BaseDialogFragment(R.layout.dialog_ai_image_te
                     showTemplateMenu(anchor, template)
                 },
                 onBindToggle = { template, isChecked ->
-                    if (bookUrl.isBlank()) {
+                    if (bookName.isBlank() && bookUrl.isBlank()) {
                         toastOnUi("未打开书籍，无法绑定")
                         return@AiImageTemplateListAdapter
                     }
                     if (isChecked) {
-                        val ok = AiImageGenerator.addBoundTemplateId(bookUrl, template.id)
+                        val ok = AiImageGenerator.addBoundTemplateId(bookName, bookUrl, template.id)
                         if (ok) {
                             toastOnUi("已将「${template.name}」加入当前书籍")
                         } else {
@@ -111,7 +114,7 @@ class AiImageTemplateListDialog : BaseDialogFragment(R.layout.dialog_ai_image_te
                             return@AiImageTemplateListAdapter
                         }
                     } else {
-                        AiImageGenerator.removeBoundTemplateId(bookUrl, template.id)
+                        AiImageGenerator.removeBoundTemplateId(bookName, bookUrl, template.id)
                         toastOnUi("已将「${template.name}」从当前书籍移除")
                     }
                     onBindChangedCallback?.invoke()

@@ -12,6 +12,7 @@ import io.legado.app.model.AiImageGenerator
 
 class AiImageTemplateListAdapter(
     private val selectedId: Long,
+    private val bookName: String,
     private val bookUrl: String,
     private val onSelect: (AiImageTemplate) -> Unit,
     /** 点击更多按钮，第二参数为锚点 View，用于挂载 PopupMenu */
@@ -43,12 +44,12 @@ class AiImageTemplateListAdapter(
             // 更多按钮对所有模板可用（含默认模板），删除项在菜单里按是否默认模板动态隐藏
 
             // 绑定开关：未打开书籍时隐藏
-            val bindVisible = bookUrl.isNotBlank()
+            val bindVisible = bookName.isNotBlank() || bookUrl.isNotBlank()
             binding.tvBindLabel.visibility = if (bindVisible) View.VISIBLE else View.GONE
             binding.switchBind.visibility = if (bindVisible) View.VISIBLE else View.GONE
-            // 绑定开关：根据当前书籍的绑定列表设置状态
+            // 绑定开关：根据当前书籍的绑定列表设置状态（按书名绑定）
             val bound = bindVisible &&
-                AiImageGenerator.isBookBoundToTemplate(bookUrl, template.id, template.isDefault)
+                AiImageGenerator.isBookBoundToTemplate(bookName, bookUrl, template.id, template.isDefault)
             // 避免复用触发回调
             binding.switchBind.setOnCheckedChangeListener(null)
             binding.switchBind.isChecked = bound

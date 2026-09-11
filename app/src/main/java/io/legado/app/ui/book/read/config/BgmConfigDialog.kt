@@ -116,12 +116,13 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
     private fun initData() = binding.run {
         switchBgm.isChecked = AppConfig.isBgmEnabled
         // 启用AI生图 / 保存AI图片开关：均每本书单独设置，默认关闭；无打开书籍时禁用
-        val bookUrl = ReadBook.book?.bookUrl
+        val book = ReadBook.book
+        val bookUrl = book?.bookUrl
         // readAloudAiImage 已改为按当前书籍存储，直接读取即可
-        switchAiImageEnable.isChecked = bookUrl != null && AppConfig.readAloudAiImage
-        switchAiImageEnable.isEnabled = bookUrl != null
-        switchAiImageSave.isChecked = bookUrl != null && AppConfig.isAiImageSaveEnabled(bookUrl)
-        switchAiImageSave.isEnabled = bookUrl != null
+        switchAiImageEnable.isChecked = book != null && AppConfig.readAloudAiImage
+        switchAiImageEnable.isEnabled = book != null
+        switchAiImageSave.isChecked = book != null && AppConfig.isAiImageSaveEnabled(book.name, bookUrl)
+        switchAiImageSave.isEnabled = book != null
         tvPath.text = AppConfig.bgmPath?.substringAfterLast("/") ?: "未选择"
         seekVolume.progress = AppConfig.bgmVolume
         tvVolumeValue.text = "${AppConfig.bgmVolume}%"
@@ -197,8 +198,8 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
 
         // 保存AI图片开关：仅对当前书生效
         switchAiImageSave.setOnCheckedChangeListener { _, isChecked ->
-            val bookUrl = ReadBook.book?.bookUrl ?: return@setOnCheckedChangeListener
-            AppConfig.setAiImageSaveEnabled(bookUrl, isChecked)
+            val book = ReadBook.book ?: return@setOnCheckedChangeListener
+            AppConfig.setAiImageSaveEnabled(book.name, book.bookUrl, isChecked)
         }
 
         spinnerSoundEffect.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {

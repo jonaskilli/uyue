@@ -7,6 +7,7 @@ import io.legado.app.BuildConfig
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
+import io.legado.app.help.book.AiImageBookPrefs
 import io.legado.app.utils.GSON
 import io.legado.app.utils.canvasrecorder.CanvasRecorderFactory
 import io.legado.app.utils.defaultSharedPreferences
@@ -1381,17 +1382,27 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.putPrefBoolean(PreferKey.showAudioCacheIndicator, value)
 
     // 19. AI 生图开关（每本书单独设置，默认关闭；无打开书籍时读为 false、写入无效）
-    // 存储 key 为 aiImageEnablePrefix + bookUrl，使该开关仅对当前小说生效。
+    // 绑定维度为【书名】，换书源后 bookUrl 变化也不失效；同时兼容旧版按 bookUrl 存储的数据。
     var readAloudAiImage: Boolean
         get() {
-            val bookUrl = io.legado.app.model.ReadBook.book?.bookUrl
-            if (bookUrl.isNullOrBlank()) return false
-            return appCtx.getPrefBoolean(PreferKey.aiImageEnablePrefix + bookUrl, false)
+            val book = io.legado.app.model.ReadBook.book ?: return false
+            return AiImageBookPrefs.getBoolean(
+                PreferKey.aiImageEnableNamePrefix,
+                PreferKey.aiImageEnablePrefix,
+                book.name,
+                book.bookUrl,
+                false
+            )
         }
         set(value) {
-            val bookUrl = io.legado.app.model.ReadBook.book?.bookUrl ?: return
-            if (bookUrl.isBlank()) return
-            appCtx.putPrefBoolean(PreferKey.aiImageEnablePrefix + bookUrl, value)
+            val book = io.legado.app.model.ReadBook.book ?: return
+            AiImageBookPrefs.putBoolean(
+                PreferKey.aiImageEnableNamePrefix,
+                PreferKey.aiImageEnablePrefix,
+                book.name,
+                book.bookUrl,
+                value
+            )
         }
     // 阅读界面顶部是否显示朗读 AI 图片（默认关闭）
     var readAloudImageInReadPage: Boolean
@@ -1474,15 +1485,28 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     /**
      * 是否保存AI生图到持久目录（每本书单独设置，默认关闭）。
      * 仅当开关开启时，生图成功后才会落盘到 AI生图/{书名}/{章节}/。
+     * 绑定维度为【书名】，换书源不失效；同时兼容旧版按 bookUrl 存储的数据。
      */
-    fun isAiImageSaveEnabled(bookUrl: String): Boolean {
-        if (bookUrl.isBlank()) return false
-        return appCtx.getPrefBoolean(PreferKey.aiImageSavePrefix + bookUrl, false)
+    fun isAiImageSaveEnabled(bookName: String?, bookUrl: String?): Boolean {
+        if (bookName.isNullOrBlank() && bookUrl.isNullOrBlank()) return false
+        return AiImageBookPrefs.getBoolean(
+            PreferKey.aiImageSaveNamePrefix,
+            PreferKey.aiImageSavePrefix,
+            bookName,
+            bookUrl,
+            false
+        )
     }
 
-    fun setAiImageSaveEnabled(bookUrl: String, enabled: Boolean) {
-        if (bookUrl.isBlank()) return
-        appCtx.putPrefBoolean(PreferKey.aiImageSavePrefix + bookUrl, enabled)
+    fun setAiImageSaveEnabled(bookName: String?, bookUrl: String?, enabled: Boolean) {
+        if (bookName.isNullOrBlank() && bookUrl.isNullOrBlank()) return
+        AiImageBookPrefs.putBoolean(
+            PreferKey.aiImageSaveNamePrefix,
+            PreferKey.aiImageSavePrefix,
+            bookName,
+            bookUrl,
+            enabled
+        )
     }
 
     // 20. 朗读/大图图片轮播间隔（秒，默认5，0=不自动轮播，仅手动切换）

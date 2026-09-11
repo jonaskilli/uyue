@@ -346,4 +346,14 @@ object PreferKey {
     const val aiImageRequestInterval = "aiImageRequestInterval"
     // 是否保存AI生图到持久目录（每本书单独设置），key = aiImageSavePrefix_${bookUrl}
     const val aiImageSavePrefix = "aiImageSave_"
+
+    // --- AI 生图「按书名」绑定（新版）---
+    // 旧版按 bookUrl 存储，换书源后 bookUrl 变化会导致绑定失效；新版改按书名存储。
+    // 读取时会回退旧版 key 并迁移，写入时新旧 key 双写以兼容降级。
+    // 启用AI生图（按书名），key = aiImageEnableNamePrefix_${bookName}
+    const val aiImageEnableNamePrefix = "aiImageEnableName_"
+    // 书籍与模板绑定关系（按书名），key = aiImageTemplateBindNamePrefix_${bookName}，value = 逗号分隔的模板 id
+    const val aiImageTemplateBindNamePrefix = "aiImageTemplateBindName_"
+    // 是否保存AI生图到持久目录（按书名），key = aiImageSaveNamePrefix_${bookName}
+    const val aiImageSaveNamePrefix = "aiImageSaveName_"
 }

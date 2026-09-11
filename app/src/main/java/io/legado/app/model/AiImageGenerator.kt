@@ -9,15 +9,13 @@ import io.legado.app.data.entities.AiImageTemplate
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.toc.AiCacheFileUtil
+import io.legado.app.help.book.AiImageBookPrefs
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.help.tts.TtsEngineActivator
 import io.legado.app.utils.GSON
 import io.legado.app.utils.defaultSharedPreferences
-import io.legado.app.utils.getPrefString
 import io.legado.app.utils.postEvent
-import io.legado.app.utils.putPrefString
-import io.legado.app.utils.removePref
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -139,9 +137,10 @@ object AiImageGenerator {
      * 获取书籍当前生效的模板列表。
      * 若该书籍绑定了多个模板则返回这些模板；未绑定时返回默认模板。
      * 生图时按场景索引轮换使用列表中的模板。
+     * 绑定维度为【书名】（换书源不失效），bookUrl 仅用于兼容旧版数据。
      */
-    fun getActiveTemplates(bookUrl: String): List<AiImageTemplate> {
-        val boundIds = getBoundTemplateIds(bookUrl)
+    fun getActiveTemplates(bookName: String, bookUrl: String): List<AiImageTemplate> {
+        val boundIds = getBoundTemplateIds(bookName, bookUrl)
         if (boundIds.isNotEmpty()) {
             val templates = boundIds.mapNotNull { appDb.aiImageTemplateDao.getById(it) }
                 .filter { t ->
@@ -160,68 +159,80 @@ object AiImageGenerator {
         return appDb.aiImageTemplateDao.getDefault()?.id ?: DEFAULT_TEMPLATE_ID
     }
 
-    /** 读取书籍绑定的模板 id 列表，未绑定返回空列表（表示使用默认模板） */
-    fun getBoundTemplateIds(bookUrl: String): List<Long> {
-        if (bookUrl.isBlank()) return emptyList()
-        return appCtx.getPrefString(PreferKey.aiImageTemplateBindPrefix + bookUrl, null)
+    /** 读取书籍绑定的模板 id 列表，未绑定返回空列表（表示使用默认模板）。按书名绑定，兼容旧版 bookUrl 数据 */
+    fun getBoundTemplateIds(bookName: String, bookUrl: String): List<Long> {
+        if (bookName.isBlank() && bookUrl.isBlank()) return emptyList()
+        return AiImageBookPrefs.getString(
+            PreferKey.aiImageTemplateBindNamePrefix,
+            PreferKey.aiImageTemplateBindPrefix,
+            bookName,
+            bookUrl
+        )
             ?.split(",")
             ?.mapNotNull { it.trim().toLongOrNull() }
             ?.filter { it > 0 }
             ?: emptyList()
     }
 
-    /** 设置书籍绑定的模板 id 列表 */
-    fun setBoundTemplateIds(bookUrl: String, templateIds: List<Long>) {
-        if (bookUrl.isBlank()) return
-        if (templateIds.isEmpty()) {
-            appCtx.removePref(PreferKey.aiImageTemplateBindPrefix + bookUrl)
-        } else {
-            appCtx.putPrefString(PreferKey.aiImageTemplateBindPrefix + bookUrl, templateIds.joinToString(","))
-        }
+    /** 设置书籍绑定的模板 id 列表（按书名存储，同时同步旧版 bookUrl key） */
+    fun setBoundTemplateIds(bookName: String, bookUrl: String, templateIds: List<Long>) {
+        if (bookName.isBlank() && bookUrl.isBlank()) return
+        AiImageBookPrefs.putString(
+            PreferKey.aiImageTemplateBindNamePrefix,
+            PreferKey.aiImageTemplateBindPrefix,
+            bookName,
+            bookUrl,
+            if (templateIds.isEmpty()) null else templateIds.joinToString(",")
+        )
     }
 
     /**
      * 添加单个模板绑定（支持多模板轮换）。
      * @return true 绑定成功；false 已达上限 [MAX_BOUND_TEMPLATES]。
      */
-    fun addBoundTemplateId(bookUrl: String, templateId: Long): Boolean {
-        val ids = getBoundTemplateIds(bookUrl).toMutableList()
+    fun addBoundTemplateId(bookName: String, bookUrl: String, templateId: Long): Boolean {
+        val ids = getBoundTemplateIds(bookName, bookUrl).toMutableList()
         if (templateId in ids) return true
         if (ids.size >= MAX_BOUND_TEMPLATES) return false
         ids.add(templateId)
-        setBoundTemplateIds(bookUrl, ids)
+        setBoundTemplateIds(bookName, bookUrl, ids)
         return true
     }
 
     /** 移除单个模板绑定 */
-    fun removeBoundTemplateId(bookUrl: String, templateId: Long) {
-        val ids = getBoundTemplateIds(bookUrl).toMutableList()
+    fun removeBoundTemplateId(bookName: String, bookUrl: String, templateId: Long) {
+        val ids = getBoundTemplateIds(bookName, bookUrl).toMutableList()
         if (ids.remove(templateId)) {
-            setBoundTemplateIds(bookUrl, ids)
+            setBoundTemplateIds(bookName, bookUrl, ids)
         }
     }
 
-    /** 解除书籍所有绑定（回到默认模板） */
-    fun unbindBook(bookUrl: String) {
-        if (bookUrl.isBlank()) return
-        appCtx.removePref(PreferKey.aiImageTemplateBindPrefix + bookUrl)
+    /** 解除书籍所有绑定（回到默认模板），同时清理新旧两套 key */
+    fun unbindBook(bookName: String, bookUrl: String) {
+        if (bookName.isBlank() && bookUrl.isBlank()) return
+        setBoundTemplateIds(bookName, bookUrl, emptyList())
     }
 
     /**
      * 删除模板时清理所有书籍对该模板的绑定。
      * 绑定 id 存在 SharedPreferences 里，只删数据库会残留失效 id，
      * 导致生图轮换时选中一个已不存在的模板。
-     * @return 受影响的书籍数量
+     * 需同时清理「按书名」与旧版「按 bookUrl」两套 key。
+     * @return 受影响的 key 数量
      */
     fun unbindTemplateFromAllBooks(templateId: Long): Int {
         val all: Map<String, Any?> = appCtx.defaultSharedPreferences.all
-        val keys = all.keys.filter { it.startsWith(PreferKey.aiImageTemplateBindPrefix) }
+        val prefixes = listOf(
+            PreferKey.aiImageTemplateBindNamePrefix,
+            PreferKey.aiImageTemplateBindPrefix
+        )
+        val keys = all.keys.filter { key -> prefixes.any { key.startsWith(it) } }
         if (keys.isEmpty()) return 0
         val editor = appCtx.defaultSharedPreferences.edit()
         var affected = 0
         for (key in keys) {
-            val bookUrl = key.removePrefix(PreferKey.aiImageTemplateBindPrefix)
-            val ids = getBoundTemplateIds(bookUrl)
+            val raw = all[key] as? String ?: continue
+            val ids = raw.split(",").mapNotNull { it.trim().toLongOrNull() }.filter { it > 0 }
             val kept = ids.filter { it != templateId }
             if (kept.size == ids.size) continue
             if (kept.isEmpty()) {
@@ -236,11 +247,11 @@ object AiImageGenerator {
     }
 
     /**
-     * 判断书籍是否绑定了指定模板。
+     * 判断书籍是否绑定了指定模板。按书名判断，兼容旧版 bookUrl 数据。
      * 未显式绑定时视为绑定到默认模板。
      */
-    fun isBookBoundToTemplate(bookUrl: String, templateId: Long, isDefault: Boolean): Boolean {
-        val ids = getBoundTemplateIds(bookUrl)
+    fun isBookBoundToTemplate(bookName: String, bookUrl: String, templateId: Long, isDefault: Boolean): Boolean {
+        val ids = getBoundTemplateIds(bookName, bookUrl)
         return if (ids.isEmpty()) {
             isDefault
         } else {
@@ -363,7 +374,7 @@ object AiImageGenerator {
             AppLog.put("AI生图[DEBUG] generateForScene: enabled=false, 直接返回")
             return
         }
-        val templates = getActiveTemplates(bookUrl)
+        val templates = getActiveTemplates(bookName, bookUrl)
         AppLog.put("AI生图[DEBUG] generateForScene: templates数量=${templates.size}")
         if (templates.isEmpty()) {
             AppLog.put("AI生图[DEBUG] generateForScene: templates为空, 直接返回")
@@ -495,7 +506,7 @@ object AiImageGenerator {
                     // 命中已有持久缓存时（genResult.isHit=true），imageFile 就是章节文件夹里
                     // 已落盘的旧图，若再 saveImage 会按当前偏移区间把同一张图存成新文件名，
                     // 造成章节文件夹里出现两张一模一样的图——这是之前重复的根因。
-                    if (!genResult.isHit && cacheCtx != null && AppConfig.isAiImageSaveEnabled(cacheCtx.bookUrl)) {
+                    if (!genResult.isHit && cacheCtx != null && AppConfig.isAiImageSaveEnabled(cacheCtx.bookName, cacheCtx.bookUrl)) {
                         AiImagePersistentCache.saveImage(
                             bookName = cacheCtx.bookName,
                             chapterIndex = cacheCtx.chapterIndex,
@@ -1111,7 +1122,7 @@ object AiImageGenerator {
         cacheCtxProvider: (() -> PersistentCacheContext?)? = null,
     ) {
         if (!enabled) return
-        val templates = getActiveTemplates(bookUrl)
+        val templates = getActiveTemplates(bookName, bookUrl)
         if (templates.isEmpty()) return
         // 按 sceneIndex 轮换选择模板
         val template = templates[sceneIndex % templates.size]

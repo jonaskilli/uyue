@@ -200,11 +200,10 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
         // 绑定开关变化即时生效（支持多模板绑定轮换）
         switchBindBook.setOnCheckedChangeListener { _, isChecked ->
             val template = currentTemplate ?: return@setOnCheckedChangeListener
-            val bookUrl = ReadBook.book?.bookUrl
-            if (bookUrl.isNullOrBlank()) return@setOnCheckedChangeListener
+            val book = ReadBook.book ?: return@setOnCheckedChangeListener
 
             if (isChecked) {
-                val ok = AiImageGenerator.addBoundTemplateId(bookUrl, template.id)
+                val ok = AiImageGenerator.addBoundTemplateId(book.name, book.bookUrl, template.id)
                 if (ok) {
                     toastOnUi("已将「${template.name}」加入当前书籍的生图模板")
                 } else {
@@ -212,7 +211,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
                     toastOnUi("每本书最多绑定 ${AiImageGenerator.MAX_BOUND_TEMPLATES} 个模板")
                 }
             } else {
-                AiImageGenerator.removeBoundTemplateId(bookUrl, template.id)
+                AiImageGenerator.removeBoundTemplateId(book.name, book.bookUrl, template.id)
                 toastOnUi("已将「${template.name}」从当前书籍移除")
             }
         }
@@ -714,17 +713,16 @@ sk-aaa@@sk-bbb@@sk-ccc
         }
         bindBookRow.visibility = View.VISIBLE
         bindHint.visibility = View.VISIBLE
-        val bound = AiImageGenerator.isBookBoundToTemplate(book.bookUrl, template.id, template.isDefault)
+        val bound = AiImageGenerator.isBookBoundToTemplate(book.name, book.bookUrl, template.id, template.isDefault)
         // 避免触发 listener
         switchBindBook.setOnCheckedChangeListener(null)
         switchBindBook.isChecked = bound
         switchBindBook.setOnCheckedChangeListener { _, isChecked ->
             val tmpl = currentTemplate ?: return@setOnCheckedChangeListener
-            val bookUrl = ReadBook.book?.bookUrl
-            if (bookUrl.isNullOrBlank()) return@setOnCheckedChangeListener
+            val b = ReadBook.book ?: return@setOnCheckedChangeListener
 
             if (isChecked) {
-                val ok = AiImageGenerator.addBoundTemplateId(bookUrl, tmpl.id)
+                val ok = AiImageGenerator.addBoundTemplateId(b.name, b.bookUrl, tmpl.id)
                 if (ok) {
                     toastOnUi("已将「${tmpl.name}」加入当前书籍的生图模板")
                 } else {
@@ -732,11 +730,11 @@ sk-aaa@@sk-bbb@@sk-ccc
                     toastOnUi("每本书最多绑定 ${AiImageGenerator.MAX_BOUND_TEMPLATES} 个模板")
                 }
             } else {
-                AiImageGenerator.removeBoundTemplateId(bookUrl, tmpl.id)
+                AiImageGenerator.removeBoundTemplateId(b.name, b.bookUrl, tmpl.id)
                 toastOnUi("已将「${tmpl.name}」从当前书籍移除")
             }
         }
-        val boundCount = AiImageGenerator.getBoundTemplateIds(book.bookUrl).size
+        val boundCount = AiImageGenerator.getBoundTemplateIds(book.name, book.bookUrl).size
         bindHint.text = if (boundCount == 0) {
             "未绑定任何模板，将使用默认模板。可开启多个模板实现轮换生图。"
         } else {
