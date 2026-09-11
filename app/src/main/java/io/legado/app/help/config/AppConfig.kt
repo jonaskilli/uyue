@@ -42,11 +42,14 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         val keysToMigrate = listOf(
             PreferKey.readAloudImageInterval,
             PreferKey.readAloudCoverWidth,
-            PreferKey.readAloudCoverTopMargin
+            PreferKey.readAloudCoverTopMargin,
+            PreferKey.readAloudImageInReadPageWidth,
+            PreferKey.readAloudImageInReadPageTextSizeReduce
         )
         for (key in keysToMigrate) {
             val v = sp.all[key]
-            if (v is Int) {
+            // 数值型一律转成字符串存回。只处理 Int 时，曾以 Float/Long 落盘的机器仍会崩溃。
+            if (v != null && v !is String) {
                 sp.edit().remove(key).apply()
                 sp.edit().putString(key, v.toString()).apply()
             }
@@ -1395,17 +1398,33 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.readAloudImageInReadPage, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.readAloudImageInReadPage, value)
 
-    // 阅读界面顶部 AI 图片宽度（dp，默认 240，范围 80-600），独立于朗读界面图片宽度
+    /**
+     * 阅读界面顶部 AI 图片宽度（dp，默认 240，范围 80-600），独立于朗读界面图片宽度。
+     *
+     * **必须以字符串存取**：该 key 在 `pref_config_aloud.xml` 里是 EditTextPreference，
+     * 其初始化会调用 `SharedPreferences.getString()`。若这里用 putPrefInt 写成 Int，
+     * 打开朗读设置时就会抛 `ClassCastException: Integer cannot be cast to String`，
+     * 且崩溃发生在构建偏好树期间，界面直接打不开。
+     * 读取用 getPrefString（内部对非字符串值做 toString 兼容），双保险。
+     */
     var readAloudImageInReadPageWidth: Int
-        get() = appCtx.getPrefInt(PreferKey.readAloudImageInReadPageWidth, 240)
-        set(value) = appCtx.putPrefInt(PreferKey.readAloudImageInReadPageWidth, value.coerceIn(80, 600))
+        get() = appCtx.getPrefString(PreferKey.readAloudImageInReadPageWidth)
+            ?.toIntOrNull()?.coerceIn(80, 600) ?: 240
+        set(value) = appCtx.putPrefString(
+            PreferKey.readAloudImageInReadPageWidth,
+            value.coerceIn(80, 600).toString()
+        )
 
-    // 显示图片界面时正文字号减小量（sp，默认 2，范围 0-10，0 表示不减小）
+    /**
+     * 显示图片界面时正文字号减小量（sp，默认 2，范围 0-10，0 表示不减小）。
+     * 同为数值型偏好，与宽度一样以字符串存取，避免将来接入设置界面时踩同样的坑。
+     */
     var readAloudImageInReadPageTextSizeReduce: Int
-        get() = appCtx.getPrefInt(PreferKey.readAloudImageInReadPageTextSizeReduce, 2)
-        set(value) = appCtx.putPrefInt(
+        get() = appCtx.getPrefString(PreferKey.readAloudImageInReadPageTextSizeReduce)
+            ?.toIntOrNull()?.coerceIn(0, 10) ?: 2
+        set(value) = appCtx.putPrefString(
             PreferKey.readAloudImageInReadPageTextSizeReduce,
-            value.coerceIn(0, 10)
+            value.coerceIn(0, 10).toString()
         )
 
     // AI 生图临时缓存保留数量上限（默认 50，至少为 1）
