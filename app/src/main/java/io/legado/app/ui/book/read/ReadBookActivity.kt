@@ -424,8 +424,11 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     override fun onPause() {
         super.onPause()
-        // 离开界面前还原被减小的字号，避免进程被杀后小字号被写进配置
-        applyTextSizeForImageMode(false)
+        // 注意：这里不要再调用 applyTextSizeForImageMode(false)。
+        // 减小量只存内存（ReadBookConfig.textSizeReduceForImage），从不落盘，
+        // 进程被杀也不会污染用户的字号设置，无需"还原"。
+        // 而在这里清掉会立刻触发 UP_CONFIG(8,5) 重新生成画笔并重新分页，
+        // 表现为切后台瞬间字号变回原样、页面重排，朗读再从当前页开头播一遍。
         ReadAloudFloatService.isReadBookActivityForeground = false
         ReadAloudFloatService.updateVisibility(this)
         autoPageStop()
