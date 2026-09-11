@@ -279,6 +279,21 @@ object ReadBookConfig {
             config.textSize = value
         }
 
+    /**
+     * 图片界面（阅读页顶部显示 AI 图片）时正文字号的临时减小量（sp）。
+     *
+     * **只影响排版，不写入 [textSize]**。早期实现直接改 textSize、退出时再加回来，
+     * 一旦中途调整过减小量、或 Activity 重建导致还原状态丢失，
+     * 用户在设置里定的字号就会被永久改小。这里改为在取字号时扣减，
+     * 用户的字号设置始终保持原值，进/出图片界面只是显示上的变化。
+     */
+    @Volatile
+    var textSizeReduceForImage: Int = 0
+
+    /** 排版与绘制实际使用的字号：用户设置值减去 [textSizeReduceForImage] */
+    val effectiveTextSize: Int
+        get() = (textSize - textSizeReduceForImage).coerceAtLeast(8)
+
     var letterSpacing: Float
         get() = config.letterSpacing
         set(value) {

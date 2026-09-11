@@ -930,7 +930,9 @@ object ChapterProvider {
         tPaint.color = ReadBookConfig.textColor
         tPaint.letterSpacing = ReadBookConfig.letterSpacing
         tPaint.typeface = titleFont
-        tPaint.textSize = with(ReadBookConfig) { textSize + titleSize }.toFloat().spToPx()
+        // 用 effectiveTextSize：图片界面开启时按「半屏字号减小」显示得更小，
+        // 但不改 ReadBookConfig.textSize，用户的字号设置保持不变
+        tPaint.textSize = with(ReadBookConfig) { effectiveTextSize + titleSize }.toFloat().spToPx()
         tPaint.isAntiAlias = true
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q && AppConfig.optimizeRender) {
             tPaint.isLinearText = true
@@ -940,7 +942,7 @@ object ChapterProvider {
         cPaint.color = ReadBookConfig.textColor
         cPaint.letterSpacing = ReadBookConfig.letterSpacing
         cPaint.typeface = textFont
-        cPaint.textSize = ReadBookConfig.textSize.toFloat().spToPx()
+        cPaint.textSize = ReadBookConfig.effectiveTextSize.toFloat().spToPx()
         cPaint.isAntiAlias = true
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q && AppConfig.optimizeRender) {
             cPaint.isLinearText = true

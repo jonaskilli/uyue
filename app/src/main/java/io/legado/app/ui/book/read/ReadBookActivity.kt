@@ -287,8 +287,6 @@ class ReadBookActivity : BaseReadBookActivity(),
     private var readAiImageResetTimer: Timer? = null
     /** 当前显示的图片路径，避免重复加载 */
     private var lastReadAiImagePath: String = ""
-    /** 图片界面当前已减小的字号量（sp），退出界面时按此值还原 */
-    private var readAiImageTextSizeReduced = 0
     private var pageChanged = false
     private val handler by lazy { buildMainHandler() }
     private val screenOffRunnable by lazy { Runnable { keepScreenOn(false) } }
@@ -2160,6 +2158,8 @@ class ReadBookActivity : BaseReadBookActivity(),
         super.onDestroy()
         // 先停掉图片回位定时器，避免销毁后仍在 runOnUiThread 里触发 Glide 加载
         cancelReadAiImageReset()
+        // 清掉图片界面的字号减小量，避免影响离开阅读页之后的排版
+        ReadBookConfig.textSizeReduceForImage = 0
         tts?.clearTts()
         textActionMenu.dismiss()
         popupAction.dismiss()
@@ -2446,23 +2446,20 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     /**
-     * 图片界面显示时按「半屏字号减小」把正文字号调小，让下半屏尽量多显示文字；
-     * 退出界面时按已减小的量还原，避免把减小后的字号写进配置。
+     * 图片界面显示时按「半屏字号减小」把正文字号调小，让下半屏尽量多显示文字。
+     *
+     * **只设置显示用的减小量，不改动 [ReadBookConfig.textSize]**：
+     * 排版取字号时统一走 `ReadBookConfig.effectiveTextSize`，
+     * 用户在设置里定的字号始终保持原值，进/出图片界面不会影响它。
      */
     private fun applyTextSizeForImageMode(show: Boolean) {
-        if (show) {
-            val reduce = AppConfig.readAloudImageInReadPageTextSizeReduce
-            if (reduce <= 0 || readAiImageTextSizeReduced > 0) return
-            val base = ReadBookConfig.textSize
-            val target = (base - reduce).coerceAtLeast(8)
-            if (target == base) return
-            ReadBookConfig.textSize = target
-            readAiImageTextSizeReduced = base - target
+        val reduce = if (show) {
+            AppConfig.readAloudImageInReadPageTextSizeReduce.coerceIn(0, 10)
         } else {
-            if (readAiImageTextSizeReduced <= 0) return
-            ReadBookConfig.textSize = ReadBookConfig.textSize + readAiImageTextSizeReduced
-            readAiImageTextSizeReduced = 0
+            0
         }
+        if (ReadBookConfig.textSizeReduceForImage == reduce) return
+        ReadBookConfig.textSizeReduceForImage = reduce
         // 8: 重新生成画笔(字号)  5: 重新分页
         postEvent(EventBus.UP_CONFIG, arrayListOf(8, 5))
     }
@@ -2481,9 +2478,8 @@ class ReadBookActivity : BaseReadBookActivity(),
             .setPositiveButton("确定") { _, _ ->
                 val value = editText.text.toString().toIntOrNull()?.coerceIn(0, 10) ?: 2
                 AppConfig.readAloudImageInReadPageTextSizeReduce = value
-                // 先还原再按新值生效
-                applyTextSizeForImageMode(false)
-                applyTextSizeForImageMode(true)
+                // 直接按新值重算显示用的减小量，不再动 ReadBookConfig.textSize
+                applyTextSizeForImageMode(binding.readAiImage.visibility == View.VISIBLE)
                 toastOnUi("半屏字号减小已设为 ${value}sp")
             }
             .setNegativeButton("取消", null)
