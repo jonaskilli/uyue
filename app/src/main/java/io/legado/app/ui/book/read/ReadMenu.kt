@@ -476,10 +476,10 @@ class ReadMenu @JvmOverloads constructor(
                 }
             )
         }
-        //长按：自动翻页（原按钮功能保留，免得没入口）
+        //长按：直接用 AI 分析当前章节（原「自动翻页」长按入口移除，点击仍是 AI 自动处理开关）
         fabAutoPage.setOnLongClickListener {
             runMenuOut {
-                callBack.autoPage()
+                callBack.aiAnalyzeCurrentChapter()
             }
             true
         }
@@ -617,6 +617,7 @@ class ReadMenu @JvmOverloads constructor(
 
     interface CallBack {
         fun autoPage()
+        fun aiAnalyzeCurrentChapter()
         fun openReplaceRule()
         fun openChapterList()
         fun openSearchActivity(searchWord: String?)

@@ -1366,6 +1366,31 @@ class ReadBookActivity : BaseReadBookActivity(),
         }
     }
 
+    /**
+     * AI 分析当前章节：长按底部菜单第二个图标触发，
+     * 等价于「AI处理章节」对话框里的「处理当前章节」。
+     * 接口未配置时直接打开配置对话框，避免用户不知从哪填。
+     */
+    override fun aiAnalyzeCurrentChapter() {
+        val book = ReadBook.book ?: return
+        val api = AppConfig.aiChapterFixApi
+        if (api.isBlank()) {
+            toastOnUi("请先填写 AI 接口配置")
+            binding.readMenu.runMenuOut()
+            showDialogFragment(AiChapterFixDialog().apply {
+                onConfirm = { a, prompt, count, fromCurrent, force ->
+                    val start = ReadBook.durChapterIndex + if (fromCurrent) 0 else 1
+                    startAiChapterFix(book, start, count, a, prompt, force, silent = false)
+                }
+            })
+            return
+        }
+        startAiChapterFix(
+            book, ReadBook.durChapterIndex, 1, api,
+            AppConfig.aiChapterFixPrompt, force = false, silent = false
+        )
+    }
+
     override fun autoPageStop() {
         if (isAutoPage) {
             binding.readView.autoPager.stop()
