@@ -1266,6 +1266,36 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.putPrefInt(PreferKey.aiChapterFixCount, value.coerceIn(1, MAX_AI_CHAPTER_FIX_COUNT))
 
     /**
+     * AI 章节处理：超长章节拆分阈值（字数），0 表示不拆分。
+     * 章节总字数超过该值时，按阈值均分成多块、逐块送 AI 处理（刀口落在段落边界，不切断段落）。
+     */
+    var aiChapterFixMaxLength: Int
+        get() = appCtx.getPrefInt(PreferKey.aiChapterFixMaxLength, 0)
+        set(value) = appCtx.putPrefInt(PreferKey.aiChapterFixMaxLength, value.coerceAtLeast(0))
+
+    /** AI 章节处理：请求失败或返回无法解析时的重试次数，0 表示不重试 */
+    var aiChapterFixRetryCount: Int
+        get() = appCtx.getPrefInt(PreferKey.aiChapterFixRetryCount, 0)
+        set(value) = appCtx.putPrefInt(PreferKey.aiChapterFixRetryCount, value.coerceAtLeast(0))
+
+    /**
+     * AI 章节处理：发给 AI 时附带的上下文参考字数，0 表示不附带。
+     * 处理某章时在其正文上、下分别附上上一章结尾 / 下一章开头该字数的内容，
+     * 供 AI 理解断章处的情节，上下文本身不会被修改。
+     */
+    var aiChapterFixContextLength: Int
+        get() = appCtx.getPrefInt(PreferKey.aiChapterFixContextLength, 0)
+        set(value) = appCtx.putPrefInt(PreferKey.aiChapterFixContextLength, value.coerceAtLeast(0))
+
+    /**
+     * AI 章节处理：单次请求的超时时间（秒，从发起到响应结束的总时限），默认 180。
+     * 长章节的 AI 分析生成较慢时可调大，下限 10 秒，上限不限制。
+     */
+    var aiChapterFixTimeoutSeconds: Int
+        get() = appCtx.getPrefInt(PreferKey.aiChapterFixTimeoutSeconds, 180)
+        set(value) = appCtx.putPrefInt(PreferKey.aiChapterFixTimeoutSeconds, value.coerceAtLeast(10))
+
+    /**
      * 阶段一每段提取关键字的**上限**，实际数量按段落字数递减（每 100 字约 12 个）。
      * 关键字限制在 1~2 字（见 [AiEffectAnalyzer.KEYWORD_PROMPT]），检索命中率高。
      */

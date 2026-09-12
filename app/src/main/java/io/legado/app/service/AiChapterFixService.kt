@@ -8,6 +8,7 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.model.ReadBook
 import io.legado.app.model.webBook.WebBook
@@ -181,29 +182,59 @@ object AiChapterFixService {
         if (paragraphs.isEmpty()) {
             return OneOutcome(Outcome.FAILED, "《$title》正文为空")
         }
-        // 3. 逐段编号
-        val numbered = StringBuilder()
-        paragraphs.forEachIndexed { i, p -> numbered.append("【${i + 1}】").append(p).append('\n') }
-        // 4. 组装提示词
-        val fullPrompt = buildString {
-            append(prompt)
-            append("\n\n【正文段落（共${paragraphs.size}段，编号即段落序号，勿改动编号顺序）】\n")
-            append(numbered)
-        }
-        // 5. 调用大模型（不限制 max_tokens，否则长回复会被截断成半截 JSON）
-        val response = try {
-            BgmAIService.callOpenAIApi(provider, fullPrompt, maxTokens = null)
-        } catch (e: Exception) {
-            AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
-            return OneOutcome(Outcome.FAILED, "《$title》AI调用失败：${e.localizedMessage}")
-        }
-        AppLog.putDebug("$TAG: 《$title》AI返回：$response")
-        // 6. 解析 JSON
-        val fixes = parseFixes(response, paragraphs.size)
-            ?: run {
-                AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
-                return OneOutcome(Outcome.FAILED, "《$title》AI返回内容无法解析，已标记为待重试")
+        // 3. 上下文参考：正文上、下分别附上一章结尾 / 下一章开头该字数的内容，
+        //    供 AI 理解断章处的情节；只用已缓存的正文，不额外下载
+        val contextLength = AppConfig.aiChapterFixContextLength.coerceAtLeast(0)
+        var contextBefore = ""
+        var contextAfter = ""
+        if (contextLength > 0) {
+            if (chapterIndex > 0) {
+                contextBefore = appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex - 1)
+                    ?.let { BookHelp.getContent(book, it) }
+                    ?.takeLast(contextLength)
+                    .orEmpty()
             }
+            contextAfter = appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex + 1)
+                ?.let { BookHelp.getContent(book, it) }
+                ?.take(contextLength)
+                .orEmpty()
+        }
+        // 4. 超过阈值的长章先均分成多块（阈值 <= 0 表示不拆分），逐块送 AI；
+        //    块内编号独立，解析结果按块起始段偏移映射回整章段落；
+        //    每一块都带紧邻的前后文：第一块上文是上一章结尾、最后一块下文是下一章开头，
+        //    中间块的前后文取相邻块的内容——拆分本来就更容易打断情节
+        val blocks = splitParagraphs(paragraphs, AppConfig.aiChapterFixMaxLength)
+        val fixes = HashMap<Int, String>()
+        if (blocks == null) {
+            val (result, err) = callAndParse(
+                provider, prompt, paragraphs, title, contextBefore, contextAfter
+            )
+            if (result == null) {
+                AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
+                return OneOutcome(Outcome.FAILED, "《$title》$err")
+            }
+            fixes.putAll(result)
+        } else {
+            var offset = 0
+            blocks.forEachIndexed { blockIndex, block ->
+                val label = "$title(${blockIndex + 1}/${blocks.size})"
+                val before = if (blockIndex == 0) contextBefore
+                    else blocks[blockIndex - 1].joinToString("\n").takeLast(contextLength)
+                val after = if (blockIndex == blocks.size - 1) contextAfter
+                    else blocks[blockIndex + 1].joinToString("\n").take(contextLength)
+                val (result, err) = callAndParse(
+                    provider, prompt, block, label, before, after
+                )
+                if (result == null) {
+                    AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
+                    return OneOutcome(
+                        Outcome.FAILED, "《$title》第 ${blockIndex + 1}/${blocks.size} 块$err"
+                    )
+                }
+                result.forEach { (index, text) -> fixes[offset + index] = text }
+                offset += block.size
+            }
+        }
         // 7. 按序号原位替换；值为空 = 删除该段，值含换行 = 一段展开成多段
         val newParagraphs = ArrayList<String>(paragraphs.size)
         paragraphs.forEachIndexed { i, p ->
@@ -234,7 +265,111 @@ object AiChapterFixService {
         // 9. 同步刷新朗读用的 data.json
         kotlin.runCatching { ReadBook.saveTtsTextJson(force = true) }
             .onFailure { AppLog.put("$TAG: 刷新朗读JSON失败 ${it.localizedMessage}", it) }
-        return OneOutcome(Outcome.FIXED, "《$title》已处理：修改 ${fixes.size} 段")
+        return OneOutcome(
+            Outcome.FIXED,
+            "《$title》已处理${if (blocks != null) "（分 ${blocks.size} 块）" else ""}：修改 ${fixes.size} 段"
+        )
+    }
+
+    /**
+     * 调用大模型并解析一块（或整章）段落的修正结果。
+     * 请求失败或返回无法解析时，按「AI请求失败重试次数」自动重试。
+     *
+     * @param label 日志用的标识（章节标题，分块时带块号）
+     * @param contextBefore 正文上方附带的前文（上一章结尾或前一块结尾，参考，不会被修改）
+     * @param contextAfter 正文下方附带的后文（下一章开头或后一块开头，参考，不会被修改）
+     * @return 序号 -> 修正后文本；重试后仍失败时第一个值为 null，第二个值是失败原因
+     */
+    private suspend fun callAndParse(
+        provider: BgmAIProvider,
+        prompt: String,
+        paragraphs: List<String>,
+        label: String,
+        contextBefore: String = "",
+        contextAfter: String = ""
+    ): Pair<Map<Int, String>?, String> {
+        // 逐段编号
+        val numbered = StringBuilder()
+        paragraphs.forEachIndexed { i, p -> numbered.append("【${i + 1}】").append(p).append('\n') }
+        // 组装提示词：上下文只是参考，真正要修改的只有编号的正文段落
+        val fullPrompt = buildString {
+            append(prompt)
+            if (contextBefore.isNotBlank()) {
+                append("\n\n【上文（前文情节，仅供理解上下文衔接，不要修改，也不要输出到结果里）】\n")
+                append(contextBefore)
+            }
+            append("\n\n【正文段落（共${paragraphs.size}段，编号即段落序号，勿改动编号顺序）】\n")
+            append(numbered)
+            if (contextAfter.isNotBlank()) {
+                append("\n\n【后续（后文情节，仅供理解上下文衔接，不要修改，也不要输出到结果里）】\n")
+                append(contextAfter)
+            }
+        }
+        val retries = AppConfig.aiChapterFixRetryCount.coerceAtLeast(0)
+        var lastError = ""
+        repeat(retries + 1) { attempt ->
+            if (attempt > 0) {
+                AppLog.put("$TAG: 《$label》请求失败，第 $attempt/$retries 次重试")
+            }
+            // 调用大模型（不限制 max_tokens，否则长回复会被截断成半截 JSON；
+            // 超时时间从设置读取，章节大、AI 生成慢时可调大等待）
+            val response = try {
+                BgmAIService.callOpenAIApi(
+                    provider, fullPrompt, maxTokens = null,
+                    callTimeoutSeconds = AppConfig.aiChapterFixTimeoutSeconds.toLong()
+                )
+            } catch (e: Exception) {
+                lastError = "AI调用失败：${e.localizedMessage}"
+                return@repeat
+            }
+            AppLog.putDebug("$TAG: 《$label》AI返回：$response")
+            // 解析 JSON，无法解析视为失败，与调用失败一样参与重试
+            val fixes = parseFixes(response, paragraphs.size)
+            if (fixes == null) {
+                lastError = "AI返回内容无法解析，已标记为待重试"
+                return@repeat
+            }
+            return fixes to ""
+        }
+        return null to lastError
+    }
+
+    /**
+     * 把段落列表按阈值拆成若干块（总字数不超过阈值时不拆分）。
+     *
+     * 拆分规则参考本地书籍「拆分超长章节」的就近换行下刀，并做均分修正：
+     *  - 块数 N = ⌈总字数 ÷ 阈值⌉，均分目标 = 总字数 ÷ N；
+     *  - 按段落累加字数，加入下一段会超过阈值（硬顶）或当前块已达均分目标时，
+     *    在段落边界（换行处）切块，绝不切断段落内部；
+     *  - 单段自身就超过阈值的，单独成一块。
+     *
+     * @return 不需要拆分（阈值 <= 0 / 未超阈值 / 只切出一块）时返回 null
+     */
+    internal fun splitParagraphs(
+        paragraphs: List<String>,
+        maxLength: Int
+    ): List<List<String>>? {
+        if (maxLength <= 0) return null
+        val total = paragraphs.sumOf { it.length }
+        if (total <= maxLength) return null
+        val blockCount = (total + maxLength - 1) / maxLength
+        val blocks = ArrayList<List<String>>(blockCount)
+        var current = ArrayList<String>()
+        var currentLen = 0
+        for (paragraph in paragraphs) {
+            val paragraphLen = paragraph.length
+            if (current.isNotEmpty() && (currentLen + paragraphLen > maxLength ||
+                    currentLen.toLong() * blockCount >= total.toLong())
+            ) {
+                blocks.add(current)
+                current = ArrayList()
+                currentLen = 0
+            }
+            current.add(paragraph)
+            currentLen += paragraphLen
+        }
+        if (current.isNotEmpty()) blocks.add(current)
+        return if (blocks.size > 1) blocks else null
     }
 
     /** 缓存里没有时联网下载（同时落缓存） */

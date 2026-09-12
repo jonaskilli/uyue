@@ -37,6 +37,9 @@ object BgmAIService {
      */
     private const val DEFAULT_MAX_TOKENS = 100
 
+    /** 默认整体超时（秒）：从请求发起到响应结束的总时限 */
+    const val DEFAULT_CALL_TIMEOUT_SECONDS = 180L
+
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
     /**
@@ -145,11 +148,14 @@ object BgmAIService {
      * @param maxTokens 输出 token 上限。**传 null 表示不限制**：不下发 max_tokens 字段，
      * 由模型自行决定输出长度。AI 音效分析一次要返回整批段落的 JSON，
      * 必须传 null，否则输出会被截断成半截 JSON 导致解析失败。
+     * @param callTimeoutSeconds 单次请求的整体超时（秒，从发起到响应结束的总时限），
+     * 可按调用场景调大（如长章节的 AI 分析生成较慢）。
      */
     internal suspend fun callOpenAIApi(
         provider: BgmAIProvider,
         prompt: String,
-        maxTokens: Int? = DEFAULT_MAX_TOKENS
+        maxTokens: Int? = DEFAULT_MAX_TOKENS,
+        callTimeoutSeconds: Long = DEFAULT_CALL_TIMEOUT_SECONDS
     ): String = withContext(Dispatchers.IO) {
         val url = if (provider.url.endsWith("/")) {
             "${provider.url}chat/completions"
@@ -179,7 +185,14 @@ object BgmAIService {
             .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
-        val response: Response = client.newCall(request).execute()
+        // 超时按调用场景调整：非流式请求在服务器生成完毕前没有任何数据返回，
+        // readTimeout 会先于 callTimeout 触发，两者需一起调大。
+        // newBuilder 共享连接池与线程池，单次请求级配置开销极小
+        val callClient = client.newBuilder()
+            .readTimeout(callTimeoutSeconds, TimeUnit.SECONDS)
+            .callTimeout(callTimeoutSeconds, TimeUnit.SECONDS)
+            .build()
+        val response: Response = callClient.newCall(request).execute()
         
         if (!response.isSuccessful) {
             throw Exception("API调用失败: ${response.code}")

@@ -77,6 +77,66 @@
 
                 </io.legado.app.ui.widget.text.TextInputLayout>
 
+                <io.legado.app.ui.widget.text.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:hint="超长章节拆分阈值（字数，0=不拆分）">
+
+                    <io.legado.app.lib.theme.view.ThemeEditText
+                        android:id="@+id/etMaxLength"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:singleLine="true" />
+
+                </io.legado.app.ui.widget.text.TextInputLayout>
+
+                <io.legado.app.ui.widget.text.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:hint="AI请求失败重试次数（0=不重试）">
+
+                    <io.legado.app.lib.theme.view.ThemeEditText
+                        android:id="@+id/etRetryCount"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:singleLine="true" />
+
+                </io.legado.app.ui.widget.text.TextInputLayout>
+
+                <io.legado.app.ui.widget.text.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:hint="AI请求超时时间（秒，默认180）">
+
+                    <io.legado.app.lib.theme.view.ThemeEditText
+                        android:id="@+id/etTimeout"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:singleLine="true" />
+
+                </io.legado.app.ui.widget.text.TextInputLayout>
+
+                <io.legado.app.ui.widget.text.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:hint="上下文参考字数（0=不附带）">
+
+                    <io.legado.app.lib.theme.view.ThemeEditText
+                        android:id="@+id/etContextLength"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:singleLine="true" />
+
+                </io.legado.app.ui.widget.text.TextInputLayout>
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -125,7 +185,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="数量为 1 时处理单章（没缓存会自动下载）；大于 1 时批量处理，只处理已缓存的章节。改完正文会同步刷新朗读文本。"
+                    android:text="数量为 1 时处理单章（没缓存会自动下载）；大于 1 时批量处理，只处理已缓存的章节。改完正文会同步刷新朗读文本。所有设置在输入时即已自动保存，也可点右上角保存按钮确认。超过拆分阈值的章节会按阈值均分成多块分别处理，切分不破坏段落；0 表示不拆分。AI 请求失败或返回无法解析时按重试次数自动重试；超时时间为单次请求从发起到响应结束的总时限，章节大、AI 生成慢时可调大（如 600 秒）。上下文参考字数大于 0 时，会在正文上、下附上上一章结尾 / 下一章开头（仅限已缓存章节）；拆分成多块时，每一块也会带上前一块结尾 / 后一块开头，供 AI 理解情节，上下文不会被修改。"
                     android:textColor="@color/secondaryText"
                     android:textSize="12sp" />
 

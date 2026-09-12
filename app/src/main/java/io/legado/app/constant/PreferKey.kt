@@ -357,6 +357,14 @@ object PreferKey {
     const val aiChapterFixAuto = "aiChapterFixAuto"
     // 每次处理的章节数量（自动处理与批量处理共用）
     const val aiChapterFixCount = "aiChapterFixCount"
+    // 超长章节拆分阈值（字数），0 表示不拆分
+    const val aiChapterFixMaxLength = "aiChapterFixMaxLength"
+    // AI 请求失败/解析失败时的重试次数，0 表示不重试
+    const val aiChapterFixRetryCount = "aiChapterFixRetryCount"
+    // 发给 AI 时附带的上下文参考字数（上一章结尾+下一章开头），0 表示不附带
+    const val aiChapterFixContextLength = "aiChapterFixContextLength"
+    // AI 请求超时时间（秒，从发起到响应结束的总时限），默认 180
+    const val aiChapterFixTimeoutSeconds = "aiChapterFixTimeoutSeconds"
 
     // --- AI 生图「按书名」绑定（新版）---
     // 旧版按 bookUrl 存储，换书源后 bookUrl 变化会导致绑定失效；新版改按书名存储。

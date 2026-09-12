@@ -3,12 +3,15 @@ package io.legado.app.ui.book.read.config
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
+import androidx.core.widget.doAfterTextChanged
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.databinding.DialogAiChapterFixBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.service.AiChapterFixService
+import io.legado.app.utils.applyTint
 import io.legado.app.utils.setLayout
+import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 
 /**
@@ -19,8 +22,9 @@ import io.legado.app.utils.viewbindingdelegate.viewBinding
  * 自身先关闭——真正的处理耗时较长，不适合挂在对话框的生命周期上。
  *
  * 设置项的保存时机（避免"填了没生效"）：
- *  - 自动处理开关：拨动即保存，并且打开时顺手把其它输入框一起保存；
- *  - 其它输入框：点处理按钮时保存，另外界面关闭时（取消/返回/点外部）也保存一次。
+ *  - 所有输入框：输入即保存（doAfterTextChanged），改完直接退出也不会回到旧值；
+ *  - 自动处理开关：拨动即保存；
+ *  - 界面关闭时（取消/返回/点外部）再兜底保存一次。
  */
 class AiChapterFixDialog : BaseDialogFragment(R.layout.dialog_ai_chapter_fix) {
 
@@ -49,6 +53,10 @@ class AiChapterFixDialog : BaseDialogFragment(R.layout.dialog_ai_chapter_fix) {
             AppConfig.aiChapterFixPrompt.ifBlank { AiChapterFixService.DEFAULT_PROMPT }
         )
         binding.etCount.setText(AppConfig.aiChapterFixCount.toString())
+        binding.etMaxLength.setText(AppConfig.aiChapterFixMaxLength.toString())
+        binding.etRetryCount.setText(AppConfig.aiChapterFixRetryCount.toString())
+        binding.etContextLength.setText(AppConfig.aiChapterFixContextLength.toString())
+        binding.etTimeout.setText(AppConfig.aiChapterFixTimeoutSeconds.toString())
         binding.btnCancel.setOnClickListener { dismiss() }
         binding.btnCurrent.setOnClickListener { confirm(fromCurrent = true) }
         binding.btnNext.setOnClickListener { confirm(fromCurrent = false) }
@@ -58,7 +66,26 @@ class AiChapterFixDialog : BaseDialogFragment(R.layout.dialog_ai_chapter_fix) {
             if (isChecked) saveSettings()
         }
         binding.switchAuto.isChecked = AppConfig.aiChapterFixAuto
-        // 界面关闭时再兜一次：填了内容没点处理按钮就退出，也不该丢
+        // 右上角保存按钮：手动确认保存并给出反馈，不关闭对话框
+        binding.toolBar.inflateMenu(R.menu.save)
+        binding.toolBar.menu.applyTint(requireContext())
+        binding.toolBar.setOnMenuItemClickListener {
+            if (it.itemId == R.id.menu_save) {
+                saveSettings()
+                context?.toastOnUi("设置已保存")
+            }
+            true
+        }
+        // 输入即保存：任何输入框一改就落盘，改完直接退出也不会回到旧值。
+        // 监听注册在初始化回显之后，回显不会误触发。
+        binding.etApi.doAfterTextChanged { saveSettings() }
+        binding.etPrompt.doAfterTextChanged { saveSettings() }
+        binding.etCount.doAfterTextChanged { saveSettings() }
+        binding.etMaxLength.doAfterTextChanged { saveSettings() }
+        binding.etRetryCount.doAfterTextChanged { saveSettings() }
+        binding.etContextLength.doAfterTextChanged { saveSettings() }
+        binding.etTimeout.doAfterTextChanged { saveSettings() }
+        // 关闭时再兜一次（覆盖切换配置等极端情况）
         setOnDismissListener { kotlin.runCatching { saveSettings() } }
     }
 
@@ -73,6 +100,14 @@ class AiChapterFixDialog : BaseDialogFragment(R.layout.dialog_ai_chapter_fix) {
             ?.let { AppConfig.aiChapterFixPrompt = it }
         binding.etCount.text?.toString()?.trim()?.toIntOrNull()
             ?.let { AppConfig.aiChapterFixCount = it }
+        binding.etMaxLength.text?.toString()?.trim()?.toIntOrNull()
+            ?.let { AppConfig.aiChapterFixMaxLength = it }
+        binding.etRetryCount.text?.toString()?.trim()?.toIntOrNull()
+            ?.let { AppConfig.aiChapterFixRetryCount = it }
+        binding.etContextLength.text?.toString()?.trim()?.toIntOrNull()
+            ?.let { AppConfig.aiChapterFixContextLength = it }
+        binding.etTimeout.text?.toString()?.trim()?.toIntOrNull()
+            ?.let { AppConfig.aiChapterFixTimeoutSeconds = it }
         AppConfig.aiChapterFixAuto = binding.switchAuto.isChecked
     }
 

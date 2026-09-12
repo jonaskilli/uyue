@@ -73,6 +73,26 @@ class EditTextPreference(context: Context, attrs: AttributeSet) :
     }
 
     /**
+     * 所有持久化读取的**必经点**（父类 onSetInitialValue、对话框恢复等内部路径最终都会调到这里）。
+     *
+     * 父类实现直接 `SharedPreferences.getString(key, def)`，一旦该 key 在 SP 中实际存储的是
+     * Float / Int / Long 等其它类型（典型来源：恢复第三方工具产生的备份、或旧版本曾以
+     * 数值类型写入），Android 的 SharedPreferencesImpl.getString 会抛
+     * `ClassCastException: java.lang.Float cannot be cast to java.lang.String`。
+     * 该异常发生在 Fragment 构建偏好树期间，设置界面完全打不开，属于「一次污染、永久崩溃」。
+     *
+     * 这里重写为类型安全读取：非 String 一律安全转换为字符串，并在
+     * [onSetInitialValue] 的重写之外再兜一层，确保任何内部调用路径都不会绕过。
+     */
+    override fun getPersistedString(defaultReturnValue: String?): String? {
+        // 使用自定义 PreferenceDataStore（本项目未使用）或不持久化时，保持父类语义
+        if (preferenceDataStore != null || !shouldPersist()) {
+            return super.getPersistedString(defaultReturnValue)
+        }
+        return readPersistedValueSafely(defaultReturnValue)
+    }
+
+    /**
      * 安全读取已持久化的值。
      *
      * @param def 默认值，当未持久化或读取失败时使用
