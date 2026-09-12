@@ -766,10 +766,18 @@ class ReadBookActivity : BaseReadBookActivity(),
         val job = lifecycleScope.launch {
             val result = AiChapterFixService.fixChapters(
                 book, ReadBook.bookSource, startIndex, n, api, prompt, force, onlyCached
-            )
+            ) { progress ->
+                // 回调发生在 IO 线程，更新弹窗必须切回主线程
+                runOnUiThread {
+                    // 弹窗实时显示当前处理的章节与块号（如《第1章》(2/5)）
+                    waitDialog?.setText("AI处理：$progress")
+                }
+            }
             waitDialog?.dismiss()
             // 改过的章节要丢弃旧排版重新读取，否则界面还是修改前的正文
             result.changedIndexes.forEach { ReadBook.reloadChapter(it) }
+            // 最终结果（成功/失败都算）写入应用日志：toast 展示时间短且长消息会截断，日志便于回看
+            AppLog.put("AI处理章节: ${result.message}")
             toastOnUi(result.message)
         }
         // 调用可能比较久，允许返回键中断

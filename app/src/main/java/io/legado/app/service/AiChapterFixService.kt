@@ -89,7 +89,8 @@ object AiChapterFixService {
         apiConfig: String,
         prompt: String,
         force: Boolean = false,
-        onlyCached: Boolean = false
+        onlyCached: Boolean = false,
+        onProgress: ((String) -> Unit)? = null
     ): FixResult = withContext(Dispatchers.IO) {
         val provider = parseApiConfig(apiConfig)
             ?: return@withContext FixResult(false, "接口格式错误，应为：接口地址@@模型名字@@密钥")
@@ -100,7 +101,7 @@ object AiChapterFixService {
                 ?: return@withContext FixResult(false, "找不到对应的章节")
             val r = fixOneChapter(
                 book, bookSource, chapter, startIndex,
-                provider, effectivePrompt, force, onlyCached
+                provider, effectivePrompt, force, onlyCached, onProgress
             )
             val changed = if (r.outcome == Outcome.FIXED) listOf(startIndex) else emptyList()
             return@withContext FixResult(r.outcome != Outcome.FAILED, r.message, changed)
@@ -116,7 +117,7 @@ object AiChapterFixService {
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: break
             val r = fixOneChapter(
                 book, bookSource, chapter, index,
-                provider, effectivePrompt, force, onlyCached
+                provider, effectivePrompt, force, onlyCached, onProgress
             )
             when (r.outcome) {
                 Outcome.FIXED -> {
@@ -153,7 +154,8 @@ object AiChapterFixService {
         provider: BgmAIProvider,
         prompt: String,
         force: Boolean,
-        onlyCached: Boolean
+        onlyCached: Boolean,
+        onProgress: ((String) -> Unit)? = null
     ): OneOutcome {
         val title = chapter.title
         if (!force && AiChapterFixStore.isDone(book.bookUrl, chapterIndex)) {
@@ -206,6 +208,7 @@ object AiChapterFixService {
         val blocks = splitParagraphs(paragraphs, AppConfig.aiChapterFixMaxLength)
         val fixes = HashMap<Int, String>()
         if (blocks == null) {
+            onProgress?.invoke(title)
             val (result, err) = callAndParse(
                 provider, prompt, paragraphs, title, contextBefore, contextAfter
             )
@@ -218,6 +221,7 @@ object AiChapterFixService {
             var offset = 0
             blocks.forEachIndexed { blockIndex, block ->
                 val label = "$title(${blockIndex + 1}/${blocks.size})"
+                onProgress?.invoke(label)
                 val before = if (blockIndex == 0) contextBefore
                     else blocks[blockIndex - 1].joinToString("\n").takeLast(contextLength)
                 val after = if (blockIndex == blocks.size - 1) contextAfter
@@ -306,27 +310,36 @@ object AiChapterFixService {
             }
         }
         val retries = AppConfig.aiChapterFixRetryCount.coerceAtLeast(0)
+        val timeoutSeconds = AppConfig.aiChapterFixTimeoutSeconds.coerceAtLeast(10)
         var lastError = ""
         repeat(retries + 1) { attempt ->
             if (attempt > 0) {
                 AppLog.put("$TAG: 《$label》请求失败，第 $attempt/$retries 次重试")
             }
+            AppLog.putDebug("$TAG: 《$label》发起AI请求，超时设置=${timeoutSeconds}秒")
             // 调用大模型（不限制 max_tokens，否则长回复会被截断成半截 JSON；
             // 超时时间从设置读取，章节大、AI 生成慢时可调大等待）
             val response = try {
                 BgmAIService.callOpenAIApi(
                     provider, fullPrompt, maxTokens = null,
-                    callTimeoutSeconds = AppConfig.aiChapterFixTimeoutSeconds.toLong()
+                    callTimeoutSeconds = timeoutSeconds.toLong()
                 )
             } catch (e: Exception) {
-                lastError = "AI调用失败：${e.localizedMessage}"
+                // 异常类型 + 实际生效的超时值一起记录，便于区分客户端超时与服务端断开
+                AppLog.put(
+                    "$TAG: 《$label》AI调用失败(${e.javaClass.simpleName})：${e.localizedMessage}" +
+                        "，超时设置=${timeoutSeconds}秒"
+                )
+                lastError = "AI调用失败：${e.localizedMessage}（超时设置${timeoutSeconds}秒）"
                 return@repeat
             }
             AppLog.putDebug("$TAG: 《$label》AI返回：$response")
             // 解析 JSON，无法解析视为失败，与调用失败一样参与重试
             val fixes = parseFixes(response, paragraphs.size)
             if (fixes == null) {
-                lastError = "AI返回内容无法解析，已标记为待重试"
+                // 把 AI 的原始返回打进应用日志，便于区分是返回内容有问题还是解析有问题
+                AppLog.put("$TAG: 《$label》AI返回内容无法解析（共${response.length}字符），原始返回如下：\n$response")
+                lastError = "AI返回内容无法解析，已标记为待重试（原始返回见应用日志）"
                 return@repeat
             }
             return fixes to ""
