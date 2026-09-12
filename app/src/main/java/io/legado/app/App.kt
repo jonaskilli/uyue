@@ -139,6 +139,8 @@ class App : Application() {
             initDefaultBgmAIPrompts()
             //初始化默认AI生图模板
             initDefaultAiImageTemplate()
+            //初始化默认AI章节处理模板
+            initDefaultAiChapterFixTemplate()
             //激活转发器对应的TTS引擎
             TtsEngineActivator.activateOnAppInit()
         }
@@ -399,6 +401,25 @@ class App : Application() {
                 )
                 appDb.aiImageTemplateDao.insert(defaultTemplate)
                 LogUtils.d("App", "已初始化默认AI生图模板")
+            }
+        }
+    }
+
+    /**
+     * 初始化默认 AI 章节处理模板
+     * 表为空时创建默认模板，并把旧版全局 SharedPreferences 配置迁移进来，
+     * 老用户升级后接口/提示词/各项参数无缝过渡。
+     */
+    private fun initDefaultAiChapterFixTemplate() {
+        Coroutine.async {
+            if (appDb.aiChapterFixTemplateDao.getAllList().isEmpty()) {
+                val fallback = io.legado.app.service.AiChapterFixService.builtinDefaultTemplate()
+                val defaultTemplate = fallback.copy(
+                    id = io.legado.app.service.AiChapterFixService.DEFAULT_TEMPLATE_ID,
+                    lastUpdateTime = System.currentTimeMillis()
+                )
+                appDb.aiChapterFixTemplateDao.insert(defaultTemplate)
+                LogUtils.d("App", "已初始化默认AI章节处理模板")
             }
         }
     }

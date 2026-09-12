@@ -365,6 +365,10 @@ object PreferKey {
     const val aiChapterFixContextLength = "aiChapterFixContextLength"
     // AI 请求超时时间（秒，从发起到响应结束的总时限），默认 180
     const val aiChapterFixTimeoutSeconds = "aiChapterFixTimeoutSeconds"
+    // AI 章节处理模板的书籍绑定（一本书一个模板），key = 前缀 + 书名
+    const val aiChapterFixTemplateBindPrefix = "aiChapterFixTemplateBind_"
+    // AI 章节处理自动处理开关（按书生效），key = 前缀 + 书名
+    const val aiChapterFixAutoBookPrefix = "aiChapterFixAutoBook_"
 
     // --- AI 生图「按书名」绑定（新版）---
     // 旧版按 bookUrl 存储，换书源后 bookUrl 变化会导致绑定失效；新版改按书名存储。

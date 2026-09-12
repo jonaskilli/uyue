@@ -47,6 +47,7 @@ import io.legado.app.constant.EventBus
 import io.legado.app.constant.PreferKey
 import io.legado.app.constant.Status
 import io.legado.app.data.appDb
+import io.legado.app.data.entities.AiChapterFixTemplate
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookProgress
@@ -96,6 +97,7 @@ import io.legado.app.model.localBook.MobiFile
 import io.legado.app.receiver.NetworkChangedListener
 import io.legado.app.receiver.TimeBatteryReceiver
 import io.legado.app.service.AiChapterFixService
+import io.legado.app.service.AiChapterFixStore
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.service.ReadAloudFloatService
 import io.legado.app.ui.about.AppLogDialog
@@ -717,16 +719,18 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     /**
-     * AI处理章节：弹框填接口、提示词、处理数量
+     * AI处理章节：模板化对话框（编辑当前书生效的模板，可打开模板列表切换/绑定）
      */
     private fun showAiChapterFixDialog() {
         val book = ReadBook.book ?: return
         binding.readMenu.runMenuOut()
         AiChapterFixDialog().apply {
-            onConfirm = { api, prompt, count, fromCurrent, force ->
+            onConfirm = { template, fromCurrent, force ->
                 val start = ReadBook.durChapterIndex + if (fromCurrent) 0 else 1
-                startAiChapterFix(book, start, count, api, prompt, force, silent = false)
+                startAiChapterFix(book, template, start, force = force, silent = false)
             }
+            // 对话框里拨动自动处理开关时，同步刷新工具栏图标状态
+            onAutoChangedCallback = { binding.readMenu.upAiAutoFixFab() }
         }.let { showDialogFragment(it) }
     }
 
@@ -734,14 +738,13 @@ class ReadBookActivity : BaseReadBookActivity(),
      * AI处理章节。
      * 数量为 1 时处理单章（没缓存会自动下载）；大于 1 时批量处理，只处理已缓存的章节。
      *
+     * @param template 处理模板（接口/提示词/拆分/并发/重试/超时/上下文）
      * @param silent 自动处理时不弹等待框，免得挡着阅读
      */
     private fun startAiChapterFix(
         book: Book,
+        template: AiChapterFixTemplate,
         startIndex: Int,
-        count: Int,
-        api: String,
-        prompt: String,
         force: Boolean,
         silent: Boolean
     ) {
@@ -753,7 +756,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             if (!silent) toastOnUi("后面没有章节了")
             return
         }
-        val n = count.coerceIn(1, AiChapterFixService.MAX_COUNT)
+        val n = template.chapterCount.coerceIn(1, AiChapterFixService.MAX_COUNT)
         aiFixRunning = true
         val onlyCached = n > 1
         val startTitle = appDb.bookChapterDao.getChapter(book.bookUrl, startIndex)?.title.orEmpty()
@@ -765,11 +768,11 @@ class ReadBookActivity : BaseReadBookActivity(),
         }
         val job = lifecycleScope.launch {
             val result = AiChapterFixService.fixChapters(
-                book, ReadBook.bookSource, startIndex, n, api, prompt, force, onlyCached
+                book, ReadBook.bookSource, template, startIndex, n, force, onlyCached
             ) { progress ->
                 // 回调发生在 IO 线程，更新弹窗必须切回主线程
                 runOnUiThread {
-                    // 弹窗实时显示当前处理的章节与块号（如《第1章》(2/5)）
+                    // 弹窗实时显示当前处理的章节与分块完成数（如《第1章》已完成 2/5）
                     waitDialog?.setText("AI处理：$progress")
                 }
             }
@@ -789,19 +792,17 @@ class ReadBookActivity : BaseReadBookActivity(),
      * 自动处理：章节一切换就处理后续章节（下标没变时不重复触发）。
      */
     private fun autoAiFixChapter() {
-        if (!AppConfig.aiChapterFixAuto) return
+        val book = ReadBook.book ?: return
+        // 自动处理开关按书生效
+        if (!AiChapterFixService.isAutoFixEnabled(book.name, book.bookUrl)) return
         val index = ReadBook.durChapterIndex
         if (index == lastAiAutoChapterIndex) return
         lastAiAutoChapterIndex = index
-        val book = ReadBook.book ?: return
-        val api = AppConfig.aiChapterFixApi
-        if (api.isBlank()) return
+        val template = AiChapterFixService.getEffectiveTemplate(book.name, book.bookUrl)
+        if (template.apiConfig.isBlank()) return
         val start = index + 1
         if (start >= ReadBook.chapterSize) return
-        startAiChapterFix(
-            book, start, AppConfig.aiChapterFixCount, api, AppConfig.aiChapterFixPrompt,
-            force = false, silent = true
-        )
+        startAiChapterFix(book, template, start, force = false, silent = true)
     }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
@@ -1373,22 +1374,37 @@ class ReadBookActivity : BaseReadBookActivity(),
      */
     override fun aiAnalyzeCurrentChapter() {
         val book = ReadBook.book ?: return
-        val api = AppConfig.aiChapterFixApi
-        if (api.isBlank()) {
+        val template = AiChapterFixService.getEffectiveTemplate(book.name, book.bookUrl)
+        if (template.apiConfig.isBlank()) {
             toastOnUi("请先填写 AI 接口配置")
             binding.readMenu.runMenuOut()
             showDialogFragment(AiChapterFixDialog().apply {
-                onConfirm = { a, prompt, count, fromCurrent, force ->
+                onConfirm = { t, fromCurrent, force ->
                     val start = ReadBook.durChapterIndex + if (fromCurrent) 0 else 1
-                    startAiChapterFix(book, start, count, a, prompt, force, silent = false)
+                    startAiChapterFix(book, t, start, force = force, silent = false)
                 }
             })
             return
         }
-        startAiChapterFix(
-            book, ReadBook.durChapterIndex, 1, api,
-            AppConfig.aiChapterFixPrompt, force = false, silent = false
-        )
+        val index = ReadBook.durChapterIndex
+        lifecycleScope.launch {
+            // 已处理过的章节不再静默跳过，弹窗询问是否忽略记录强制重跑
+            val done = AiChapterFixStore.isDone(book.bookUrl, index)
+            withContext(Main) {
+                if (!done) {
+                    startAiChapterFix(book, template, index, force = false, silent = false)
+                    return@withContext
+                }
+                AlertDialog.Builder(this@ReadBookActivity)
+                    .setTitle("该章节已处理过")
+                    .setMessage("当前章节已经 AI 处理过，是否忽略处理记录、强制再次处理？")
+                    .setPositiveButton("再次处理") { _, _ ->
+                        startAiChapterFix(book, template, index, force = true, silent = false)
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+        }
     }
 
     override fun autoPageStop() {

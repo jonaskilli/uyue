@@ -6,41 +6,40 @@ import android.view.ViewGroup
 import androidx.core.widget.doAfterTextChanged
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
+import io.legado.app.data.appDb
+import io.legado.app.data.entities.AiChapterFixTemplate
 import io.legado.app.databinding.DialogAiChapterFixBinding
 import io.legado.app.help.config.AppConfig
+import io.legado.app.model.ReadBook
 import io.legado.app.service.AiChapterFixService
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.setLayout
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
+import kotlinx.coroutines.Dispatchers
 
 /**
- * 「AI处理章节」对话框：接口输入框（格式与 AI 切歌一致：
- * 接口地址@@模型名@@密钥）、提示词输入框、处理章节数量、自动处理开关。
+ * 「AI处理章节」对话框（模板化）。
  *
- * 点「处理当前章节」/「处理下一章」后保存各项设置，把参数回传给调用方执行，
- * 自身先关闭——真正的处理耗时较长，不适合挂在对话框的生命周期上。
+ * 顶部显示当前书生效的模板（绑定的模板或默认模板），可打开模板列表切换编辑目标/绑定。
+ * 所有输入框编辑的就是当前生效模板的字段，输入即保存（写入数据库）。
+ * 多组接口轮换格式：接口@@模型@@密钥@@接口@@模型@@密钥@@...（3 段一组，可无限追加）。
  *
- * 设置项的保存时机（避免"填了没生效"）：
- *  - 所有输入框：输入即保存（doAfterTextChanged），改完直接退出也不会回到旧值；
- *  - 自动处理开关：拨动即保存；
- *  - 界面关闭时（取消/返回/点外部）再兜底保存一次。
+ * 点「处理当前章节」/「处理下一章」后回调 [onConfirm]，由调用方执行处理。
  */
 class AiChapterFixDialog : BaseDialogFragment(R.layout.dialog_ai_chapter_fix) {
 
     private val binding by viewBinding(DialogAiChapterFixBinding::bind)
 
-    /**
-     * 点处理按钮后回调：
-     * (接口配置, 提示词, 处理数量, 是否从当前章开始, 是否忽略已完成记录)
-     */
-    var onConfirm: ((
-        api: String,
-        prompt: String,
-        count: Int,
-        fromCurrent: Boolean,
-        force: Boolean
-    ) -> Unit)? = null
+    /** 当前编辑的模板（当前书生效的模板） */
+    private var currentTemplate: AiChapterFixTemplate? = null
+
+    /** 点处理按钮后回调：(生效模板, 是否从当前章开始, 是否忽略已完成记录) */
+    var onConfirm: ((template: AiChapterFixTemplate, fromCurrent: Boolean, force: Boolean) -> Unit)? =
+        null
+
+    /** 自动处理开关变化回调（按书生效，用于同步工具栏图标状态） */
+    var onAutoChangedCallback: ((Boolean) -> Unit)? = null
 
     override fun onStart() {
         super.onStart()
@@ -48,70 +47,136 @@ class AiChapterFixDialog : BaseDialogFragment(R.layout.dialog_ai_chapter_fix) {
     }
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
-        binding.etApi.setText(AppConfig.aiChapterFixApi)
-        binding.etPrompt.setText(
-            AppConfig.aiChapterFixPrompt.ifBlank { AiChapterFixService.DEFAULT_PROMPT }
-        )
-        binding.etCount.setText(AppConfig.aiChapterFixCount.toString())
-        binding.etMaxLength.setText(AppConfig.aiChapterFixMaxLength.toString())
-        binding.etRetryCount.setText(AppConfig.aiChapterFixRetryCount.toString())
-        binding.etContextLength.setText(AppConfig.aiChapterFixContextLength.toString())
-        binding.etTimeout.setText(AppConfig.aiChapterFixTimeoutSeconds.toString())
         binding.btnCancel.setOnClickListener { dismiss() }
         binding.btnCurrent.setOnClickListener { confirm(fromCurrent = true) }
         binding.btnNext.setOnClickListener { confirm(fromCurrent = false) }
-        // 自动处理开关"拨动即保存"：只拨开关、不点处理按钮就退出，下次进来也要保持
-        binding.switchAuto.setOnCheckedChangeListener { _, isChecked ->
-            AppConfig.aiChapterFixAuto = isChecked
-            if (isChecked) saveSettings()
-        }
-        binding.switchAuto.isChecked = AppConfig.aiChapterFixAuto
         // 右上角保存按钮：手动确认保存并给出反馈，不关闭对话框
         binding.toolBar.inflateMenu(R.menu.save)
         binding.toolBar.menu.applyTint(requireContext())
         binding.toolBar.setOnMenuItemClickListener {
             if (it.itemId == R.id.menu_save) {
                 saveSettings()
-                context?.toastOnUi("设置已保存")
+                context?.toastOnUi("设置已保存到模板「${currentTemplate?.name.orEmpty()}」")
             }
             true
         }
-        // 输入即保存：任何输入框一改就落盘，改完直接退出也不会回到旧值。
-        // 监听注册在初始化回显之后，回显不会误触发。
+        // 模板列表：切换编辑目标 / 绑定当前书
+        binding.btnTemplateList.setOnClickListener {
+            AiChapterFixTemplateListDialog.newInstance(
+                currentEditId = currentTemplate?.id ?: 0,
+                onSelect = { template ->
+                    currentTemplate = template
+                    fillInputs()
+                },
+                onBindChanged = { refreshCurrentTemplate() }
+            ).let { showDialogFragmentSafely(it) }
+        }
+        // 自动处理开关按书生效，与底部工具栏的 AI 图标状态同步
+        val book = ReadBook.book
+        binding.switchAuto.isChecked = if (book != null) {
+            AiChapterFixService.isAutoFixEnabled(book.name, book.bookUrl)
+        } else {
+            AppConfig.aiChapterFixAuto
+        }
+        binding.switchAuto.setOnCheckedChangeListener { _, isChecked ->
+            if (book != null) {
+                AiChapterFixService.setAutoFixEnabled(book.name, book.bookUrl, isChecked)
+            } else {
+                AppConfig.aiChapterFixAuto = isChecked
+            }
+            onAutoChangedCallback?.invoke(isChecked)
+        }
+        // 输入即保存到当前模板（监听注册在回显之后，回显不会误触发）
         binding.etApi.doAfterTextChanged { saveSettings() }
         binding.etPrompt.doAfterTextChanged { saveSettings() }
         binding.etCount.doAfterTextChanged { saveSettings() }
+        binding.etConcurrency.doAfterTextChanged { saveSettings() }
         binding.etMaxLength.doAfterTextChanged { saveSettings() }
         binding.etRetryCount.doAfterTextChanged { saveSettings() }
         binding.etContextLength.doAfterTextChanged { saveSettings() }
         binding.etTimeout.doAfterTextChanged { saveSettings() }
-        // 关闭时再兜一次（覆盖切换配置等极端情况）
+        // 关闭时再兜一次
         setOnDismissListener { kotlin.runCatching { saveSettings() } }
+        // 异步读取当前书生效的模板并回显
+        refreshCurrentTemplate()
+    }
+
+    private fun refreshCurrentTemplate() {
+        val book = ReadBook.book
+        execute {
+            if (book != null) {
+                AiChapterFixService.getEffectiveTemplate(book.name, book.bookUrl)
+            } else {
+                appDb.aiChapterFixTemplateDao.getDefault()
+                    ?: AiChapterFixService.builtinDefaultTemplate()
+            }
+        }.onSuccess(Dispatchers.Main) { template ->
+            currentTemplate = template
+            binding.tvTemplateName.text = buildString {
+                append("当前模板：${template.name}")
+                val boundId = if (book != null) {
+                    AiChapterFixService.getBoundTemplateId(book.name, book.bookUrl)
+                } else 0L
+                if (boundId == 0L && template.isDefault) append("（未绑定，使用默认）")
+            }
+            fillInputs()
+        }
+    }
+
+    private fun fillInputs() {
+        val t = currentTemplate ?: return
+        binding.etApi.setText(t.apiConfig)
+        binding.etPrompt.setText(t.prompt.ifBlank { AiChapterFixService.DEFAULT_PROMPT })
+        binding.etCount.setText(t.chapterCount.toString())
+        binding.etConcurrency.setText(t.concurrency.toString())
+        binding.etMaxLength.setText(t.maxLength.toString())
+        binding.etRetryCount.setText(t.retryCount.toString())
+        binding.etContextLength.setText(t.contextLength.toString())
+        binding.etTimeout.setText(t.timeoutSeconds.toString())
+    }
+
+    private fun showDialogFragmentSafely(dialog: AiChapterFixTemplateListDialog) {
+        (activity as? androidx.fragment.app.FragmentActivity)?.let {
+            it.supportFragmentManager.beginTransaction()
+                .add(dialog, "aiChapterFixTemplateList")
+                .commitAllowingStateLoss()
+        }
     }
 
     /**
-     * 把输入框里的内容落到配置里。
+     * 把输入框里的内容写回当前模板并落库。
      * 空值不覆盖，避免误清空（比如提示词框被清空后仍保留上一次的设置）。
      */
     private fun saveSettings() {
+        val t = currentTemplate ?: return
+        var changed = false
+        fun newTemplate(block: (AiChapterFixTemplate) -> AiChapterFixTemplate) {
+            val updated = block(t)
+            currentTemplate = updated
+            execute { appDb.aiChapterFixTemplateDao.update(updated) }
+            changed = true
+        }
         binding.etApi.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { AppConfig.aiChapterFixApi = it }
+            ?.takeIf { it != t.apiConfig }?.let { api -> newTemplate { it.copy(apiConfig = api) } }
         binding.etPrompt.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { AppConfig.aiChapterFixPrompt = it }
+            ?.takeIf { it != t.prompt }?.let { p -> newTemplate { it.copy(prompt = p) } }
         binding.etCount.text?.toString()?.trim()?.toIntOrNull()
-            ?.let { AppConfig.aiChapterFixCount = it }
+            ?.takeIf { it != t.chapterCount }?.let { v -> newTemplate { it.copy(chapterCount = v) } }
+        binding.etConcurrency.text?.toString()?.trim()?.toIntOrNull()
+            ?.takeIf { it != t.concurrency }?.let { v -> newTemplate { it.copy(concurrency = v) } }
         binding.etMaxLength.text?.toString()?.trim()?.toIntOrNull()
-            ?.let { AppConfig.aiChapterFixMaxLength = it }
+            ?.takeIf { it != t.maxLength }?.let { v -> newTemplate { it.copy(maxLength = v) } }
         binding.etRetryCount.text?.toString()?.trim()?.toIntOrNull()
-            ?.let { AppConfig.aiChapterFixRetryCount = it }
+            ?.takeIf { it != t.retryCount }?.let { v -> newTemplate { it.copy(retryCount = v) } }
         binding.etContextLength.text?.toString()?.trim()?.toIntOrNull()
-            ?.let { AppConfig.aiChapterFixContextLength = it }
+            ?.takeIf { it != t.contextLength }?.let { v -> newTemplate { it.copy(contextLength = v) } }
         binding.etTimeout.text?.toString()?.trim()?.toIntOrNull()
-            ?.let { AppConfig.aiChapterFixTimeoutSeconds = it }
+            ?.takeIf { it != t.timeoutSeconds }?.let { v -> newTemplate { it.copy(timeoutSeconds = v) } }
         AppConfig.aiChapterFixAuto = binding.switchAuto.isChecked
     }
 
     private fun confirm(fromCurrent: Boolean) {
+        val template = currentTemplate ?: return
         val api = binding.etApi.text?.toString()?.trim().orEmpty()
         val prompt = binding.etPrompt.text?.toString()?.trim().orEmpty()
         val force = binding.switchForce.isChecked
@@ -119,18 +184,12 @@ class AiChapterFixDialog : BaseDialogFragment(R.layout.dialog_ai_chapter_fix) {
             binding.etApi.error = "请填写接口地址"
             return
         }
-        if (api.split("@@").size < 2) {
-            binding.etApi.error = "格式错误，应为：接口地址@@模型名字@@密钥"
-            return
-        }
         if (prompt.isEmpty()) {
             binding.etPrompt.error = "请填写提示词"
             return
         }
-        val count = binding.etCount.text?.toString()?.trim()?.toIntOrNull()
-            ?.coerceIn(1, AiChapterFixService.MAX_COUNT) ?: 1
         saveSettings()
         dismissAllowingStateLoss()
-        onConfirm?.invoke(api, prompt, count, fromCurrent, force)
+        onConfirm?.invoke(currentTemplate ?: template, fromCurrent, force)
     }
 }

@@ -23,7 +23,7 @@ object DatabaseMigrations {
             migration_89_90,
             migration_90_91, migration_91_92, migration_92_93, migration_93_94,
             migration_94_95, migration_95_96, migration_96_97, migration_97_98, migration_98_99,
-            migration_99_100,
+            migration_99_100, migration_100_101,
         )
     }
 
@@ -526,6 +526,30 @@ object DatabaseMigrations {
             // books 表新增本地书原文件物理路径候选字段(nullable TEXT),
             // 用于重装/恢复备份后 SAF 授权失效时自动重新定位原文件。存量书为 NULL(惰性补录)。
             db.execSQL("ALTER TABLE `books` ADD `originPaths` TEXT")
+        }
+    }
+
+    private val migration_100_101 = object : Migration(100, 101) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // 新增 AI 章节处理模板表
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `aiChapterFixTemplate` (
+                    `id` INTEGER NOT NULL,
+                    `name` TEXT NOT NULL DEFAULT '',
+                    `apiConfig` TEXT NOT NULL DEFAULT '',
+                    `prompt` TEXT NOT NULL DEFAULT '',
+                    `chapterCount` INTEGER NOT NULL DEFAULT 1,
+                    `maxLength` INTEGER NOT NULL DEFAULT 0,
+                    `concurrency` INTEGER NOT NULL DEFAULT 1,
+                    `retryCount` INTEGER NOT NULL DEFAULT 0,
+                    `timeoutSeconds` INTEGER NOT NULL DEFAULT 180,
+                    `contextLength` INTEGER NOT NULL DEFAULT 0,
+                    `isDefault` INTEGER NOT NULL DEFAULT 0,
+                    `lastUpdateTime` INTEGER NOT NULL DEFAULT 0,
+                    `sortOrder` INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (`id`)
+                )"""
+            )
         }
     }
 

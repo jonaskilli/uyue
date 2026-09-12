@@ -1,7 +1,9 @@
 package io.legado.app.service
 
 import io.legado.app.constant.AppLog
+import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
+import io.legado.app.data.entities.AiChapterFixTemplate
 import io.legado.app.data.entities.BgmAIProvider
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
@@ -12,10 +14,22 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.model.ReadBook
 import io.legado.app.model.webBook.WebBook
+import io.legado.app.utils.defaultSharedPreferences
+import io.legado.app.utils.getPrefBoolean
+import io.legado.app.utils.getPrefString
+import io.legado.app.utils.putPrefBoolean
+import io.legado.app.utils.putPrefString
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import splitties.init.appCtx
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * AI 章节处理（去广告 / 错别字 / 书写错误）。
@@ -37,6 +51,12 @@ object AiChapterFixService {
 
     /** 单次最多处理的章节数量 */
     const val MAX_COUNT = 50
+
+    /** 并发请求数上限 */
+    const val MAX_CONCURRENCY = 20
+
+    /** 默认模板的固定 id，首次初始化时使用 */
+    const val DEFAULT_TEMPLATE_ID = 1L
 
     /** 内置默认提示词：以后想让 AI 扩写/改写，直接改提示词即可，代码不用动 */
     val DEFAULT_PROMPT = """
@@ -68,40 +88,139 @@ object AiChapterFixService {
 
     private data class OneOutcome(val outcome: Outcome, val message: String)
 
+    /** 多组 API 轮换计数器：每次请求（含重试）按顺序取下一组 */
+    private val apiCounter = AtomicInteger(0)
+
+    // ---------- 书籍绑定（一本书绑定一个模板，未绑定使用默认模板） ----------
+
+    private fun bindKey(bookName: String, bookUrl: String): String? = when {
+        bookName.isNotBlank() -> PreferKey.aiChapterFixTemplateBindPrefix + bookName
+        bookUrl.isNotBlank() -> PreferKey.aiChapterFixTemplateBindPrefix + bookUrl
+        else -> null
+    }
+
+    /** 读取书籍绑定的模板 id，0 表示未绑定（使用默认模板） */
+    fun getBoundTemplateId(bookName: String, bookUrl: String): Long {
+        val key = bindKey(bookName, bookUrl) ?: return 0L
+        return appCtx.getPrefString(key, "")?.toLongOrNull() ?: 0L
+    }
+
+    /** 设置书籍绑定的模板 id（单选：直接覆盖），null 表示解绑回到默认模板 */
+    fun setBoundTemplateId(bookName: String, bookUrl: String, templateId: Long?) {
+        val key = bindKey(bookName, bookUrl) ?: return
+        if (templateId == null) {
+            appCtx.defaultSharedPreferences.edit().remove(key).apply()
+        } else {
+            appCtx.putPrefString(key, templateId.toString())
+        }
+    }
+
+    /** 删除模板时清理所有书籍对该模板的绑定 */
+    fun unbindTemplateFromAllBooks(templateId: Long) {
+        val prefs = appCtx.defaultSharedPreferences
+        val editor = prefs.edit()
+        var affected = 0
+        for ((key, value) in prefs.all) {
+            if (!key.startsWith(PreferKey.aiChapterFixTemplateBindPrefix)) continue
+            if ((value as? String)?.toLongOrNull() == templateId) {
+                editor.remove(key)
+                affected++
+            }
+        }
+        if (affected > 0) editor.apply()
+    }
+
+    /**
+     * 获取书籍当前生效的模板：绑定的模板优先，其次默认模板，
+     * 都不存在时返回内置默认模板（不落库）。
+     */
+    fun getEffectiveTemplate(bookName: String, bookUrl: String): AiChapterFixTemplate {
+        val boundId = getBoundTemplateId(bookName, bookUrl)
+        if (boundId > 0) {
+            appDb.aiChapterFixTemplateDao.getById(boundId)?.let { return it }
+        }
+        return appDb.aiChapterFixTemplateDao.getDefault() ?: builtinDefaultTemplate()
+    }
+
+    /** 内置默认模板（兜底）：字段取自旧版全局配置，保证老用户升级后配置不丢 */
+    fun builtinDefaultTemplate(): AiChapterFixTemplate = AiChapterFixTemplate(
+        id = 0L,
+        name = "默认模板",
+        apiConfig = AppConfig.aiChapterFixApi,
+        prompt = AppConfig.aiChapterFixPrompt,
+        chapterCount = AppConfig.aiChapterFixCount,
+        maxLength = AppConfig.aiChapterFixMaxLength,
+        retryCount = AppConfig.aiChapterFixRetryCount,
+        timeoutSeconds = AppConfig.aiChapterFixTimeoutSeconds,
+        contextLength = AppConfig.aiChapterFixContextLength,
+        isDefault = true
+    )
+
+    // ---------- 自动处理开关（按书生效） ----------
+
+    /**
+     * 当前书是否开启自动处理：优先读按书设置；
+     * 该书从未单独设置过时，回退到旧版全局开关（兼容升级前行为）。
+     */
+    fun isAutoFixEnabled(bookName: String, bookUrl: String): Boolean {
+        val key = when {
+            bookName.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookName
+            bookUrl.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookUrl
+            else -> return AppConfig.aiChapterFixAuto
+        }
+        val prefs = appCtx.defaultSharedPreferences
+        if (prefs.contains(key)) {
+            return prefs.getBoolean(key, false)
+        }
+        return AppConfig.aiChapterFixAuto
+    }
+
+    /** 设置当前书的自动处理开关（按书存储，切换书籍后互不影响） */
+    fun setAutoFixEnabled(bookName: String, bookUrl: String, enabled: Boolean) {
+        val key = when {
+            bookName.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookName
+            bookUrl.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookUrl
+            else -> return
+        }
+        appCtx.putPrefBoolean(key, enabled)
+    }
+
     /**
      * 处理若干章节。
      *
      * 提示信息一律用**章节标题**（章节序号只是列表下标，书里有卷、序章时和「第N章」并不一致，
      * 直接报下标会让人误解处理错了章节）。
      *
+     * @param template 处理模板（接口/提示词/拆分/并发/重试/超时/上下文）
      * @param startIndex 起始章节下标
      * @param count 处理数量；>1 时视为批量，[onlyCached] 会跳过没缓存的章节
-     * @param apiConfig AI 接口配置，格式与「AI 切歌」一致：接口地址@@模型名@@密钥
-     * @param prompt 用户提示词，为空时用 [DEFAULT_PROMPT]
      * @param force 忽略「已处理过」的记录强制重跑（换了提示词，比如改成扩写时用）
      * @param onlyCached 只处理本地已有缓存的章节，没缓存的不处理（也不下载）
      */
     suspend fun fixChapters(
         book: Book,
         bookSource: BookSource?,
+        template: AiChapterFixTemplate,
         startIndex: Int,
         count: Int,
-        apiConfig: String,
-        prompt: String,
         force: Boolean = false,
         onlyCached: Boolean = false,
         onProgress: ((String) -> Unit)? = null
     ): FixResult = withContext(Dispatchers.IO) {
-        val provider = parseApiConfig(apiConfig)
-            ?: return@withContext FixResult(false, "接口格式错误，应为：接口地址@@模型名字@@密钥")
-        val effectivePrompt = prompt.ifBlank { DEFAULT_PROMPT }
-        val n = count.coerceIn(1, MAX_COUNT)
+        val providers = parseApiConfigs(template.apiConfig)
+        if (providers.isEmpty()) {
+            return@withContext FixResult(
+                false, "接口格式错误，应为：接口地址@@模型名字@@密钥（可@@追加多组轮换）"
+            )
+        }
+        val effectivePrompt = template.prompt.ifBlank { DEFAULT_PROMPT }
+        val n = template.chapterCount.coerceIn(1, MAX_COUNT)
         if (n == 1) {
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, startIndex)
                 ?: return@withContext FixResult(false, "找不到对应的章节")
             val r = fixOneChapter(
                 book, bookSource, chapter, startIndex,
-                provider, effectivePrompt, force, onlyCached, onProgress
+                template, providers, effectivePrompt, force, onlyCached, onProgress
             )
             val changed = if (r.outcome == Outcome.FIXED) listOf(startIndex) else emptyList()
             return@withContext FixResult(r.outcome != Outcome.FAILED, r.message, changed)
@@ -117,7 +236,7 @@ object AiChapterFixService {
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: break
             val r = fixOneChapter(
                 book, bookSource, chapter, index,
-                provider, effectivePrompt, force, onlyCached, onProgress
+                template, providers, effectivePrompt, force, onlyCached, onProgress
             )
             when (r.outcome) {
                 Outcome.FIXED -> {
@@ -151,7 +270,8 @@ object AiChapterFixService {
         bookSource: BookSource?,
         chapter: BookChapter,
         chapterIndex: Int,
-        provider: BgmAIProvider,
+        template: AiChapterFixTemplate,
+        providers: List<BgmAIProvider>,
         prompt: String,
         force: Boolean,
         onlyCached: Boolean,
@@ -186,7 +306,7 @@ object AiChapterFixService {
         }
         // 3. 上下文参考：正文上、下分别附上一章结尾 / 下一章开头该字数的内容，
         //    供 AI 理解断章处的情节；只用已缓存的正文，不额外下载
-        val contextLength = AppConfig.aiChapterFixContextLength.coerceAtLeast(0)
+        val contextLength = template.contextLength.coerceAtLeast(0)
         var contextBefore = ""
         var contextAfter = ""
         if (contextLength > 0) {
@@ -205,12 +325,13 @@ object AiChapterFixService {
         //    块内编号独立，解析结果按块起始段偏移映射回整章段落；
         //    每一块都带紧邻的前后文：第一块上文是上一章结尾、最后一块下文是下一章开头，
         //    中间块的前后文取相邻块的内容——拆分本来就更容易打断情节
-        val blocks = splitParagraphs(paragraphs, AppConfig.aiChapterFixMaxLength)
+        val blocks = splitParagraphs(paragraphs, template.maxLength)
         val fixes = HashMap<Int, String>()
         if (blocks == null) {
             onProgress?.invoke(title)
             val (result, err) = callAndParse(
-                provider, prompt, paragraphs, title, contextBefore, contextAfter
+                providers, prompt, paragraphs, title, contextBefore, contextAfter,
+                template.retryCount, template.timeoutSeconds
             )
             if (result == null) {
                 AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
@@ -218,25 +339,46 @@ object AiChapterFixService {
             }
             fixes.putAll(result)
         } else {
-            var offset = 0
-            blocks.forEachIndexed { blockIndex, block ->
-                val label = "$title(${blockIndex + 1}/${blocks.size})"
-                onProgress?.invoke(label)
-                val before = if (blockIndex == 0) contextBefore
-                    else blocks[blockIndex - 1].joinToString("\n").takeLast(contextLength)
-                val after = if (blockIndex == blocks.size - 1) contextAfter
-                    else blocks[blockIndex + 1].joinToString("\n").take(contextLength)
-                val (result, err) = callAndParse(
-                    provider, prompt, block, label, before, after
-                )
+            // 并发处理：每块独立请求（块内编号独立、上下文取自相邻块固定内容，与请求顺序无关），
+            // 用信号量限制同时进行的请求数；全部块成功才合并写回，任何一块失败整章失败
+            val concurrency = template.concurrency.coerceIn(1, MAX_CONCURRENCY)
+            val semaphore = Semaphore(concurrency)
+            val completed = AtomicInteger(0)
+            // 各块在整章段落中的起始偏移
+            val offsets = IntArray(blocks.size)
+            var offsetAcc = 0
+            blocks.forEachIndexed { i, block ->
+                offsets[i] = offsetAcc
+                offsetAcc += block.size
+            }
+            val results = coroutineScope {
+                blocks.mapIndexed { blockIndex, block ->
+                    async {
+                        semaphore.withPermit {
+                            val label = "$title(${blockIndex + 1}/${blocks.size})"
+                            val before = if (blockIndex == 0) contextBefore
+                                else blocks[blockIndex - 1].joinToString("\n").takeLast(contextLength)
+                            val after = if (blockIndex == blocks.size - 1) contextAfter
+                                else blocks[blockIndex + 1].joinToString("\n").take(contextLength)
+                            val (result, err) = callAndParse(
+                                providers, prompt, block, label, before, after,
+                                template.retryCount, template.timeoutSeconds
+                            )
+                            onProgress?.invoke("$title 已完成 ${completed.incrementAndGet()}/${blocks.size}")
+                            (blockIndex to result) to err
+                        }
+                    }
+                }.awaitAll()
+            }
+            for ((pair, err) in results) {
+                val (blockIndex, result) = pair
                 if (result == null) {
                     AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
                     return OneOutcome(
                         Outcome.FAILED, "《$title》第 ${blockIndex + 1}/${blocks.size} 块$err"
                     )
                 }
-                result.forEach { (index, text) -> fixes[offset + index] = text }
-                offset += block.size
+                result.forEach { (index, text) -> fixes[offsets[blockIndex] + index] = text }
             }
         }
         // 7. 按序号原位替换；值为空 = 删除该段，值含换行 = 一段展开成多段
@@ -277,20 +419,24 @@ object AiChapterFixService {
 
     /**
      * 调用大模型并解析一块（或整章）段落的修正结果。
-     * 请求失败或返回无法解析时，按「AI请求失败重试次数」自动重试。
+     * 请求失败或返回无法解析时，按重试次数自动重试，**每次请求（含重试）轮换下一组 API**。
      *
      * @param label 日志用的标识（章节标题，分块时带块号）
      * @param contextBefore 正文上方附带的前文（上一章结尾或前一块结尾，参考，不会被修改）
      * @param contextAfter 正文下方附带的后文（下一章开头或后一块开头，参考，不会被修改）
+     * @param retryCount 失败重试次数
+     * @param timeoutSeconds 单次请求整体超时（秒）
      * @return 序号 -> 修正后文本；重试后仍失败时第一个值为 null，第二个值是失败原因
      */
     private suspend fun callAndParse(
-        provider: BgmAIProvider,
+        providers: List<BgmAIProvider>,
         prompt: String,
         paragraphs: List<String>,
         label: String,
         contextBefore: String = "",
-        contextAfter: String = ""
+        contextAfter: String = "",
+        retryCount: Int = 0,
+        timeoutSeconds: Int = 180
     ): Pair<Map<Int, String>?, String> {
         // 逐段编号
         val numbered = StringBuilder()
@@ -309,28 +455,34 @@ object AiChapterFixService {
                 append(contextAfter)
             }
         }
-        val retries = AppConfig.aiChapterFixRetryCount.coerceAtLeast(0)
-        val timeoutSeconds = AppConfig.aiChapterFixTimeoutSeconds.coerceAtLeast(10)
+        val retries = retryCount.coerceAtLeast(0)
+        val timeout = timeoutSeconds.coerceAtLeast(10)
         var lastError = ""
         repeat(retries + 1) { attempt ->
             if (attempt > 0) {
                 AppLog.put("$TAG: 《$label》请求失败，第 $attempt/$retries 次重试")
             }
-            AppLog.putDebug("$TAG: 《$label》发起AI请求，超时设置=${timeoutSeconds}秒")
+            // 每次请求（含重试）按顺序轮换一组 API：分散限流压力，失败自动换下一组
+            val apiIndex = apiCounter.getAndIncrement().mod(providers.size)
+            val provider = providers[apiIndex]
+            AppLog.putDebug(
+                "$TAG: 《$label》发起AI请求（第${attempt + 1}/${retries + 1}次，" +
+                        "API第${apiIndex + 1}/${providers.size}组），超时设置=${timeout}秒"
+            )
             // 调用大模型（不限制 max_tokens，否则长回复会被截断成半截 JSON；
-            // 超时时间从设置读取，章节大、AI 生成慢时可调大等待）
+            // 超时时间从模板读取，章节大、AI 生成慢时可调大等待）
             val response = try {
                 BgmAIService.callOpenAIApi(
                     provider, fullPrompt, maxTokens = null,
-                    callTimeoutSeconds = timeoutSeconds.toLong()
+                    callTimeoutSeconds = timeout.toLong()
                 )
             } catch (e: Exception) {
                 // 异常类型 + 实际生效的超时值一起记录，便于区分客户端超时与服务端断开
                 AppLog.put(
                     "$TAG: 《$label》AI调用失败(${e.javaClass.simpleName})：${e.localizedMessage}" +
-                        "，超时设置=${timeoutSeconds}秒"
+                            "，API第${apiIndex + 1}组，超时设置=${timeout}秒"
                 )
-                lastError = "AI调用失败：${e.localizedMessage}（超时设置${timeoutSeconds}秒）"
+                lastError = "AI调用失败：${e.localizedMessage}（超时设置${timeout}秒）"
                 return@repeat
             }
             AppLog.putDebug("$TAG: 《$label》AI返回：$response")
@@ -472,27 +624,50 @@ object AiChapterFixService {
     }
 
     /**
-     * 解析接口配置，格式与「AI 切歌」一致：接口地址@@模型名@@密钥
+     * 解析接口配置，支持多组轮换，3 段一组（可无限追加）：
+     * 接口地址@@模型名@@密钥@@接口地址@@模型名@@密钥@@...
+     * 尾部凑不满 3 段的残余：2 段视为省略密钥的一组；1 段不完整，忽略并提示。
+     * 兼容旧的单组 2 段写法（接口地址@@模型名）。
      */
-    private fun parseApiConfig(config: String): BgmAIProvider? {
-        val parts = config.trim().split("@@")
-        if (parts.size < 2) return null
-        val url = parts[0].trim().let {
-            when {
-                it.endsWith("/chat/completions") ->
-                    it.removeSuffix("/chat/completions").removeSuffix("/")
-                it.endsWith("/") -> it.removeSuffix("/")
-                else -> it
+    internal fun parseApiConfigs(config: String): List<BgmAIProvider> {
+        val parts = config.trim().split("@@").map { it.trim() }
+        if (parts.size < 2 || parts[0].isEmpty()) return emptyList()
+        val providers = ArrayList<BgmAIProvider>()
+        fun buildProvider(url: String, model: String, key: String): BgmAIProvider? {
+            val normalized = url.let {
+                when {
+                    it.endsWith("/chat/completions") ->
+                        it.removeSuffix("/chat/completions").removeSuffix("/")
+                    it.endsWith("/") -> it.removeSuffix("/")
+                    else -> it
+                }
+            }
+            if (normalized.isEmpty() || model.isEmpty()) return null
+            return BgmAIProvider(
+                id = 0L,
+                name = "AI章节处理",
+                url = normalized,
+                apiKey = key,
+                modelId = model,
+                enabled = true
+            )
+        }
+        var i = 0
+        // 完整组：每 3 段一组
+        while (i + 3 <= parts.size) {
+            buildProvider(parts[i], parts[i + 1], parts[i + 2])?.let { providers.add(it) }
+            i += 3
+        }
+        // 尾部残余：2 段视为省略密钥的一组；1 段不完整，忽略并提示
+        if (i < parts.size) {
+            if (parts.size - i >= 2) {
+                buildProvider(parts[i], parts[i + 1], "")?.let { providers.add(it) }
+                i += 2
+            }
+            if (i < parts.size) {
+                AppLog.put("$TAG: 接口配置尾部有一段不完整（缺少模型名），已忽略")
             }
         }
-        if (url.isEmpty()) return null
-        return BgmAIProvider(
-            id = 0L,
-            name = "AI章节处理",
-            url = url,
-            apiKey = if (parts.size >= 3) parts[2].trim() else "",
-            modelId = parts[1].trim(),
-            enabled = true
-        )
+        return providers
     }
 }

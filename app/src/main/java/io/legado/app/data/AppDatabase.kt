@@ -14,6 +14,7 @@ import io.legado.app.data.dao.BookGroupDao
 import io.legado.app.data.dao.BookSourceDao
 import io.legado.app.data.dao.BookmarkDao
 import io.legado.app.data.dao.AiImageTemplateDao
+import io.legado.app.data.dao.AiChapterFixTemplateDao
 import io.legado.app.data.dao.BgmAIProviderDao
 import io.legado.app.data.dao.BgmAIPromptDao
 import io.legado.app.data.dao.CacheDao
@@ -40,6 +41,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.data.entities.Bookmark
 import io.legado.app.data.entities.AiImageTemplate
+import io.legado.app.data.entities.AiChapterFixTemplate
 import io.legado.app.data.entities.BgmAIProvider
 import io.legado.app.data.entities.BgmAIPrompt
 import io.legado.app.data.entities.Cache
@@ -77,14 +79,15 @@ val appDb by lazy {
 }
 
 @Database(
-    version = 100,
+    version = 101,
     exportSchema = true,
     entities = [Book::class, BookGroup::class, BookSource::class, BookChapter::class,
         ReplaceRule::class, SearchBook::class, SearchKeyword::class, Cookie::class,
         RssSource::class, Bookmark::class, RssArticle::class, RssReadRecord::class,
         RssStar::class, TxtTocRule::class, ReadRecord::class, HttpTTS::class, Cache::class,
         RuleSub::class, DictRule::class, KeyboardAssist::class, Server::class,
-        BgmAIProvider::class, BgmAIPrompt::class, TtsScript::class, AiImageTemplate::class],
+        BgmAIProvider::class, BgmAIPrompt::class, TtsScript::class, AiImageTemplate::class,
+        AiChapterFixTemplate::class],
     views = [BookSourcePart::class]
     // 注：原 autoMigrations(43→93) 因历史 schema 文件（43~92.json）未随源码保留，
     // 编译期无法生成自动迁移，已移除。89→96 由 DatabaseMigrations 中的手动迁移覆盖；
@@ -117,6 +120,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract val bgmAIPromptDao: BgmAIPromptDao
     abstract val ttsScriptDao: TtsScriptDao
     abstract val aiImageTemplateDao: AiImageTemplateDao
+    abstract val aiChapterFixTemplateDao: AiChapterFixTemplateDao
 
     companion object {
 

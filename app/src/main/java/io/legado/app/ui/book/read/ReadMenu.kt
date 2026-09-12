@@ -19,6 +19,7 @@ import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
 import io.legado.app.databinding.ViewReadMenuBinding
 import io.legado.app.help.config.AppConfig
+import io.legado.app.service.AiChapterFixService
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ThemeConfig
@@ -463,17 +464,17 @@ class ReadMenu @JvmOverloads constructor(
             }
         }
 
-        //AI自动处理开关（原来的「自动翻页」移到长按）
+        //AI自动处理开关（按书生效：切换书籍后可对每本书单独决定是否自动处理）
         fabAutoPage.setOnClickListener {
-            val on = !AppConfig.aiChapterFixAuto
-            AppConfig.aiChapterFixAuto = on
+            val book = ReadBook.book
+            val name = book?.name.orEmpty()
+            val url = book?.bookUrl.orEmpty()
+            val on = !AiChapterFixService.isAutoFixEnabled(name, url)
+            AiChapterFixService.setAutoFixEnabled(name, url, on)
             upAiAutoFixFab()
             context.toastOnUi(
-                if (on) {
-                    "AI自动处理：已开启（切换章节时自动处理后续章节）"
-                } else {
-                    "AI自动处理：已关闭"
-                }
+                if (on) "AI自动处理：本书已开启（${book?.name.orEmpty()}）"
+                else "AI自动处理：本书已关闭（${book?.name.orEmpty()}）"
             )
         }
         //长按：直接用 AI 分析当前章节（原「自动翻页」长按入口移除，点击仍是 AI 自动处理开关）
@@ -595,10 +596,11 @@ class ReadMenu @JvmOverloads constructor(
      * 该按钮原来是「自动翻页」，现改为 AI 自动处理开关，自动翻页保留在长按上。
      */
     fun upAiAutoFixFab() = binding.run {
-        val on = AppConfig.aiChapterFixAuto
+        val book = ReadBook.book
+        val on = AiChapterFixService.isAutoFixEnabled(book?.name.orEmpty(), book?.bookUrl.orEmpty())
         fabAutoPage.setColorFilter(if (on) context.accentColor else textColor)
-        fabAutoPage.contentDescription = if (on) "AI自动处理已开启" else "AI自动处理"
-        fabAutoPage.tooltipText = if (on) "AI自动处理：已开启（点击关闭）" else "AI自动处理：已关闭（点击开启）"
+        fabAutoPage.contentDescription = if (on) "AI自动处理已开启（本书）" else "AI自动处理（本书）"
+        fabAutoPage.tooltipText = if (on) "AI自动处理：本书已开启（点击关闭）" else "AI自动处理：本书已关闭（点击开启）"
     }
 
     private fun upBrightnessVwPos() {
