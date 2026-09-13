@@ -291,20 +291,35 @@ object CharacterProfileManager {
      * @param chapterTitle 当前章节标题
      * @param chapterIndex 当前章节下标，用于计算增量间隔
      * @param names 本批识别出的角色名
+     * @param force true=跳过模板 autoEnable 检查（切章补全有自己的独立开关）
+     * @param onComplete 本批全部处理完毕后的回调（在串行队列线程执行，可能滞后），
+     *        参数为过滤后的有效角色名；切章补全流程据此为缺立绘的角色补图
      */
     fun onCharactersDetected(
         bookName: String,
         chapterTitle: String,
         chapterIndex: Int,
-        names: Collection<String>
+        names: Collection<String>,
+        force: Boolean = false,
+        onComplete: ((List<String>) -> Unit)? = null
     ) {
-        if (!autoEnable()) return
-        if (bookName.isBlank()) return
+        if (!force && !autoEnable()) {
+            onComplete?.invoke(emptyList())
+            return
+        }
+        if (bookName.isBlank()) {
+            onComplete?.invoke(emptyList())
+            return
+        }
         val valid = names.map { it.trim() }.filter { !isSkipName(it) }.distinct()
-        if (valid.isEmpty()) return
+        if (valid.isEmpty()) {
+            onComplete?.invoke(emptyList())
+            return
+        }
         scope.launch(serial) {
             runCatching { handle(bookName, chapterTitle, chapterIndex, valid) }
                 .onFailure { AppLog.put("角色档案处理异常: ${it.message}", it) }
+            onComplete?.invoke(valid)
         }
     }
 

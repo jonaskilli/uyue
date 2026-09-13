@@ -299,6 +299,9 @@ object PreferKey {
     const val showRoleAnnotation = "showRoleAnnotation"
     const val roleAnnotationOffset = "roleAnnotationOffset"
 
+    // 切章自动补全角色档案（用上一章正文与已标注姓名，无立绘的角色自动生成）
+    const val autoProfileOnChapterSwitch = "autoProfileOnChapterSwitch"
+
     // 音频缓存标记显示开关
     const val showAudioCacheIndicator = "showAudioCacheIndicator"
 

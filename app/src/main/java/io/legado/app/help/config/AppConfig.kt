@@ -1442,6 +1442,11 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.defaultSharedPreferences.edit()
             .putString(PreferKey.roleAnnotationOffset, value.toString()).apply()
 
+    // 17b. 切章自动补全角色档案：阅读切章时用上一章正文 + 已标注姓名补全档案并自动生成立绘
+    var autoProfileOnChapterSwitch: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.autoProfileOnChapterSwitch, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.autoProfileOnChapterSwitch, value)
+
     // 18. 音频缓存标记显示开关
     var showAudioCacheIndicator: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.showAudioCacheIndicator, false)

@@ -442,6 +442,8 @@ object ReadBook : CoroutineScope by MainScope() {
             callBack?.upMenuView()
             AppLog.putDebug("moveToNextChapter-curPageChanged()")
             curPageChanged()
+            // 切章补全：用「离开的那一章」（durChapterIndex-1）的正文与姓名补档案
+            AiProfileService.onChapterSwitched(book?.name.orEmpty(), durChapterIndex - 1)
             loadRoleAnnotations(curTextChapter)
             loadAudioCacheIndicators(curTextChapter)
             return true
@@ -475,6 +477,8 @@ object ReadBook : CoroutineScope by MainScope() {
             callBack?.upMenuView()
             AppLog.putDebug("moveToNextChapter-curPageChanged()")
             curPageChanged()
+            // 切章补全：用「离开的那一章」（durChapterIndex-1）的正文与姓名补档案
+            AiProfileService.onChapterSwitched(book?.name.orEmpty(), durChapterIndex - 1)
             loadRoleAnnotations(curTextChapter)
             loadAudioCacheIndicators(curTextChapter)
             return true
@@ -506,6 +510,8 @@ object ReadBook : CoroutineScope by MainScope() {
             saveRead()
             callBack?.upMenuView()
             curPageChanged()
+            // 切章补全：用「离开的那一章」（本次是往后翻，即 index+1）的正文与姓名补档案
+            AiProfileService.onChapterSwitched(book?.name.orEmpty(), durChapterIndex + 1)
             loadRoleAnnotations(curTextChapter)
             loadAudioCacheIndicators(curTextChapter)
             return true

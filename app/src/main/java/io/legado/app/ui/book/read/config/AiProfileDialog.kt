@@ -39,6 +39,8 @@ class AiProfileDialog : BaseDialogFragment(R.layout.dialog_ai_profile) {
             binding.etRetry.setText(template.retryCount.toString())
             binding.etTimeout.setText(template.timeoutSeconds.toString())
             binding.switchAuto.isChecked = template.autoEnable
+            binding.switchChapterAuto.isChecked =
+                io.legado.app.help.config.AppConfig.autoProfileOnChapterSwitch
             binding.tvSave.setOnClickListener { save(template.id) }
         }
         binding.tvCancel.setOnClickListener { dismissAllowingStateLoss() }
@@ -69,6 +71,8 @@ class AiProfileDialog : BaseDialogFragment(R.layout.dialog_ai_profile) {
         )
         appDb.aiProfileTemplateDao.insert(template)
         CharacterProfileManager.invalidateTemplateCache()
+        io.legado.app.help.config.AppConfig.autoProfileOnChapterSwitch =
+            binding.switchChapterAuto.isChecked
         toastOnUi("档案设置已保存")
         dismissAllowingStateLoss()
     }
