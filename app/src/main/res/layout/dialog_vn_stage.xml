@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  视觉小说舞台（朗读大图界面的替换形态，开关 vnStageEnabled）：
+  - 全屏 AI 场景背景（centerCrop；无背景时用内置通用背景兜底，不黑屏）
+  - 底部演出区（两行）：
+    第一行 = 说话人立绘（左，旁白时显示旁白立绘）
+    第二行 = 台词面板（角色名 + 旁白文字 + 台词）
+    旁白与对话同框显示；旁白用字数分割（15字/片）跟读显示，对话用打字机
+  固定深色 galgame 风格，不随日/夜主题切换。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/root_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <!-- 全屏场景背景 -->
+    <ImageView
+        android:id="@+id/iv_vn_background"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:contentDescription="场景背景" />
+
+    <!-- 底部演出区：整体上移（不再紧贴屏幕底） -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="26dp"
+        android:orientation="vertical"
+        android:paddingHorizontal="14dp"
+        android:paddingBottom="14dp">
+
+        <!-- 第一行：立绘（左；INVISIBLE 占位保持 110dp 高度恒定，无图时不塌陷） -->
+        <ImageView
+            android:id="@+id/iv_vn_portrait"
+            android:layout_width="110dp"
+            android:layout_height="110dp"
+            android:layout_marginStart="10dp"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/bg_vn_portrait"
+            android:padding="4dp"
+            android:scaleType="fitCenter"
+            android:contentDescription="说话人立绘"
+            android:visibility="invisible" />
+
+        <!-- 第二行：台词面板（半透明融入背景；固定高度容纳 3 行） -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_vn_dialog_panel"
+            android:orientation="vertical"
+            android:paddingHorizontal="14dp"
+            android:paddingVertical="10dp">
+
+            <TextView
+                android:id="@+id/tv_vn_role_name"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:textColor="#FFFFD54F"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                tools:ignore="HardcodedText"
+                tools:text="角色名" />
+
+            <!-- 旁白文字（与对话同框同高：固定 3 行；白字黑描边加宽；字数分割跟读显示） -->
+            <TextView
+                android:id="@+id/tv_vn_narration"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:minLines="3"
+                android:maxLines="3"
+                android:shadowColor="#FF000000"
+                android:shadowDx="0"
+                android:shadowDy="0"
+                android:shadowRadius="12"
+                android:textColor="#FFFFFFFF"
+                android:textSize="16sp"
+                android:lineSpacingExtra="4dp"
+                android:visibility="gone"
+                tools:ignore="HardcodedText"
+                tools:text="旁白文字（字数分割跟读显示）" />
+
+            <!-- 台词（打字机逐字显示） -->
+            <TextView
+                android:id="@+id/tv_vn_dialogue"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:minLines="3"
+                android:maxLines="3"
+                android:lineSpacingExtra="4dp"
+                android:scrollbars="vertical"
+                android:textColor="#F2FFFFFF"
+                android:textSize="16sp"
+                tools:ignore="HardcodedText"
+                tools:text="台词打字机逐字显示" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

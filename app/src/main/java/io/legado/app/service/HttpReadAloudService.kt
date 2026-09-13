@@ -34,6 +34,8 @@ import androidx.media3.extractor.wav.WavExtractor
 import com.script.ScriptException
 import io.legado.app.R
 import io.legado.app.constant.AppLog
+import io.legado.app.model.VnParagraph
+import io.legado.app.model.VnSubtitlePos
 import io.legado.app.constant.AppPattern
 import io.legado.app.constant.EventBus
 import io.legado.app.utils.observeEvent
@@ -1906,6 +1908,9 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         val baseText = purifySpeakText(text)
         buildSubtitles(baseText)
 
+        // 视觉小说舞台：段落开始朗读即推送（说话人归属由 UI 侧反查章节角色缓存）
+        postEvent(EventBus.VN_PARAGRAPH, VnParagraph(text, nowSpeak))
+
         val effectiveMode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
             AppConfig.getEffectiveSoundEffectMode(it)
         } ?: AppConfig.soundEffectMode
@@ -1971,14 +1976,21 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         val currentCharCount = (ratio * currentParagraphTotalChars).toInt()
 
         var currentSubtitle = currentSubtitles.lastOrNull() ?: ""
+        var currentRange = currentSubtitleCharRanges.lastOrNull() ?: (0 to 0)
         for (i in currentSubtitleCharRanges.indices) {
             val (startChars, endChars) = currentSubtitleCharRanges[i]
             if (currentCharCount in startChars until endChars) {
                 currentSubtitle = currentSubtitles[i]
+                currentRange = startChars to endChars
                 break
             }
         }
         postEvent(EventBus.READ_ALOUD_SUBTITLE, currentSubtitle)
+        // 视觉小说舞台：片段位置（段内字符区间），驱动对话文字跟随朗读进度
+        postEvent(
+            EventBus.VN_SUBTITLE_POS,
+            VnSubtitlePos(currentSubtitle, currentRange.first, currentRange.second)
+        )
 
         // 章节整体进度（千分比 0~1000）
         val textChapter = textChapter ?: return

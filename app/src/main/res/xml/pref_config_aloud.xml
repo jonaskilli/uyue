@@ -401,6 +401,13 @@
             android:key="showAudioCacheIndicator"
             app:iconSpaceReserved="false" />
 
+        <io.legado.app.lib.prefs.SwitchPreference
+            android:defaultValue="false"
+            android:title="视觉小说舞台"
+            android:summary="朗读时大图界面替换为游戏式演出界面：说话人立绘 + 打字机台词 + AI 场景背景（场景图由 AI 生成，全局共用）"
+            android:key="vnStageEnabled"
+            app:iconSpaceReserved="false" />
+
     </io.legado.app.lib.prefs.PreferenceCategory>
 
 </androidx.preference.PreferenceScreen>

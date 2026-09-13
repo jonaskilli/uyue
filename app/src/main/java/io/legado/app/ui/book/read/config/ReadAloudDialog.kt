@@ -853,7 +853,12 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         // 使全屏 Dialog 获得独立的顶层窗口，不被本 Dialog（底部定位、WRAP_CONTENT）的窗口范围限制，
         // 避免顶部透出底层阅读页文字
         tvReadAloudSubtitle.setOnClickListener {
-            FullscreenAiImageDialog().show(requireActivity().supportFragmentManager, "fullscreenAiImageDialog")
+            // 视觉小说舞台开关：开→舞台界面，关→原全屏图界面
+            if (AppConfig.vnStageEnabled) {
+                VnStageDialog().show(requireActivity().supportFragmentManager, "vnStageDialog")
+            } else {
+                FullscreenAiImageDialog().show(requireActivity().supportFragmentManager, "fullscreenAiImageDialog")
+            }
         }
         llMainMenu.setOnClickListener {
             callBack?.showMenuBar()
@@ -1055,8 +1060,12 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                         if (AppConfig.readAloudAiImage) switchAiHistoryImage(1) else switchLocalImage(-1)
                     }
                     else -> {
-                        // 中 1/3：进入全屏图片预览（两种模式通用）
-                        FullscreenAiImageDialog().show(requireActivity().supportFragmentManager, "fullscreenAiImageDialog")
+                        // 中 1/3：进入大图界面（视觉小说舞台开→舞台，关→全屏图）
+                        if (AppConfig.vnStageEnabled) {
+                            VnStageDialog().show(requireActivity().supportFragmentManager, "vnStageDialog")
+                        } else {
+                            FullscreenAiImageDialog().show(requireActivity().supportFragmentManager, "fullscreenAiImageDialog")
+                        }
                     }
                 }
                 return true

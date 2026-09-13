@@ -41,6 +41,12 @@ object EventBus {
     const val READ_ALOUD_STARTING = "readAloudStarting"
     const val READ_ALOUD_AUDIO_CACHE_REFRESH = "readAloudAudioCacheRefresh"
     const val READ_ALOUD_VOLUME_GAIN = "readAloudVolumeGain"
+    // 视觉小说舞台：段落归属（说话人/旁白）+ 段落全文，value = VnParagraph
+    const val VN_PARAGRAPH = "vnParagraph"
+    // 视觉小说舞台：当前字幕片段及其段内字符区间，value = VnSubtitlePos
+    // （READ_ALOUD_SUBTITLE 会周期性重发同一片段，累计长度会膨胀；
+    //   本事件带区间，消费侧幂等取 pos.end，不受重发影响）
+    const val VN_SUBTITLE_POS = "vnSubtitlePos"
     const val EXPORT_BOOK = "exportBook"
     const val UP_MANGA_CONFIG = "upMangaConfig"
     const val PLAY_MODE_CHANGED = "playModeChanged"

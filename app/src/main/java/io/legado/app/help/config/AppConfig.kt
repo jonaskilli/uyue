@@ -1452,6 +1452,11 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.showAudioCacheIndicator, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.showAudioCacheIndicator, value)
 
+    // 19.5 视觉小说舞台开关（朗读大图界面替换为 galgame 演出界面，全局开关，默认关闭）
+    var vnStageEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.vnStageEnabled, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.vnStageEnabled, value)
+
     // 19. AI 生图开关（每本书单独设置，默认关闭；无打开书籍时读为 false、写入无效）
     // 绑定维度为【书名】，换书源后 bookUrl 变化也不失效；同时兼容旧版按 bookUrl 存储的数据。
     var readAloudAiImage: Boolean

@@ -325,6 +325,8 @@ object PreferKey {
 
     // --- AI 生图配置 ---
     const val readAloudAiImage = "readAloudAiImage"
+    // 视觉小说舞台（朗读大图界面替换为 galgame 演出界面）
+    const val vnStageEnabled = "vnStageEnabled"
     // 启用AI生图（每本书单独设置），key = aiImageEnablePrefix_${bookUrl}
     const val aiImageEnablePrefix = "aiImageEnable_"
     // AI 生图临时缓存保留数量上限（默认 50）

@@ -180,6 +180,17 @@ object CharacterProfileManager {
      * 单轮 OpenAI 兼容对话（非流式），messages = system + user。
      * 失败抛异常，由调用方按模板 retryCount 与多组 API 轮换重试。
      */
+    /**
+     * 公共文本对话入口（供视觉小说舞台等外部功能复用）：
+     * 复用档案模板的接口配置/多组轮换/重试，阻塞式（调用方需在 IO 线程）。
+     * 返回 null 表示失败（原因已写日志）。
+     */
+    fun chatForExternal(
+        system: String,
+        user: String,
+        maxTokens: Int
+    ): String? = chatWithRetry(system, user, maxTokens)
+
     private fun chatOnce(
         provider: BgmAIProvider,
         system: String,

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
 import android.os.Looper
+import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.InputDevice
@@ -108,6 +109,7 @@ import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.book.read.config.AiChapterFixDialog
 import io.legado.app.ui.book.read.config.AutoReadDialog
 import io.legado.app.ui.book.read.config.CharacterManagerDialog
+import io.legado.app.ui.book.read.config.CharacterProfileDialog
 import io.legado.app.ui.book.read.config.CharacterVoiceHelper
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.BG_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_ACCENT_COLOR
@@ -1980,8 +1982,8 @@ class ReadBookActivity : BaseReadBookActivity(),
             .setTitle("编辑角色")
             .setView(scrollView)
             // Neutral 位于按钮栏最左侧（排列顺序为 Neutral | Negative | Positive），
-            // 即「角色管理 | 取消 | 保存」。
-            // 与「取消」一致：不保存当前修改，仅关闭本对话框后进入角色管理。
+            // 即「角色管理 | 角色档案 | 取消 | 保存」（角色档案为下方注入的第 4 个按钮）。
+            // 与「取消」一致：不保存当前修改，仅关闭本对话框后进入对应界面。
             .setNeutralButton("角色管理") { _, _ ->
                 dialogRef.get()?.dismiss()
                 showDialogFragment(CharacterManagerDialog())
@@ -1990,6 +1992,45 @@ class ReadBookActivity : BaseReadBookActivity(),
             .setNegativeButton("取消", null)
             .show()
         dialogRef.set(dialog)
+
+        // 「角色档案」入口：插在按钮栏「角色管理」右侧。
+        // AlertDialog 的按钮槽位固定 3 个（Neutral|Negative|Positive），Builder
+        // 加不了第 4 个，这里在 neutral 按钮的父容器（按钮栏 LinearLayout）中
+        // 紧随其后插入一个同风格按钮；主题差异导致取不到容器时静默降级（不显示）。
+        runCatching {
+            val neutral = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+            val bar = neutral?.parent
+            if (neutral != null && bar is LinearLayout) {
+                val typedValue = TypedValue()
+                context.theme.resolveAttribute(
+                    android.R.attr.selectableItemBackground, typedValue, true
+                )
+                val btnProfile = Button(context).apply {
+                    text = "角色档案"
+                    textSize = neutral.textSize
+                    typeface = neutral.typeface
+                    // 与系统对话框按钮同风格：无边框水波纹 + 同文字色
+                    setBackgroundResource(typedValue.resourceId)
+                    setTextColor(neutral.textColors)
+                    val hp = 16.dpToPx()
+                    val vp = 12.dpToPx()
+                    setPadding(hp, vp, hp, vp)
+                    minHeight = 48.dpToPx()
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                    setOnClickListener {
+                        // 与「角色管理」一致：不保存当前修改，关闭本对话框后打开角色档案
+                        dialogRef.get()?.dismiss()
+                        showDialogFragment(
+                            CharacterProfileDialog.newInstance(bookName, name)
+                        )
+                    }
+                }
+                bar.addView(btnProfile, bar.indexOfChild(neutral) + 1)
+            }
+        }
     }
 
     /**
