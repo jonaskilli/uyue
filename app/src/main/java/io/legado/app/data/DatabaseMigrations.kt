@@ -23,7 +23,7 @@ object DatabaseMigrations {
             migration_89_90,
             migration_90_91, migration_91_92, migration_92_93, migration_93_94,
             migration_94_95, migration_95_96, migration_96_97, migration_97_98, migration_98_99,
-            migration_99_100, migration_100_101,
+            migration_99_100, migration_100_101, migration_101_102,
         )
     }
 
@@ -544,6 +544,57 @@ object DatabaseMigrations {
                     `retryCount` INTEGER NOT NULL DEFAULT 0,
                     `timeoutSeconds` INTEGER NOT NULL DEFAULT 180,
                     `contextLength` INTEGER NOT NULL DEFAULT 0,
+                    `isDefault` INTEGER NOT NULL DEFAULT 0,
+                    `lastUpdateTime` INTEGER NOT NULL DEFAULT 0,
+                    `sortOrder` INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (`id`)
+                )"""
+            )
+        }
+    }
+
+    private val migration_101_102 = object : Migration(101, 102) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // 新增 AI 角色档案表（主键 bookUrl+name；列不带 DEFAULT，与 Room 期望的
+            // schema 一致——实体字段未声明 @ColumnInfo(defaultValue)）
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `characterProfiles` (
+                    `bookUrl` TEXT NOT NULL,
+                    `name` TEXT NOT NULL,
+                    `aliases` TEXT NOT NULL,
+                    `gender` TEXT NOT NULL,
+                    `age` TEXT NOT NULL,
+                    `identity` TEXT NOT NULL,
+                    `personality` TEXT NOT NULL,
+                    `traits` TEXT NOT NULL,
+                    `speakingStyle` TEXT NOT NULL,
+                    `relations` TEXT NOT NULL,
+                    `background` TEXT NOT NULL,
+                    `timeline` TEXT NOT NULL,
+                    `firstChapter` TEXT NOT NULL,
+                    `lastChapter` TEXT NOT NULL,
+                    `lastChapterIndex` INTEGER NOT NULL,
+                    `mentionCount` INTEGER NOT NULL,
+                    `lastUpdateMention` INTEGER NOT NULL,
+                    `confidence` REAL NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    PRIMARY KEY(`bookUrl`, `name`)
+                )"""
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_characterProfiles_bookUrl` ON `characterProfiles` (`bookUrl`)"
+            )
+            // 新增 AI 角色档案模板表（输入框直填 API，格式同 AI 处理章节）
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `aiProfileTemplate` (
+                    `id` INTEGER NOT NULL,
+                    `name` TEXT NOT NULL DEFAULT '',
+                    `apiConfig` TEXT NOT NULL DEFAULT '',
+                    `prompt` TEXT NOT NULL DEFAULT '',
+                    `chapterGap` INTEGER NOT NULL DEFAULT 5,
+                    `retryCount` INTEGER NOT NULL DEFAULT 1,
+                    `timeoutSeconds` INTEGER NOT NULL DEFAULT 240,
+                    `autoEnable` INTEGER NOT NULL DEFAULT 1,
                     `isDefault` INTEGER NOT NULL DEFAULT 0,
                     `lastUpdateTime` INTEGER NOT NULL DEFAULT 0,
                     `sortOrder` INTEGER NOT NULL DEFAULT 0,

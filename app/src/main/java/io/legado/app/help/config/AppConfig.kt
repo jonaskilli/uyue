@@ -1590,4 +1590,28 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     // ================= 自定义功能区域 End =================
 
+    // --- 与角色对话（RoleChat）---
+
+    /** 与角色对话：OpenAI 兼容接口配置，格式同 AI 处理章节：接口@@模型@@密钥（可多组轮换）。
+     *  未配置（或被清空）时默认走内置混元太极本地网关，与其他 AI 功能同一条路线 */
+    var roleChatApiConfig: String
+        get() = appCtx.getPrefString(PreferKey.roleChatApiConfig)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_AI_CHAPTER_FIX_API
+        set(value) = appCtx.putPrefString(PreferKey.roleChatApiConfig, value)
+
+    /** 与角色对话：回复完成后是否用角色绑定发音人朗读 */
+    var roleChatVoiceEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.roleChatVoiceEnabled, true)
+        set(value) = appCtx.putPrefBoolean(PreferKey.roleChatVoiceEnabled, value)
+
+    /** 与角色对话：发给 AI 的历史上下文条数上限 */
+    var roleChatContextLimit: Int
+        get() = appCtx.getPrefInt(PreferKey.roleChatContextLimit, 20)
+        set(value) = appCtx.putPrefInt(PreferKey.roleChatContextLimit, value.coerceIn(2, 200))
+
+    /** 角色立绘使用的生图模板 id（0 = 跟随默认模板）。选择后持久化，重启不丢 */
+    var aiPortraitTemplateId: Long
+        get() = appCtx.getPrefString(PreferKey.aiPortraitTemplateId)?.toLongOrNull() ?: 0L
+        set(value) = appCtx.putPrefString(PreferKey.aiPortraitTemplateId, value.toString())
+
 }

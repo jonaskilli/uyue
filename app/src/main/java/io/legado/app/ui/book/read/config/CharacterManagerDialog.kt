@@ -344,6 +344,8 @@ class CharacterManagerDialog : DialogFragment() {
         val name = character.optString("name", "")
 
         val options = arrayOf(
+            "与角色对话",
+            "角色档案",
             "修改角色",
             "删除角色",
             "设为主角",
@@ -360,16 +362,18 @@ class CharacterManagerDialog : DialogFragment() {
             .setTitle("角色操作: $name")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> showEditCharacterDialog(position)
-                    1 -> deleteCharacter(position)
-                    2 -> setMainCharacter(position)
-                    3 -> showFixVoiceDialog(position)
-                    4 -> fixCurrentVoice(position)
-                    5 -> showGenderAgeDialog(position)
-                    6 -> releaseCharacter(position)
-                    7 -> doMerge()
-                    8 -> clearAllMarks()
-                    9 -> pinMarkedToTop(position)
+                    0 -> RoleChatActivity.start(requireActivity(), currentBook, name)
+                    1 -> CharacterProfileDialog.newInstance(currentBook, name)
+                        .show(childFragmentManager, "characterProfileDialog")
+                    2 -> showEditCharacterDialog(position)
+                    3 -> setMainCharacter(position)
+                    4 -> showFixVoiceDialog(position)
+                    5 -> fixCurrentVoice(position)
+                    6 -> showGenderAgeDialog(position)
+                    7 -> releaseCharacter(position)
+                    8 -> doMerge()
+                    9 -> clearAllMarks()
+                    10 -> pinMarkedToTop(position)
                 }
             }
             .show()
@@ -1122,6 +1126,8 @@ class CharacterManagerDialog : DialogFragment() {
                 updateCharacterList()
                 updateLabel()
                 toast("已删除角色: $name")
+                // 同步联动：删除 AI 角色档案（并记入删除名单，朗读不再自动重建）
+                io.legado.app.model.CharacterProfileManager.delete(currentBook, name)
             }
             .setNegativeButton("取消", null)
             .show()
@@ -1358,9 +1364,11 @@ class CharacterManagerDialog : DialogFragment() {
             allAliasesSet.add(mainName)
         }
 
-        // 收集待合并角色的别名
+        // 收集待合并角色的别名（在移除前完成，顺带记下被合并方角色名供档案合并联动）
+        val mergedNames = mutableListOf<String>()
         mergeIndices.sortedDescending().forEach { pos ->
             val char = characterRecords.optJSONObject(pos) ?: return@forEach
+            char.optString("name", "").takeIf { it.isNotEmpty() }?.let { mergedNames.add(it) }
             val aliasesStr = char.optString("aliases", "")
             if (aliasesStr.isNotEmpty()) {
                 aliasesStr.split("|").forEach { allAliasesSet.add(it.trim()) }
@@ -1384,6 +1392,10 @@ class CharacterManagerDialog : DialogFragment() {
         updateCharacterList()
         updateLabel()
         toast("已合并角色: $mainName")
+        // 同步联动：AI 角色档案合并（被合并方档案并入主名，后台由 AI 重新整理）
+        io.legado.app.model.CharacterProfileManager.mergeProfiles(
+            currentBook, mainName, mergedNames, null
+        )
     }
 
     private fun showChangeVoiceDialog() {

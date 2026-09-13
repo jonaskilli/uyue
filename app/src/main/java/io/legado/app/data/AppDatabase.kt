@@ -15,9 +15,11 @@ import io.legado.app.data.dao.BookSourceDao
 import io.legado.app.data.dao.BookmarkDao
 import io.legado.app.data.dao.AiImageTemplateDao
 import io.legado.app.data.dao.AiChapterFixTemplateDao
+import io.legado.app.data.dao.AiProfileTemplateDao
 import io.legado.app.data.dao.BgmAIProviderDao
 import io.legado.app.data.dao.BgmAIPromptDao
 import io.legado.app.data.dao.CacheDao
+import io.legado.app.data.dao.CharacterProfileDao
 import io.legado.app.data.dao.CookieDao
 import io.legado.app.data.dao.DictRuleDao
 import io.legado.app.data.dao.HttpTTSDao
@@ -42,9 +44,11 @@ import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.data.entities.Bookmark
 import io.legado.app.data.entities.AiImageTemplate
 import io.legado.app.data.entities.AiChapterFixTemplate
+import io.legado.app.data.entities.AiProfileTemplate
 import io.legado.app.data.entities.BgmAIProvider
 import io.legado.app.data.entities.BgmAIPrompt
 import io.legado.app.data.entities.Cache
+import io.legado.app.data.entities.CharacterProfile
 import io.legado.app.data.entities.Cookie
 import io.legado.app.data.entities.DictRule
 import io.legado.app.data.entities.HttpTTS
@@ -79,7 +83,7 @@ val appDb by lazy {
 }
 
 @Database(
-    version = 101,
+    version = 102,
     exportSchema = true,
     entities = [Book::class, BookGroup::class, BookSource::class, BookChapter::class,
         ReplaceRule::class, SearchBook::class, SearchKeyword::class, Cookie::class,
@@ -87,7 +91,7 @@ val appDb by lazy {
         RssStar::class, TxtTocRule::class, ReadRecord::class, HttpTTS::class, Cache::class,
         RuleSub::class, DictRule::class, KeyboardAssist::class, Server::class,
         BgmAIProvider::class, BgmAIPrompt::class, TtsScript::class, AiImageTemplate::class,
-        AiChapterFixTemplate::class],
+        AiChapterFixTemplate::class, CharacterProfile::class, AiProfileTemplate::class],
     views = [BookSourcePart::class]
     // 注：原 autoMigrations(43→93) 因历史 schema 文件（43~92.json）未随源码保留，
     // 编译期无法生成自动迁移，已移除。89→96 由 DatabaseMigrations 中的手动迁移覆盖；
@@ -121,6 +125,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract val ttsScriptDao: TtsScriptDao
     abstract val aiImageTemplateDao: AiImageTemplateDao
     abstract val aiChapterFixTemplateDao: AiChapterFixTemplateDao
+    abstract val characterProfileDao: CharacterProfileDao
+    abstract val aiProfileTemplateDao: AiProfileTemplateDao
 
     companion object {
 

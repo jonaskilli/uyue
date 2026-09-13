@@ -1808,4 +1808,190 @@ object AiImageGenerator {
         // 其他情况最多只补 /images/generations，不强制补 /v1，避免非标准路径出错
         return "$trimmed/images/generations"
     }
+
+    // ===================== 角色立绘（气泡头像 / 与角色对话） =====================
+
+    /** 角色立绘缓存目录名（固定 cacheDir/ai_images/ai_avatars/） */
+    private const val AVATAR_DIR_NAME = "ai_avatars"
+
+    /** 立绘专用负面提示词：与场景插图不同，立绘要的是人物半身/全身像 */
+    private const val AVATAR_NEGATIVE_PROMPT =
+        "文字, 水印, 边框, 多人, 群像, 残缺肢体, 手部特写, 模糊, 低质量"
+
+    /** 用户没配置画风时的中性兜底（避免默认国风把都市小说的立绘带成仙侠） */
+    private const val AVATAR_NEUTRAL_STYLE =
+        "高质量数字绘画, 细腻光影, 写实与插画结合的人物立绘风格"
+
+    /** 同一角色的立绘只生成一次 */
+    private val avatarInFlight = ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * 角色立绘缓存目录（应用私有缓存，懒加载）。
+     * 固定 cacheDir 而不跟随 savePath：savePath 可能是 SAF content:// 路径不可写。
+     */
+    private val avatarDirCache: File by lazy {
+        File(File(appCtx.cacheDir, CACHE_DIR_NAME), AVATAR_DIR_NAME).apply {
+            if (!exists()) mkdirs()
+        }
+    }
+
+    private fun avatarCacheDir(): File = avatarCacheDirLazy()
+
+    private fun avatarCacheDirLazy(): File = avatarDirCache
+
+    /** 角色立绘的稳定标识：书名 + 角色名（同书同名视为同一角色） */
+    fun avatarKey(bookName: String, characterName: String): String =
+        "avatar_${sanitizeFilePart(bookName)}_${sanitizeFilePart(characterName)}"
+
+    private fun sanitizeFilePart(s: String): String =
+        s.replace(Regex("[\\\\/:*?\"<>|\\s]"), "_").take(40)
+
+    /** 取已缓存的角色立绘；未生成过返回 null */
+    fun getCachedAvatar(bookName: String, characterName: String): File? {
+        val f = File(avatarCacheDir(), avatarKey(bookName, characterName) + ".jpg")
+        return if (f.isFile && f.length() > 0) f else null
+    }
+
+    /**
+     * 生成角色立绘。
+     *
+     * 与段落生图的区别：
+     * - 缓存键为「书名 + 角色名」，同一角色全局只生成一次；
+     * - 提示词由角色名 + 性别年龄段 + 档案人设构成，而非段落正文，保证形象稳定；
+     * - 已在生成中的请求直接丢弃（并发去重）。
+     *
+     * @return 是否已受理并**保证回调**；false 表示被并发去重丢弃、不会有回调
+     */
+    fun generateCharacterAvatar(
+        characterName: String,
+        genderAge: String,
+        bookName: String,
+        identity: String = "",
+        personality: String = "",
+        background: String = "",
+        regenerate: Boolean = false,
+        templateId: Long = 0L,
+        onSuccess: (File) -> Unit,
+        onFailure: (Throwable) -> Unit
+    ): Boolean {
+        if (characterName.isBlank()) {
+            onFailure(IllegalArgumentException("角色名为空"))
+            return true
+        }
+        val key = avatarKey(bookName, characterName)
+        if (regenerate) {
+            runCatching { File(avatarCacheDir(), "$key.jpg").delete() }
+        } else {
+            getCachedAvatar(bookName, characterName)?.let {
+                AppLog.put("AI立绘: 命中缓存 $characterName")
+                onSuccess(it)
+                return true
+            }
+        }
+        // 同一角色并发去重
+        if (avatarInFlight.putIfAbsent(key, true) != null) {
+            if (regenerate) {
+                runCatching { File(avatarCacheDir(), "$key.jpg").delete() }
+                onFailure(IllegalStateException("旧立绘生成中，稍后重试"))
+                return true
+            }
+            AppLog.put("AI立绘: 已在处理中，跳过 $characterName")
+            return false
+        }
+        AppLog.put("AI立绘: 开始生成 $characterName（重新生成=$regenerate）")
+        scope.launch {
+            try {
+                // 模板选择：优先用界面选定的模板（持久化），无效或未选时回落默认模板
+                val template = runCatching {
+                    if (templateId > 0L) appDb.aiImageTemplateDao.getById(templateId) else null
+                }.getOrNull()
+                    ?: runCatching { appDb.aiImageTemplateDao.getDefault() }.getOrNull()
+                    ?: appDb.aiImageTemplateDao.getAllList().firstOrNull()
+                if (template == null) {
+                    throw IllegalStateException("未找到生图模板，请先在 AI 生图设置里配置模板")
+                }
+                val slots = buildKeySlots(listOf(template))
+                if (slots.isEmpty()) {
+                    throw IllegalStateException("生图模板「${template.name}」未配置接口与密钥")
+                }
+                val prompt = buildAvatarPrompt(
+                    characterName, genderAge, bookName,
+                    template.imageStyle, identity, personality, background
+                )
+                AppLog.put("AI立绘: 提示词 $prompt")
+                val slot = slots[nextSlotIndex(slots.size)]
+                // 多密钥/多模板轮换 + 重试一次
+                var file: File? = null
+                for (attempt in 1..2) {
+                    val s = if (attempt == 1) slot else slots[nextSlotIndex(slots.size)]
+                    file = try {
+                        callImageApi(s.template, s.key, prompt, key)
+                    } catch (e: Exception) {
+                        AppLog.put("AI立绘第${attempt}次请求异常: ${e.message}")
+                        null
+                    }
+                    if (file != null) break
+                }
+                file ?: throw IllegalStateException("生图失败，请稍后重试")
+                // 落到角色专属缓存路径
+                val dir = avatarCacheDir()
+                if (!dir.exists() && !dir.mkdirs()) {
+                    throw IllegalStateException("立绘缓存目录不可写: ${dir.absolutePath}")
+                }
+                val target = File(dir, "$key.jpg")
+                if (file.absolutePath != target.absolutePath) {
+                    file.copyTo(target, overwrite = true)
+                }
+                if (target.length() <= 0) {
+                    throw IllegalStateException("立绘写入为空: ${target.absolutePath}")
+                }
+                AppLog.put("AI立绘: 生成成功 $characterName -> ${target.name}")
+                withContext(Dispatchers.Main) { onSuccess(target) }
+            } catch (e: Exception) {
+                AppLog.put("AI立绘: 生成失败 $characterName ${e.message}")
+                withContext(Dispatchers.Main) { onFailure(e) }
+            } finally {
+                avatarInFlight.remove(key)
+            }
+        }
+        return true
+    }
+
+    /**
+     * 角色立绘提示词：强调「人物立绘」与纯背景，避免肢体残缺、多人物或带文字。
+     *
+     * 画风来源：生图模板的 [AiImageTemplate.imageStyle]；未配置时用中性兜底，
+     * 避免默认国风把任何题材都带成古装仙侠。
+     * 人设依据（身份/性格/背景）来自 AI 角色档案，没有则仅用姓名+性别年龄。
+     */
+    private fun buildAvatarPrompt(
+        characterName: String,
+        genderAge: String,
+        bookName: String,
+        imageStyle: String,
+        identity: String = "",
+        personality: String = "",
+        background: String = ""
+    ): String {
+        val who = if (genderAge.isBlank()) characterName else "${genderAge}角色「${characterName}」"
+        val style = imageStyle.trim().takeIf { it.isNotBlank() } ?: AVATAR_NEUTRAL_STYLE
+        val personaCues = buildList {
+            if (identity.isNotBlank()) add("身份：${identity.take(40)}")
+            if (personality.isNotBlank()) add("性格：${personality.take(40)}")
+            if (background.isNotBlank()) add("背景履历：${background.take(80)}")
+        }
+        return buildString {
+            if (bookName.isNotBlank()) append("小说《${bookName}》")
+            append("中的${who}的人物立绘。")
+            if (personaCues.isNotEmpty()) {
+                append("人物设定：").append(personaCues.joinToString("；")).append("。")
+                append("请据此表现其气质、神态与服饰。")
+            }
+            append("要求：单人全身或大半身立绘，居中构图，面部清晰完整，")
+            append("表情自然，姿态放松。")
+            append("画面风格：${style}。")
+            append("纯色简洁背景，不要文字，不要水印，不要边框，")
+            append("不要多余人物，不要残缺肢体，不要手部特写。")
+        }
+    }
 }

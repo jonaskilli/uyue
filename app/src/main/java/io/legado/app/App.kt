@@ -141,6 +141,7 @@ class App : Application() {
             initDefaultAiImageTemplate()
             //初始化默认AI章节处理模板
             initDefaultAiChapterFixTemplate()
+            initDefaultAiProfileTemplate()
             //激活转发器对应的TTS引擎
             TtsEngineActivator.activateOnAppInit()
         }
@@ -420,6 +421,18 @@ class App : Application() {
                 )
                 appDb.aiChapterFixTemplateDao.insert(defaultTemplate)
                 LogUtils.d("App", "已初始化默认AI章节处理模板")
+            }
+        }
+    }
+
+    /** 初始化默认「AI 角色档案」模板（空接口配置，用户在档案设置里填写后生效） */
+    private fun initDefaultAiProfileTemplate() {
+        Coroutine.async {
+            if (appDb.aiProfileTemplateDao.getAllList().isEmpty()) {
+                appDb.aiProfileTemplateDao.insert(
+                    io.legado.app.model.CharacterProfileManager.builtinDefaultTemplate()
+                )
+                LogUtils.d("App", "已初始化默认AI角色档案模板")
             }
         }
     }

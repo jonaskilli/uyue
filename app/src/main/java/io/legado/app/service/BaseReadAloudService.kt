@@ -3268,6 +3268,15 @@ abstract class BaseReadAloudService : BaseService(),
             stopSelf()
             return
         }
+        // 进入新章节：从脚本章节缓存提取角色，触发 AI 角色档案的建档/增量更新（全容错）
+        runCatching {
+            ReadBook.book?.let { book ->
+                io.legado.app.model.AiProfileService.onChapterStarted(
+                    book.name, ReadBook.durChapterIndex,
+                    ReadBook.curTextChapter?.chapter?.title.orEmpty()
+                )
+            }
+        }
         resumeReadAloudInternal()
     }
 

@@ -245,6 +245,12 @@
             android:name=".ui.tts.plugin.TtsPluginActivity"
             android:launchMode="singleTop"
             android:screenOrientation="behind" />
+        <!-- 与角色对话（galgame 式） -->
+        <activity
+            android:name=".ui.book.read.config.RoleChatActivity"
+            android:label="与角色对话"
+            android:screenOrientation="behind"
+            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.hunyuan.HunyuanTaijiActivity"
             android:label="混元太极"

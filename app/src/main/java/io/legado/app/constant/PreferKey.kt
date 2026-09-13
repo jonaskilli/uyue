@@ -379,4 +379,14 @@ object PreferKey {
     const val aiImageTemplateBindNamePrefix = "aiImageTemplateBindName_"
     // 是否保存AI生图到持久目录（按书名），key = aiImageSaveNamePrefix_${bookName}
     const val aiImageSaveNamePrefix = "aiImageSaveName_"
+
+    // --- 与角色对话（RoleChat）---
+    // OpenAI 兼容接口配置，格式与「AI处理章节」一致：接口@@模型@@密钥（3 段一组，可多组轮换）
+    const val roleChatApiConfig = "roleChatApiConfig"
+    // 回复完成后是否用角色绑定的发音人朗读
+    const val roleChatVoiceEnabled = "roleChatVoiceEnabled"
+    // 发给 AI 的历史上下文条数上限（不含本轮输入与 system 人设）
+    const val roleChatContextLimit = "roleChatContextLimit"
+    // 角色立绘使用的生图模板 id（0 = 跟随默认模板）
+    const val aiPortraitTemplateId = "aiPortraitTemplateId"
 }
