@@ -1,6 +1,8 @@
 package io.legado.app.ui.book.read.config
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
 import android.text.method.ScrollingMovementMethod
 import android.view.WindowManager
@@ -66,6 +68,9 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
     private var streamJob: Job? = null
     private var printerJob: Job? = null
 
+    /** 当前立绘位图（整图，MATRIX 顶格自适应显示） */
+    private var portraitBitmap: Bitmap? = null
+
     /** 键盘可视区监听（见 [setupKeyboardSync]） */
     private var keyboardListener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
 
@@ -117,6 +122,10 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
         binding.tvPlaceholder.text = characterName.firstOrNull()?.toString() ?: "?"
         binding.tvDialogue.movementMethod = ScrollingMovementMethod()
         updateVoiceLabel()
+        // 立绘区尺寸变化（输入法弹出/收起顶动布局）时重算顶格矩阵
+        binding.ivPortrait.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            applyPortraitMatrix()
+        }
         loadPortrait()
         // 空会话给一句开场引导
         if (history.isEmpty()) {
@@ -315,15 +324,48 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
 
     private fun showPortraitBitmap(file: java.io.File) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val bmp = AiImageGenerator.decodeAvatarTopSquare(file, 512)
+            // 解码整图（不预裁），由 Matrix 顶格自适应：空间够显示更多身体部分
+            val bmp = AiImageGenerator.decodeAvatarFull(file, 720)
             withContext(Dispatchers.Main) {
                 if (bmp != null && !isDestroyed && !isFinishing) {
+                    portraitBitmap = bmp
+                    binding.ivPortrait.scaleType = android.widget.ImageView.ScaleType.MATRIX
                     binding.ivPortrait.setImageBitmap(bmp)
+                    applyPortraitMatrix()
                     binding.ivPortrait.visibility = android.view.View.VISIBLE
                     binding.tvPlaceholder.visibility = android.view.View.GONE
                 }
             }
         }
+    }
+
+    /**
+     * 立绘顶格矩阵：
+     * - 宽度铺满立绘区、顶部顶格（不居中悬浮）；区域下方有空间时继续显示
+     *   图片方形以下的身体部分，底部超出自然被裁；
+     * - 输入法把区域压到装不下完整正方形时，按「方形边长=区域高」整体缩小
+     *   （以正方形为单位缩放），保证头部方形始终完整可见。
+     */
+    private fun applyPortraitMatrix() {
+        val bmp = portraitBitmap ?: return
+        val iv = binding.ivPortrait
+        val vw = iv.width - iv.paddingLeft - iv.paddingRight
+        val vh = iv.height - iv.paddingTop - iv.paddingBottom
+        if (vw <= 0 || vh <= 0) return
+        // 方形边长 = 图片宽；空间装得下方形就按宽度铺满，装不下就缩到区域高
+        val scale = if (vh >= vw) {
+            vw.toFloat() / bmp.width
+        } else {
+            vh.toFloat() / bmp.width
+        }
+        val matrix = Matrix().apply {
+            setScale(scale, scale)
+            postTranslate(
+                iv.paddingLeft + (vw - bmp.width * scale) / 2f,
+                iv.paddingTop.toFloat()
+            )
+        }
+        iv.imageMatrix = matrix
     }
 
     /** 立绘尚未生成时轮询缓存（每 5 秒，最多 5 分钟），生成完成立即刷新本页 */

@@ -1888,6 +1888,24 @@ object AiImageGenerator {
     }.getOrNull()
 
     /**
+     * 解码角色立绘**整图**（不裁剪，保留全身），按宽度目标像素降采样。
+     *
+     * 供聊天页 MATRIX 自适应显示使用：空间足够时能看到方形以下的身体部分，
+     * 空间不足时由调用方按方形边长整体缩放。
+     */
+    fun decodeAvatarFull(file: File, targetPx: Int): Bitmap? = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= targetPx) sample *= 2
+        BitmapFactory.decodeFile(
+            file.absolutePath,
+            BitmapFactory.Options().apply { inSampleSize = sample }
+        )
+    }.getOrNull()
+
+    /**
      * 生成角色立绘。
      *
      * 与段落生图的区别：
