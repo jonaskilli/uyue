@@ -109,6 +109,11 @@ object ScriptCharacterRepository {
     /**
      * 构建「对话文本 → 归属」索引。
      * 脚本自身也是先按序号取、再用文本校验，说明文本才是两边同源的锚点。
+     *
+     * 跨多行的对话（作者把一句对话拆成多个段落，脚本提取时 `[^”]*` 会把换行一起吃进来）
+     * 额外为**每一行**也建索引，这样被拆开、完全没有引号的续段能按行命中归属
+     * ——对应脚本 `handleNoQuoteText` + `tryMatchTextWithNewlines`。
+     * 用 putIfAbsent：整段/前缀索引优先，行索引只做兜底，不覆盖更精确的命中。
      */
     private fun buildTextIndex(roles: Map<String, DialogRole>): Map<String, DialogRole> {
         val index = HashMap<String, DialogRole>(roles.size * 2 + 1)
@@ -118,6 +123,15 @@ object ScriptCharacterRepository {
             index[n] = role
             if (n.length >= TEXT_PREFIX_LEN) {
                 index[TEXT_PREFIX_KEY + n.substring(0, TEXT_PREFIX_LEN)] = role
+            }
+            if (n.indexOf('\n') < 0) continue
+            for (line in n.split('\n')) {
+                val ln = normalizeDialog(line)
+                if (ln.isEmpty()) continue
+                index.putIfAbsent(ln, role)
+                if (ln.length >= TEXT_PREFIX_LEN) {
+                    index.putIfAbsent(TEXT_PREFIX_KEY + ln.substring(0, TEXT_PREFIX_LEN), role)
+                }
             }
         }
         return index

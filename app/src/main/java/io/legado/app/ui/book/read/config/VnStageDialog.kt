@@ -9,15 +9,19 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.ImageView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import com.bumptech.glide.Glide
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.constant.EventBus
 import io.legado.app.databinding.DialogVnStageBinding
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
+import io.legado.app.help.loadGif
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.AiProfileService
 import io.legado.app.model.ReadBook
@@ -63,6 +67,42 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     /** 当前是否已有立绘可显示（旁白时保持，避免闪烁） */
     private var portraitAvailable = false
 
+    /**
+     * 触发提前量（字符数）：立绘需要解码（IO）甚至首次 AI 生成，
+     * 等朗读位置真正越过对话起点才切换会来不及，表现为立绘晚半拍才出现。
+     * 统一把「触发 / 显示」判据前移这么多字符，让立绘与台词面板提前就位。
+     */
+    private val triggerLookaheadChars = 4
+
+    /** 单条对话的长度上限（字符）：与脚本同款，防止引号缺失时把整段吞成一句对话 */
+    private val maxDialogLen = 1000
+
+    /**
+     * 拟声/强调的引号内容上限（字符）：纯汉字、无标点且不超过这个长度时视为
+     * 拟声词或强调（如「只听“砰”的一声」），降级为旁白，不查说话人、不生成立绘。
+     * 与内置脚本终局过滤 `/“(<<[^<>]+>>)?([\u4E00-\u9FFF]{1,15})”/g` 同款。
+     */
+    private val shortInterjectionMax = 15
+
+    /** 上一段是否以未闭合的 `“` 结尾（作者把一句对话拆成了多个段落） */
+    private var pendingDialog = false
+
+    /** 未闭合对话的说话人，供下一个续段继承 */
+    private var pendingSpeaker = ""
+
+    /** 上次处理段落所属章节标题：切章后不延续上一段的未闭合对话 */
+    private var lastChapterTitle: String? = null
+
+    /**
+     * 背景来源是否为「AI 生图」（与大图/小图界面同源）。
+     * 由「启用AI生图」开关（[AppConfig.readAloudAiImage]）决定：
+     * - 开启 → 背景用 [AiImageGenerator] 的图，随 [EventBus.AI_IMAGE_CHANGED] 切换，
+     *          与大图/小图界面完全同一套来源与切换方式；
+     * - 关闭 → 背景用 [VnBackgroundManager] 的场景背景（原逻辑，不动）。
+     * 进入界面时判定一次；中途改开关需重进本界面生效。
+     */
+    private var useAiImageBackground = false
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,8 +146,15 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
         binding.rootView.setBackgroundColor(Color.BLACK)
         binding.tvVnDialogue.movementMethod = ScrollingMovementMethod()
-        // 背景管理器（object 单例）：绑定显示目标
-        VnBackgroundManager.attach(binding.ivVnBackground)
+        // 背景来源：AI 生图开关开启 → 与大图/小图界面同源（AiImageGenerator + AI_IMAGE_CHANGED）；
+        // 关闭 → 场景背景管理器（原逻辑，不动）
+        useAiImageBackground = AppConfig.readAloudAiImage
+        if (useAiImageBackground) {
+            showAiGeneratedBackground()
+        } else {
+            // 背景管理器（object 单例）：绑定显示目标
+            VnBackgroundManager.attach(binding.ivVnBackground)
+        }
 
         // 中途进入：立刻渲染当前朗读段落（整段按已读完状态显示），
         // 随后段落切换事件自然接管。否则要等下一段开始才有文字。
@@ -138,7 +185,55 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         observeEvent<VnParagraph>(EventBus.VN_PARAGRAPH) { p ->
             handleParagraph(p)
         }
+        // AI 生图变化：与大图/小图界面同一套事件源驱动背景切换。
+        // 只有 AI 生图开关开启时消费；关闭时背景归 VnBackgroundManager 管，这里不插手。
+        observeEvent<String>(EventBus.AI_IMAGE_CHANGED) { imagePath ->
+            if (!useAiImageBackground) return@observeEvent
+            if (imagePath.isBlank()) return@observeEvent
+            val f = File(imagePath)
+            if (f.exists()) loadBackground(f)
+        }
     }
+
+    // ------------------------------------------------------------------
+    // 背景：AI 生图（与大图/小图界面同源）
+    // ------------------------------------------------------------------
+
+    /**
+     * 取最新一张 AI 生图作为背景（复刻 FullscreenAiImageDialog 的 AI 分支）。
+     * 暂无图时用内置通用背景兜底，不黑屏。
+     */
+    private fun showAiGeneratedBackground() {
+        val f = AiImageGenerator.getLastGeneratedImage()
+        if (f != null && f.exists()) {
+            loadBackground(f)
+        } else {
+            binding.ivVnBackground.setImageResource(R.drawable.vn_default_background)
+        }
+    }
+
+    /**
+     * 加载背景图。写法与 FullscreenAiImageDialog.loadImage 一致：
+     * GIF 走 loadGif 链路，静态图走 Glide；placeholder 保留当前图，避免切换时闪黑。
+     * 缩放用 centerCrop——舞台背景要铺满全屏（大图界面是 fitCenter，不裁剪）。
+     */
+    private fun loadBackground(file: File) {
+        if (!isAdded || activity?.isDestroyed == true) return
+        val iv = binding.ivVnBackground
+        if (isGifFile(file)) {
+            iv.loadGif(file, ImageView.ScaleType.CENTER_CROP)
+            return
+        }
+        Glide.with(iv.context)
+            .load(file)
+            .centerCrop()
+            .placeholder(iv.drawable)
+            .into(iv)
+    }
+
+    /** 判断文件是否为 GIF 动图（按扩展名，不区分大小写） */
+    private fun isGifFile(file: File): Boolean =
+        file.extension.equals("gif", ignoreCase = true)
 
     // ------------------------------------------------------------------
     // 段落处理
@@ -196,9 +291,9 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             handleParagraph(VnParagraph(text, -1))
             // 段内已读位置 ≈ durChapterPos - 段起点
             readChars = (pos - para.chapterPosition).coerceIn(0, text.length)
-            // 用统一路由定位当前片段（与 onSubtitlePos 同款判据：朗读位置）：
+            // 用统一路由定位当前片段（与 onSubtitlePos 同款判据：朗读位置 + 提前量）：
             // 朗读位置在对话内 → 触发对话；在旁白内 → 旁白框整段
-            val current = paraSegments.lastOrNull { it.start < readChars }
+            val current = currentSegment(readChars)
             if (current != null && current.type == SegType.DIALOG) {
                 triggerDialog(current)
                 val visible = (readChars - current.start).coerceIn(0, current.text.trim().length)
@@ -227,15 +322,61 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         readChars = 0
         stopTypewriter()
         val raw: List<Segment> = splitSegments(p.text)
-        // 解析每个对话段的说话人。解析不出的**保持对话类型**（不降级成旁白）：
-        // 对话永远按对话显示（台词区+打字机），角色名显示"未知"，立绘保持现状。
-        // 之前"降级为旁白"导致说话人匹配失败时整段全按旁白念、对话感全丢。
-        paraSegments = raw.map { s ->
-            if (s.type == SegType.DIALOG) {
-                val sp = lookupSpeakerText(s.text)
-                if (sp.isBlank()) s else s.copy(speaker = sp)
-            } else s
+
+        // 切章：上一段属于上一章，未闭合的对话不能延续到本章
+        val chapterTitle = ReadBook.curTextChapter?.chapter?.title.orEmpty()
+        if (chapterTitle != lastChapterTitle) {
+            lastChapterTitle = chapterTitle
+            pendingDialog = false
+            pendingSpeaker = ""
         }
+
+        // ---- 跨段延续：作者把一句对话拆成多个段落时，中间的段落可能没有引号 ----
+        // 上一段留下未闭合的 “ → 本段是它的续段
+        val carried = pendingDialog
+        val carriedSpeaker = pendingSpeaker
+        // 本段是否以未闭合的 “ 结尾：最后一个 “ 在最后一个 ” 之后。
+        // （脚本没有这一步，靠缓存按行匹配；舞台是连续处理段落的，
+        //   直接看引号状态更可靠，也不依赖缓存是否已生成）
+        pendingDialog = p.text.lastIndexOf('“') > p.text.lastIndexOf('”')
+        pendingSpeaker = ""
+
+        // 完全无引号：可能是被拆开的对话的续段（脚本 handleNoQuoteText 同款）。
+        // 先拿整段文本去章节缓存反查归属，命中即说明这句确实是某人说的。
+        val noQuote = !p.text.contains('“') && !p.text.contains('”')
+        val noQuoteSpeaker = if (noQuote && p.text.isNotBlank()) {
+            lookupSpeakerText(p.text).takeIf { it.isNotBlank() }.orEmpty()
+        } else ""
+
+        paraSegments = if (
+            noQuote && (noQuoteSpeaker.isNotBlank() || (carried && carriedSpeaker.isNotBlank()))
+        ) {
+            // 整段按对话显示：优先用缓存查到的说话人，其次继承上一段未闭合的对话
+            listOf(
+                Segment(
+                    0, p.text.length, SegType.DIALOG, p.text,
+                    noQuoteSpeaker.ifBlank { carriedSpeaker }
+                )
+            )
+        } else {
+            // 解析每个对话段的说话人。解析不出的**保持对话类型**（不降级成旁白）：
+            // 对话永远按对话显示（台词区+打字机），角色名显示"未知"，立绘保持现状。
+            // 之前"降级为旁白"导致说话人匹配失败时整段全按旁白念、对话感全丢。
+            raw.map { s ->
+                if (s.type != SegType.DIALOG) return@map s
+                val sp = lookupSpeakerText(s.text)
+                when {
+                    sp.isNotBlank() -> s.copy(speaker = sp)
+                    // 续段且查不到归属：继承上一段未闭合对话的说话人
+                    carried && carriedSpeaker.isNotBlank() -> s.copy(speaker = carriedSpeaker)
+                    else -> s
+                }
+            }
+        }
+        // 记下本段最后一位说话人，供下一段继承
+        pendingSpeaker = paraSegments.lastOrNull {
+            it.type == SegType.DIALOG && it.speaker.isNotBlank()
+        }?.speaker.orEmpty()
         // 诊断日志：分割结果（类型/区间/说话人），用于验证真实路径
         io.legado.app.constant.AppLog.putDebug(
             "舞台诊断: 分割结果 " + paraSegments.joinToString(" | ") {
@@ -272,8 +413,28 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             binding.tvVnDialogue.visibility = View.GONE
             switchPortrait("旁白")
         }
-        // 背景预分析调度 + 查记录切场景（带段落索引）
-        VnBackgroundManager.onParagraphIndex(p.index, p.text)
+        // 背景预分析调度 + 查记录切场景（带段落索引）。
+        // AI 生图开关开启时背景由 AI_IMAGE_CHANGED 驱动，不再走场景背景调度，
+        // 避免两套体系同时生成、浪费请求
+        if (!useAiImageBackground) {
+            VnBackgroundManager.onParagraphIndex(p.index, p.text)
+        }
+    }
+
+    /**
+     * 按朗读位置定位「当前片段」，带 [triggerLookaheadChars] 提前量。
+     *
+     * 只**提前进入对话**，不提前离开对话：
+     * 立绘/台词面板提前 [triggerLookaheadChars] 个字符就位（补偿解码与生成耗时），
+     * 但对话末尾的最后几个字符仍归该对话——否则台词会被提前掐掉、立绘提前消失，
+     * 出现「话还没念完立绘先没了」。
+     */
+    private fun currentSegment(readPos: Int): Segment? {
+        val strict = paraSegments.lastOrNull { it.start < readPos }
+        val ahead = paraSegments.lastOrNull { it.start < readPos + triggerLookaheadChars }
+        if (strict == null) return ahead
+        if (ahead == null || ahead.start <= strict.start) return strict
+        return if (ahead.type == SegType.DIALOG) ahead else strict
     }
 
     /**
@@ -285,16 +446,18 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     private fun onSubtitlePos(pos: io.legado.app.model.VnSubtitlePos) {
         if (!isAdded || paraSegments.isEmpty()) return
         readChars = pos.end
-        // 触发与显示统一用同一判据：朗读位置 pos.end。
+        // 触发与显示统一用同一判据：朗读位置 pos.end（+ 提前量）。
         // 之前触发用 pos.end、显示用 pos.start——边界碎片上两者不一致：
         // 对话刚触发（立绘切到说话人），显示路由又按碎片起点判"当前在旁白"，
         // 立刻覆盖回旁白立绘/旁白框——表现为立绘闪一下又回旁白、文字按旁白显示。
         // 统一判据后不可能自己和自己竞争。
+        // 提前量：立绘解码/生成耗时，前移若干字符触发，避免立绘晚半拍才出现。
+        val triggerPos = pos.end + triggerLookaheadChars
         paraSegments.filter {
-            it.type == SegType.DIALOG && !it.triggered && it.start < pos.end
+            it.type == SegType.DIALOG && !it.triggered && it.start < triggerPos
         }.forEach { triggerDialog(it) }
-        // 显示定位：朗读位置所在的片段（最后一个 start < pos.end 的片段）
-        val current = paraSegments.lastOrNull { it.start < pos.end } ?: return
+        // 显示定位：朗读位置所在的片段（带提前量，见 currentSegment）
+        val current = currentSegment(pos.end) ?: return
         // 诊断日志：路由决策（读到哪个片段、显示到哪个框）
         io.legado.app.constant.AppLog.putDebug(
             "舞台诊断: 路由 pos=(${pos.start}-${pos.end}) 当前片段=" +
@@ -369,13 +532,27 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     }
 
     /**
-     * 把段落按引号切成交替的旁白/对话片段序列（带 raw 段内字符区间）。
-     * 引号识别：中文全角“”『』「」与英文双引号。
-     * 不配对：只有开引号→其后视为对话；只有闭引号→闭引号仅作边界，其前为旁白。
+     * 把段落按**中文全角双引号**切成交替的旁白/对话片段序列（带 raw 段内字符区间）。
+     *
+     * 规则与内置朗读脚本「(脚本)猫箱-VV(混元3+Z)」保持一致——
+     * [ScriptCharacterRepository.matchChapterRoleByText] 是按**对话文本**反查归属的，
+     * 只有切出来的文本与脚本写入章节缓存的 dialogText 逐字一致才能命中说话人。
+     *
+     * 1. 只认 `“`(U+201C) / `”`(U+201D)：开闭是两个不同字符，无二义性；
+     * 2. 一个 `“` 就是一段对话：再遇到 `“` 直接关闭上一段（等价脚本预处理
+     *    `replace(/(“[^“”\n]*)(“)/g, "$1”$2")`），因此**对话内容里不会包含引号**，
+     *    嵌套引号不再把对话截断成半截；
+     * 3. 整段**没有 `“` 只有 `”`**（对话被作者拆成多个段落的续段）：
+     *    段首 → `”` 判为对话，`”` 之后判为旁白（脚本 handleSpecialQuoteCases 同款）。
+     *    本段若存在 `“`，多余的 `”` 仅作边界忽略，不倒推成对话；
+     * 4. **正常闭合**的引号对里，纯汉字、无标点且 ≤ [shortInterjectionMax] 字的内容
+     *    降级为旁白（拟声/强调，如「只听“砰”的一声」）；被新 `“` 打断或段尾未闭合的
+     *    不参与该判定；
+     * 5. 单条对话最长 [maxDialogLen] 字。
      */
     private fun splitSegments(paragraph: String): List<Segment> {
         val out = ArrayList<Segment>(4)
-        val chars = paragraph.toCharArray()
+        val hasOpenQuote = paragraph.indexOf('“') >= 0
         var narrationStart = 0
         var dialogStart = -1
         var i = 0
@@ -384,34 +561,70 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
                 Segment(from, to, SegType.NARRATION, paragraph.substring(from, to))
             )
         }
-        fun addDialog(from: Int, to: Int) {
-            if (to > from) out.add(
-                Segment(from, to, SegType.DIALOG, paragraph.substring(from, to))
-            )
+        /**
+         * @param closed 是否被 `”` 正常闭合。只有正常闭合的引号对才做拟声降级——
+         *               被新 `“` 打断或段尾未闭合的都是真正的对话，不能因为短就降级
+         *               （脚本终局过滤正则同样要求 `“`…`”` 完整配对才命中）。
+         */
+        fun addDialog(from: Int, to: Int, closed: Boolean) {
+            val end = minOf(to, from + maxDialogLen)
+            if (end <= from) return
+            val text = paragraph.substring(from, end)
+            // 拟声/强调（如「只听“砰”的一声」）不当对话：不查说话人、不生成立绘
+            val type =
+                if (closed && isShortInterjection(text)) SegType.NARRATION else SegType.DIALOG
+            out.add(Segment(from, end, type, text))
         }
-        while (i < chars.size) {
-            val c = chars[i]
-            // 只认中文全角双引号：开“ 闭”是两个不同字符，开闭明确无二义性
-            val isOpen = c == '“'
-            val isClose = c == '”'
-            if (isOpen && dialogStart < 0) {
-                addNarration(narrationStart, i)
-                dialogStart = i + 1
-            } else if (isClose && dialogStart >= 0) {
-                addDialog(dialogStart, i)
-                dialogStart = -1
-                narrationStart = i + 1
+        while (i < paragraph.length) {
+            when (paragraph[i]) {
+                '“' -> {
+                    if (dialogStart >= 0) {
+                        // 嵌套/连续开引号：直接关闭上一段，再开新段
+                        addDialog(dialogStart, i, closed = false)
+                    } else {
+                        addNarration(narrationStart, i)
+                    }
+                    dialogStart = i + 1
+                }
+                '”' -> {
+                    if (dialogStart >= 0) {
+                        addDialog(dialogStart, i, closed = true)
+                        dialogStart = -1
+                    } else if (!hasOpenQuote) {
+                        // 整段无左引号：承接上一段的对话，段首到此处算对话
+                        addDialog(narrationStart, i, closed = true)
+                    }
+                    narrationStart = i + 1
+                }
             }
             i++
         }
         if (dialogStart >= 0) {
             // 只有开引号：其后全部视为对话
-            addDialog(dialogStart, chars.size)
-        } else if (narrationStart < chars.size) {
-            // 正常闭引号后的引号外旁白
-            addNarration(narrationStart, chars.size)
+            addDialog(dialogStart, paragraph.length, closed = false)
+        } else if (narrationStart < paragraph.length) {
+            addNarration(narrationStart, paragraph.length)
         }
-        return out
+        // 合并相邻旁白段：拟声降级与引号间隙会把一句旁白切成好几块，
+        // 不合并的话旁白框会跟着朗读位置一跳一跳地换内容
+        val merged = ArrayList<Segment>(out.size)
+        for (s in out) {
+            val last = merged.lastOrNull()
+            if (s.type == SegType.NARRATION && last != null && last.type == SegType.NARRATION) {
+                merged[merged.size - 1] =
+                    last.copy(end = s.end, text = paragraph.substring(last.start, s.end))
+            } else {
+                merged.add(s)
+            }
+        }
+        return merged
+    }
+
+    /** 拟声/强调判定：纯汉字、无标点、且不超过 [shortInterjectionMax] 字 */
+    private fun isShortInterjection(text: String): Boolean {
+        val t = text.trim()
+        if (t.isEmpty() || t.length > shortInterjectionMax) return false
+        return t.all { it in '\u4E00'..'\u9FFF' }
     }
 
     /** 反查单个对话文本的说话人（matchChapterRoleByText 前缀索引） */
