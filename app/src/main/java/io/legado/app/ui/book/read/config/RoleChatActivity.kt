@@ -10,9 +10,12 @@ import io.legado.app.databinding.ActivityRoleChatBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.glide.ImageLoader
 import io.legado.app.model.AiChatManager
+import io.legado.app.model.AiImageGenerator
+import io.legado.app.model.AiProfileService
 import io.legado.app.model.CharacterProfileManager
 import io.legado.app.model.CharacterVoiceBinding
 import io.legado.app.model.ReadAloud
+import io.legado.app.model.ReadBook
 import io.legado.app.model.RoleVoiceSpeaker
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.utils.viewbindingdelegate.viewBinding
@@ -20,7 +23,9 @@ import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import splitties.init.appCtx
 import java.io.File
 
@@ -290,17 +295,49 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
     /**
      * 加载角色立绘：与 AI 立绘功能的缓存约定一致
      * （cacheDir/ai_images/ai_avatars/avatar_<书名>_<角色名>.jpg）。
-     * 立绘功能落地前显示首字占位；之后无需改动本页即可自动显示。
+     * 显示为**从顶部裁剪的正方形**（保证头部完整）；无立绘时保持首字占位，
+     * 同时后台触发建档/生成立绘，生成完成后立即刷新本页显示。
      */
     private fun loadPortrait() {
-        val safe = { s: String -> s.replace(Regex("[\\\\/:*?\"<>|\\s]"), "_") }
-        val file = File(
-            appCtx.cacheDir, "ai_images/ai_avatars/avatar_${safe(bookName)}_${safe(characterName)}.jpg"
-        )
-        if (file.exists() && file.length() > 0) {
-            ImageLoader.load(appCtx, file).into(binding.ivPortrait)
-            binding.ivPortrait.visibility = android.view.View.VISIBLE
-            binding.tvPlaceholder.visibility = android.view.View.GONE
+        val file = AiImageGenerator.getCachedAvatar(bookName, characterName)
+        if (file == null) {
+            // 无立绘：后台建档/生成立绘（异步、可并发去重），完成后自动刷新
+            AiProfileService.ensureProfileAndAvatar(
+                bookName, characterName,
+                ReadBook.durChapterIndex,
+                ReadBook.curTextChapter?.chapter?.title.orEmpty()
+            )
+            pollPortrait()
+            return
+        }
+        showPortraitBitmap(file)
+    }
+
+    private fun showPortraitBitmap(file: java.io.File) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val bmp = AiImageGenerator.decodeAvatarTopSquare(file, 512)
+            withContext(Dispatchers.Main) {
+                if (bmp != null && !isDestroyed && !isFinishing) {
+                    binding.ivPortrait.setImageBitmap(bmp)
+                    binding.ivPortrait.visibility = android.view.View.VISIBLE
+                    binding.tvPlaceholder.visibility = android.view.View.GONE
+                }
+            }
+        }
+    }
+
+    /** 立绘尚未生成时轮询缓存（每 5 秒，最多 5 分钟），生成完成立即刷新本页 */
+    private fun pollPortrait() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            repeat(60) {
+                if (!isActive) return@launch
+                delay(5000)
+                val file = AiImageGenerator.getCachedAvatar(bookName, characterName)
+                if (file != null) {
+                    showPortraitBitmap(file)
+                    return@launch
+                }
+            }
         }
     }
 

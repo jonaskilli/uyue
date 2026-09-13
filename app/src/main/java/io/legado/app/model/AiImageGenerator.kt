@@ -1,5 +1,7 @@
 package io.legado.app.model
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import com.google.gson.JsonParser
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.EventBus
@@ -1851,6 +1853,39 @@ object AiImageGenerator {
         val f = File(avatarCacheDir(), avatarKey(bookName, characterName) + ".jpg")
         return if (f.isFile && f.length() > 0) f else null
     }
+
+    /**
+     * 解码角色立绘并**从顶部裁成正方形**（优先保留头部），按目标边长降采样。
+     *
+     * 立绘通常是竖版全身像：直接等比显示头部占比太小，centerCrop 居中裁剪
+     * 又会把头裁掉。这里统一裁成「以宽度为边长、从最顶端开始」的正方形，
+     * 保证头部完整可见，显示区域也可以更小。
+     *
+     * @param targetPx 目标显示边长（px），用于计算降采样倍数；解码失败返回 null
+     */
+    fun decodeAvatarTopSquare(file: File, targetPx: Int): Bitmap? = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= targetPx) sample *= 2
+        val bmp = BitmapFactory.decodeFile(
+            file.absolutePath,
+            BitmapFactory.Options().apply { inSampleSize = sample }
+        ) ?: return@runCatching null
+        val side = minOf(bmp.width, bmp.height)
+        if (side <= 0) {
+            bmp.recycle()
+            return@runCatching null
+        }
+        if (bmp.width == side && bmp.height == side) {
+            bmp
+        } else {
+            val cropped = Bitmap.createBitmap(bmp, 0, 0, side, side)
+            bmp.recycle()
+            cropped
+        }
+    }.getOrNull()
 
     /**
      * 生成角色立绘。

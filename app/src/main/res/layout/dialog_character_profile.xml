@@ -17,11 +17,12 @@
         android:textSize="17sp"
         android:textStyle="bold" />
 
-    <!-- 顶部立绘预览：有立绘显示图片，无立绘显示默认人形占位 -->
+    <!-- 顶部立绘预览：固定正方形居中（不铺满两侧），内容取图片顶部方形区域保证看到头部 -->
     <ImageView
         android:id="@+id/iv_portrait"
-        android:layout_width="match_parent"
-        android:layout_height="150dp"
+        android:layout_width="220dp"
+        android:layout_height="220dp"
+        android:layout_gravity="center_horizontal"
         android:layout_marginTop="2dp"
         android:background="@drawable/bg_portrait_gradient"
         android:contentDescription="角色立绘"

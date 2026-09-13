@@ -1,7 +1,6 @@
 package io.legado.app.ui.book.read.config
 
 import android.annotation.SuppressLint
-import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
@@ -263,8 +262,8 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
     }
 
     /**
-     * 顶部立绘预览：有缓存立绘则后台解码显示（按宽度降采样避免大图占内存），
-     * 无立绘显示默认人形占位。
+     * 顶部立绘预览：显示**正方形**（从图片最顶端裁剪，保证看得到头部），
+     * 居中不铺满两侧；无立绘显示默认人形占位。
      */
     private fun loadPortrait() {
         val file = io.legado.app.model.AiImageGenerator.getCachedAvatar(bookName, characterName)
@@ -274,17 +273,10 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
             return
         }
         execute {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.absolutePath, bounds)
-            var sample = 1
-            while (bounds.outWidth / (sample * 2) >= 720) sample *= 2
-            BitmapFactory.decodeFile(
-                file.absolutePath,
-                BitmapFactory.Options().apply { inSampleSize = sample }
-            )
+            io.legado.app.model.AiImageGenerator.decodeAvatarTopSquare(file, 440)
         }.onSuccess(Dispatchers.Main) { bmp ->
             if (bmp != null) {
-                binding.ivPortrait.scaleType = ImageView.ScaleType.CENTER_CROP
+                binding.ivPortrait.scaleType = ImageView.ScaleType.FIT_CENTER
                 binding.ivPortrait.setImageBitmap(bmp)
             } else {
                 binding.ivPortrait.scaleType = ImageView.ScaleType.CENTER_INSIDE

@@ -37,6 +37,12 @@ object AiProfileService {
     @Volatile
     private var lastSwitchAt = 0L
 
+    /** 进入对话触发建档的防抖：同一角色 60 秒内不重复发起 */
+    @Volatile
+    private var lastEnsureKey: String? = null
+    @Volatile
+    private var lastEnsureAt = 0L
+
     /** 朗读进入新章节时触发一次角色发现 */
     fun onChapterStarted(bookName: String, chapterIndex: Int, chapterTitle: String) {
         if (bookName.isBlank() || chapterTitle.isBlank()) return
@@ -115,6 +121,12 @@ object AiProfileService {
             runCatching {
                 val existing = CharacterProfileManager.getProfile(bookName, name)
                 if (existing == null) {
+                    // 防抖：重复进出对话页不反复打建档 API
+                    val key = "$bookName#$name"
+                    val now = System.currentTimeMillis()
+                    if (lastEnsureKey == key && now - lastEnsureAt < 60_000L) return@launch
+                    lastEnsureKey = key
+                    lastEnsureAt = now
                     AppLog.putDebug("角色档案: 进入对话，后台为「$name」建档（第${chapterIndex + 1}章）")
                     CharacterProfileManager.regenerate(
                         bookName, name,
