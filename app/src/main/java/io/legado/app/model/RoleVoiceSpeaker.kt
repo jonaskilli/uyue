@@ -1,46 +1,41 @@
 package io.legado.app.model
 
 import android.content.Context
-import android.media.MediaPlayer
-import io.legado.app.help.audiobook.JReadVoiceEngine
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.io.File
-import java.util.concurrent.atomic.AtomicReference
+import androidx.lifecycle.LifecycleOwner
+import io.legado.app.ui.book.read.config.TtsPreviewHelper
 
 /**
  * 角色语音回复播放器。
  *
- * 用角色绑定的发音人（JReadVoiceEngine 的 voiceTag）把文本合成音频，
- * 再用 MediaPlayer 播放。合成与角色管理的「试听」共用同一条
- * [JReadVoiceEngine.synthesizeLineAudio] 链路，
- * 因此发音人 tag 的解析、降级逻辑完全一致。
+ * 复用「角色管理 - 按角色主名字试听」同一条合成链路
+ * [TtsPreviewHelper.previewVoice]：依据用户实际配置的朗读引擎（内置TTS插件 /
+ * 系统TTS / 猫箱等）合成，并把发音人内嵌成 `<<voice>>` 标记交给引擎解析，
+ * 因此回复朗读的音色与试听、与正常朗读完全一致。
+ *
+ * 早期版本直接调 [io.legado.app.help.audiobook.JReadVoiceEngine.synthesizeLineAudio]
+ * 并传 pointer 声码，绕过了用户实际配置的引擎、且与「试听」音色不一致，
+ * 故改为走 previewVoice。
  */
 object RoleVoiceSpeaker {
 
-    private val playerRef = AtomicReference<MediaPlayer?>(null)
-
     /**
-     * 用 voiceTag 朗读文本。voiceTag 为空（角色未绑定发音人）直接跳过。
-     * 角色扮演回复里的（动作描写）先剥离，避免把括号内容念出来。
+     * 朗读角色回复文本。
+     * @param text 原始回复；角色扮演的动作括号（…）/ 尖括号标记会被剥离，避免念出来
+     * @param voiceTag 角色绑定的发音人（空 = 未绑定，不朗读）
      */
-    suspend fun speak(context: Context, text: String, voiceTag: String) {
+    fun speak(context: Context, lifecycleOwner: LifecycleOwner, text: String, voiceTag: String) {
         if (voiceTag.isBlank()) return
         val clean = stripBrackets(text).takeIf { it.isNotBlank() } ?: return
-        val pointer = JSONObject().put("voiceTag", voiceTag).toString()
-        withContext(Dispatchers.IO) {
-            val bytes = runCatching {
-                JReadVoiceEngine.synthesizeLineAudio(
-                    context.applicationContext,
-                    clean,
-                    pointer,
-                    "rolechat_${System.currentTimeMillis()}"
-                )
-            }.getOrNull() ?: return@withContext
-            if (bytes.isEmpty()) return@withContext
-            playWav(context.applicationContext, bytes)
-        }
+        // 内嵌发音人标记，与角色管理「试听」拼装方式完全一致：
+        // 前后包中文全角双引号、标记紧跟左引号后（引擎约定此写法才按角色对话音合成）
+        val previewText = "\u201C <<$voiceTag>>$clean\u201D"
+        TtsPreviewHelper.previewVoice(
+            context = context,
+            lifecycleOwner = lifecycleOwner,
+            previewText = previewText,
+            voiceId = voiceTag,
+            onToast = { }
+        )
     }
 
     /** 剥离角色扮演的动作括号：（）全角 / () 半角 / <> 标记 */
@@ -49,26 +44,7 @@ object RoleVoiceSpeaker {
             .replace(Regex("<[^>]*>"), "")
             .trim()
 
-    private fun playWav(ctx: Context, bytes: ByteArray) {
-        runCatching { playerRef.getAndSet(null)?.release() }
-        val file = File(ctx.cacheDir, "role_chat/reply_${System.currentTimeMillis()}.wav")
-        runCatching { file.parentFile?.mkdirs(); file.writeBytes(bytes) }
-        val player = MediaPlayer()
-        try {
-            player.setDataSource(file.absolutePath)
-            player.setOnCompletionListener { mp -> mp.release(); playerRef.compareAndSet(mp, null) }
-            player.setOnErrorListener { mp, _, _ ->
-                mp.release(); playerRef.compareAndSet(mp, null); true
-            }
-            player.prepare()
-            player.start()
-            playerRef.set(player)
-        } catch (e: Exception) {
-            runCatching { player.release() }
-        }
-    }
-
     fun release() {
-        runCatching { playerRef.getAndSet(null)?.release() }
+        // 播放由 TtsPreviewHelper 内部管理，此处无需释放
     }
 }

@@ -28,7 +28,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import splitties.init.appCtx
 import java.io.File
 
 /**
@@ -300,9 +299,9 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
 
     private fun speakReply(text: String) {
         if (!AppConfig.roleChatVoiceEnabled || voiceTag.isBlank()) return
-        lifecycleScope.launch(Dispatchers.IO) {
-            RoleVoiceSpeaker.speak(appCtx, text, voiceTag)
-        }
+        // 复用角色管理「试听」同一条合成链路（TtsPreviewHelper），以当前 Activity
+        // 作为 Context / LifecycleOwner，确保回复音色与试听、正常朗读一致
+        RoleVoiceSpeaker.speak(this@RoleChatActivity, this@RoleChatActivity, text, voiceTag)
     }
 
     /**

@@ -38,8 +38,8 @@ import java.io.File
  *
  * 结构（自上而下）：
  * - 全屏 AI 场景背景（[VnBackgroundManager]：AI 选场景类别，缓存命中直接用，未命中生成）
- * - 顶部旁白字幕：旁白段落显示在图片最上面
- * - 底部两行：第一行说话人立绘（左侧、带边框、顶部裁剪保头部），第二行台词面板（打字机逐字）
+ * - 顶部旁白字幕：旁白段落显示在图片最上面（旁白态不显示立绘，仅留占位高度）
+ * - 底部两行：第一行说话人立绘（左侧、带边框、顶部裁剪保头部，仅对话角色显示），第二行台词面板（打字机逐字）
  *
  * 段落归属：朗读服务推 EventBus.VN_PARAGRAPH（段落全文），本界面用
  * ScriptCharacterRepository.getChapterRoles 的 dialogText 反查说话人；
@@ -118,8 +118,7 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         setupGestures()
 
         // 点立绘 → 打开该角色的角色档案（可补全信息/编辑提示词/重新生成立绘）。
-        // 旁白也打开：无档案时显示"暂无档案"，可先「编辑」填人设再「生成立绘」，
-        // 已有立绘时点「生成立绘」会弹确认框重新生成（覆盖旧图）
+        // 仅对话角色有立绘可点；旁白态立绘为 INVISIBLE 占位、不可点击。
         binding.ivVnPortrait.setOnClickListener {
             val speaker = currentSpeaker.ifBlank { "旁白" }
             CharacterProfileDialog.newInstance(bookName, speaker)
@@ -445,6 +444,13 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     private fun switchPortrait(speaker: String) {
         portraitPollJob?.cancel()
         portraitPollJob = null
+        if (speaker == "旁白") {
+            // 旁白不显示立绘：仅预留 110dp 占位（保持演出区高度恒定、不跳变），
+            // 不再生成"说书人"形象
+            portraitAvailable = false
+            binding.ivVnPortrait.visibility = View.INVISIBLE
+            return
+        }
         val cached = AiImageGenerator.getCachedAvatar(bookName, speaker)
         if (cached != null) {
             showPortrait(cached)
@@ -455,28 +461,11 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         // 生成完成前面板位置不跳变
         portraitAvailable = false
         binding.ivVnPortrait.visibility = View.INVISIBLE
-        if (speaker == "旁白") {
-            // 旁白立绘：不建角色档案（避免"旁白"污染档案列表），
-            // 直接按"说书人"形象生成，全局缓存一张
-            AiImageGenerator.generateCharacterAvatar(
-                characterName = "旁白",
-                genderAge = "",
-                bookName = bookName,
-                identity = "说书人，故事的讲述者",
-                personality = "沉稳",
-                background = "",
-                regenerate = false,
-                templateId = io.legado.app.help.config.AppConfig.aiPortraitTemplateId,
-                onSuccess = { },
-                onFailure = { }
-            )
-        } else {
-            AiProfileService.ensureProfileAndAvatar(
-                bookName, speaker,
-                ReadBook.durChapterIndex,
-                ReadBook.curTextChapter?.chapter?.title.orEmpty()
-            )
-        }
+        AiProfileService.ensureProfileAndAvatar(
+            bookName, speaker,
+            ReadBook.durChapterIndex,
+            ReadBook.curTextChapter?.chapter?.title.orEmpty()
+        )
         portraitPollJob = lifecycleScope.launch(Dispatchers.Main) {
             repeat(60) {
                 delay(5000)
