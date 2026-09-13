@@ -777,16 +777,35 @@ object CharacterProfileManager {
             old?.aliases ?: legacy.third,
             context
         ) ?: throw IllegalStateException("AI 未返回有效档案，请稍后重试（详情见日志）")
+        // 字段级补全（不是覆盖）：老档案非空的内容字段一律保留，
+        // 空缺的才用本次新生成的补上；元数据照旧取老档案。
+        // 否则每次点「补全」都会用有限上下文重新生成一份，把原来
+        // 积累的信息顶掉，档案永远补不全。
+        fun keep(oldVal: String?, newVal: String): String =
+            oldVal?.takeIf { it.isNotBlank() } ?: newVal
+
+        fun keepArr(oldVal: String?, newVal: String): String =
+            oldVal?.takeIf { it.isNotBlank() && it != "[]" } ?: newVal
+
         val merged = created.copy(
             bookUrl = bookUrl,
             name = name,
+            gender = keep(old?.gender, created.gender),
+            age = keep(old?.age, created.age),
             aliases = old?.aliases ?: sanitizeAliases(created.aliases, bookUrl, name),
+            identity = keep(old?.identity, created.identity),
+            personality = keep(old?.personality, created.personality),
+            speakingStyle = keep(old?.speakingStyle, created.speakingStyle),
+            background = keep(old?.background, created.background),
+            traits = keepArr(old?.traits, created.traits),
+            relations = keepArr(old?.relations, created.relations),
             firstChapter = old?.firstChapter ?: "",
             lastChapter = old?.lastChapter ?: "",
             lastChapterIndex = old?.lastChapterIndex ?: -1,
             mentionCount = old?.mentionCount ?: 1,
             lastUpdateMention = old?.mentionCount ?: 1,
-            timeline = old?.timeline ?: created.timeline
+            timeline = keepArr(old?.timeline, created.timeline),
+            confidence = maxOf(old?.confidence ?: 0f, created.confidence)
         )
         dao.insert(merged.copy(updatedAt = System.currentTimeMillis()))
         return merged

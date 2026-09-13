@@ -1901,7 +1901,13 @@ object AiImageGenerator {
         while (bounds.outWidth / (sample * 2) >= targetPx) sample *= 2
         BitmapFactory.decodeFile(
             file.absolutePath,
-            BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.Options().apply {
+                inSampleSize = sample
+                // 关闭密度缩放：聊天页用 MATRIX 手算矩阵，绘制尺寸必须与
+                // bmp.width/bmp.height 严格 1:1，否则带 DPI 的图会被系统再
+                // 放大一截，导致矩阵基准错位、立绘溢出贴边（左右不对称）。
+                inScaled = false
+            }
         )
     }.getOrNull()
 

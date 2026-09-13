@@ -127,9 +127,13 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
             applyPortraitMatrix()
         }
         loadPortrait()
-        // 空会话给一句开场引导
+        // 空会话给一句开场引导；有历史时默认回显上一次 AI 的回复
         if (history.isEmpty()) {
             showText("（轻声）来了呀…想聊点什么？")
+            printed = 0
+        } else {
+            val lastReply = history.lastOrNull { it.role == "assistant" }?.content
+            showText(lastReply?.takeIf { it.isNotBlank() } ?: "（轻声）来了呀…想聊点什么？")
             printed = 0
         }
     }
@@ -331,9 +335,13 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
                     portraitBitmap = bmp
                     binding.ivPortrait.scaleType = android.widget.ImageView.ScaleType.MATRIX
                     binding.ivPortrait.setImageBitmap(bmp)
-                    applyPortraitMatrix()
+                    // 先 VISIBLE 再算矩阵：GONE 状态下宽高为 0，提前算会
+                    // early-return 残留单位矩阵（左上对齐不缩放，左右不对称）
                     binding.ivPortrait.visibility = android.view.View.VISIBLE
                     binding.tvPlaceholder.visibility = android.view.View.GONE
+                    applyPortraitMatrix()
+                    // 兜底：VISIBLE 后首帧 layout 完成时尺寸才真正就绪
+                    binding.ivPortrait.post { applyPortraitMatrix() }
                 }
             }
         }
@@ -345,6 +353,12 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
      *   图片方形以下的身体部分，底部超出自然被裁；
      * - 输入法把区域压到装不下完整正方形时，按「方形边长=区域高」整体缩小
      *   （以正方形为单位缩放），保证头部方形始终完整可见。
+     *
+     * 注意：ImageView.onDraw 在应用 imageMatrix 前已执行
+     * canvas.translate(paddingLeft, paddingTop)，即矩阵在「内容区坐标系」
+     * （原点=内容区左上角）中生效。因此这里的平移**不再叠加 padding**，
+     * 只需在内容区内定位；否则 padding 被算两次，图片向右下多偏 18dp，
+     * 表现为左侧空白加倍、右侧贴边（左右不对称的根因）。
      */
     private fun applyPortraitMatrix() {
         val bmp = portraitBitmap ?: return
@@ -360,9 +374,10 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
         }
         val matrix = Matrix().apply {
             setScale(scale, scale)
+            // 在内容区内定位：水平居中、垂直顶格（padding 由系统画布处理）
             postTranslate(
-                iv.paddingLeft + (vw - bmp.width * scale) / 2f,
-                iv.paddingTop.toFloat()
+                (vw - bmp.width * scale) / 2f,
+                0f
             )
         }
         iv.imageMatrix = matrix

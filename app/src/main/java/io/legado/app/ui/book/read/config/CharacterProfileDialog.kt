@@ -90,7 +90,7 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
             binding.tvGenderAge.text = ""
             binding.tvIdentity.text = "该角色暂无档案。"
             binding.tvPersonality.text =
-                "可在朗读过一段该角色的内容后，点「重新生成」让 AI 建档；朗读中也会自动补全。"
+                "可在朗读过一段该角色的内容后，点「补全信息」让 AI 建档；朗读中也会自动补全。"
             binding.tvSpeakingStyle.text = ""
             binding.tvTraits.text = ""
             binding.tvRelations.text = ""
@@ -171,7 +171,7 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
 
     private fun regenerate() {
         binding.tvStatus.visibility = View.VISIBLE
-        binding.tvStatus.text = "正在让 AI 重新生成档案…（可能需要几十秒）"
+        binding.tvStatus.text = "正在让 AI 补全档案…（只补空缺，不覆盖已有信息；可能需要几十秒）"
         binding.tvRegen.isEnabled = false
         val chapterIndex = io.legado.app.model.ReadBook.durChapterIndex
         val chapterTitle = io.legado.app.model.ReadBook.curTextChapter?.chapter?.title.orEmpty()

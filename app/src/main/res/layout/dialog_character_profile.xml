@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- AI 角色档案详情弹窗：只读展示 + 编辑/重新生成/与角色对话 -->
+<!-- AI 角色档案详情弹窗：只读展示 + 编辑/补全信息/与角色对话 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -193,7 +193,7 @@
             android:layout_weight="1"
             android:gravity="center"
             android:paddingVertical="9dp"
-            android:text="重新生成"
+            android:text="补全信息"
             android:textSize="13sp" />
 
         <TextView
