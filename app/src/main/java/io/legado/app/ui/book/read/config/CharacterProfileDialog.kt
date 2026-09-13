@@ -79,6 +79,8 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
                         p.aliases.split("|").map { it.trim() }.contains(characterName)
                     }
         }.onSuccess(Dispatchers.Main) { p ->
+            // 查询是异步的，回调时弹窗可能已关闭：先判 View 存活
+            if (!isAdded || view == null) return@onSuccess
             fill(p)
         }
     }
@@ -114,11 +116,12 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
     }
 
     private fun showEditDialog() {
-        val p = profile
-        if (p == null) {
-            toastOnUi("暂无档案可编辑，请先建档")
-            return
-        }
+        // 无档案（如旁白）也允许编辑：以空档案进入，保存时创建档案记录。
+        // 这样旁白可以自定义身份/性格/背景，再「生成立绘」按这些内容生成。
+        val p = profile ?: CharacterProfile(
+            bookUrl = CharacterProfileManager.bookKey(bookName),
+            name = characterName
+        )
         val ctx = requireContext()
         val scroll = android.widget.ScrollView(ctx)
         val layout = android.widget.LinearLayout(ctx).apply {
@@ -180,15 +183,19 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
             if (chapterIndex >= 0 && chapterTitle.isNotBlank()) chapterIndex else -1,
             chapterTitle
         ) { p, error ->
-            binding.tvRegen.isEnabled = true
-            if (p == null) {
-                binding.tvStatus.visibility = View.VISIBLE
-                binding.tvStatus.text = "建档失败：$error"
-                toastOnUi("建档失败：$error")
-            } else {
-                binding.tvStatus.visibility = View.GONE
-                fill(p)
-                toastOnUi("档案已更新")
+            // AI 耗时几十秒，回调时弹窗可能已关闭（View 已销毁）：
+            // 访问 binding 会抛 IllegalStateException，必须先判 View 存活
+            if (isAdded && view != null) {
+                binding.tvRegen.isEnabled = true
+                if (p == null) {
+                    binding.tvStatus.visibility = View.VISIBLE
+                    binding.tvStatus.text = "建档失败：$error"
+                    toastOnUi("建档失败：$error")
+                } else {
+                    binding.tvStatus.visibility = View.GONE
+                    fill(p)
+                    toastOnUi("档案已更新")
+                }
             }
         }
     }
@@ -201,6 +208,8 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
         execute {
             io.legado.app.data.appDb.aiImageTemplateDao.getAllList()
         }.onSuccess(Dispatchers.Main) { templates ->
+            // 查询是异步的，回调时弹窗可能已关闭：先判 View 存活
+            if (!isAdded || view == null) return@onSuccess
             val items = mutableListOf("默认模板（跟随 AI 生图设置）")
             items.addAll(templates.map { it.name.ifBlank { "未命名模板" } })
             val adapter = android.widget.ArrayAdapter(
@@ -233,8 +242,29 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
     /** 按（性别年龄 + 档案人设）生成角色立绘，成功后自动被「与角色对话」和气泡复用 */
     private fun generatePortrait() {
         val p = profile
+        // 已有立绘：确认后重新生成（覆盖旧图）；无立绘：直接生成
+        val hasCached = io.legado.app.model.AiImageGenerator
+            .getCachedAvatar(bookName, characterName) != null
+        if (hasCached) {
+            android.app.AlertDialog.Builder(requireContext())
+                .setTitle("重新生成立绘")
+                .setMessage("「$characterName」已有立绘，重新生成将覆盖现有图片，确定？")
+                .setPositiveButton("重新生成") { _, _ -> doGeneratePortrait(regenerate = true) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        } else {
+            doGeneratePortrait(regenerate = false)
+        }
+    }
+
+    private fun doGeneratePortrait(regenerate: Boolean) {
+        val p = profile
         binding.tvStatus.visibility = View.VISIBLE
-        binding.tvStatus.text = "正在生成角色立绘…（可能需要几十秒）"
+        binding.tvStatus.text = if (regenerate) {
+            "正在重新生成角色立绘…（覆盖旧图，可能需要几十秒）"
+        } else {
+            "正在生成角色立绘…（可能需要几十秒）"
+        }
         binding.tvPortrait.isEnabled = false
         io.legado.app.model.AiImageGenerator.generateCharacterAvatar(
             characterName = characterName,
@@ -244,19 +274,25 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
             identity = p?.identity.orEmpty(),
             personality = p?.personality.orEmpty(),
             background = p?.background.orEmpty(),
-            regenerate = false,
+            regenerate = regenerate,
             templateId = io.legado.app.help.config.AppConfig.aiPortraitTemplateId,
             onSuccess = { file ->
-                binding.tvPortrait.isEnabled = true
-                binding.tvStatus.visibility = View.VISIBLE
-                binding.tvStatus.text = "立绘已生成：${file.name}"
-                loadPortrait()
-                toastOnUi("立绘已生成，与角色对话页将自动使用")
+                // 生成耗时几十秒，回调时弹窗可能已关闭（View 已销毁）：
+                // 访问 binding 会抛 IllegalStateException，必须先判 View 存活
+                if (isAdded && view != null) {
+                    binding.tvPortrait.isEnabled = true
+                    binding.tvStatus.visibility = View.VISIBLE
+                    binding.tvStatus.text = "立绘已生成：${file.name}"
+                    loadPortrait()
+                    toastOnUi("立绘已生成，与角色对话页将自动使用")
+                }
             },
             onFailure = { e ->
-                binding.tvPortrait.isEnabled = true
-                binding.tvStatus.visibility = View.VISIBLE
-                binding.tvStatus.text = "立绘生成失败：${e.localizedMessage}"
+                if (isAdded && view != null) {
+                    binding.tvPortrait.isEnabled = true
+                    binding.tvStatus.visibility = View.VISIBLE
+                    binding.tvStatus.text = "立绘生成失败：${e.localizedMessage}"
+                }
             }
         )
     }
@@ -275,6 +311,8 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
         execute {
             io.legado.app.model.AiImageGenerator.decodeAvatarTopSquare(file, 440)
         }.onSuccess(Dispatchers.Main) { bmp ->
+            // 解码是异步的，回调时弹窗可能已关闭：先判 View 存活
+            if (!isAdded || view == null) return@onSuccess
             if (bmp != null) {
                 binding.ivPortrait.scaleType = ImageView.ScaleType.FIT_CENTER
                 binding.ivPortrait.setImageBitmap(bmp)

@@ -116,6 +116,15 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         // 手势（与大图界面一致）：单击左/右 1/3 上一段/下一段，
         // 中 1/3 暂停/继续朗读；从上向下滑动退出本界面
         setupGestures()
+
+        // 点立绘 → 打开该角色的角色档案（可补全信息/编辑提示词/重新生成立绘）。
+        // 旁白也打开：无档案时显示"暂无档案"，可先「编辑」填人设再「生成立绘」，
+        // 已有立绘时点「生成立绘」会弹确认框重新生成（覆盖旧图）
+        binding.ivVnPortrait.setOnClickListener {
+            val speaker = currentSpeaker.ifBlank { "旁白" }
+            CharacterProfileDialog.newInstance(bookName, speaker)
+                .show(parentFragmentManager, "characterProfileDialog")
+        }
     }
 
     override fun observeLiveBus() {
@@ -188,24 +197,20 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             handleParagraph(VnParagraph(text, -1))
             // 段内已读位置 ≈ durChapterPos - 段起点
             readChars = (pos - para.chapterPosition).coerceIn(0, text.length)
-            // 旁白框：首个对话前的整段旁白
-            val narration = paraSegments
-                .takeWhile { it.type != SegType.DIALOG }
-                .map { it.text.trim() }
-                .filter { it.isNotBlank() }
-                .joinToString("  ")
-            if (narration.isNotBlank()) {
+            // 用统一路由定位当前片段（与 onSubtitlePos 同款判据：朗读位置）：
+            // 朗读位置在对话内 → 触发对话；在旁白内 → 旁白框整段
+            val current = paraSegments.lastOrNull { it.start < readChars }
+            if (current != null && current.type == SegType.DIALOG) {
+                triggerDialog(current)
+                val visible = (readChars - current.start).coerceIn(0, current.text.trim().length)
+                binding.tvVnDialogue.text = current.text.trim().take(visible)
+            } else if (current != null) {
+                if (currentSpeaker != "旁白") switchPortrait("旁白")
+                currentSpeaker = "旁白"
                 binding.tvVnNarration.visibility = View.VISIBLE
-                binding.tvVnNarration.text = narration
-            }
-            // 对话面板：处于对话区间内则立即触发该对话（文字按 readChars 截取）
-            val inDialog = paraSegments.firstOrNull {
-                it.type == SegType.DIALOG && readChars >= it.start && readChars < it.end
-            }
-            if (inDialog != null) {
-                triggerDialog(inDialog)
-                val visible = (readChars - inDialog.start).coerceIn(0, inDialog.text.trim().length)
-                binding.tvVnDialogue.text = inDialog.text.trim().take(visible)
+                binding.tvVnNarration.text = current.text.trim()
+                binding.tvVnDialogue.visibility = View.GONE
+                binding.tvVnRoleName.text = "旁白"
             }
         }
     }
@@ -222,48 +227,51 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         if (!isAdded) return
         readChars = 0
         stopTypewriter()
-        val raw = splitSegments(p.text)
-        // 解析每个对话段的说话人；解析不出的降级为旁白（其文本走旁白框）
+        val raw: List<Segment> = splitSegments(p.text)
+        // 解析每个对话段的说话人。解析不出的**保持对话类型**（不降级成旁白）：
+        // 对话永远按对话显示（台词区+打字机），角色名显示"未知"，立绘保持现状。
+        // 之前"降级为旁白"导致说话人匹配失败时整段全按旁白念、对话感全丢。
         paraSegments = raw.map { s ->
             if (s.type == SegType.DIALOG) {
                 val sp = lookupSpeakerText(s.text)
-                if (sp.isBlank()) s.copy(type = SegType.NARRATION) else s.copy(speaker = sp)
+                if (sp.isBlank()) s else s.copy(speaker = sp)
             } else s
         }
+        // 诊断日志：分割结果（类型/区间/说话人），用于验证真实路径
+        io.legado.app.constant.AppLog.putDebug(
+            "舞台诊断: 分割结果 " + paraSegments.joinToString(" | ") {
+                "${if (it.type == SegType.DIALOG) "对话" else "旁白"}" +
+                        "(${it.start}-${it.end})" +
+                        (if (it.type == SegType.DIALOG) "说话人=${it.speaker.ifBlank { "未知" }}" else "") +
+                        " 文本=${it.text.trim().take(12)}"
+            }
+        )
         val dialogSegs = paraSegments.filter { it.type == SegType.DIALOG }
 
-        // ---- 旁白文字（与对话同框，在台词面板内）：先整段顶上
-        // 「第一个对话之前」的旁白（随后片段接管 15 字/片切句）----
-        val narrationBeforeDialog = paraSegments
-            .takeWhile { it.type != SegType.DIALOG }
-            .map { it.text.trim() }
-            .filter { it.isNotBlank() }
-            .joinToString("  ")
-        if (narrationBeforeDialog.isNotBlank()) {
+        // ---- 初始态（段落刚开始，朗读位置≈0）----
+        // 只显示「段首片段」：是旁白则旁白框整段顶上；是对话则等待触发。
+        // 后续片段由 onSubtitlePos 统一路由（读到哪个显示哪个），
+        // 不再用 takeWhile——中间/段尾旁白不会被丢弃。
+        val first = paraSegments.firstOrNull()
+        if (first != null && first.type == SegType.NARRATION && first.text.isNotBlank()) {
+            currentSpeaker = "旁白"
             binding.tvVnNarration.visibility = View.VISIBLE
-            binding.tvVnNarration.text = narrationBeforeDialog
-        } else {
+            binding.tvVnNarration.text = first.text.trim()
+            binding.tvVnDialogue.visibility = View.GONE
+            binding.tvVnRoleName.text = "旁白"
+            switchPortrait("旁白")
+        } else if (first != null && first.type == SegType.DIALOG) {
             binding.tvVnNarration.visibility = View.GONE
             binding.tvVnNarration.text = ""
-        }
-
-        // ---- 台词面板：重置，等待朗读进度触发 ----
-        binding.tvVnDialogue.text = ""
-        if (narrationBeforeDialog.isNotBlank()) {
-            // 旁白文字正在显示（纯旁白段或混合段的旁白部分）：
-            // 立绘统一显示旁白形象，面板标"旁白"
-            binding.tvVnRoleName.text = "旁白"
-            binding.tvVnDialogue.visibility = View.GONE
-            switchPortrait("旁白")
-        } else if (dialogSegs.isEmpty()) {
-            // 无旁白文字也无对话（异常兜底）：按旁白处理
-            binding.tvVnRoleName.text = "旁白"
-            binding.tvVnDialogue.visibility = View.GONE
-            switchPortrait("旁白")
-        } else {
+            binding.tvVnDialogue.visibility = View.VISIBLE
             binding.tvVnRoleName.text = ""
-            // 段首就是对话：立绘等触发时再显示（triggerDialog 里 switchPortrait）；
-            // 这里不 GONE 立绘——保持 110dp 占位，避免演出区高度跳变
+            // 段首就是对话：等触发（onSubtitlePos），立绘保持占位
+        } else {
+            // 空片段兜底：按旁白
+            currentSpeaker = "旁白"
+            binding.tvVnRoleName.text = "旁白"
+            binding.tvVnDialogue.visibility = View.GONE
+            switchPortrait("旁白")
         }
         // 背景预分析调度 + 查记录切场景（带段落索引）
         VnBackgroundManager.onParagraphIndex(p.index, p.text)
@@ -278,31 +286,59 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     private fun onSubtitlePos(pos: io.legado.app.model.VnSubtitlePos) {
         if (!isAdded || paraSegments.isEmpty()) return
         readChars = pos.end
-        // 触发所有已被朗读越过的对话段（start < 片段末尾）
+        // 触发与显示统一用同一判据：朗读位置 pos.end。
+        // 之前触发用 pos.end、显示用 pos.start——边界碎片上两者不一致：
+        // 对话刚触发（立绘切到说话人），显示路由又按碎片起点判"当前在旁白"，
+        // 立刻覆盖回旁白立绘/旁白框——表现为立绘闪一下又回旁白、文字按旁白显示。
+        // 统一判据后不可能自己和自己竞争。
         paraSegments.filter {
             it.type == SegType.DIALOG && !it.triggered && it.start < pos.end
         }.forEach { triggerDialog(it) }
-        // 当前片段与对话区间有交集时：对话显示优先，不进旁白框
-        val inDialog = paraSegments.any {
-            it.type == SegType.DIALOG && it.triggered && pos.start < it.end
+        // 显示定位：朗读位置所在的片段（最后一个 start < pos.end 的片段）
+        val current = paraSegments.lastOrNull { it.start < pos.end } ?: return
+        // 诊断日志：路由决策（读到哪个片段、显示到哪个框）
+        io.legado.app.constant.AppLog.putDebug(
+            "舞台诊断: 路由 pos=(${pos.start}-${pos.end}) 当前片段=" +
+                    "${if (current.type == SegType.DIALOG) "对话" else "旁白"}" +
+                    "(${current.start}-${current.end}) 字幕=${pos.text.take(12)}"
+        )
+        if (current.type == SegType.DIALOG) {
+            // ---- 朗读位置在对话内：台词区打字机（已触发），旁白框 GONE ----
+            if (!current.triggered) triggerDialog(current)
+        } else {
+            // ---- 朗读位置在旁白内：旁白框显示，台词区 GONE ----
+            // 立绘：之前不是旁白态才切换（先判断后更新，顺序不能反）
+            if (currentSpeaker != "旁白") switchPortrait("旁白")
+            // 同步更新 currentSpeaker（点击立绘打开档案要用）：
+            // 之前只在 triggerDialog 更新，旁白期间残留上一个说话人，
+            // 点旁白立绘会打开上一个角色的档案
+            currentSpeaker = "旁白"
+            binding.tvVnNarration.visibility = View.VISIBLE
+            // 碎片可能横跨「对话尾→旁白头」：截掉碎片里属于对话的部分，
+            // 只显示旁白头的文字（避免对话尾巴以旁白形式重复显示）
+            val narrationText = if (pos.start < current.start) {
+                pos.text.substring((current.start - pos.start).coerceAtLeast(0))
+            } else pos.text
+            binding.tvVnNarration.text = narrationText
+            binding.tvVnDialogue.visibility = View.GONE
+            binding.tvVnRoleName.text = "旁白"
         }
-        if (inDialog) return
-        // 纯旁白片段：进旁白框
-        binding.tvVnNarration.visibility = View.VISIBLE
-        binding.tvVnNarration.text = pos.text
     }
 
     /** 触发一个对话段：立绘切到说话人 + 启动打字机（28ms/字，节奏均匀） */
     private fun triggerDialog(seg: Segment) {
         seg.triggered = true
         currentSpeaker = seg.speaker
-        binding.tvVnRoleName.text = seg.speaker
-        // 双向互斥：对话显示时旁白区 GONE、台词区 VISIBLE——
-        // 面板恒为「角色名 + 3 行正文」，任何状态高度不变
+        // 说话人解析失败时显示"未知"（对话仍按对话显示，不降级）
+        binding.tvVnRoleName.text = seg.speaker.ifBlank { "未知" }
+        // 互斥（对话态）：旁白框 GONE、台词区 VISIBLE
         binding.tvVnNarration.visibility = View.GONE
         binding.tvVnNarration.text = ""
         binding.tvVnDialogue.visibility = View.VISIBLE
-        switchPortrait(seg.speaker)
+        // 说话人未知：不切立绘（保持现状），只显示对话
+        if (seg.speaker.isNotBlank()) {
+            switchPortrait(seg.speaker)
+        }
         startTypewriter(seg.text.trim())
     }
 
@@ -356,8 +392,9 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         }
         while (i < chars.size) {
             val c = chars[i]
-            val isOpen = c == '“' || c == '「' || c == '『' || c == '"'
-            val isClose = c == '”' || c == '」' || c == '』' || c == '"'
+            // 只认中文全角双引号：开“ 闭”是两个不同字符，开闭明确无二义性
+            val isOpen = c == '“'
+            val isClose = c == '”'
             if (isOpen && dialogStart < 0) {
                 addNarration(narrationStart, i)
                 dialogStart = i + 1
@@ -382,11 +419,23 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     private fun lookupSpeakerText(dialogText: String): String {
         if (bookName.isBlank()) return ""
         val title = ReadBook.curTextChapter?.chapter?.title.orEmpty()
-        if (title.isBlank()) return ""
+        if (title.isBlank()) {
+            io.legado.app.constant.AppLog.putDebug(
+                "舞台诊断: 章节标题为空，无法匹配说话人（对话前20字=${dialogText.take(20)}）"
+            )
+            return ""
+        }
         val role = ScriptCharacterRepository.matchChapterRoleByText(
             bookName, title, dialogText.trim()
         )
-        return if (role != null && !role.isNarration) role.name else ""
+        val result = if (role != null && !role.isNarration) role.name else ""
+        if (result.isBlank()) {
+            io.legado.app.constant.AppLog.putDebug(
+                "舞台诊断: 说话人匹配失败 书=$bookName 章=$title 对话前20字=${dialogText.take(20)}" +
+                        "（缓存命中=${role != null}，isNarration=${role?.isNarration}）"
+            )
+        }
+        return result
     }
 
     // ------------------------------------------------------------------
@@ -503,7 +552,13 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
                 }
             }
         )
-        root.setOnTouchListener { _, event ->
+        root.setOnTouchListener { v, event ->
+            // 事件落在立绘区域内：放行给立绘的 click（打开角色档案），
+            // 不进入舞台手势（否则 setClickListener 永远收不到事件）
+            val portrait = binding.ivVnPortrait
+            if (portrait.visibility == View.VISIBLE && isInsideView(portrait, event)) {
+                return@setOnTouchListener false
+            }
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     downY = event.y
@@ -513,6 +568,15 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             gesture.onTouchEvent(event)
             true
         }
+    }
+
+    /** 事件坐标是否落在视图 bounds 内（窗口坐标系） */
+    private fun isInsideView(view: View, event: android.view.MotionEvent): Boolean {
+        val loc = IntArray(2)
+        view.getLocationInWindow(loc)
+        val x = event.rawX - loc[0]
+        val y = event.rawY - loc[1]
+        return x >= 0 && x <= view.width && y >= 0 && y <= view.height
     }
 
     /** 暂停/继续朗读（与大图界面同款回调链） */
