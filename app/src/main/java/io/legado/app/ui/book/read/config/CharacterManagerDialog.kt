@@ -362,7 +362,15 @@ class CharacterManagerDialog : DialogFragment() {
             .setTitle("角色操作: $name")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> RoleChatActivity.start(requireActivity(), currentBook, name)
+                    0 -> {
+                        // 无档案时后台建档并补立绘，不阻塞进入对话页
+                        io.legado.app.model.AiProfileService.ensureProfileAndAvatar(
+                            currentBook, name,
+                            io.legado.app.model.ReadBook.durChapterIndex,
+                            io.legado.app.model.ReadBook.curTextChapter?.chapter?.title.orEmpty()
+                        )
+                        RoleChatActivity.start(requireActivity(), currentBook, name)
+                    }
                     1 -> CharacterProfileDialog.newInstance(currentBook, name)
                         .show(childFragmentManager, "characterProfileDialog")
                     2 -> showEditCharacterDialog(position)

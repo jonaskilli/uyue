@@ -1,9 +1,11 @@
 package io.legado.app.ui.book.read.config
 
 import android.annotation.SuppressLint
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import com.google.gson.JsonParser
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
@@ -38,6 +40,12 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
         binding.tvTitle.text = "角色档案 · $characterName"
         binding.tvChat.setOnClickListener {
+            // 无档案时后台建档并补立绘，不阻塞进入对话页
+            io.legado.app.model.AiProfileService.ensureProfileAndAvatar(
+                bookName, characterName,
+                io.legado.app.model.ReadBook.durChapterIndex,
+                io.legado.app.model.ReadBook.curTextChapter?.chapter?.title.orEmpty()
+            )
             dismissAllowingStateLoss()
             RoleChatActivity.start(requireActivity(), bookName, characterName)
         }
@@ -61,6 +69,7 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
         binding.tvRegen.setOnClickListener { regenerate() }
         binding.tvPortrait.setOnClickListener { generatePortrait() }
         loadProfile()
+        loadPortrait()
     }
 
     private fun loadProfile() {
@@ -242,6 +251,7 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
                 binding.tvPortrait.isEnabled = true
                 binding.tvStatus.visibility = View.VISIBLE
                 binding.tvStatus.text = "立绘已生成：${file.name}"
+                loadPortrait()
                 toastOnUi("立绘已生成，与角色对话页将自动使用")
             },
             onFailure = { e ->
@@ -250,6 +260,37 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
                 binding.tvStatus.text = "立绘生成失败：${e.localizedMessage}"
             }
         )
+    }
+
+    /**
+     * 顶部立绘预览：有缓存立绘则后台解码显示（按宽度降采样避免大图占内存），
+     * 无立绘显示默认人形占位。
+     */
+    private fun loadPortrait() {
+        val file = io.legado.app.model.AiImageGenerator.getCachedAvatar(bookName, characterName)
+        if (file == null) {
+            binding.ivPortrait.scaleType = ImageView.ScaleType.CENTER_INSIDE
+            binding.ivPortrait.setImageResource(R.drawable.ic_portrait_person)
+            return
+        }
+        execute {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= 720) sample *= 2
+            BitmapFactory.decodeFile(
+                file.absolutePath,
+                BitmapFactory.Options().apply { inSampleSize = sample }
+            )
+        }.onSuccess(Dispatchers.Main) { bmp ->
+            if (bmp != null) {
+                binding.ivPortrait.scaleType = ImageView.ScaleType.CENTER_CROP
+                binding.ivPortrait.setImageBitmap(bmp)
+            } else {
+                binding.ivPortrait.scaleType = ImageView.ScaleType.CENTER_INSIDE
+                binding.ivPortrait.setImageResource(R.drawable.ic_portrait_person)
+            }
+        }
     }
 
     // ---- JSON 数组字段的展示美化 ----
