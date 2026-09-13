@@ -84,6 +84,12 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
      */
     private val shortInterjectionMax = 15
 
+    /**
+     * 黑括号 `【】` 片段的说话人。
+     * 与内置朗读脚本 SPECIAL_ROLES 里的「【】括号发音人 → 系统」一致。
+     */
+    private val systemSpeaker = "系统"
+
     /** 上一段是否以未闭合的 `“` 结尾（作者把一句对话拆成了多个段落） */
     private var pendingDialog = false
 
@@ -165,12 +171,24 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         setupGestures()
 
         // 点立绘 → 打开该角色的角色档案（可补全信息/编辑提示词/重新生成立绘）。
-        // 仅对话角色有立绘可点；旁白态立绘为 INVISIBLE 占位、不可点击。
+        // 仅对话/系统角色有立绘可点；旁白态立绘为 INVISIBLE 占位，点击不生效。
         binding.ivVnPortrait.setOnClickListener {
             val speaker = currentSpeaker.ifBlank { "旁白" }
             CharacterProfileDialog.newInstance(bookName, speaker)
                 .show(parentFragmentManager, "characterProfileDialog")
         }
+
+        // 长按立绘区 → 固定打开「系统」档案。
+        // 这是正文里没有【】时编辑系统立绘的唯一入口：立绘 VISIBLE 时由 ImageView
+        // 消费长按，INVISIBLE 时（旁白态）落到外层 FrameLayout，两处都挂保证任何时候
+        // 都进得去。档案弹窗支持无档案时直接出图，也可编辑人设后重新生成。
+        val openSystemProfile: () -> Boolean = {
+            CharacterProfileDialog.newInstance(bookName, systemSpeaker)
+                .show(parentFragmentManager, "characterProfileDialog")
+            true
+        }
+        binding.ivVnPortrait.setOnLongClickListener { openSystemProfile() }
+        binding.flVnPortrait.setOnLongClickListener { openSystemProfile() }
     }
 
     override fun observeLiveBus() {
@@ -239,8 +257,8 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     // 段落处理
     // ------------------------------------------------------------------
 
-    /** 片段类型：引号外旁白 / 引号内对话 */
-    private enum class SegType { NARRATION, DIALOG }
+    /** 片段类型：引号外旁白 / 引号内对话 / 黑括号【】内系统消息 */
+    private enum class SegType { NARRATION, DIALOG, SYSTEM }
 
     /** 段落片段：raw 段内字符区间 + 归属（对话段解析不出说话人时降级为旁白） */
     private data class Segment(
@@ -294,7 +312,7 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             // 用统一路由定位当前片段（与 onSubtitlePos 同款判据：朗读位置 + 提前量）：
             // 朗读位置在对话内 → 触发对话；在旁白内 → 旁白框整段
             val current = currentSegment(readChars)
-            if (current != null && current.type == SegType.DIALOG) {
+            if (current != null && current.type != SegType.NARRATION) {
                 triggerDialog(current)
                 val visible = (readChars - current.start).coerceIn(0, current.text.trim().length)
                 binding.tvVnDialogue.text = current.text.trim().take(visible)
@@ -363,12 +381,18 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             // 对话永远按对话显示（台词区+打字机），角色名显示"未知"，立绘保持现状。
             // 之前"降级为旁白"导致说话人匹配失败时整段全按旁白念、对话感全丢。
             raw.map { s ->
-                if (s.type != SegType.DIALOG) return@map s
-                val sp = lookupSpeakerText(s.text)
-                when {
-                    sp.isNotBlank() -> s.copy(speaker = sp)
-                    // 续段且查不到归属：继承上一段未闭合对话的说话人
-                    carried && carriedSpeaker.isNotBlank() -> s.copy(speaker = carriedSpeaker)
+                when (s.type) {
+                    // 系统消息：说话人固定，不需要按文本反查归属
+                    SegType.SYSTEM -> s.copy(speaker = systemSpeaker)
+                    SegType.DIALOG -> {
+                        val sp = lookupSpeakerText(s.text)
+                        when {
+                            sp.isNotBlank() -> s.copy(speaker = sp)
+                            // 续段且查不到归属：继承上一段未闭合对话的说话人
+                            carried && carriedSpeaker.isNotBlank() -> s.copy(speaker = carriedSpeaker)
+                            else -> s
+                        }
+                    }
                     else -> s
                 }
             }
@@ -400,7 +424,7 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             binding.tvVnDialogue.visibility = View.GONE
             binding.tvVnRoleName.text = "旁白"
             switchPortrait("旁白")
-        } else if (first != null && first.type == SegType.DIALOG) {
+        } else if (first != null && first.type != SegType.NARRATION) {
             binding.tvVnNarration.visibility = View.GONE
             binding.tvVnNarration.text = ""
             binding.tvVnDialogue.visibility = View.VISIBLE
@@ -434,7 +458,8 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         val ahead = paraSegments.lastOrNull { it.start < readPos + triggerLookaheadChars }
         if (strict == null) return ahead
         if (ahead == null || ahead.start <= strict.start) return strict
-        return if (ahead.type == SegType.DIALOG) ahead else strict
+        // 对话与系统消息都提前进入（都要先切立绘）；旁白不提前
+        return if (ahead.type != SegType.NARRATION) ahead else strict
     }
 
     /**
@@ -454,7 +479,7 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         // 提前量：立绘解码/生成耗时，前移若干字符触发，避免立绘晚半拍才出现。
         val triggerPos = pos.end + triggerLookaheadChars
         paraSegments.filter {
-            it.type == SegType.DIALOG && !it.triggered && it.start < triggerPos
+            it.type != SegType.NARRATION && !it.triggered && it.start < triggerPos
         }.forEach { triggerDialog(it) }
         // 显示定位：朗读位置所在的片段（带提前量，见 currentSegment）
         val current = currentSegment(pos.end) ?: return
@@ -464,8 +489,8 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
                     "${if (current.type == SegType.DIALOG) "对话" else "旁白"}" +
                     "(${current.start}-${current.end}) 字幕=${pos.text.take(12)}"
         )
-        if (current.type == SegType.DIALOG) {
-            // ---- 朗读位置在对话内：台词区打字机（已触发），旁白框 GONE ----
+        if (current.type != SegType.NARRATION) {
+            // ---- 朗读位置在对话/系统消息内：台词区打字机（已触发），旁白框 GONE ----
             if (!current.triggered) triggerDialog(current)
         } else {
             // ---- 朗读位置在旁白内：旁白框显示，台词区 GONE ----
@@ -521,6 +546,9 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             binding.tvVnDialogue.text = ""
             return
         }
+        // 不预设高度：让框随打字机逐字显示自然增高。
+        // 演出区是 layout_gravity="bottom"，内容变高时底部不动、顶部向上推，
+        // 就是"一行一行向上生长"的效果；下限 4 行、上限 8 行由 XML 约束。
         typewriterJob = lifecycleScope.launch(Dispatchers.Main) {
             val sb = StringBuilder()
             for (ch in fullText) {
@@ -548,17 +576,28 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
      * 4. **正常闭合**的引号对里，纯汉字、无标点且 ≤ [shortInterjectionMax] 字的内容
      *    降级为旁白（拟声/强调，如「只听“砰”的一声」）；被新 `“` 打断或段尾未闭合的
      *    不参与该判定；
-     * 5. 单条对话最长 [maxDialogLen] 字。
+     * 5. 单条对话最长 [maxDialogLen] 字；
+     * 6. 黑括号 `【…】` 内的内容单独切成 [SegType.SYSTEM]，说话人为 [systemSpeaker]
+     *    （与脚本 SPECIAL_ROLES 的「【】括号发音人 → 系统」一致）；
+     *    `【` 优先于引号——遇到它就先收尾当前旁白/对话。形如 `【01】` 的纯数字
+     *    黑括号是脚本的对话序号标记，按边界吞掉，不当系统消息。
      */
     private fun splitSegments(paragraph: String): List<Segment> {
         val out = ArrayList<Segment>(4)
         val hasOpenQuote = paragraph.indexOf('“') >= 0
         var narrationStart = 0
         var dialogStart = -1
+        var systemStart = -1
         var i = 0
         fun addNarration(from: Int, to: Int) {
             if (to > from) out.add(
                 Segment(from, to, SegType.NARRATION, paragraph.substring(from, to))
+            )
+        }
+        /** 黑括号【】内的系统消息（说话人固定为 [systemSpeaker]） */
+        fun addSystem(from: Int, to: Int) {
+            if (to > from) out.add(
+                Segment(from, to, SegType.SYSTEM, paragraph.substring(from, to))
             )
         }
         /**
@@ -577,6 +616,33 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         }
         while (i < paragraph.length) {
             when (paragraph[i]) {
+                '【' -> {
+                    if (isSeqMark(paragraph, i)) {
+                        // 脚本的对话序号【01】【02】：当边界吞掉，不进正文显示
+                        val closeIdx = paragraph.indexOf('】', i)
+                        if (closeIdx > 0) {
+                            addNarration(narrationStart, i)
+                            i = closeIdx
+                            narrationStart = closeIdx + 1
+                        }
+                    } else {
+                        // 黑括号优先：先收尾当前旁白/对话，再开系统段
+                        if (dialogStart >= 0) {
+                            addDialog(dialogStart, i, closed = false)
+                            dialogStart = -1
+                        } else {
+                            addNarration(narrationStart, i)
+                        }
+                        systemStart = i + 1
+                    }
+                }
+                '】' -> {
+                    if (systemStart >= 0) {
+                        addSystem(systemStart, i)
+                        systemStart = -1
+                        narrationStart = i + 1
+                    }
+                }
                 '“' -> {
                     if (dialogStart >= 0) {
                         // 嵌套/连续开引号：直接关闭上一段，再开新段
@@ -599,7 +665,10 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             }
             i++
         }
-        if (dialogStart >= 0) {
+        if (systemStart >= 0) {
+            // 未闭合的【：其后全部视为系统消息
+            addSystem(systemStart, paragraph.length)
+        } else if (dialogStart >= 0) {
             // 只有开引号：其后全部视为对话
             addDialog(dialogStart, paragraph.length, closed = false)
         } else if (narrationStart < paragraph.length) {
@@ -625,6 +694,18 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         val t = text.trim()
         if (t.isEmpty() || t.length > shortInterjectionMax) return false
         return t.all { it in '\u4E00'..'\u9FFF' }
+    }
+
+    /**
+     * `【` 开头的是否为朗读脚本的对话序号标记（形如 `【01】`）。
+     * 脚本 `generateBatchSeqContent` 会给每条对话打序号发给 AI，`cleanDialogText`
+     * 里也有 `replace(/【\d+】/g, "")`——这类不是系统消息，必须排除。
+     */
+    private fun isSeqMark(paragraph: String, openIndex: Int): Boolean {
+        var j = openIndex + 1
+        if (j >= paragraph.length) return false
+        while (j < paragraph.length && paragraph[j].isDigit()) j++
+        return j > openIndex + 1 && j < paragraph.length && paragraph[j] == '】'
     }
 
     /** 反查单个对话文本的说话人（matchChapterRoleByText 前缀索引） */
@@ -664,6 +745,11 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             binding.ivVnPortrait.visibility = View.INVISIBLE
             return
         }
+        if (speaker == systemSpeaker) {
+            // 系统：只出图、不建档（见 showSystemPortrait 注释）
+            showSystemPortrait()
+            return
+        }
         val cached = AiImageGenerator.getCachedAvatar(bookName, speaker)
         if (cached != null) {
             showPortrait(cached)
@@ -689,6 +775,37 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
                 }
             }
         }
+    }
+
+    /**
+     * 系统立绘：只生成/复用一张图，**不建角色档案**。
+     *
+     * "系统"不是正文人物——它在 CharacterProfileManager 的 SKIP_NAMES 里，
+     * 且没有台词上下文可供 AI 分析，走 [AiProfileService.ensureProfileAndAvatar]
+     * 会因建档失败而始终拿不到图。这里直接按角色名出图。
+     *
+     * 人设编辑与「重新生成立绘」由用户在角色档案弹窗里手工操作：
+     * 点舞台上的系统立绘即可进入（[CharacterProfileDialog] 支持无档案时也能出图）。
+     */
+    private fun showSystemPortrait() {
+        val cached = AiImageGenerator.getCachedAvatar(bookName, systemSpeaker)
+        if (cached != null) {
+            showPortrait(cached)
+            return
+        }
+        // 用 INVISIBLE 而非 GONE：保持 110dp 占位，生成完成前面板位置不跳变
+        portraitAvailable = false
+        binding.ivVnPortrait.visibility = View.INVISIBLE
+        AiImageGenerator.generateCharacterAvatar(
+            characterName = systemSpeaker,
+            genderAge = "",
+            bookName = bookName,
+            identity = "系统提示",
+            regenerate = false,
+            templateId = io.legado.app.help.config.AppConfig.aiPortraitTemplateId,
+            onSuccess = { if (currentSpeaker == systemSpeaker) showPortrait(it) },
+            onFailure = { }
+        )
     }
 
     private fun showPortrait(file: File) {

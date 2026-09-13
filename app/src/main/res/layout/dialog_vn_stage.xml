@@ -33,18 +33,26 @@
         android:paddingHorizontal="14dp"
         android:paddingBottom="14dp">
 
-        <!-- 第一行：立绘（左；INVISIBLE 占位保持 110dp 高度恒定，无图时不塌陷） -->
-        <ImageView
-            android:id="@+id/iv_vn_portrait"
+        <!-- 第一行：立绘（左；INVISIBLE 占位保持 110dp 高度恒定，无图时不塌陷）。
+             外层 FrameLayout 是常驻触摸区：立绘 INVISIBLE 时（旁白态）ImageView 收不到触摸，
+             但这里仍可长按，用于打开「系统」角色档案（正文里没有【】时也能编辑系统立绘）。 -->
+        <FrameLayout
+            android:id="@+id/fl_vn_portrait"
             android:layout_width="110dp"
             android:layout_height="110dp"
             android:layout_marginStart="10dp"
-            android:layout_marginBottom="8dp"
-            android:background="@drawable/bg_vn_portrait"
-            android:padding="4dp"
-            android:scaleType="fitCenter"
-            android:contentDescription="说话人立绘"
-            android:visibility="invisible" />
+            android:layout_marginBottom="8dp">
+
+            <ImageView
+                android:id="@+id/iv_vn_portrait"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/bg_vn_portrait"
+                android:padding="4dp"
+                android:scaleType="fitCenter"
+                android:contentDescription="说话人立绘"
+                android:visibility="invisible" />
+        </FrameLayout>
 
         <!-- 第二行：台词面板（半透明融入背景；固定高度容纳 3 行） -->
         <LinearLayout
@@ -67,14 +75,15 @@
                 tools:ignore="HardcodedText"
                 tools:text="角色名" />
 
-            <!-- 旁白文字（与对话同框同高：固定 3 行；白字黑描边加宽；字数分割跟读显示） -->
+            <!-- 旁白文字（与对话同基础高度 4 行；白字黑描边加宽；字数分割跟读显示）。
+                 旁白按 15 字分片，不会超过 4 行，这里固定即可。 -->
             <TextView
                 android:id="@+id/tv_vn_narration"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:minLines="3"
-                android:maxLines="3"
+                android:minLines="4"
+                android:maxLines="4"
                 android:shadowColor="#FF000000"
                 android:shadowDx="0"
                 android:shadowDy="0"
@@ -86,14 +95,17 @@
                 tools:ignore="HardcodedText"
                 tools:text="旁白文字（字数分割跟读显示）" />
 
-            <!-- 台词（打字机逐字显示） -->
+            <!-- 台词（打字机逐字显示）。
+                 基础 4 行；随打字机逐字显示自然增高——演出区是 layout_gravity="bottom"，
+                 内容变高时底部不动、顶部向上推，即一行一行向上生长。
+                 上限 8 行，超过不再增高，改为内部滚动。 -->
             <TextView
                 android:id="@+id/tv_vn_dialogue"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:minLines="3"
-                android:maxLines="3"
+                android:minLines="4"
+                android:maxLines="8"
                 android:lineSpacingExtra="4dp"
                 android:scrollbars="vertical"
                 android:textColor="#F2FFFFFF"
