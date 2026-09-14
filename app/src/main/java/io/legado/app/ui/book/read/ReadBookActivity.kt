@@ -1982,8 +1982,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             .setTitle("编辑角色")
             .setView(scrollView)
             // Neutral 位于按钮栏最左侧（排列顺序为 Neutral | Negative | Positive），
-            // 即「角色管理 | 角色档案 | 取消 | 保存」（角色档案为下方注入的第 4 个按钮）。
-            // 与「取消」一致：不保存当前修改，仅关闭本对话框后进入对应界面。
+            // 即「角色管理 | 取消 | 保存」。与「取消」一致：不保存当前修改，仅关闭本对话框后进入角色管理。
             .setNeutralButton("角色管理") { _, _ ->
                 dialogRef.get()?.dismiss()
                 showDialogFragment(CharacterManagerDialog())
@@ -1993,35 +1992,27 @@ class ReadBookActivity : BaseReadBookActivity(),
             .show()
         dialogRef.set(dialog)
 
-        // 「角色档案」入口：插在按钮栏「角色管理」右侧。
-        // AlertDialog 的按钮槽位固定 3 个（Neutral|Negative|Positive），Builder
-        // 加不了第 4 个，这里在 neutral 按钮的父容器（按钮栏 LinearLayout）中
-        // 紧随其后插入一个同风格按钮；主题差异导致取不到容器时静默降级（不显示）。
+        // 在系统按钮栏「角色管理」右侧追加一个「角色档案」入口。
+        // AlertDialog 仅有 3 个按钮槽位，第 4 个按钮通过向按钮栏 LinearLayout 注入实现；
+        // 沿用系统 buttonBarButtonStyle，不改动原有三个按钮的布局。取不到容器时静默降级（不显示）。
         runCatching {
             val neutral = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
             val bar = neutral?.parent
             if (neutral != null && bar is LinearLayout) {
-                val typedValue = TypedValue()
-                context.theme.resolveAttribute(
-                    android.R.attr.selectableItemBackground, typedValue, true
-                )
-                val btnProfile = Button(context).apply {
-                    text = "角色档案"
-                    textSize = neutral.textSize
+                val btnProfile = Button(context, null, android.R.attr.buttonBarButtonStyle).apply {
+                    // 缩短为 2 字以减少该按钮宽度，避免与系统三按钮合计超出行宽
+                    // （Material ButtonBarLayout 放不下会整体竖排），保证标准字体也能横排成一行。
+                    text = "档案"
+                    setTextSize(TypedValue.COMPLEX_UNIT_PX, neutral.textSize)
                     typeface = neutral.typeface
-                    // 与系统对话框按钮同风格：无边框水波纹 + 同文字色
-                    setBackgroundResource(typedValue.resourceId)
                     setTextColor(neutral.textColors)
-                    val hp = 16.dpToPx()
-                    val vp = 12.dpToPx()
-                    setPadding(hp, vp, hp, vp)
-                    minHeight = 48.dpToPx()
+                    // 收窄左右内边距，进一步给同行按钮腾出空间
+                    setPadding(4.dpToPx(), neutral.paddingTop, 4.dpToPx(), neutral.paddingBottom)
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT
                     )
                     setOnClickListener {
-                        // 与「角色管理」一致：不保存当前修改，关闭本对话框后打开角色档案
                         dialogRef.get()?.dismiss()
                         showDialogFragment(
                             CharacterProfileDialog.newInstance(bookName, name)
