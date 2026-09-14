@@ -6,15 +6,18 @@ import android.os.Handler
 import android.os.Looper
 import android.text.method.ScrollingMovementMethod
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.app.AlertDialog
 import android.widget.ImageView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
+import com.bumptech.glide.load.resource.bitmap.CenterCrop
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.constant.EventBus
@@ -22,6 +25,8 @@ import io.legado.app.databinding.DialogVnStageBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.loadGif
+import io.legado.app.help.glide.BlurTransformation
+import io.legado.app.help.glide.VnMirrorTransform
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.AiProfileService
 import io.legado.app.model.ReadBook
@@ -158,7 +163,10 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         if (useAiImageBackground) {
             showAiGeneratedBackground()
         } else {
-            // 背景管理器（object 单例）：绑定显示目标
+            // 背景管理器（object 单例）：绑定显示目标；渲染交给本界面的两层背景加载，
+            // 以统一支持「背景呈现方式」（裁切 / 上下补模糊 / 贴顶补模糊）。
+            VnBackgroundManager.onSceneFile = { loadBackgroundImage(file = it) }
+            VnBackgroundManager.onBuiltin = { loadBackgroundImage(resId = R.drawable.vn_default_background) }
             VnBackgroundManager.attach(binding.ivVnBackground)
         }
 
@@ -209,7 +217,7 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             if (!useAiImageBackground) return@observeEvent
             if (imagePath.isBlank()) return@observeEvent
             val f = File(imagePath)
-            if (f.exists()) loadBackground(f)
+            if (f.exists()) loadBackgroundImage(file = f)
         }
     }
 
@@ -224,29 +232,87 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     private fun showAiGeneratedBackground() {
         val f = AiImageGenerator.getLastGeneratedImage()
         if (f != null && f.exists()) {
-            loadBackground(f)
+            loadBackgroundImage(file = f)
         } else {
-            binding.ivVnBackground.setImageResource(R.drawable.vn_default_background)
+            loadBackgroundImage(resId = R.drawable.vn_default_background)
         }
     }
 
     /**
-     * 加载背景图。写法与 FullscreenAiImageDialog.loadImage 一致：
-     * GIF 走 loadGif 链路，静态图走 Glide；placeholder 保留当前图，避免切换时闪黑。
-     * 缩放用 centerCrop——舞台背景要铺满全屏（大图界面是 fitCenter，不裁剪）。
+     * 加载背景图并按 [AppConfig.vnBackgroundMode] 切换呈现方式。
+     * - 0 左右裁切铺满全屏（centerCrop，所有镜像/模糊层隐藏）
+     * - 1 不裁左右（fitCenter，整图显示），上下留白带用「镜像」填充：接缝清晰、向屏幕
+     *      边缘渐隐透出模糊镜像，形成自然反射 + 越来越模糊，整条带不透明（绝无黑边）
+     * - 2 贴顶（fitStart），仅下方留白带用镜像填充（上方被图片顶满、无留白）
+     * 兜底：再铺一层全屏模糊（ivVnBackgroundBlur），任何未覆盖处也不露黑底。
+     * GIF 模糊成本高且镜像意义不大，模式 1/2 退化为仅清晰层按模式缩放。
      */
-    private fun loadBackground(file: File) {
+    private fun loadBackgroundImage(file: File? = null, resId: Int = 0) {
         if (!isAdded || activity?.isDestroyed == true) return
-        val iv = binding.ivVnBackground
-        if (isGifFile(file)) {
-            iv.loadGif(file, ImageView.ScaleType.CENTER_CROP)
+        val mode = AppConfig.vnBackgroundMode
+        val isGif = file != null && isGifFile(file)
+        val sharp = binding.ivVnBackground
+        val blurBg = binding.ivVnBackgroundBlur
+        val topBlur = binding.ivVnMirrorTopBlur
+        val top = binding.ivVnMirrorTop
+        val botBlur = binding.ivVnMirrorBottomBlur
+        val bot = binding.ivVnMirrorBottom
+
+        // 0 / GIF：左右裁切铺满，隐藏所有镜像与模糊层
+        if (isGif || mode == 0) {
+            blurBg.visibility = View.GONE
+            topBlur.visibility = View.GONE
+            top.visibility = View.GONE
+            botBlur.visibility = View.GONE
+            bot.visibility = View.GONE
+            sharp.scaleType = ImageView.ScaleType.CENTER_CROP
+            if (isGif) {
+                sharp.loadGif(file!!, sharp.scaleType)
+            } else {
+                val req = if (resId != 0) Glide.with(sharp.context).load(resId)
+                else Glide.with(sharp.context).load(file)
+                req.placeholder(sharp.drawable).into(sharp)
+            }
             return
         }
-        Glide.with(iv.context)
-            .load(file)
-            .centerCrop()
-            .placeholder(iv.drawable)
-            .into(iv)
+
+        // 清晰层：不裁左右（fitCenter / 贴顶）
+        sharp.scaleType = if (mode == 2) ImageView.ScaleType.FIT_START
+        else ImageView.ScaleType.FIT_CENTER
+        val sharpReq = if (resId != 0) Glide.with(sharp.context).load(resId)
+        else Glide.with(sharp.context).load(file)
+        sharpReq.placeholder(sharp.drawable).into(sharp)
+
+        // 全屏模糊兜底层：保证任何未覆盖处不露黑底
+        blurBg.visibility = View.VISIBLE
+        val blurBgReq = if (resId != 0) Glide.with(blurBg.context).load(resId)
+        else Glide.with(blurBg.context).load(file)
+        blurBgReq.transform(BlurTransformation(20), CenterCrop())
+            .placeholder(blurBg.drawable).into(blurBg)
+
+        val fitMode = if (mode == 2) 1 else 0
+        fun loadMirror(v: ImageView, blurred: Boolean, side: Int) {
+            val req = if (resId != 0) Glide.with(v.context).load(resId)
+            else Glide.with(v.context).load(file)
+            if (blurred) req.transform(BlurTransformation(20), VnMirrorTransform(side, fitMode, false))
+            else req.transform(VnMirrorTransform(side, fitMode, true))
+            req.placeholder(v.drawable).into(v)
+        }
+        // 上方镜像：仅模式 1（不裁左右·上下）
+        if (mode == 1) {
+            topBlur.visibility = View.VISIBLE
+            top.visibility = View.VISIBLE
+            loadMirror(topBlur, blurred = true, side = 0)
+            loadMirror(top, blurred = false, side = 0)
+        } else {
+            topBlur.visibility = View.GONE
+            top.visibility = View.GONE
+        }
+        // 下方镜像：模式 1 与 2 都有
+        botBlur.visibility = View.VISIBLE
+        bot.visibility = View.VISIBLE
+        loadMirror(botBlur, blurred = true, side = 1)
+        loadMirror(bot, blurred = false, side = 1)
     }
 
     /** 判断文件是否为 GIF 动图（按扩展名，不区分大小写） */
@@ -841,6 +907,12 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             object : android.view.GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(e: android.view.MotionEvent): Boolean = true
 
+                override fun onLongPress(e: android.view.MotionEvent) {
+                    // 长按背景 → 选择呈现方式；滑动已触发退出时不弹
+                    if (moved) return
+                    showBackgroundModeMenu()
+                }
+
                 override fun onSingleTapUp(e: android.view.MotionEvent): Boolean {
                     if (moved) return false
                     val w = root.width.takeIf { it > 0 } ?: return false
@@ -886,6 +958,39 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             }
             gesture.onTouchEvent(event)
             true
+        }
+    }
+
+    /**
+     * 长按背景 → 选择背景呈现方式（持久化，重启不丢）。
+     * 三项对应 [AppConfig.vnBackgroundMode]：
+     * 0 左右裁切铺满 / 1 不裁左右·上下镜像渐模糊 / 2 贴顶·仅下方镜像渐模糊。
+     */
+    private fun showBackgroundModeMenu() {
+        if (!isAdded) return
+        val items = arrayOf(
+            "左右裁切（铺满全屏）",
+            "不裁左右 · 上下镜像渐模糊",
+            "贴顶 · 下方镜像渐模糊"
+        )
+        val cur = AppConfig.vnBackgroundMode
+        AlertDialog.Builder(requireContext())
+            .setTitle("背景呈现方式")
+            .setSingleChoiceItems(items, cur) { d, which ->
+                AppConfig.vnBackgroundMode = which
+                d.dismiss()
+                reloadBackgroundWithMode()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** 切换呈现方式后，按当前背景来源重刷两层背景 */
+    private fun reloadBackgroundWithMode() {
+        if (useAiImageBackground) {
+            showAiGeneratedBackground()
+        } else {
+            VnBackgroundManager.reshow()
         }
     }
 

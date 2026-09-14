@@ -1,6 +1,5 @@
 package io.legado.app.ui.book.read.config
 
-import android.graphics.BitmapFactory
 import android.widget.ImageView
 import io.legado.app.constant.AppLog
 import io.legado.app.model.AiImageGenerator
@@ -91,6 +90,15 @@ object VnBackgroundManager {
     @Volatile
     private var currentScene: String = ""
 
+    /**
+     * 背景图就绪回调：交给舞台界面统一做两层渲染（清晰层 + 模糊蒙板层 + 呈现方式）。
+     * 由 VnStageDialog 在 attach 前设置，release 时清空，避免持有界面引用。
+     */
+    var onSceneFile: ((File) -> Unit)? = null
+
+    /** 内置通用背景回调（同样交给舞台界面渲染，以统一呈现方式） */
+    var onBuiltin: (() -> Unit)? = null
+
     /** 当前 ImageView 引用（界面销毁即释放） */
     @Volatile
     private var targetView: ImageView? = null
@@ -151,6 +159,14 @@ object VnBackgroundManager {
     /** 界面销毁时释放引用（不删缓存与记录） */
     fun release() {
         targetView = null
+        onSceneFile = null
+        onBuiltin = null
+    }
+
+    /** 呈现方式切换后，按当前场景/内置背景重绘（回调交给舞台界面做两层渲染） */
+    fun reshow() {
+        if (currentScene.isNotBlank()) showScene(currentScene)
+        else onBuiltin?.invoke()
     }
 
     // ------------------------------------------------------------------
@@ -436,28 +452,23 @@ object VnBackgroundManager {
         }
     }
 
-    /** 主线程显示该类别背景；缓存未就绪（生成中）时保持当前显示（不闪黑） */
+    /** 主线程显示该类别背景；渲染交给舞台界面的 [onSceneFile] 回调（两层 + 呈现方式） */
     private fun showScene(scene: String) {
         val f = sceneFile(scene)
         if (!f.isFile || f.length() == 0L) return
-        val view = targetView ?: return
+        if (targetView == null) return
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            val v = targetView ?: return@post
-            runCatching {
-                val bmp = BitmapFactory.decodeFile(f.absolutePath) ?: return@post
-                v.setImageBitmap(bmp)
-            }
+            if (targetView == null) return@post
+            onSceneFile?.invoke(f)
         }
     }
 
-    /** 显示打包进 APK 的内置通用背景（res/drawable-nodpi/vn_default_background） */
+    /** 显示打包进 APK 的内置通用背景（渲染交给舞台界面的 [onBuiltin] 回调） */
     private fun showBuiltinBackground() {
-        val view = targetView ?: return
+        if (targetView == null) return
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            val v = targetView ?: return@post
-            runCatching {
-                v.setImageResource(io.legado.app.R.drawable.vn_default_background)
-            }
+            if (targetView == null) return@post
+            onBuiltin?.invoke()
         }
     }
 }

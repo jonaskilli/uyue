@@ -327,6 +327,8 @@ object PreferKey {
     const val readAloudAiImage = "readAloudAiImage"
     // 视觉小说舞台（朗读大图界面替换为 galgame 演出界面）
     const val vnStageEnabled = "vnStageEnabled"
+    // 视觉小说舞台背景呈现方式：0=左右裁切铺满(默认) 1=不裁左右·上下补模糊 2=贴顶·仅下方补模糊
+    const val vnBackgroundMode = "vnBackgroundMode"
     // 启用AI生图（每本书单独设置），key = aiImageEnablePrefix_${bookUrl}
     const val aiImageEnablePrefix = "aiImageEnable_"
     // AI 生图临时缓存保留数量上限（默认 50）

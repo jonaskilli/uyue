@@ -1624,4 +1624,9 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefString(PreferKey.aiPortraitTemplateId)?.toLongOrNull() ?: 0L
         set(value) = appCtx.putPrefString(PreferKey.aiPortraitTemplateId, value.toString())
 
+    // 视觉小说舞台背景呈现方式：0=左右裁切铺满(默认) 1=不裁左右·上下补模糊 2=贴顶·仅下方补模糊
+    var vnBackgroundMode: Int
+        get() = appCtx.getPrefInt(PreferKey.vnBackgroundMode, 0).coerceIn(0, 2)
+        set(value) = appCtx.putPrefInt(PreferKey.vnBackgroundMode, value.coerceIn(0, 2))
+
 }
