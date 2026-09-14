@@ -1816,6 +1816,16 @@ object AiImageGenerator {
     /** 角色立绘缓存目录名（固定 cacheDir/ai_images/ai_avatars/） */
     private const val AVATAR_DIR_NAME = "ai_avatars"
 
+    /**
+     * 立绘历史目录名：cacheDir/ai_images/ai_avatars/avatar_history/<角色key>/
+     * 重新生成或切换立绘时，旧图归档到这里而不是删除，供用户在历史里挑回来。
+     * 文件名即归档时间戳（毫秒），升序=由旧到新。
+     */
+    private const val AVATAR_HISTORY_DIR = "avatar_history"
+
+    /** 每个角色保留的历史立绘上限，超出删最旧的（避免长期累积占满缓存） */
+    private const val AVATAR_HISTORY_LIMIT = 20
+
     /** 立绘专用负面提示词：与场景插图不同，立绘要的是人物半身/全身像 */
     private const val AVATAR_NEGATIVE_PROMPT =
         "文字, 水印, 边框, 多人, 群像, 残缺肢体, 手部特写, 模糊, 低质量"
@@ -1852,6 +1862,85 @@ object AiImageGenerator {
     fun getCachedAvatar(bookName: String, characterName: String): File? {
         val f = File(avatarCacheDir(), avatarKey(bookName, characterName) + ".jpg")
         return if (f.isFile && f.length() > 0) f else null
+    }
+
+    // ------------------------------------------------------------------
+    // 立绘历史：重新生成/切换时旧图归档，不满意可在历史里换回来
+    // ------------------------------------------------------------------
+
+    private fun avatarHistoryDir(bookName: String, characterName: String): File =
+        File(File(avatarCacheDir(), AVATAR_HISTORY_DIR), avatarKey(bookName, characterName))
+
+    /**
+     * 把当前在用的立绘归档为一条历史。
+     * 在重新生成、或切换到另一张历史图之前调用，保证旧图不丢。
+     * 归档前会去重：历史里已有**内容完全相同**（大小一致且逐字节一致）的图就不重复存，
+     * 否则来回切换同一张立绘会让它无谓地保存很多次。
+     * @return 归档后的历史文件（命中已有则返回那条）；当前无立绘或归档失败返回 null
+     */
+    fun archiveCurrentAvatar(bookName: String, characterName: String): File? {
+        val current = getCachedAvatar(bookName, characterName) ?: return null
+        return runCatching {
+            val dir = avatarHistoryDir(bookName, characterName)
+            if (!dir.exists() && !dir.mkdirs()) return@runCatching null
+            // 去重：已有大小一致且逐字节一致的，直接复用，不再复制一份
+            dir.listFiles { f -> f.isFile && f.length() == current.length() }
+                ?.firstOrNull { sameContent(it, current) }
+                ?.let { return@runCatching it }
+            val dst = File(dir, "${System.currentTimeMillis()}.jpg")
+            current.copyTo(dst, overwrite = true)
+            if (dst.length() <= 0) {
+                runCatching { dst.delete() }
+                return@runCatching null
+            }
+            trimAvatarHistory(dir)
+            dst
+        }.getOrNull()
+    }
+
+    /** 两个文件是否逐字节相同（先比大小，省掉不必要的读盘） */
+    private fun sameContent(a: File, b: File): Boolean {
+        if (a.length() != b.length()) return false
+        return runCatching { a.readBytes().contentEquals(b.readBytes()) }
+            .getOrDefault(false)
+    }
+
+    /** 该角色的历史立绘，**新的在前** */
+    fun getAvatarHistory(bookName: String, characterName: String): List<File> {
+        val dir = avatarHistoryDir(bookName, characterName)
+        if (!dir.isDirectory) return emptyList()
+        return dir.listFiles { f ->
+            f.isFile && f.extension.equals("jpg", true) && f.length() > 0
+        }?.sortedByDescending { it.nameWithoutExtension.toLongOrNull() ?: 0L }
+            ?: emptyList()
+    }
+
+    /**
+     * 启用某条历史立绘：先归档当前在用的，再把历史图复制成当前立绘。
+     * 先归档是为了能来回切换——当前图同样进历史，不会被覆盖丢失。
+     */
+    fun useAvatarHistory(bookName: String, characterName: String, history: File): Boolean {
+        if (!history.isFile || history.length() <= 0) return false
+        return runCatching {
+            archiveCurrentAvatar(bookName, characterName)
+            val target = File(avatarCacheDir(), avatarKey(bookName, characterName) + ".jpg")
+            history.copyTo(target, overwrite = true)
+            target.length() > 0
+        }.getOrDefault(false)
+    }
+
+    /** 删除一条历史立绘（不影响当前在用的那张） */
+    fun deleteAvatarHistory(history: File): Boolean =
+        runCatching { history.delete() }.getOrDefault(false)
+
+    /** 历史超过 [AVATAR_HISTORY_LIMIT] 时删最旧的（文件名即时间戳） */
+    private fun trimAvatarHistory(dir: File) {
+        val files = (dir.listFiles { f -> f.isFile } ?: return)
+            .sortedBy { it.nameWithoutExtension.toLongOrNull() ?: 0L }
+            .toMutableList()
+        while (files.size > AVATAR_HISTORY_LIMIT) {
+            runCatching { files.removeAt(0).delete() }
+        }
     }
 
     /**
@@ -1939,6 +2028,8 @@ object AiImageGenerator {
         }
         val key = avatarKey(bookName, characterName)
         if (regenerate) {
+            // 旧图先归档为历史再删除：新图不满意可在角色档案「立绘历史」里挑回来
+            archiveCurrentAvatar(bookName, characterName)
             runCatching { File(avatarCacheDir(), "$key.jpg").delete() }
         } else {
             getCachedAvatar(bookName, characterName)?.let {
@@ -1950,6 +2041,7 @@ object AiImageGenerator {
         // 同一角色并发去重
         if (avatarInFlight.putIfAbsent(key, true) != null) {
             if (regenerate) {
+                archiveCurrentAvatar(bookName, characterName)
                 runCatching { File(avatarCacheDir(), "$key.jpg").delete() }
                 onFailure(IllegalStateException("旧立绘生成中，稍后重试"))
                 return true

@@ -67,6 +67,12 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
         binding.tvEdit.setOnClickListener { showEditDialog() }
         binding.tvRegen.setOnClickListener { regenerate() }
         binding.tvPortrait.setOnClickListener { generatePortrait() }
+        // 点立绘图片 → 立绘历史：重新生成过的旧图都存着，可在这里换回来或删除
+        binding.ivPortrait.setOnClickListener { showAvatarHistory() }
+        // 历史里换回某张立绘后，刷新本弹窗的预览
+        childFragmentManager.setFragmentResultListener(
+            AvatarHistoryDialog.RESULT_KEY, viewLifecycleOwner
+        ) { _, _ -> loadPortrait() }
         loadProfile()
         loadPortrait()
     }
@@ -240,6 +246,12 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
     }
 
     /** 按（性别年龄 + 档案人设）生成角色立绘，成功后自动被「与角色对话」和气泡复用 */
+    /** 点立绘图片：打开立绘历史，可换回旧图或删除历史 */
+    private fun showAvatarHistory() {
+        AvatarHistoryDialog.newInstance(bookName, characterName)
+            .show(childFragmentManager, "avatarHistoryDialog")
+    }
+
     private fun generatePortrait() {
         val p = profile
         // 已有立绘：确认后重新生成（覆盖旧图）；无立绘：直接生成
