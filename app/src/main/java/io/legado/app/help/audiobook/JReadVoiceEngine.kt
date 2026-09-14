@@ -12,9 +12,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
-import java.io.File
 import java.net.URLEncoder
-import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.UUID
 import java.util.zip.ZipInputStream
@@ -1685,11 +1683,9 @@ object JReadVoiceEngine {
             )
             Log.w(TAG, "Fallback voice config: requested=$voiceTag actual=$resolvedVoiceTag")
         }
-        val file = cacheFile(context, requestId, text, config, pointer)
-        if (!file.exists() || file.length() <= 0L) {
-            requestAudioToFile(context, config, text, resolvedVoiceTag, pointer, requestId, file)
-        }
-        return file.readBytes()
+        // 直接返回合成字节，不再落盘到 line_audio 缓存（该缓存 key 含随机 requestId，
+        // 永不命中，且清理函数从未被调用，纯属移植残留、只会无限占空间）
+        return requestAudioToFile(context, config, text, resolvedVoiceTag, pointer, requestId)
     }
 
     fun synthesizeConfigLineAudio(
@@ -1705,11 +1701,8 @@ object JReadVoiceEngine {
                 .ifBlank { pointer.optString("jreadVoiceTag") }
                 .ifBlank { "旁白" }
         }.trim()
-        val file = cacheFile(context, requestId, text, config, pointer)
-        if (!file.exists() || file.length() <= 0L) {
-            requestAudioToFile(context, config, text, voiceTag, pointer, requestId, file)
-        }
-        return file.readBytes()
+        // 直接返回合成字节，不再落盘到 line_audio 缓存（移植残留、永不命中且从未清理）
+        return requestAudioToFile(context, config, text, voiceTag, pointer, requestId)
     }
 
     private fun findConfig(context: Context, voiceTag: String): VoiceConfig? {
@@ -1762,8 +1755,7 @@ object JReadVoiceEngine {
         voiceTag: String,
         pointer: JSONObject,
         requestId: String,
-        file: File,
-    ) {
+    ): ByteArray {
         var lastError: Exception? = null
         val startedAt = android.os.SystemClock.elapsedRealtime()
         AppLog.putDebug(
@@ -1777,21 +1769,20 @@ object JReadVoiceEngine {
                     "[声音合成][J阅读引擎] 音频合成尝试 ${attempt + 1}/$SYNTHESIS_RETRY_COUNT " +
                         "requestId=$requestId tag=$voiceTag text=${text.take(36)}"
                 )
-                requestAudioToFileOnce(context, config, text, voiceTag, pointer, requestId, file)
-                if (file.length() > 0L) {
+                val bytes = requestAudioToFileOnce(context, config, text, voiceTag, pointer, requestId)
+                if (bytes.isNotEmpty()) {
                     AppLog.putDebug(
                         "[声音合成][J阅读引擎] 音频合成成功 requestId=$requestId " +
                             "attempt=${attempt + 1}/$SYNTHESIS_RETRY_COUNT " +
                             "cost=${android.os.SystemClock.elapsedRealtime() - startedAt}ms " +
                             "thisCost=${android.os.SystemClock.elapsedRealtime() - attemptStartedAt}ms " +
-                            "size=${file.length()} tag=$voiceTag"
+                            "size=${bytes.size} tag=$voiceTag"
                     )
-                    return
+                    return bytes
                 }
-                throw IllegalStateException("J阅读声音合成后文件为空")
+                throw IllegalStateException("J阅读声音合成后音频为空")
             } catch (e: Exception) {
                 lastError = e
-                if (file.exists() && file.length() <= 0L) file.delete()
                 if (attempt >= SYNTHESIS_RETRY_COUNT - 1) {
                     AppLog.putDebug(
                         "[声音合成][J阅读引擎] 音频合成最终失败，已达到 $SYNTHESIS_RETRY_COUNT 次 " +
@@ -1826,18 +1817,16 @@ object JReadVoiceEngine {
         voiceTag: String,
         pointer: JSONObject,
         requestId: String,
-        file: File,
-    ) {
+    ): ByteArray {
         val plugin = findPlugin(context, config.pluginId)
         Log.i(
             TAG,
-            "Request audio: tag=$voiceTag, plugin=${plugin?.name.orEmpty()}, voice=${config.voice}, textLen=${text.length}, file=${file.name}"
+            "Request audio: tag=$voiceTag, plugin=${plugin?.name.orEmpty()}, voice=${config.voice}, textLen=${text.length}"
         )
         if (plugin != null && plugin.code.isNotBlank() && config.urlTemplate.isBlank()) {
             require(config.voice.isNotBlank()) {
                 "J阅读声音配置未选择插件音色: voiceTag=${config.voiceTag.ifBlank { voiceTag }}，请在单项 TTS 里读取插件音色列表并选择 voice"
             }
-            file.parentFile?.mkdirs()
             val bytes = JReadVoicePluginRuntime.synthesize(
                 context = context.applicationContext,
                 plugin = plugin,
@@ -1859,8 +1848,7 @@ object JReadVoiceEngine {
                         "plugin=${plugin.name.ifBlank { plugin.pluginId.ifBlank { plugin.id } }} voice=${config.voice}"
                 )
             }
-            file.writeBytes(applySilenceSkipIfEnabled(bytes))
-            return
+            return applySilenceSkipIfEnabled(bytes)
         }
 
         val request = config.resolveRequest(plugin)
@@ -1881,8 +1869,7 @@ object JReadVoiceEngine {
             builder.get()
         }
 
-        file.parentFile?.mkdirs()
-        synthesisHttpClient().newCall(builder.build()).execute().use { response ->
+        val result = synthesisHttpClient().newCall(builder.build()).execute().use { response ->
             if (!response.isSuccessful) {
                 throw IllegalStateException("J阅读声音请求失败: HTTP ${response.code} ${response.message}")
             }
@@ -1896,8 +1883,9 @@ object JReadVoiceEngine {
                     "J阅读声音请求返回异常小音频: bytes=${audioBytes.size} textLen=${text.length}"
                 )
             }
-            file.writeBytes(applySilenceSkipIfEnabled(audioBytes))
+            applySilenceSkipIfEnabled(audioBytes)
         }
+        return result
     }
 
     /**
@@ -2636,131 +2624,6 @@ object JReadVoiceEngine {
         return null
     }
 
-    fun cleanupLineAudioCache(cacheKey: String): Boolean {
-        val file = runCatching { File(cacheKey) }.getOrNull() ?: return false
-        if (!file.exists()) return false
-        val chapterDir = file.parentFile
-        val deletedFile = file.delete()
-        if (chapterDir != null && chapterDir.name != "line_audio") {
-            runCatching {
-                chapterDir.takeIf { dir ->
-                    dir.isDirectory && dir.listFiles()?.isEmpty() == true
-                }?.delete()
-            }
-        }
-        return deletedFile
-    }
-
-    fun cleanupLineAudioChapterCache(cacheKeys: Collection<String>): Int {
-        val marker = "${File.separator}jread_voice_engine${File.separator}line_audio${File.separator}"
-        val chapterDirs = cacheKeys.mapNotNull { cacheKey ->
-            runCatching { File(cacheKey.trim()).parentFile?.canonicalFile }.getOrNull()
-        }.filter { dir ->
-            dir.isDirectory && dir.canonicalPath.contains(marker)
-        }.distinctBy { it.canonicalPath }
-        var deletedCount = 0
-        chapterDirs.forEach { dir ->
-            deletedCount += deleteLineAudioChapterDir(dir)
-        }
-        return deletedCount
-    }
-
-    fun cleanupLineAudioChapterCache(
-        context: Context,
-        bookName: String,
-        bookUrl: String,
-        chapterIndex: Int,
-        chapterTitle: String,
-        includeUnknownBookFallback: Boolean = false,
-    ): Int {
-        val appContext = context.applicationContext
-        val cacheRoot = appContext.externalCacheDir ?: appContext.cacheDir
-        val chapterKey = lineAudioChapterKey(chapterIndex, chapterTitle)
-        val bookKeys = mutableListOf(lineAudioBookKey(bookName, bookUrl))
-        if (includeUnknownBookFallback) {
-            bookKeys += "unknown_book"
-        }
-        var deletedCount = 0
-        bookKeys.distinct().forEach { bookKey ->
-            val chapterDir = File(
-                cacheRoot,
-                "jread_voice_engine/line_audio/$bookKey/$chapterKey"
-            )
-            deletedCount += deleteLineAudioChapterDir(chapterDir)
-        }
-        return deletedCount
-    }
-
-    private fun cacheFile(
-        context: Context,
-        requestId: String,
-        text: String,
-        config: VoiceConfig,
-        pointer: JSONObject,
-    ): File {
-        val key = sha1("${config.id}|${config.pluginId}|${config.voiceTag}|${config.locale}|${config.voice}|${config.dataJson}|$requestId|$text")
-        val appContext = context.applicationContext
-        val cacheRoot = appContext.externalCacheDir ?: appContext.cacheDir
-        val bookName = pointer.optString("bookName")
-            .ifBlank { pointer.optString("jreadBookName") }
-            .ifBlank { "unknown_book" }
-        val bookUrl = pointer.optString("bookUrl")
-            .ifBlank { pointer.optString("jreadBookUrl") }
-        val chapterIndex = pointer.optInt(
-            "chapterIndex",
-            pointer.optInt("jreadChapterIndex", -1)
-        )
-        val chapterTitle = pointer.optString("chapterTitle")
-            .ifBlank { pointer.optString("jreadChapterTitle") }
-            .ifBlank { "chapter" }
-        val bookKey = lineAudioBookKey(bookName, bookUrl)
-        val chapterKey = lineAudioChapterKey(chapterIndex, chapterTitle)
-        return File(cacheRoot, "jread_voice_engine/line_audio/$bookKey/$chapterKey/$key.mp3")
-    }
-
-    private fun lineAudioBookKey(bookName: String, bookUrl: String): String {
-        return safeCacheSegment(
-            listOf(
-                bookName.ifBlank { "unknown_book" },
-                bookUrl.takeIf { it.isNotBlank() }?.let { sha1(it).take(10) }.orEmpty(),
-            ).filter { it.isNotBlank() }.joinToString("_")
-        )
-    }
-
-    private fun lineAudioChapterKey(chapterIndex: Int, chapterTitle: String): String {
-        return safeCacheSegment(
-            "${chapterIndex.coerceAtLeast(0).toString().padStart(4, '0')}_" +
-                    chapterTitle.ifBlank { "chapter" }
-        )
-    }
-
-    private fun deleteLineAudioChapterDir(dir: File): Int {
-        if (!dir.isDirectory) return 0
-        val beforeCount = runCatching {
-            dir.walkTopDown().count { it.isFile }
-        }.getOrDefault(0)
-        val deleted = runCatching { dir.deleteRecursively() }.getOrDefault(false)
-        return if (deleted) beforeCount else 0
-    }
-
-    private fun safeCacheSegment(value: String): String {
-        return value
-            .replace(Regex("[\\\\/:*?\"<>|\\r\\n]+"), "_")
-            .trim()
-            .take(80)
-            .ifBlank { "unknown" }
-    }
-
-    private fun mimeByFileName(name: String): String {
-        return when {
-            name.endsWith(".wav", ignoreCase = true) -> "audio/wav"
-            name.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
-            name.endsWith(".aac", ignoreCase = true) -> "audio/aac"
-            name.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
-            else -> "audio/mpeg"
-        }
-    }
-
     private fun parseHeaders(headersText: String): Map<String, String> {
         return headersText.lineSequence()
             .mapNotNull { line ->
@@ -2801,11 +2664,5 @@ object JReadVoiceEngine {
 
     private fun safeJsonObject(raw: String): JSONObject {
         return runCatching { JSONObject(raw.ifBlank { "{}" }) }.getOrElse { JSONObject() }
-    }
-
-    private fun sha1(value: String): String {
-        return MessageDigest.getInstance("SHA-1")
-            .digest(value.toByteArray())
-            .joinToString("") { "%02x".format(it) }
     }
 }
