@@ -46,11 +46,11 @@ class VnMirrorTransform(
         // 接缝 y：上方 = 清晰层顶边(dy)，下方 = 清晰层底边(dy+dh)
         val seamY = if (side == 1) dy + dh else dy
 
-        val result = if (source.width == outWidth && source.height == outHeight) {
-            Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
-        } else {
-            pool.get(outWidth, outHeight, Bitmap.Config.ARGB_8888)
-        }
+        // 必须用独立的新 Bitmap（不能取自 BitmapPool）：app 切后台再恢复时，
+        // Glide 会把同一个池化 Bitmap 复用到别处的 transform，导致本 ImageView 仍持有的
+        // drawable 变成 recycled bitmap，onResume 重绘时抛
+        // "Canvas: trying to use a recycled bitmap"。独立 Bitmap 不参与池复用，杜绝该崩溃。
+        val result = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
         result.setHasAlpha(true)
         val canvas = Canvas(result)
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
