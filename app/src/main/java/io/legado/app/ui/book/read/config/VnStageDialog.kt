@@ -17,7 +17,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
-import com.bumptech.glide.load.resource.bitmap.CenterCrop
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.constant.EventBus
@@ -25,8 +24,7 @@ import io.legado.app.databinding.DialogVnStageBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.loadGif
-import io.legado.app.help.glide.BlurTransformation
-import io.legado.app.help.glide.VnMirrorTransform
+import io.legado.app.help.glide.VnCompositeTransform
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.AiProfileService
 import io.legado.app.model.ReadBook
@@ -240,11 +238,11 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
 
     /**
      * 加载背景图并按 [AppConfig.vnBackgroundMode] 切换呈现方式。
-     * - 0 左右裁切铺满全屏（centerCrop，所有镜像/模糊层隐藏）
-     * - 1 不裁左右（fitCenter，整图显示），上下留白带用「镜像」填充：接缝清晰、向屏幕
-     *      边缘渐隐透出模糊镜像，形成自然反射 + 越来越模糊，整条带不透明（绝无黑边）
-     * - 2 贴顶（fitStart），仅下方留白带用镜像填充（上方被图片顶满、无留白）
-     * 兜底：再铺一层全屏模糊（ivVnBackgroundBlur），任何未覆盖处也不露黑底。
+     * - 0 左右裁切铺满全屏（centerCrop，单次加载）
+     * - 1 不裁左右（fitCenter），上下镜像带：接缝清晰、向边缘渐隐透出模糊 → 越来越模糊
+     * - 2 贴顶（fitStart），仅下方镜像带
+     * 模式 1/2 用 [VnCompositeTransform] 把「全屏模糊底 + 清晰主图 + 镜像带」合成到
+     * 一张 Bitmap（一个 drawable），切换时主图与上下拼接同帧出现，不再先出主图再补拼接。
      * GIF 模糊成本高且镜像意义不大，模式 1/2 退化为仅清晰层按模式缩放。
      */
     private fun loadBackgroundImage(file: File? = null, resId: Int = 0) {
@@ -252,19 +250,9 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         val mode = AppConfig.vnBackgroundMode
         val isGif = file != null && isGifFile(file)
         val sharp = binding.ivVnBackground
-        val blurBg = binding.ivVnBackgroundBlur
-        val topBlur = binding.ivVnMirrorTopBlur
-        val top = binding.ivVnMirrorTop
-        val botBlur = binding.ivVnMirrorBottomBlur
-        val bot = binding.ivVnMirrorBottom
 
-        // 0 / GIF：左右裁切铺满，隐藏所有镜像与模糊层
+        // 0 / GIF：左右裁切铺满（单次加载，立即显示）
         if (isGif || mode == 0) {
-            blurBg.visibility = View.GONE
-            topBlur.visibility = View.GONE
-            top.visibility = View.GONE
-            botBlur.visibility = View.GONE
-            bot.visibility = View.GONE
             sharp.scaleType = ImageView.ScaleType.CENTER_CROP
             if (isGif) {
                 sharp.loadGif(file!!, sharp.scaleType)
@@ -276,43 +264,14 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             return
         }
 
-        // 清晰层：不裁左右（fitCenter / 贴顶）
-        sharp.scaleType = if (mode == 2) ImageView.ScaleType.FIT_START
-        else ImageView.ScaleType.FIT_CENTER
-        val sharpReq = if (resId != 0) Glide.with(sharp.context).load(resId)
-        else Glide.with(sharp.context).load(file)
-        sharpReq.placeholder(sharp.drawable).into(sharp)
-
-        // 全屏模糊兜底层：保证任何未覆盖处不露黑底
-        blurBg.visibility = View.VISIBLE
-        val blurBgReq = if (resId != 0) Glide.with(blurBg.context).load(resId)
-        else Glide.with(blurBg.context).load(file)
-        blurBgReq.transform(BlurTransformation(20), CenterCrop())
-            .placeholder(blurBg.drawable).into(blurBg)
-
+        // 模式 1/2：单张合成图（主图 + 全屏模糊底 + 镜像带），一次加载同帧呈现
+        sharp.scaleType = ImageView.ScaleType.FIT_XY
         val fitMode = if (mode == 2) 1 else 0
-        fun loadMirror(v: ImageView, blurred: Boolean, side: Int) {
-            val req = if (resId != 0) Glide.with(v.context).load(resId)
-            else Glide.with(v.context).load(file)
-            if (blurred) req.transform(BlurTransformation(20), VnMirrorTransform(side, fitMode, false))
-            else req.transform(VnMirrorTransform(side, fitMode, true))
-            req.placeholder(v.drawable).into(v)
-        }
-        // 上方镜像：仅模式 1（不裁左右·上下）
-        if (mode == 1) {
-            topBlur.visibility = View.VISIBLE
-            top.visibility = View.VISIBLE
-            loadMirror(topBlur, blurred = true, side = 0)
-            loadMirror(top, blurred = false, side = 0)
-        } else {
-            topBlur.visibility = View.GONE
-            top.visibility = View.GONE
-        }
-        // 下方镜像：模式 1 与 2 都有
-        botBlur.visibility = View.VISIBLE
-        bot.visibility = View.VISIBLE
-        loadMirror(botBlur, blurred = true, side = 1)
-        loadMirror(bot, blurred = false, side = 1)
+        val req = if (resId != 0) Glide.with(sharp.context).load(resId)
+        else Glide.with(sharp.context).load(file)
+        req.transform(VnCompositeTransform(top = mode == 1, bottom = true, fitMode = fitMode))
+            .placeholder(sharp.drawable)
+            .into(sharp)
     }
 
     /** 判断文件是否为 GIF 动图（按扩展名，不区分大小写） */

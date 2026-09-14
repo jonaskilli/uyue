@@ -15,53 +15,8 @@
     android:layout_height="match_parent"
     android:background="@android:color/black">
 
-    <!-- 全屏模糊兜底层（位于清晰层之后；呈现方式=上下/仅下方镜像渐模糊时可见，
-         保证任何未覆盖处（侧边/极端比例）也不露黑底） -->
-    <ImageView
-        android:id="@+id/iv_vn_background_blur"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="centerCrop"
-        android:contentDescription="场景背景模糊兜底"
-        android:visibility="gone" />
-
-    <!-- 上方镜像（模糊打底，呈现方式=不裁左右时可见） -->
-    <ImageView
-        android:id="@+id/iv_vn_mirror_top_blur"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="fitXY"
-        android:contentDescription="上方镜像模糊"
-        android:visibility="gone" />
-
-    <!-- 上方镜像（清晰，接缝清晰→边缘渐隐透出模糊层，呈现方式=不裁左右时可见） -->
-    <ImageView
-        android:id="@+id/iv_vn_mirror_top"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="fitXY"
-        android:contentDescription="上方镜像清晰"
-        android:visibility="gone" />
-
-    <!-- 下方镜像（模糊打底，呈现方式=不裁左右·贴顶时可见） -->
-    <ImageView
-        android:id="@+id/iv_vn_mirror_bottom_blur"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="fitXY"
-        android:contentDescription="下方镜像模糊"
-        android:visibility="gone" />
-
-    <!-- 下方镜像（清晰，接缝清晰→边缘渐隐透出模糊层，呈现方式=不裁左右·贴顶时可见） -->
-    <ImageView
-        android:id="@+id/iv_vn_mirror_bottom"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="fitXY"
-        android:contentDescription="下方镜像清晰"
-        android:visibility="gone" />
-
-    <!-- 全屏场景背景（清晰层，scaleType 由「背景呈现方式」动态切换） -->
+    <!-- 全屏场景背景（模式 0 左右裁切铺满；模式 1/2 由 VnCompositeTransform
+         合成「全屏模糊底 + 清晰主图 + 上下镜像带」为一张图，同帧呈现） -->
     <ImageView
         android:id="@+id/iv_vn_background"
         android:layout_width="match_parent"
