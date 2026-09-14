@@ -74,6 +74,11 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
     private var searchBookList = arrayListOf<SearchBook>()
     private val searchBooks = Collections.synchronizedList(arrayListOf<SearchBook>())
     private val tocMap = ConcurrentHashMap<String, List<BookChapter>>()
+
+    /**
+     * 各书源结果的章节数（key: primaryStr），用于"按章节数排序"
+     */
+    private val chapterCountMap = ConcurrentHashMap<String, Int>()
     private val _changeSourceProgress = MutableStateFlow(0 to "")
     val changeSourceProgress = _changeSourceProgress.asStateFlow()
     private var tocMapChapterCount = 0
@@ -82,6 +87,21 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
     }
     private var searchCallback: SourceCallback? = null
     private val chapterNumRegex = "^\\[(\\d+)]".toRegex()
+    private val whitespaceRegex = Regex("\\s+")
+
+    /**
+     * 关键词校验参数，仅保存在内存中，换源界面关闭（ViewModel 销毁）即失效，不持久化
+     */
+    private var keywordCheck: KeywordCheck? = null
+    val isKeywordCheckActive: Boolean
+        get() = keywordCheck != null
+
+    private data class KeywordCheck(
+        val chapterKey: String,
+        val mustHave: List<String>,
+        val forbidden: List<String>
+    )
+
     private val comparatorBase by lazy {
         compareByDescending<SearchBook> { getBookScore(it) }
             .thenByDescending { SourceConfig.getSourceScore(it.origin) }
@@ -93,6 +113,10 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
         comparatorBase.thenByDescending { it.chapterWordCount > 1000 }
             .thenByDescending { getChapterNum(it.chapterWordCountText) }
             .thenByDescending { it.chapterWordCount }
+            .thenBy { it.originOrder }
+    }
+    private val chapterCountComparator by lazy {
+        comparatorBase.thenByDescending { chapterCountMap[it.primaryStr()] ?: 0 }
             .thenBy { it.originOrder }
     }
     private var task: Job? = null
@@ -133,10 +157,10 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
         }
     }.map {
         kotlin.runCatching {
-            val comparator = if (AppConfig.changeSourceLoadWordCount) {
-                wordCountComparator
-            } else {
-                defaultComparator
+            val comparator = when {
+                AppConfig.changeSourceSortByChapterCount -> chapterCountComparator
+                AppConfig.changeSourceLoadWordCount -> wordCountComparator
+                else -> defaultComparator
             }
             searchBooks.sortedWith(comparator)
         }.onFailure {
@@ -224,6 +248,15 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
         }
     }
 
+    /**
+     * 关键词校验搜索：只保留校验通过的书源结果。
+     * 校验参数仅保存在内存中，随换源界面关闭而失效。
+     */
+    fun startKeywordSearch(chapterKey: String, mustHave: List<String>, forbidden: List<String>) {
+        keywordCheck = KeywordCheck(chapterKey, mustHave, forbidden)
+        startSearch()
+    }
+
     private fun search() {
         task = viewModelScope.launch(searchPool!!) {
             flow {
@@ -269,7 +302,9 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
             })
         resultBooks.forEach { searchBook ->
             when {
-                loadInfo || loadToc || loadWordCount -> {
+                loadInfo || loadToc || loadWordCount
+                        || keywordCheck != null
+                        || AppConfig.changeSourceSortByChapterCount -> {
                     loadBookInfo(source, searchBook.toBook())
                 }
 
@@ -284,7 +319,9 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
         if (book.tocUrl.isEmpty()) {
             WebBook.getBookInfoAwait(source, book)
         }
-        if (AppConfig.changeSourceLoadToc || AppConfig.changeSourceLoadWordCount) {
+        if (AppConfig.changeSourceLoadToc || AppConfig.changeSourceLoadWordCount
+            || AppConfig.changeSourceSortByChapterCount || keywordCheck != null
+        ) {
             loadBookToc(source, book)
         } else {
             //从详情页里获取最新章节
@@ -302,13 +339,58 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
             tocMapChapterCount += chapters.size
             tocMap[book.primaryStr()] = chapters
         }
+        chapterCountMap[book.primaryStr()] = chapters.size
         bookMap[book.primaryStr()] = book
         book.releaseHtmlData()
-        if (AppConfig.changeSourceLoadWordCount) {
-            loadBookWordCount(source, book, chapters)
-        } else {
-            val searchBook = book.toSearchBook()
-            searchCallback?.searchSuccess(searchBook)
+        when {
+            keywordCheck != null -> {
+                loadBookKeywordCheck(source, book, chapters)
+            }
+
+            AppConfig.changeSourceLoadWordCount -> {
+                loadBookWordCount(source, book, chapters)
+            }
+
+            else -> {
+                val searchBook = book.toSearchBook()
+                searchCallback?.searchSuccess(searchBook)
+            }
+        }
+    }
+
+    /**
+     * 关键词校验：在目录中定位校验章节，取正文检查禁词/必含词。
+     * 只有校验通过的结果才会进列表，不通过（含禁词、缺必含词、找不到章节、取正文失败）直接丢弃。
+     */
+    private suspend fun loadBookKeywordCheck(
+        source: BookSource,
+        book: Book,
+        chapters: List<BookChapter>
+    ) {
+        val check = keywordCheck ?: return
+        val key = check.chapterKey.replace(whitespaceRegex, "")
+        val index = chapters.indexOfFirst {
+            !it.isVolume && it.title.replace(whitespaceRegex, "").contains(key)
+        }
+        if (index < 0) {
+            AppLog.put("关键词校验：${source.bookSourceName} 未找到包含「${check.chapterKey}」的章节，已过滤")
+            return
+        }
+        val content = try {
+            WebBook.getContentAwait(
+                source, book, chapters[index],
+                chapters.getOrNull(index + 1)?.url,
+                false // 不写入本地缓存，避免给待淘汰书源留下垃圾缓存
+            )
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            AppLog.put("关键词校验：${source.bookSourceName} 获取正文出错\n${t.localizedMessage}", t)
+            return
+        }
+        val passed = check.forbidden.none { content.contains(it) }
+                && check.mustHave.all { content.contains(it) }
+        if (passed) {
+            searchCallback?.searchSuccess(book.toSearchBook())
         }
     }
 
@@ -350,6 +432,15 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
     fun onLoadWordCountChecked(isChecked: Boolean) {
         if (isChecked) {
             startRefreshList(true)
+        }
+    }
+
+    /**
+     * 勾选"按章节数排序"后，重新加载列表以统计各结果的章节数（数量多的排前面）
+     */
+    fun onLoadSortByChapterCountChecked(isChecked: Boolean) {
+        if (isChecked) {
+            startRefreshList()
         }
     }
 

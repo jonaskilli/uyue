@@ -31,6 +31,7 @@ import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.elevation
 import io.legado.app.lib.theme.getPrimaryTextColor
 import io.legado.app.lib.theme.primaryColor
+import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.book.source.manage.BookSourceActivity
@@ -43,6 +44,7 @@ import io.legado.app.utils.dpToPx
 import io.legado.app.utils.getCompatDrawable
 import io.legado.app.utils.observeEvent
 import io.legado.app.utils.setLayout
+import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.startActivity
 import io.legado.app.utils.transaction
 import io.legado.app.utils.viewbindingdelegate.viewBinding
@@ -79,7 +81,7 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
             viewModel.startSearch(origin)
         }
     private val searchFinishCallback: (isEmpty: Boolean) -> Unit = {
-        if (it) {
+        if (it && !viewModel.isKeywordCheckActive) {
             val searchGroup = AppConfig.searchGroup
             if (searchGroup.isNotEmpty()) {
                 lifecycleScope.launch {
@@ -142,6 +144,8 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
             ?.isChecked = AppConfig.changeSourceLoadWordCount
         binding.toolBar.menu.findItem(R.id.menu_show_cache_count)
             ?.isChecked = AppConfig.changeSourceShowCacheCount
+        binding.toolBar.menu.findItem(R.id.menu_sort_by_chapter_count)
+            ?.isChecked = AppConfig.changeSourceSortByChapterCount
     }
 
     private fun initRecyclerView() {
@@ -247,14 +251,18 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
                 viewModel.changeSourceProgress
                     .drop(1)
                     .collect { (count, name) ->
-                        binding.tvDur.text =
-                            getString(
-                                R.string.change_source_progress,
-                                adapter.itemCount,
-                                count,
-                                viewModel.totalSourceCount,
-                                name
-                            )
+                        val prefix = if (viewModel.isKeywordCheckActive) {
+                            getString(R.string.keyword_check) + "·"
+                        } else {
+                            ""
+                        }
+                        binding.tvDur.text = prefix + getString(
+                            R.string.change_source_progress,
+                            adapter.itemCount,
+                            count,
+                            viewModel.totalSourceCount,
+                            name
+                        )
                         delay(500)
                     }
             }
@@ -296,6 +304,14 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
                 viewModel.onLoadWordCountChecked(item.isChecked)
             }
 
+            R.id.menu_keyword_check -> showKeywordCheckConfig()
+
+            R.id.menu_sort_by_chapter_count -> {
+                AppConfig.changeSourceSortByChapterCount = !item.isChecked
+                item.isChecked = !item.isChecked
+                viewModel.onLoadSortByChapterCountChecked(item.isChecked)
+            }
+
             R.id.menu_show_cache_count -> {
                 AppConfig.changeSourceShowCacheCount = !item.isChecked
                 item.isChecked = !item.isChecked
@@ -323,6 +339,24 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
             }
         }
         return false
+    }
+
+    private fun showKeywordCheckConfig() {
+        val dialog = KeywordCheckConfigDialog()
+        dialog.defaultChapterKey = getDurChapterTitle()
+        dialog.onConfirm = { chapterKey, mustHave, forbidden ->
+            viewModel.startKeywordSearch(chapterKey, mustHave, forbidden)
+        }
+        showDialogFragment(dialog)
+    }
+
+    /**
+     * 从阅读界面进入时，返回当前正在阅读的章节标题，用于默认填充校验章节名
+     */
+    private fun getDurChapterTitle(): String? {
+        if (activity !is ReadBookActivity) return null
+        val book = ReadBook.book ?: return null
+        return appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)?.title
     }
 
     private fun scrollToDurSource() {

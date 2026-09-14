@@ -29,6 +29,17 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_keyword_check"
+        android:title="@string/keyword_check"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_sort_by_chapter_count"
+        android:title="@string/sort_by_chapter_count"
+        android:checkable="true"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_check_author"
         android:title="@string/checkAuthor"
         android:checkable="true"

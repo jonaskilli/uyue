@@ -1265,6 +1265,14 @@
     <string name="load_word_count">Load word count</string>
     <string name="show_cache_count">Show cached chapter count</string>
     <string name="cache_chapter_count">%1$d cached</string>
+    <string name="keyword_check">Keyword check</string>
+    <string name="sort_by_chapter_count">Sort by chapter count</string>
+    <string name="check_chapter_key">Chapter name keyword</string>
+    <string name="check_chapter_key_hint">e.g. Chapter 120</string>
+    <string name="check_must_have_words">Required words</string>
+    <string name="check_forbidden_words">Forbidden words</string>
+    <string name="check_words_hint">Split by |, optional</string>
+    <string name="keyword_check_tip">Only sources whose checked chapter content contains no forbidden word and all required words will be shown. Split words by |. Not saved, resets after this window closes.</string>
     <string name="delete_cached_chapters">Delete cached chapters</string>
     <string name="sure_del_cached_chapters">Delete cached chapters of "%1$s"?</string>
     <string name="replace_exclude_scope">Exclude range, optional title or source URL</string>

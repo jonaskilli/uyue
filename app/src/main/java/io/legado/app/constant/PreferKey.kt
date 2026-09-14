@@ -82,6 +82,7 @@ object PreferKey {
     const val changeSourceLoadInfo = "changeSourceLoadInfo"
     const val changeSourceLoadWordCount = "changeSourceLoadWordCount"
     const val changeSourceShowCacheCount = "changeSourceShowCacheCount"
+    const val changeSourceSortByChapterCount = "changeSourceSortByChapterCount"
     const val chineseConverterType = "chineseConverterType"
     const val launcherIcon = "launcherIcon"
     const val textSelectAble = "selectText"

@@ -1179,6 +1179,14 @@
     <string name="load_word_count">加载字数</string>
     <string name="show_cache_count">显示本地缓存章节数</string>
     <string name="cache_chapter_count">缓存%1$d章</string>
+    <string name="keyword_check">关键词校验</string>
+    <string name="sort_by_chapter_count">按章节数排序</string>
+    <string name="check_chapter_key">校验章节名</string>
+    <string name="check_chapter_key_hint">例如：第120章</string>
+    <string name="check_must_have_words">必含词</string>
+    <string name="check_forbidden_words">禁词</string>
+    <string name="check_words_hint">多个词用 | 分隔，可留空</string>
+    <string name="keyword_check_tip">只显示校验章节正文中不含禁词、且包含全部必含词的书源。多词用 | 分隔（同正则习惯）。设置不保存，关闭窗口后自动失效。</string>
     <string name="delete_cached_chapters">删除已缓存章节</string>
     <string name="sure_del_cached_chapters">确定删除「%1$s」已缓存的章节吗？</string>
     <string name="replace_exclude_scope">排除范围，选填书名或者书源 URL</string>

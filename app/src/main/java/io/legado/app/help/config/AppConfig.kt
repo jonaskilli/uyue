@@ -571,6 +571,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.changeSourceShowCacheCount, value)
         }
 
+    var changeSourceSortByChapterCount: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.changeSourceSortByChapterCount)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.changeSourceSortByChapterCount, value)
+        }
+
     var openBookInfoByClickTitle: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.openBookInfoByClickTitle, true)
         set(value) {
