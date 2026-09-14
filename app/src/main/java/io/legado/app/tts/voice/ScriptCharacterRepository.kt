@@ -246,6 +246,63 @@ object ScriptCharacterRepository {
         return out.take(maxLines)
     }
 
+    /** 找「角色出场章节」时最多扫描多少个章节缓存文件 */
+    private const val MAX_SCAN_CHAPTERS = 60
+
+    /** 某角色在某个章节里的出场：章节标题 + 该角色在该章的台词 */
+    data class RoleChapter(
+        val title: String,
+        val dialogs: List<String>
+    )
+
+    /**
+     * 全书范围找出**该角色实际出场过的章节**，返回章节标题 + 该角色在该章的台词。
+     *
+     * 与 [collectDialogsByName] 的区别：后者把所有台词拍平成一个列表，只有台词、
+     * 没有章节归属，上层拿不到剧情；而建档需要按章节组织，才能把该章正文里的
+     * 剧情（叙述、他人评价、事件经过）和台词一起喂给 AI。
+     *
+     * 章节里没有该角色 → 直接跳过，不占用材料名额。
+     *
+     * @param names 主名 + 别名集合（识别出的名字可能是别名，需一并匹配）
+     * @param maxChapters 最多返回几个章节
+     * @param maxLinesPerChapter 每章最多取几句台词
+     */
+    @Synchronized
+    fun collectChaptersByRole(
+        bookName: String,
+        names: Set<String>,
+        maxChapters: Int = 3,
+        maxLinesPerChapter: Int = 12
+    ): List<RoleChapter> {
+        if (bookName.isBlank() || names.isEmpty()) return emptyList()
+        val targets = names.map { it.trim() }.filter { it.isNotBlank() }.toHashSet()
+        if (targets.isEmpty()) return emptyList()
+        val out = ArrayList<RoleChapter>(maxChapters)
+        for (dir in bookDirCandidates(bookName)) {
+            val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".json", true) }
+                ?: continue
+            // 最近朗读过的章节排前面；只扫描最近若干个，避免长书全目录读一遍
+            for (file in files.sortedByDescending { it.lastModified() }.take(MAX_SCAN_CHAPTERS)) {
+                if (out.size >= maxChapters) break
+                val chapter = readChapterFile(file) ?: continue
+                val lines = ArrayList<String>(maxLinesPerChapter)
+                for (role in chapter.roles.values) {
+                    if (role.isNarration) continue
+                    if (role.name.trim() !in targets) continue
+                    val text = role.dialogText.trim()
+                    if (text.isNotBlank()) lines.add(text)
+                    if (lines.size >= maxLinesPerChapter) break
+                }
+                // 该章没有这个角色 → 跳过
+                if (lines.isEmpty()) continue
+                out.add(RoleChapter(chapter.title, lines))
+            }
+            if (out.isNotEmpty()) break
+        }
+        return out
+    }
+
     /**
      * 使指定章节的缓存失效。
      * AI 分析出新结果后调用，保证下一次取用立即重新读盘。
@@ -287,7 +344,15 @@ object ScriptCharacterRepository {
         return null
     }
 
-    private fun readChapterRoles(file: File): Map<String, DialogRole>? {
+    /** 章节文件解析结果：章节标题 + 对话归属 */
+    private data class ChapterFile(
+        val title: String,
+        val roles: Map<String, DialogRole>
+    )
+
+    private fun readChapterRoles(file: File): Map<String, DialogRole>? = readChapterFile(file)?.roles
+
+    private fun readChapterFile(file: File): ChapterFile? {
         if (!file.isFile) return null
         return try {
             val text = file.readText()
@@ -310,7 +375,9 @@ object ScriptCharacterRepository {
                     dialogText = v.optString("dialogText").trim()
                 )
             }
-            map.ifEmpty { null }
+            if (map.isEmpty()) return null
+            val title = obj.optString("title").trim().ifEmpty { file.nameWithoutExtension }
+            ChapterFile(title, map)
         } catch (_: Exception) {
             null
         }

@@ -3,6 +3,7 @@ package io.legado.app.model
 import android.os.Handler
 import android.os.Looper
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import io.legado.app.constant.AppLog
@@ -54,8 +55,29 @@ import java.util.concurrent.atomic.AtomicLong
  */
 object CharacterProfileManager {
 
-    /** 建档上下文最大字符数 */
+    /** 建档上下文最大字符数（正文中提到该角色的段落） */
     private const val MAX_CONTEXT_CHARS = 6000
+    /**
+     * 上下文里台词的最大条数。
+     * 以前只取 12 条，材料太少是「补全几乎不增长」的主因之一，放宽到 40 条。
+     */
+    private const val MAX_CONTEXT_LINES = 40
+    /** 单条台词最大字符数 */
+    private const val MAX_LINE_CHARS = 200
+    /** 正文中提到该角色的最大段落数 */
+    private const val MAX_CONTEXT_PARAS = 25
+    /** 全书范围收集台词的上限（条） */
+    private const val MAX_DIALOG_LINES = 40
+    /** 建档时最多取几个「该角色有出场」的章节（章节里没他就跳过） */
+    private const val MAX_PROFILE_CHAPTERS = 3
+    /**
+     * **手动补全**时总共看几个章节：当前章 + 其后 [MANUAL_CHAPTER_COUNT] - 1 章。
+     * 手动按钮只求「大致把这个人分析出来」，自动建档本来就会一章一章往上累加，
+     * 没必要一次吃下全书材料。想多看就把这个数调大。
+     */
+    private const val MANUAL_CHAPTER_COUNT = 3
+    /** 每个章节最多取几句该角色的台词 */
+    private const val MAX_LINES_PER_CHAPTER = 12
     /** 单个角色失败后的冷却时间，避免反复打 API */
     private const val FAIL_COOLDOWN_MS = 5 * 60_000L
     /** 兜底台词缓存有效期：避免每次分析日志都全量扫章节目录 */
@@ -629,10 +651,14 @@ object CharacterProfileManager {
     ) {
         val bookUrl = bookKey(bookName)
         seedLegacy(bookUrl, bookName)
-        // 允许读整章：取当前章节正文作为建档上下文
-        val chapterText = readChapterText(bookName, chapterIndex)
-        val dialogLines = collectDialogLines(bookName, chapterTitle)
-        for (name in names) {
+        // 双引号上方标注的姓名是 AI 识别出来的，可能是别人的别名 →
+        // 先解析成主名并按主名归并，避免同一个人被拆成多份档案
+        val grouped = LinkedHashMap<String, LinkedHashSet<String>>()
+        for (raw in names) {
+            val main = resolveMainName(bookUrl, bookName, raw)
+            grouped.getOrPut(main) { LinkedHashSet() }.add(raw)
+        }
+        for ((name, rawNames) in grouped) {
             // 误判名（如「XX的手机」）与用户已删除的角色，一律不再建档
             if (isNoiseName(name) || isDeleted(bookUrl, name)) continue
             val key = "$bookUrl\u0000$name"
@@ -640,18 +666,21 @@ object CharacterProfileManager {
             try {
                 val lastFail = failedAt[key] ?: 0L
                 if (System.currentTimeMillis() - lastFail < FAIL_COOLDOWN_MS) continue
-                // 本章没有该角色的任何专属材料 → 不请求 AI（避免拿别人的段落生成导致串档），
-                // 但仍登记一次出场
-                val dialogs = dialogLines[name].takeIf { !it.isNullOrEmpty() }
-                    ?: if (dialogLines.isEmpty()) fallbackDialogs(bookName, name) else null
-                val context = buildContext(name, chapterText, dialogs)
+                // 材料：该角色**实际出场**的若干章节（台词 + 该章剧情），
+                // 章节里没他就跳过；一个章节都没有才回退到全书台词
+                val aliasNames = LinkedHashSet<String>(rawNames).apply { add(name) }
+                val materials = collectChapterMaterials(
+                    bookName, aliasNames, chapterIndex, chapterTitle
+                )
+                val extra = if (materials.isEmpty()) fallbackDialogs(bookName, name) else emptyList()
+                val context = buildContext(name, materials, extra)
                 if (context.isBlank()) {
-                    touchMention(bookUrl, bookName, name, chapterTitle)
+                    touchMention(bookUrl, bookName, name, chapterTitle, rawNames)
                     AppLog.put("角色「$name」本章无专属上下文，暂只记录出场")
                     continue
                 }
                 updateOrCreate(
-                    bookUrl, bookName, name, chapterTitle, chapterIndex, context
+                    bookUrl, bookName, name, rawNames, chapterTitle, chapterIndex, context
                 )
             } catch (e: Exception) {
                 failedAt[key] = System.currentTimeMillis()
@@ -667,16 +696,26 @@ object CharacterProfileManager {
         bookUrl: String,
         bookName: String,
         name: String,
+        rawNames: Set<String>,
         chapterTitle: String,
         chapterIndex: Int,
         context: String
     ) {
         val dao = appDb.characterProfileDao
         val existing = dao.get(bookUrl, name) ?: findByAlias(bookUrl, name)
+        // 本次识别出的称呼（很可能是别名）并入档案别名，
+        // 以后再识别到这个称呼就能直接命中主名档案
+        val aliasStr = rawNames
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it != name }
+            .distinct()
+            .joinToString("|")
         if (existing == null) {
             val legacy = legacyInfo(bookName, name)
             val created = requestCreate(
-                bookName, name, legacy.first, legacy.second, legacy.third, context
+                bookName, name, legacy.first, legacy.second,
+                // 脚本角色表的别名 + 本次识别到的称呼，一起告知 AI
+                unionAliases(legacy.third, aliasStr), context
             )
             // 建档失败也要写一条占位档案：保证「主名」这个锚点存在，
             // 否则下次该角色出现时主名查不到，会按别名误命中别人的档案
@@ -691,7 +730,9 @@ object CharacterProfileManager {
                 base.copy(
                     bookUrl = bookUrl,
                     name = name,
-                    aliases = sanitizeAliases(base.aliases, bookUrl, name),
+                    aliases = sanitizeAliases(
+                        unionAliases(base.aliases, aliasStr), bookUrl, name
+                    ),
                     firstChapter = chapterTitle,
                     lastChapter = chapterTitle,
                     lastChapterIndex = chapterIndex,
@@ -712,8 +753,15 @@ object CharacterProfileManager {
             dao.update(existing.copy(mentionCount = mention, lastChapter = chapterTitle))
             return
         }
-        val patch = requestPatch(bookName, existing, context)
-        val merged = applyPatch(existing, patch)
+        val patch = requestPatch(bookName, existing, rawNames, context)
+        var merged = applyPatch(existing, patch)
+        if (aliasStr.isNotBlank()) {
+            merged = merged.copy(
+                aliases = sanitizeAliases(
+                    unionAliases(merged.aliases, aliasStr), bookUrl, name
+                )
+            )
+        }
         dao.update(
             merged.copy(
                 mentionCount = mention,
@@ -755,24 +803,28 @@ object CharacterProfileManager {
     ): CharacterProfile? {
         val bookUrl = bookKey(bookName)
         val dao = appDb.characterProfileDao
-        val old = dao.get(bookUrl, name)
+        val old = dao.get(bookUrl, name) ?: findByAlias(bookUrl, name)
+        // 传入的姓名可能是别名（AI 识别带入），统一归到**主名**下补全
+        val mainName = old?.name ?: resolveMainName(bookUrl, bookName, name)
         // 没有可用接口时直接给出明确原因
         val providers = AiChapterFixService.parseApiConfigs(getTemplate()?.apiConfig.orEmpty())
         if (providers.isEmpty()) {
             throw IllegalStateException("未配置档案接口，请在「角色档案设置」里填写（接口@@模型@@密钥）")
         }
-        val chapterText = if (chapterIndex >= 0) readChapterText(bookName, chapterIndex) else null
-        // dialogs 不能固定传 null：那样在 chapterIndex<0（UI 直接调用）时上下文恒为空，
-        // 手动建档会 100% 失败并误报成「接口未配置」
-        var dialogs: List<String>? = if (chapterTitle.isNotBlank()) {
-            collectDialogLines(bookName, chapterTitle)[name]
-        } else null
-        if (dialogs.isNullOrEmpty()) {
-            // 兜底：全书范围找该角色的台词
-            ScriptCharacterRepository.collectDialogsByName(bookName, name)
-                .takeIf { it.isNotEmpty() }?.let { dialogs = it }
+        // 材料：手动补全只看「当前章 + 后面几章」（台词 + 该章剧情），不扫全书
+        val aliasNames = LinkedHashSet<String>().apply {
+            add(mainName)
+            add(name)
+            old?.aliases?.split("|")?.map { it.trim() }
+                ?.filter { it.isNotBlank() }?.let { addAll(it) }
         }
-        val context = buildContext(name, chapterText, dialogs)
+        val materials = collectManualChapterMaterials(bookName, aliasNames, chapterIndex)
+        val context = buildContext(
+            mainName, materials,
+            // 这几章里都没有他 → 才回退全书台词，避免直接建档失败
+            if (materials.isEmpty()) collectAllDialogLines(bookName, mainName, chapterTitle)
+            else emptyList()
+        )
         if (context.isBlank()) {
             if (old != null) {
                 AppLog.put("角色「$name」未找到专属上下文，跳过重新生成")
@@ -780,46 +832,85 @@ object CharacterProfileManager {
             }
             throw IllegalStateException("未找到《$name》的台词或相关段落，无法建档（可先朗读一段该角色的内容再试）")
         }
-        val legacy = legacyInfo(bookName, name)
-        val created = requestCreate(
-            bookName, name,
-            old?.gender ?: legacy.first,
-            old?.age ?: legacy.second,
-            old?.aliases ?: legacy.third,
-            context
-        ) ?: throw IllegalStateException("AI 未返回有效档案，请稍后重试（详情见日志）")
-        // 字段级补全（不是覆盖）：老档案非空的内容字段一律保留，
-        // 空缺的才用本次新生成的补上；元数据照旧取老档案。
-        // 否则每次点「补全」都会用有限上下文重新生成一份，把原来
-        // 积累的信息顶掉，档案永远补不全。
+        val legacy = legacyInfo(bookName, mainName)
+        // 已有档案 → 走「带旧档案的整合扩写」，让内容随补全次数单调增长；
+        // 没有档案 → 走首次建档
+        val created = if (old != null) {
+            requestExpand(bookName, old, aliasNames, context)
+                ?: throw IllegalStateException("AI 未返回有效档案，请稍后重试（详情见日志）")
+        } else {
+            requestCreate(
+                bookName, mainName,
+                legacy.first, legacy.second,
+                // 传入的称呼（可能是别名）也一并告知 AI
+                unionAliases(legacy.third, name), context
+            ) ?: throw IllegalStateException("AI 未返回有效档案，请稍后重试（详情见日志）")
+        }
+        // 合并策略（与旧版「只填空缺」的区别）：
+        // AI 已经看过旧档案，故以它的**整合结果为准**，AI 漏掉的字段才用旧值兜底；
+        // 数组类字段（特征/关系/经历/别名）一律取**并集**，保证档案只增不减，
+        // 不会出现「补全一次反而变短」的情况。
         fun keep(oldVal: String?, newVal: String): String =
-            oldVal?.takeIf { it.isNotBlank() } ?: newVal
+            newVal.ifBlank { oldVal.orEmpty() }
 
-        fun keepArr(oldVal: String?, newVal: String): String =
-            oldVal?.takeIf { it.isNotBlank() && it != "[]" } ?: newVal
-
+        val (gender, age) = splitGenderAge(
+            keep(old?.gender, created.gender),
+            keep(old?.age, created.age)
+        )
         val merged = created.copy(
             bookUrl = bookUrl,
-            name = name,
-            gender = keep(old?.gender, created.gender),
-            age = keep(old?.age, created.age),
-            aliases = old?.aliases ?: sanitizeAliases(created.aliases, bookUrl, name),
+            name = mainName,
+            gender = gender,
+            age = age,
+            aliases = sanitizeAliases(
+                unionAliases(old?.aliases, unionAliases(created.aliases, name)),
+                bookUrl, mainName
+            ),
             identity = keep(old?.identity, created.identity),
             personality = keep(old?.personality, created.personality),
             speakingStyle = keep(old?.speakingStyle, created.speakingStyle),
             background = keep(old?.background, created.background),
-            traits = keepArr(old?.traits, created.traits),
-            relations = keepArr(old?.relations, created.relations),
-            firstChapter = old?.firstChapter ?: "",
-            lastChapter = old?.lastChapter ?: "",
+            traits = unionJsonArray(old?.traits, created.traits),
+            relations = unionJsonArray(old?.relations, created.relations),
+            firstChapter = old?.firstChapter.orEmpty(),
+            lastChapter = old?.lastChapter.orEmpty(),
             lastChapterIndex = old?.lastChapterIndex ?: -1,
             mentionCount = old?.mentionCount ?: 1,
             lastUpdateMention = old?.mentionCount ?: 1,
-            timeline = keepArr(old?.timeline, created.timeline),
+            timeline = mergeTimeline(old?.timeline.orEmpty(), created.timeline),
             confidence = maxOf(old?.confidence ?: 0f, created.confidence)
         )
         dao.insert(merged.copy(updatedAt = System.currentTimeMillis()))
         return merged
+    }
+
+    /**
+     * 汇总一个角色可用的台词材料：本章台词 ∪ 全书台词，去重后返回。
+     *
+     * 以前只在「整章缓存完全取不到」时才回退全书，导致绝大多数情况下 AI 只看得到
+     * 当前一章的两三句话，补全几乎不增长。这里改为无条件取并集。
+     */
+    private fun collectAllDialogLines(
+        bookName: String,
+        name: String,
+        chapterTitle: String
+    ): List<String> {
+        val out = LinkedHashSet<String>()
+        if (chapterTitle.isNotBlank()) {
+            collectDialogLines(bookName, chapterTitle)[name]
+                ?.map { it.trim() }
+                ?.filter { it.isNotBlank() }
+                ?.forEach { out.add(it) }
+        }
+        runCatching {
+            ScriptCharacterRepository.collectDialogsByName(
+                bookName, name, maxChapters = 60, maxLines = MAX_DIALOG_LINES
+            )
+        }.getOrDefault(emptyList())
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { out.add(it) }
+        return out.toList()
     }
 
     /**
@@ -888,6 +979,28 @@ object CharacterProfileManager {
     }
 
     /**
+     * 把脚本/识别产出的姓名解析为**主名**。
+     *
+     * 阅读界面双引号上方标注的姓名是 AI 识别出来的，很可能是某个人的别名
+     * （如「小张」实为「张小凡」、「林姑娘」实为「林黛玉」）。直接拿它建档会把
+     * 同一个人拆成好几份档案，因此建档前必须先归到主名。解析优先级：
+     *   1. 已建档案的**主名**命中
+     *   2. 已建档案的**别名**命中 → 归到那份档案的主名
+     *   3. 脚本 characterRecords.json 里的主名 / 别名
+     * 都命中不了才原样返回（当作新角色的主名）。
+     */
+    fun resolveMainName(bookUrl: String, bookName: String, raw: String): String {
+        val name = raw.trim()
+        if (name.isBlank()) return name
+        runCatching { appDb.characterProfileDao.get(bookUrl, name) }.getOrNull()
+            ?.let { return it.name }
+        findByAlias(bookUrl, name)?.let { return it.name }
+        runCatching { ScriptCharacterRepository.findRecord(name, bookName) }.getOrNull()
+            ?.let { return it.name.ifBlank { name } }
+        return name
+    }
+
+    /**
      * 别名清洗 —— 串档的另一个主要来源。
      * AI 建档时常常把主角的称呼写进配角 aliases，之后主角出场时按别名命中的
      * 就是配角档案。这里强制剔除任何与**其他角色主名**相同的别名。
@@ -916,6 +1029,56 @@ object CharacterProfileManager {
         BookHelp.getContent(book, chapter)
     }.getOrNull()
 
+    /** 按下标读到的章节：标题 + 正文 */
+    private data class ChapterMeta(val title: String, val text: String)
+
+    /** 按章节下标读标题与正文（手动补全按「当前章往后」顺序取材料用） */
+    private fun readChapterMeta(bookName: String, index: Int): ChapterMeta? = runCatching {
+        if (index < 0) return null
+        val book: io.legado.app.data.entities.Book =
+            appDb.bookDao.findByName(bookName).firstOrNull() ?: return null
+        val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: return null
+        ChapterMeta(chapter.title, BookHelp.getContent(book, chapter).orEmpty())
+    }.getOrNull()
+
+    /**
+     * **手动补全**用的材料收集：不扫全书，只按章节顺序取「当前章 + 后面几章」。
+     *
+     * 与 [collectChapterMaterials]（自动建档，全书范围挑该角色出场的章节）的区别：
+     * 手动按钮只求大致把人物分析出来，且自动建档会随朗读一章章累加，
+     * 因此这里只顺延 [MANUAL_CHAPTER_COUNT] 个章节；章节里没有该角色 → 跳过。
+     */
+    private fun collectManualChapterMaterials(
+        bookName: String,
+        names: Set<String>,
+        chapterIndex: Int
+    ): List<ChapterMaterial> {
+        if (chapterIndex < 0) return emptyList()
+        val out = ArrayList<ChapterMaterial>(MANUAL_CHAPTER_COUNT)
+        for (offset in 0 until MANUAL_CHAPTER_COUNT) {
+            val meta = readChapterMeta(bookName, chapterIndex + offset) ?: continue
+            val dialogs = collectDialogLines(bookName, meta.title)
+                .filterKeys { it.trim() in names }
+                .values.flatten()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .take(MAX_LINES_PER_CHAPTER)
+            val paras = pickParagraphs(meta.text, names, MAX_CONTEXT_PARAS)
+            // 这个章节里没有该角色 → 跳过，不占名额
+            if (dialogs.isEmpty() && paras.isEmpty()) continue
+            out.add(ChapterMaterial(meta.title, dialogs, paras))
+        }
+        return out
+    }
+
+    /** 按**章节标题**读正文：脚本缓存里的章节标题 → App 章节 → 正文 */
+    private fun readChapterTextByTitle(bookName: String, title: String): String? = runCatching {
+        if (title.isBlank()) return null
+        val book: io.legado.app.data.entities.Book = appDb.bookDao.findByName(bookName).firstOrNull() ?: return null
+        val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, title) ?: return null
+        BookHelp.getContent(book, chapter)
+    }.getOrNull()
+
     /** 从脚本章节缓存聚合「角色 → 台词」作为兜底上下文 */
     private fun collectDialogLines(bookName: String, chapterTitle: String): Map<String, List<String>> {
         val roles = runCatching {
@@ -938,7 +1101,9 @@ object CharacterProfileManager {
             if (now - at < FALLBACK_TTL_MS) return lines
         }
         val lines = runCatching {
-            ScriptCharacterRepository.collectDialogsByName(bookName, name)
+            ScriptCharacterRepository.collectDialogsByName(
+                bookName, name, maxLines = MAX_DIALOG_LINES
+            )
         }.getOrDefault(emptyList())
         dialogFallback[key] = now to lines
         trimDialogFallback()
@@ -973,7 +1138,8 @@ object CharacterProfileManager {
         bookUrl: String,
         bookName: String,
         name: String,
-        chapterTitle: String
+        chapterTitle: String,
+        rawNames: Set<String> = emptySet()
     ) {
         runCatching {
             val dao = appDb.characterProfileDao
@@ -981,10 +1147,16 @@ object CharacterProfileManager {
             if (existing == null) {
                 val legacy = legacyInfo(bookName, name)
                 val (gender, age) = splitGenderAge(legacy.first, legacy.second)
+                val aliasStr = rawNames
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() && it != name }
+                    .distinct()
+                    .joinToString("|")
                 dao.insert(
                     CharacterProfile(
                         bookUrl = bookUrl,
                         name = name,
+                        aliases = unionAliases(legacy.third, aliasStr),
                         gender = gender,
                         age = age,
                         confidence = 0f,
@@ -1006,43 +1178,121 @@ object CharacterProfileManager {
         }
     }
 
+    /** 建档材料：某一章里与该角色相关的内容（台词 + 该章剧情段落） */
+    private data class ChapterMaterial(
+        val title: String,
+        val dialogs: List<String>,
+        val paragraphs: List<String>
+    )
+
     /**
-     * 构造**该角色专属**的上下文。
+     * 收集建档材料：挑出该角色**实际出场**的章节（最多 [MAX_PROFILE_CHAPTERS] 个），
+     * 逐章取「该角色台词 + 该章提到他的正文段落」。
+     *
+     * 光给台词是不够的——台词只能体现说话风格，身份、经历、人际关系都在正文的
+     * 剧情里，所以每章必须配上正文段落；章节里没有该角色就跳过，不占名额。
+     *
+     * @param names 主名 + 别名，用于匹配台词归属与正文段落
+     */
+    private fun collectChapterMaterials(
+        bookName: String,
+        names: Set<String>,
+        chapterIndex: Int,
+        chapterTitle: String
+    ): List<ChapterMaterial> {
+        val out = LinkedHashMap<String, ChapterMaterial>()
+        // 1) 当前章节优先（正在阅读/朗读的那一章）
+        if (chapterTitle.isNotBlank()) {
+            val dialogs = collectDialogLines(bookName, chapterTitle)
+                .filterKeys { it.trim() in names }
+                .values.flatten()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .take(MAX_LINES_PER_CHAPTER)
+            val paras = pickParagraphs(
+                readChapterText(bookName, chapterIndex), names, MAX_CONTEXT_PARAS
+            )
+            if (dialogs.isNotEmpty() || paras.isNotEmpty()) {
+                out[chapterTitle] = ChapterMaterial(chapterTitle, dialogs, paras)
+            }
+        }
+        // 2) 全书范围内该角色出场的其他章节（按最近朗读时间倒序）
+        for (rc in ScriptCharacterRepository.collectChaptersByRole(
+            bookName, names, MAX_PROFILE_CHAPTERS, MAX_LINES_PER_CHAPTER
+        )) {
+            if (out.size >= MAX_PROFILE_CHAPTERS) break
+            if (out.containsKey(rc.title)) continue
+            out[rc.title] = ChapterMaterial(
+                title = rc.title,
+                dialogs = rc.dialogs,
+                paragraphs = pickParagraphs(
+                    readChapterTextByTitle(bookName, rc.title), names, MAX_CONTEXT_PARAS
+                )
+            )
+        }
+        return out.values.toList()
+    }
+
+    /** 从章节正文里挑出提到该角色（主名或别名）的段落，受总字数预算约束 */
+    private fun pickParagraphs(text: String?, names: Set<String>, maxParas: Int): List<String> {
+        if (text.isNullOrBlank()) return emptyList()
+        var left = MAX_CONTEXT_CHARS / MAX_PROFILE_CHAPTERS
+        val out = ArrayList<String>()
+        for (p in text.split('\n')) {
+            if (out.size >= maxParas || left <= 0) break
+            val s = p.trim()
+            if (!mentionsAny(s, names)) continue
+            val take = s.take(left)
+            out.add(take)
+            left -= take.length
+        }
+        return out
+    }
+
+    /** 段落是否确实在说这个角色：长度合理，且出现主名或任一别名 */
+    private fun mentionsAny(paragraph: String, names: Set<String>): Boolean {
+        if (paragraph.length < 4 || paragraph.length > 1200) return false
+        return names.any { it.isNotBlank() && paragraph.contains(it) }
+    }
+
+    /**
+     * 构造**该角色专属**的建档上下文：按章节组织，每章给出「台词 + 该章剧情段落」。
      *
      * 关键点：**绝不回退到整章正文**——只喂该角色的台词与正文中提到该角色
      * 姓名的段落，两者都没有 → 返回空串，宁缺勿错（避免把主角履历写进配角档案）。
      */
-    private fun buildContext(name: String, chapterText: String?, dialogs: List<String>?): String {
+    private fun buildContext(
+        name: String,
+        materials: List<ChapterMaterial>,
+        extraDialogs: List<String> = emptyList()
+    ): String {
         val sb = StringBuilder()
-        val lines = dialogs?.map { it.trim() }?.filter { it.isNotBlank() } ?: emptyList()
-        if (lines.isNotEmpty()) {
-            sb.append("【该角色在本章的台词】\n")
-            lines.take(12).forEachIndexed { i, d ->
-                sb.append(i + 1).append(". ").append(d.take(120)).append('\n')
-            }
-        }
-        if (!chapterText.isNullOrBlank()) {
-            val paras = chapterText.split('\n')
-                .map { it.trim() }
-                .filter { mentionsRole(it, name) }
-            if (paras.isNotEmpty()) {
-                sb.append("【正文中提到「").append(name).append("」的段落】\n")
-                var budget = MAX_CONTEXT_CHARS
-                for (p in paras.take(15)) {
-                    if (budget <= 0) break
-                    val s = p.take(budget)
-                    sb.append(s).append('\n')
-                    budget -= s.length
+        if (materials.isNotEmpty()) {
+            sb.append("【该角色出场章节的材料】")
+            sb.append("（每章含其台词与该章相关剧情，其中出现的其他人物仅作背景）\n\n")
+            materials.forEachIndexed { i, m ->
+                sb.append("=== 材料 ").append(i + 1).append("｜章节：")
+                    .append(m.title).append(" ===\n")
+                if (m.dialogs.isNotEmpty()) {
+                    sb.append("【该角色的台词】\n")
+                    m.dialogs.take(MAX_LINES_PER_CHAPTER).forEachIndexed { j, d ->
+                        sb.append(j + 1).append(". ").append(d.take(MAX_LINE_CHARS)).append('\n')
+                    }
                 }
+                if (m.paragraphs.isNotEmpty()) {
+                    sb.append("【该章提到「").append(name).append("」的剧情段落】\n")
+                    m.paragraphs.forEach { sb.append(it).append('\n') }
+                }
+                sb.append('\n')
+            }
+        } else if (extraDialogs.isNotEmpty()) {
+            // 兜底：一个章节材料都没取到时，至少把台词给它
+            sb.append("【该角色的台词】\n")
+            extraDialogs.take(MAX_CONTEXT_LINES).forEachIndexed { i, d ->
+                sb.append(i + 1).append(". ").append(d.take(MAX_LINE_CHARS)).append('\n')
             }
         }
         return sb.toString()
-    }
-
-    /** 段落是否确实在说这个角色：长度合理且出现该角色全名 */
-    private fun mentionsRole(paragraph: String, name: String): Boolean {
-        if (paragraph.length < 4 || paragraph.length > 1200) return false
-        return paragraph.contains(name)
     }
 
     // ==================== AI 请求 ====================
@@ -1058,26 +1308,60 @@ object CharacterProfileManager {
         val user = CREATE_PROMPT
             .replace("{book}", bookName)
             .replace("{name}", name)
-            .replace(
-                "{known}",
-                "性别：${gender.ifBlank { "未知" }}；年龄段：${age.ifBlank { "未知" }}；别名：${aliases.ifBlank { "无" }}"
-            )
+            .replace("{known}", "性别：${gender.ifBlank { "未知" }}；年龄段：${age.ifBlank { "未知" }}")
+            .replace("{aliasNote}", nameBlock(name, aliases.split("|")))
             .replace("{context}", context)
         val raw = chatWithRetry(SYSTEM_PROMPT, user, 1200)
+        return raw?.let { parseProfile(it) }
+    }
+
+    /**
+     * 基于**已有档案 + 新材料**做整合扩写（手动「重新生成/补全」用）。
+     *
+     * 与 [requestCreate] 的区别：会把现有档案一并交给 AI，让它**先完整沿用再补充**，
+     * 从而让档案内容随补全次数单调增长；而 [requestCreate] 只看新材料盲生成，
+     * 结果大部分会被合并策略丢弃，表现为「每次补全只增加一点点」。
+     */
+    private fun requestExpand(
+        bookName: String,
+        old: CharacterProfile,
+        extraNames: Set<String>,
+        context: String
+    ): CharacterProfile? {
+        // 旧档案别名 + 本次识别到的称呼，一起声明给 AI，避免材料里通篇别名时被当成另一个人
+        val aliases = LinkedHashSet<String>().apply {
+            addAll(old.aliases.split("|"))
+            addAll(extraNames)
+        }
+        val user = EXPAND_PROMPT
+            .replace("{book}", bookName)
+            .replace("{name}", old.name)
+            .replace("{aliasNote}", nameBlock(old.name, aliases))
+            .replace("{profile}", describe(old))
+            .replace("{context}", context)
+        val raw = chatWithRetry(SYSTEM_PROMPT, user, 2000)
         return raw?.let { parseProfile(it) }
     }
 
     private fun requestPatch(
         bookName: String,
         existing: CharacterProfile,
+        extraNames: Set<String>,
         context: String
     ): JsonObject? {
+        // 旧档案别名 + 本次识别到的称呼，一起声明给 AI
+        val aliases = LinkedHashSet<String>().apply {
+            addAll(existing.aliases.split("|"))
+            addAll(extraNames)
+        }
         val user = PATCH_PROMPT
             .replace("{book}", bookName)
             .replace("{name}", existing.name)
+            .replace("{aliasNote}", nameBlock(existing.name, aliases))
             .replace("{profile}", describe(existing))
             .replace("{context}", context)
-        val raw = chatWithRetry(SYSTEM_PROMPT, user, 1000)
+        // revised 现在要求输出「整合后的完整表述」，输出变长，token 上限同步放宽
+        val raw = chatWithRetry(SYSTEM_PROMPT, user, 1500)
         return raw?.let { runCatching { extractJsonObject(it) }.getOrNull() }
     }
 
@@ -1246,7 +1530,31 @@ object CharacterProfileManager {
                 )
             }
         }
-        // 3) 置信度取更高者
+        // 3) 补充新增的特征 / 关系 / 别名（取并集，保证只增不减）
+        runCatching {
+            val traits = patch.get("newTraits")?.takeIf { it.isJsonArray }?.asJsonArray
+            if (traits != null && traits.size() > 0) {
+                result = result.copy(traits = unionJsonArray(result.traits, traits.toString()))
+            }
+            val rel = patch.get("newRelations")?.takeIf { it.isJsonArray }?.asJsonArray
+            if (rel != null && rel.size() > 0) {
+                result = result.copy(relations = unionJsonArray(result.relations, rel.toString()))
+            }
+            val alias = patch.get("newAliases")?.takeIf { it.isJsonArray }?.asJsonArray
+            if (alias != null && alias.size() > 0) {
+                val added = alias.mapNotNull { e ->
+                    runCatching { e.takeIf { !it.isJsonNull }?.asString?.trim() }.getOrNull()
+                }.filter { it.isNotBlank() }.joinToString("|")
+                if (added.isNotBlank()) {
+                    result = result.copy(
+                        aliases = sanitizeAliases(
+                            unionAliases(result.aliases, added), result.bookUrl, result.name
+                        )
+                    )
+                }
+            }
+        }
+        // 4) 置信度取更高者
         runCatching {
             val c = patch.get("confidence")?.asFloat
             if (c != null && c > result.confidence) {
@@ -1280,6 +1588,45 @@ object CharacterProfileManager {
         val chapter = o.get("chapter")?.takeIf { !it.isJsonNull }?.asString.orEmpty()
         val event = o.get("event")?.takeIf { !it.isJsonNull }?.asString.orEmpty()
         return "$chapter|$event"
+    }
+
+    /** 解析 JSON 数组字符串，为空或解析失败返回空数组 */
+    private fun parseJsonArray(s: String?): JsonArray =
+        runCatching { JsonParser.parseString(s?.ifBlank { "[]" } ?: "[]").asJsonArray }
+            .getOrDefault(JsonArray())
+
+    /**
+     * 两个 JSON 数组取**并集**：基本类型元素按文本去重，对象元素按「字段=值」拼接去重。
+     *
+     * 用于特征 / 关系这类「只应追加、不应被覆盖」的字段，配合 [unionAliases] 保证
+     * 档案内容只增不减——否则 AI 每次只回一两条，反而会把之前积累的顶掉。
+     */
+    private fun unionJsonArray(a: String?, b: String?): String {
+        val arr = parseJsonArray(a)
+        val add = parseJsonArray(b)
+        if (add.size() == 0) return arr.toString()
+        fun keyOf(e: JsonElement): String = when {
+            e.isJsonPrimitive -> runCatching { e.asString.trim() }.getOrDefault("")
+            e.isJsonObject -> e.asJsonObject.entrySet().joinToString("|") { (k, v) ->
+                "$k=${runCatching { v.asString.trim() }.getOrDefault("")}"
+            }
+            else -> ""
+        }
+        val seen = HashSet<String>()
+        arr.forEach { keyOf(it).takeIf { k -> k.isNotBlank() }?.let { seen.add(it) } }
+        add.forEach { e ->
+            val k = keyOf(e)
+            if (k.isNotBlank() && seen.add(k)) arr.add(e)
+        }
+        return arr.toString()
+    }
+
+    /** 别名并集（| 分隔），保持原有顺序 */
+    private fun unionAliases(a: String?, b: String?): String {
+        val set = LinkedHashSet<String>()
+        a.orEmpty().split("|").map { it.trim() }.filter { it.isNotBlank() }.forEach { set.add(it) }
+        b.orEmpty().split("|").map { it.trim() }.filter { it.isNotBlank() }.forEach { set.add(it) }
+        return set.joinToString("|")
     }
 
     /** 档案 → 给 AI 看的简要描述 */
@@ -1320,6 +1667,34 @@ object CharacterProfileManager {
         return if (parts.isEmpty()) "（暂无）" else parts.joinToString("\n")
     }
 
+    /**
+     * 生成给 AI 看的「人物称呼说明」。
+     *
+     * 章节正文与台词里往往**通篇只用别名**（如通篇「林姑娘」「小张」），而档案是
+     * 按主名建的。若不主动声明两者的对应关系，AI 会认为材料里根本没有这个角色、
+     * 或把别名当成另一个人物写进关系里。这里显式声明：
+     * 「主名是谁 + 哪些称呼指同一个人 + 统一按主名整理」。
+     */
+    private fun nameBlock(mainName: String, aliases: Collection<String>): String {
+        val main = mainName.trim()
+        val others = aliases
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it != main }
+            .distinct()
+            .take(8)
+        return if (others.isEmpty()) {
+            "【人物称呼】档案主名：$main（材料中出现的「$main」即指该角色）"
+        } else {
+            buildString {
+                append("【人物称呼】档案主名：").append(main).append('\n')
+                append("其他称呼/别名（与上面是**同一个人**）：")
+                append(others.joinToString("、")).append('\n')
+                append("材料中出现的上述任一称呼都指同一人物，请统一按主名「").append(main)
+                append("」整理档案；\n不要把别名当成另一个角色，也不要把别名写进人物关系的对象里。")
+            }
+        }
+    }
+
     private fun extractJsonObject(raw: String): JsonObject {
         val s = raw.trim()
             .removePrefix("```json").removePrefix("```")
@@ -1338,6 +1713,8 @@ object CharacterProfileManager {
 
 【已知信息】
 {known}
+
+{aliasNote}
 
 【可参考内容】（以下材料均与该角色直接相关，其中的其他人物仅作背景）
 {context}
@@ -1370,9 +1747,55 @@ object CharacterProfileManager {
 8. 只输出 JSON 本身
     """.trimIndent()
 
+    private val EXPAND_PROMPT = """
+        小说《{book}》中的角色「{name}」已有一份档案，现在拿到了更多关于该角色的材料。
+请**在完整保留原有档案全部信息的基础上**做整合扩写，输出扩充后的完整档案。
+
+{aliasNote}
+
+【现有档案】
+{profile}
+
+【新材料】（以下均与该角色直接相关，其中的其他人物仅作背景）
+{context}
+
+【输出要求】
+严格输出如下 JSON 对象（不要数组，不要代码块）：
+{
+  "name": "角色主名",
+  "aliases": ["所有出现过的称呼"],
+  "gender": "男 或 女",
+  "age": "童 / 少年 / 青年 / 中年 / 老年 之一",
+  "identity": "整合后的身份",
+  "personality": "整合后的性格，60 字以内",
+  "traits": ["外形或习惯特征，最多 6 条"],
+  "speakingStyle": "说话风格，40 字以内",
+  "relations": [{"target": "相关角色名", "relation": "关系"}],
+  "background": "出身与背景履历，200 字以内",
+  "timeline": [{"chapter": "章节或时间点", "event": "事件，30 字以内"}],
+  "confidence": 0.8
+}
+
+【规则】
+1. **先完整沿用现有档案的每一条信息**（身份/性格/特征/说话风格/关系/背景/经历），
+   再把新材料中的**新增信息合并进去**；不得删减，不得用更简短的话替换原有内容
+2. traits / relations / timeline 一律取**并集**：原有的全部保留，新材料里不重复的
+   追加在后面；同一条目表述不同时保留信息更具体的一条
+3. 性格、背景这类整段文字要写成**合并后的完整表述**，而不是只写新增的那一句
+4. 只有新材料出现**明确反证**时才修正原有结论，并把 confidence 调整到相应把握程度
+5. 新材料里确实没有新信息时，原样输出整合后的现有档案即可（不要留空）
+6. 【严禁】把内容中其他人物的身份、经历、履历、人际关系写成「{name}」的内容
+7. aliases 只能是该人物本人的其他称呼（字号/绰号/昵称），禁止填写其他角色的名字
+8. gender 只填「男」或「女」；age 只填 童/少年/青年/中年/老年 之一
+9. confidence 为 0~1 小数，整合后信息越充分越高
+10. 只输出 JSON 本身
+    """.trimIndent()
+
     private val PATCH_PROMPT = """
         角色「{name}」在小说《{book}》中的现有档案：
 {profile}
+
+{aliasNote}
 
 以下是后续章节中与该角色有关的内容：
 {context}
@@ -1380,17 +1803,25 @@ object CharacterProfileManager {
 请输出**增量更新**，严格 JSON：
 {
   "newTimeline": [{"chapter": "章节", "event": "事件"}],
-  "revised": {"identity": "", "personality": "", "background": "", "speakingStyle": ""},
+  "revised": {"identity": "", "personality": "", "background": "", "speakingStyle": "",
+              "gender": "", "age": ""},
+  "newTraits": ["新增的外形或习惯特征"],
+  "newRelations": [{"target": "相关角色名", "relation": "关系"}],
+  "newAliases": ["新出现的称呼"],
   "confidence": 0.8
 }
 
 【规则】
-1. newTimeline 只写本次内容里「{name}」**本人新出现**的事件；没有就给空数组
-2. 【严禁】把本章其他人物的经历写成「{name}」的经历，只写与该角色直接相关的新事件
-3. 若「{name}」在本段内容中没有实质戏份，newTimeline 给空数组、revised 全留空
-4. revised 只填需要修正的字段，未变化或不确定就留空字符串
-5. confidence 为整合全部信息后的总体充分度
-6. 只输出 JSON 本身
+1. 目标是让档案**越来越完整**，因此只要材料里有关于「{name}」的有效信息就应当补进去；
+   不要因为「不确定」就一律留空，把握不大可以照写并适当调低 confidence
+2. newTimeline 写本批材料里「{name}」本人相关的事件，已有的事件不必重复
+3. revised 填**整合后的完整表述**（把新材料合并进现有档案后的完整内容），
+   而不是只写变化部分；没有变化就原样输出现有档案的对应字段
+4. newTraits / newRelations / newAliases 用于补充现有档案里**缺失**的条目；
+   newRelations 的 target 必须是具体人名
+5. 【严禁】把本章其他人物的经历写成「{name}」的经历
+6. confidence 为整合全部信息后的总体充分度，信息越全越高
+7. 只输出 JSON 本身
     """.trimIndent()
 
     private val MERGE_PROMPT = """
