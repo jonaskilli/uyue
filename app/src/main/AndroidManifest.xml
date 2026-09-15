@@ -268,6 +268,13 @@
             android:launchMode="singleTop"
             android:screenOrientation="behind"
             android:windowSoftInputMode="adjustResize" />
+        <!-- 书源登录（WebView 登录后保存 Cookie，供 AI 生成与阅读使用） -->
+        <activity
+            android:name=".ui.book.source.WebViewLoginActivity"
+            android:label="登录"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind"
+            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.soundeffect.SoundEffectRuleEditActivity"
             android:label="编辑音效规则"

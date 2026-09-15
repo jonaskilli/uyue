@@ -7,6 +7,7 @@ import io.legado.app.constant.AppLog
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookSource
 import io.legado.app.help.http.BackstageWebView
+import io.legado.app.help.http.CookieStore
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.GSON
@@ -129,12 +130,23 @@ object AiBookSourceGenerator {
     suspend fun generate(
         seedUrl: String,
         keyword: String,
+        loginUrl: String? = null,
+        includeExplore: Boolean = false,
+        fixRounds: Int = 2,
         onProgress: (String) -> Unit
     ): Result<GenResult> = withContext(Dispatchers.IO) {
         runCatching {
             val seed = normalize(seedUrl)
             val pages = ArrayList<Page>(6)
             val meta = HashMap<String, String>()
+            if (!loginUrl.isNullOrBlank()) {
+                val cookie = CookieStore.getCookie(seed)
+                meta["登录"] = if (cookie.isNotBlank()) {
+                    "用户已登录该站点，采集页面为登录后状态（书源将写入登录地址）"
+                } else {
+                    "站点需要登录但未检测到登录状态，建议先点「去登录」完成登录再生成"
+                }
+            }
 
             // ---------- 1) 首页 ----------
             onProgress("抓取首页…")
@@ -244,30 +256,52 @@ object AiBookSourceGenerator {
             meta["详情质检"] = infoCheck?.str("problem")?.takeIf { it.isNotBlank() }
                 ?: if (detailHtml != null) "通过" else "未抓到"
 
-            // ---------- 4) 目录页（详情/目录合一则直接用详情页） ----------
+            // ---------- 4) 目录页：多候选竞速，取章节链接最多的当目录 ----------
+            // 很多站详情页只挂一部分章节（最新章节区块/前几章），另有「全部目录」独立页。
+            // 把详情页本身、AI 给的目录地址、详情页里的目录文字链接全部作为候选，
+            // 逐个抓取并统计章节链接数，数量最多的才是真正目录（纯代码计数，不耗 AI）。
             var tocHtml: String? = null
             var tocUrl = ""
             var tocCheck: JsonObject? = null
-            val declaredTocUrl = infoCheck?.str("tocUrl")?.takeIf {
-                it.startsWith("http") && it != detailUrlFinal
+            data class TocCandidate(val url: String, val html: String?, val source: String)
+            val tocCandidates = ArrayList<TocCandidate>()
+            if (detailPageIsToc && detailHtml != null && detailUrlFinal != null) {
+                tocCandidates.add(TocCandidate(detailUrlFinal, detailHtml, "详情页"))
             }
-            when {
-                detailPageIsToc && detailHtml != null -> {
-                    onProgress("详情页即为目录页")
-                    tocUrl = detailUrlFinal ?: error("详情页地址缺失")
-                    tocHtml = detailHtml
-                    tocCheck = aiCheckPage(CHECK_TOC, tocHtml, tocUrl)
-                }
-                declaredTocUrl != null -> {
-                    onProgress("抓取目录页…")
-                    tocUrl = declaredTocUrl
-                    tocHtml = fetch(tocUrl)
-                    if (tocHtml != null) {
-                        pages.add(Page("目录页", tocUrl, tocHtml))
-                        tocCheck = aiCheckPage(CHECK_TOC, tocHtml, tocUrl)
+            infoCheck?.str("tocUrl")?.takeIf {
+                it.startsWith("http") && it != detailUrlFinal
+            }?.let { tocCandidates.add(TocCandidate(it, null, "AI目录链接")) }
+            detailHtml?.let { dh ->
+                val du = detailUrlFinal ?: seed
+                heuristicTocLinks(dh, du).forEach { u ->
+                    if (u != detailUrlFinal && tocCandidates.none { it.url == u }) {
+                        tocCandidates.add(TocCandidate(u, null, "页面目录链接"))
                     }
                 }
-                else -> onProgress("未找到明确目录页，交给 AI 从已有页面推断")
+            }
+            if (tocCandidates.isNotEmpty()) {
+                var best: TocCandidate? = null
+                var bestCount = -1
+                for (cand in tocCandidates.take(4)) {
+                    val html = cand.html ?: fetch(cand.url) ?: continue
+                    val count = countChapterLinks(html)
+                    onProgress("目录候选「${cand.source}」章节链接 $count 个")
+                    if (count > bestCount) {
+                        bestCount = count
+                        best = TocCandidate(cand.url, html, cand.source)
+                    }
+                }
+                best?.let { b ->
+                    tocUrl = b.url
+                    tocHtml = b.html
+                    if (b.source != "详情页" && pages.none { it.url == b.url }) {
+                        pages.add(Page("目录页", b.url, b.html ?: ""))
+                    }
+                    meta["目录选择"] = "候选 ${tocCandidates.size} 个，选中「${b.source}」（${bestCount} 个章节链接）"
+                    tocCheck = aiCheckPage(CHECK_TOC, b.html ?: "", b.url)
+                }
+            } else {
+                onProgress("未找到明确目录页，交给 AI 从已有页面推断")
             }
             meta["目录质检"] = tocCheck?.str("problem")?.takeIf { it.isNotBlank() }
                 ?: if (tocHtml != null) "通过" else "未抓到"
@@ -275,9 +309,10 @@ object AiBookSourceGenerator {
 
             // ---------- 5) 正文页 ----------
             var contentUrl = tocCheck?.str("firstChapterUrl")?.takeIf { it.startsWith("http") }
-            if (contentUrl == null && tocHtml != null) {
+            val tocHtmlFinal = tocHtml
+            if (contentUrl == null && tocHtmlFinal != null) {
                 contentUrl = firstChapterLink(
-                    tocHtml, tocUrl.ifBlank { seed }, desc = chapterOrder == "desc"
+                    tocHtmlFinal, tocUrl.ifBlank { seed }, desc = chapterOrder == "desc"
                 )
             }
             if (contentUrl != null) {
@@ -287,7 +322,7 @@ object AiBookSourceGenerator {
                 // 抓回来的页面若与详情页相同，改用目录页里的章节链接
                 if (contentHtml != null && detailHtml != null && pageSimilar(contentHtml, detailHtml)) {
                     onProgress("该章节地址无效（返回了详情页），改用目录页中的章节链接…")
-                    tocHtml?.let { toc ->
+                    tocHtmlFinal?.let { toc ->
                         val alt = firstChapterLink(
                             toc, tocUrl.ifBlank { seed }, desc = chapterOrder == "desc"
                         )
@@ -316,20 +351,51 @@ object AiBookSourceGenerator {
                 }
             }
 
+            // ---------- 6) 分类列表页（发现页用，勾选了才采集） ----------
+            if (includeExplore && pages.none { it.role.startsWith("分类列表页") }) {
+                val classUrl = homeCheck?.str("firstCategoryUrl")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { fillKey(it, testKeyword).replace("{{page}}", "1") }
+                    ?.takeIf { it.startsWith("http") }
+                    ?: firstClassLink(homeHtml, seed)
+                if (classUrl != null) {
+                    onProgress("抓取分类列表页…")
+                    fetch(classUrl)?.let { clsHtml ->
+                        if (!pageSimilar(clsHtml, homeHtml)) {
+                            pages.add(Page("分类列表页", classUrl, clsHtml))
+                            val catCheck = aiCheckPage(CHECK_CATEGORY, clsHtml, classUrl)
+                            meta["发现页"] = if (catCheck?.bool("isListPage") == true) {
+                                "分类列表页可用：$classUrl"
+                            } else {
+                                catCheck?.str("problem")?.takeIf { it.isNotBlank() } ?: "分类列表页疑似异常"
+                            }
+                        }
+                    }
+                } else {
+                    meta["发现页"] = "未识别出分类导航"
+                }
+            }
+
             // ---------- 阶段二：生成书源 ----------
             onProgress("已采集 ${pages.size} 个页面，正在交给 AI 生成书源规则…")
-            var source = askGenerate(pages, seed, searchTemplate, meta)
+            var source = askGenerate(pages, seed, searchTemplate, meta, includeExplore)
                 ?: error("AI 未返回书源。请确认「角色档案设置」里已配置接口（接口@@模型@@密钥）")
             ensureMobileUa(source)
+            // 写入登录地址：Cookie 失效时可在「书源管理→登录」重新登录，
+            // 登录后的 Cookie 由 legado 按域名自动注入书源请求
+            if (!loginUrl.isNullOrBlank()) {
+                source.loginUrl = loginUrl
+            }
 
-            // ---------- 阶段三：四链路实测 + 失败修正 ----------
-            var fixRounds = 0
+            // ---------- 阶段三：五链路实测 + 失败修正 ----------
+            val maxRounds = fixRounds.coerceIn(0, 8)
+            var fixRound = 0
             var report = verifySource(source, testKeyword, pages, onProgress)
-            while (report.any { !it.ok } && fixRounds < MAX_FIX_ROUNDS) {
-                fixRounds++
+            while (report.any { !it.ok } && fixRound < maxRounds) {
+                fixRound++
                 onProgress(
                     "验证未通过（${report.filter { !it.ok }.joinToString("、") { it.step }}），" +
-                        "正在让 AI 修正（第 $fixRounds 轮）…"
+                        "正在让 AI 修正（第 $fixRound/$maxRounds 轮）…"
                 )
                 val fixed = fixSource(source, report, pages) ?: break
                 ensureMobileUa(fixed)
@@ -340,7 +406,7 @@ object AiBookSourceGenerator {
             if (source.bookSourceName.isBlank()) source.bookSourceName = "AI生成书源"
             if (source.bookSourceGroup.isNullOrBlank()) source.bookSourceGroup = "AI生成"
 
-            GenResult(source, report, fixRounds)
+            GenResult(source, report, fixRound)
         }
     }
 
@@ -402,13 +468,17 @@ object AiBookSourceGenerator {
             val u = java.net.URI(url)
             "${u.scheme}://${u.host}/"
         }.getOrDefault("")
-        val request = Request.Builder()
+        val builder = Request.Builder()
             .url(url)
             .header("User-Agent", if (pcUa) PC_UA else MOBILE_UA)
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header("Accept-Language", "zh-CN,zh;q=0.9")
             .header("Referer", referer)
-            .build()
+        // 登录态：按域名取用户在此站点登录保存的 Cookie（需要登录才能看正文的站点）
+        CookieStore.getCookie(url).takeIf { it.isNotBlank() }?.let {
+            builder.header("Cookie", it)
+        }
+        val request = builder.build()
         c.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 AppLog.put("[AI书源] 抓取失败 HTTP ${response.code}：$url")
@@ -439,7 +509,7 @@ object AiBookSourceGenerator {
     }
 
     private fun postBy(c: OkHttpClient, url: String, body: String, charset: String): String? = runCatching {
-        val request = Request.Builder()
+        val builder = Request.Builder()
             .url(url)
             .header("User-Agent", MOBILE_UA)
             .header("Referer", runCatching {
@@ -447,6 +517,10 @@ object AiBookSourceGenerator {
                 "${u.scheme}://${u.host}/"
             }.getOrDefault(""))
             .header("Content-Type", "application/x-www-form-urlencoded; charset=$charset")
+        CookieStore.getCookie(url).takeIf { it.isNotBlank() }?.let {
+            builder.header("Cookie", it)
+        }
+        val request = builder
             .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
             .build()
         c.newCall(request).execute().use { response ->
@@ -483,6 +557,34 @@ object AiBookSourceGenerator {
         }?.attr("abs:href")
     }
 
+    /**
+     * 详情页里的目录入口链接：文字含「目录/全部章节/章节列表」等。
+     * 用于目录多候选竞速——很多站详情页只挂部分章节，真正的完整目录在独立页。
+     */
+    private fun heuristicTocLinks(detailHtml: String, baseUrl: String): List<String> {
+        val doc = Jsoup.parse(detailHtml, baseUrl)
+        val keywords = listOf("目录", "全部章节", "章节列表", "查看全部", "完整目录", "所有章节")
+        return doc.select("a[href]")
+            .filter { a ->
+                val t = a.text().trim()
+                t.length <= 12 && keywords.any { t.contains(it) } &&
+                    a.attr("abs:href").startsWith("http")
+            }
+            .map { it.attr("abs:href") }
+            .distinct()
+    }
+
+    /**
+     * 统计页面里「第X章/节/回」式章节链接的数量。
+     * 用于目录候选竞速：数量最多的候选才是完整目录。
+     * （同一标准下比较，有区分度即可；个别站章节名无编号会使计数偏低，但不影响相对比较）
+     */
+    private fun countChapterLinks(html: String): Int {
+        val doc = Jsoup.parse(html)
+        val chapterPattern = Regex("第\\s*[0-9零〇一二两三四五六七八九十百千万]+\\s*[章节回]")
+        return doc.select("a[href]").count { chapterPattern.containsMatchIn(it.text()) }
+    }
+
     /** 目录页里的第一章链接（AI 不可用时的兜底，感知正倒序） */
     private fun firstChapterLink(html: String, baseUrl: String, desc: Boolean): String? {
         val doc = Jsoup.parse(html, baseUrl)
@@ -513,7 +615,7 @@ object AiBookSourceGenerator {
             append("\n页面 URL：").append(url).append('\n')
             append("```html\n").append(cleanHtml(html)).append("\n```")
         }
-        val raw = chat(user, 600) ?: return null
+        val raw = chat(user, 1200) ?: return null
         return parseJsonObject(raw)
     }
 
@@ -521,8 +623,26 @@ object AiBookSourceGenerator {
         pages: List<Page>,
         seedUrl: String,
         searchTemplate: String?,
-        meta: Map<String, String>
+        meta: Map<String, String>,
+        includeExplore: Boolean
     ): BookSource? {
+        // 发现页字段按需拼接：不勾选时完全不出现，JSON 更紧凑、输出截断风险更低
+        val exploreFields = if (includeExplore) {
+            "         \"exploreUrl\": \"发现页分类列表，「分类名::完整网址」每行一个；网址用采集确认里的真实分类地址（带页码的写 {{page}}）；没有分类导航留空\","
+        } else {
+            "         \"exploreUrl\": \"\","
+        }
+        val exploreRule = if (includeExplore) {
+            "         \"ruleExplore\": {\"bookList\": \"分类列表页的书籍列表选择器\", \"name\": \"书名规则\", \"author\": \"作者规则\",\n" +
+                "           \"kind\": \"\", \"lastChapter\": \"\", \"intro\": \"\", \"coverUrl\": \"\", \"bookUrl\": \"详情页链接规则；结构与搜索结果页类似，可复用其写法\"},"
+        } else {
+            "         \"ruleExplore\": {},"
+        }
+        val exploreHardRule = if (includeExplore) {
+            "发现页：exploreUrl 必须用采集确认里出现的真实分类地址，ruleExplore 依据「分类列表页」的实际 HTML 写；没有分类页则 exploreUrl 与 ruleExplore 留空；"
+        } else {
+            "本次不生成发现页：exploreUrl 与 ruleExplore 必须留空；"
+        }
         val sb = StringBuilder()
         pages.forEachIndexed { index, page ->
             sb.append("【页面").append(index + 1).append("｜角色：").append(page.role)
@@ -536,8 +656,11 @@ object AiBookSourceGenerator {
             .replace("{seed}", seedUrl)
             .replace("{searchHint}", searchHint)
             .replace("{meta}", metaText)
-            .replace("{pages}", sb.toString()) + PATTERN_LIBRARY
-        val raw = chat(user, 4000) ?: return null
+            .replace("{pages}", sb.toString())
+            .replace("{exploreFields}", exploreFields)
+            .replace("{exploreRule}", exploreRule)
+            .replace("{exploreHardRule}", exploreHardRule) + PATTERN_LIBRARY
+        val raw = chat(user, 8000) ?: return null
         val json = extractJson(raw) ?: return null
         return GSON.fromJsonObject<BookSource>(json).getOrNull()
     }
@@ -560,6 +683,7 @@ object AiBookSourceGenerator {
                     ?: pages.firstOrNull { it.role.startsWith("详情") }
                 "正文" -> pages.firstOrNull { it.role.startsWith("正文") }
                     ?: pages.firstOrNull { it.role.startsWith("目录") }
+                "发现" -> pages.firstOrNull { it.role.startsWith("分类列表页") }
                 else -> null
             }
             if (page != null) {
@@ -570,7 +694,7 @@ object AiBookSourceGenerator {
         val user = FIX_PROMPT
             .replace("{fails}", sb.toString())
             .replace("{source}", current) + PATTERN_LIBRARY
-        val raw = chat(user, 4000) ?: return null
+        val raw = chat(user, 8000) ?: return null
         val json = extractJson(raw) ?: return null
         return GSON.fromJsonObject<BookSource>(json).getOrNull()
     }
@@ -604,9 +728,12 @@ object AiBookSourceGenerator {
         val report = ArrayList<VerifyItem>(4)
         var book: Book? = null
 
-        onProgress("验证 ①/④：搜索…")
+        onProgress("验证 ①/⑤：搜索…")
         runCatching {
             if (source.searchUrl.isNullOrBlank()) error("searchUrl 为空")
+            if (source.searchUrl!!.contains("::")) {
+                error("searchUrl 写成了「分类名::网址」的分类列表格式——那是 exploreUrl 的格式，searchUrl 必须是单个搜索地址且含 {{key}}")
+            }
             val books = WebBook.searchBookAwait(source, keyword, 1)
             if (books.isEmpty()) error("搜索无结果")
             val first = books.first()
@@ -616,7 +743,7 @@ object AiBookSourceGenerator {
             report.add(VerifyItem("搜索", false, it.message ?: "执行异常"))
         }
 
-        onProgress("验证 ②/④：书籍详情…")
+        onProgress("验证 ②/⑤：书籍详情…")
         runCatching {
             val probe = book ?: Book(
                 name = "验证测试",
@@ -639,7 +766,7 @@ object AiBookSourceGenerator {
             report.add(VerifyItem("详情", false, it.message ?: "执行异常"))
         }
 
-        onProgress("验证 ③/④：目录…")
+        onProgress("验证 ③/⑤：目录…")
         var firstChapter: io.legado.app.data.entities.BookChapter? = null
         runCatching {
             val b = book ?: error("详情验证未通过，无法继续")
@@ -651,7 +778,7 @@ object AiBookSourceGenerator {
             report.add(VerifyItem("目录", false, it.message ?: "执行异常"))
         }
 
-        onProgress("验证 ④/④：正文…")
+        onProgress("验证 ④/⑤：正文…")
         runCatching {
             val b = book ?: error("详情验证未通过，无法继续")
             val chapter = firstChapter ?: error("目录验证未通过，无法继续")
@@ -661,6 +788,24 @@ object AiBookSourceGenerator {
             report.add(VerifyItem("正文", true, "取到正文 ${plain.length} 字"))
         }.onFailure {
             report.add(VerifyItem("正文", false, it.message ?: "执行异常"))
+        }
+
+        onProgress("验证 ⑤/⑤：发现页…")
+        val explore = source.exploreUrl?.trim().orEmpty()
+        if (explore.isBlank()) {
+            report.add(VerifyItem("发现", true, "未配置（站点无分类导航，已跳过）"))
+        } else {
+            runCatching {
+                val url = parseExploreFirstUrl(explore, source.bookSourceUrl)
+                    ?: error("exploreUrl 无法解析出分类地址")
+                val books = WebBook.exploreBookAwait(source, url, 1)
+                if (books.isEmpty()) error("发现页无结果（规则或分类地址有误）")
+                report.add(
+                    VerifyItem("发现", true, "分类页取到《${books.first().name}》等 ${books.size} 本")
+                )
+            }.onFailure {
+                report.add(VerifyItem("发现", false, it.message ?: "执行异常"))
+            }
         }
         return report
     }
@@ -737,6 +882,34 @@ object AiBookSourceGenerator {
         return ka.take(600) == kb.take(600)
     }
 
+    /**
+     * 解析 exploreUrl 的第一个分类地址（用于抓取分类列表页与发现页验证）。
+     * 支持「分类名::URL」行式（含 {{page}}）与 JSON 数组两种主流写法；
+     * @js 动态生成无法静态解析，返回 null 由调用方兜底。
+     */
+    private fun parseExploreFirstUrl(exploreUrl: String, seed: String): String? {
+        val raw = exploreUrl.trim()
+        if (raw.isBlank() || raw.startsWith("@js") || raw.contains("<js>")) return null
+        val rawUrl = when {
+            raw.startsWith("[") -> runCatching {
+                JsonParser.parseString(raw).asJsonArray.firstOrNull()
+                    ?.asJsonObject?.get("url")?.asString
+            }.getOrNull()
+            else -> raw.lineSequence().firstOrNull { it.contains("::") }
+                ?.substringAfter("::")?.trim()
+        } ?: return null
+        val u = rawUrl.replace("{{page}}", "1").trim()
+        return when {
+            u.startsWith("http") -> u
+            u.startsWith("//") -> "https:$u"
+            u.startsWith("/") -> runCatching {
+                val home = java.net.URI(seed)
+                "${home.scheme}://${home.host}$u"
+            }.getOrNull()
+            else -> null
+        }
+    }
+
     /** 首页里最像「分类列表页」的链接（站点搜索不可用时的降级入口） */
     private fun firstClassLink(html: String, baseUrl: String): String? {
         val doc = Jsoup.parse(html, baseUrl)
@@ -780,6 +953,7 @@ object AiBookSourceGenerator {
         {"isNovelSite": true或false,
          "searchUrl": "可直接使用的搜索请求地址，关键词位置用 {{key}} 占位，例如 https://www.x.com/Search/{{key}}；若必须 POST 则写成 {\"method\":\"POST\",\"body\":\"参数名={{key}}&其他隐藏参数=值\"}；找不到填 null",
          "suggestKeyword": "从页面热门搜索词或推荐书名里挑一个 2~3 字的中文关键词用于测试，找不到填 null",
+         "firstCategoryUrl": "页面导航/分类区里第一个书籍分类的完整网址（只填一个地址，用于抓取分类列表页；地址带页码时把页码写成 {{page}}，如 https://www.x.com/class/1/{{page}}.html）；页面没有分类导航填 null",
          "problem": "不是小说站或缺搜索入口时简述原因，正常则留空"}
     """.trimIndent()
 
@@ -890,7 +1064,17 @@ object AiBookSourceGenerator {
         · 站点拒绝请求时给书源配 header（手机 UA 与 Referer）
         · 不要给 chapterList 主动加反转/排序处理，按页面章节链接的自然顺序写规则即可
 
-        九、知名大站的已验证方案（HTML 搜索页多为 JS 渲染，直接套用其 JSON 接口）
+        九、发现页（exploreUrl + ruleExplore，5541 个书源里 3264 个都配了）
+        · exploreUrl 行式写法（最常用 1838 个），分类名::完整网址，每行一个，支持 {{page}} 翻页：
+          玄幻::https://x.com/class/1/{{page}}.html
+          都市::https://x.com/class/2/{{page}}.html
+        · 也支持 JSON 数组写法：[{"title":"玄幻","url":"..."},{"title":"都市","url":"..."}]
+        · ruleExplore 与 ruleSearch 同类字段：bookList/name/author/bookUrl/coverUrl/intro/kind/lastChapter
+        · 分类列表页 bookList 常见写法：
+          class.l@li｜class.novelslist2@tag.dl｜class.list-item｜class.hot_sale｜class.bookbox｜class.titlelist@li
+        · 分类地址必须是采集到的真实分类页，不要编造；站点没有分类导航就不要写 exploreUrl
+
+        十、知名大站的已验证方案（HTML 搜索页多为 JS 渲染，直接套用其 JSON 接口）
         · 纵横中文网（zongheng.com 系，含 comic.zongheng.com）：
           searchUrl: https://search.zongheng.com/search/book?keyword={{key}}&sort=null&pageNo=1&pageNum=20&isFromHuayu=0
           bookList: $.data.datas.list[*]　name: $.name　author: $.authorName
@@ -925,10 +1109,12 @@ object AiBookSourceGenerator {
          "bookSourceGroup": "AI生成",
          "bookSourceType": 0,
          "bookUrlPattern": "详情页 URL 正则，不确定留空",
-         "searchUrl": "搜索地址，关键词用 {{key}}，翻页用 {{page}}",
+         "searchUrl": "搜索地址，关键词用 {{key}}，翻页用 {{page}}；必须是单个搜索请求地址，绝不能写成分类列表",
+{exploreFields}
          "ruleSearch": {"bookList": "搜索结果列表选择器", "name": "书名规则", "author": "作者规则",
            "kind": "分类规则，不确定留空", "lastChapter": "", "intro": "", "coverUrl": "",
            "bookUrl": "详情页链接规则"},
+{exploreRule}
          "ruleBookInfo": {"name": "书名规则", "author": "作者规则", "kind": "", "lastChapter": "",
            "intro": "", "coverUrl": "", "tocUrl": "目录页链接规则", "wordCount": ""},
          "ruleToc": {"chapterList": "章节列表选择器", "chapterName": "章节名规则",
@@ -946,7 +1132,9 @@ object AiBookSourceGenerator {
         1. 只依据给到的页面内容推断；
         2. 正文容器的命名因站而异（可能是 id.nr、id.content、class.read-content、article 等），以页面实际结构为准，不要套用固定命名；
         3. 章节列表排除「最新章节」推荐区，取完整章节列表容器；
-        4. 采集确认里的书名/作者/第一章网址必须与规则解析结果吻合。
+        4. 采集确认里的书名/作者/第一章网址必须与规则解析结果吻合；
+        5. {exploreHardRule}
+        6. searchUrl 与 exploreUrl 是两个完全不同的东西，绝不能混写：searchUrl 是**单个**搜索请求地址且必须含 {{key}}；exploreUrl 是**多行**「分类名::网址」列表且不含 {{key}}。
     """.trimIndent()
 
     private val FIX_PROMPT = """

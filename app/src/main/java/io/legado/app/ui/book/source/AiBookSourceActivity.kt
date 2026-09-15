@@ -34,6 +34,19 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         binding.btnGenerate.setOnClickListener { startGenerate() }
         binding.btnSave.setOnClickListener { saveSource() }
+        binding.btnLogin.setOnClickListener { gotoLogin() }
+    }
+
+    /** 打开 WebView 登录，登录后 cookie 按域名存入 CookieStore，生成与阅读都会自动带上 */
+    private fun gotoLogin() {
+        val loginUrl = binding.etLoginUrl.text?.toString()?.trim().orEmpty()
+        if (loginUrl.isBlank()) {
+            toastOnUi("请先填写登录地址")
+            return
+        }
+        val siteUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
+            .ifBlank { loginUrl }
+        WebViewLoginActivity.start(this, loginUrl, siteUrl)
     }
 
     override fun onDestroy() {
@@ -49,6 +62,11 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         }
         val keyword = binding.etKeyword.text?.toString()?.trim()
             .takeIf { !it.isNullOrBlank() } ?: "剑"
+        val loginUrl = binding.etLoginUrl.text?.toString()?.trim()
+            .takeIf { !it.isNullOrBlank() }
+        val includeExplore = binding.cbExplore.isChecked
+        val fixRounds = binding.etFixRounds.text?.toString()?.trim()
+            ?.toIntOrNull()?.coerceIn(0, 8) ?: 2
 
         generated = null
         binding.etResult.setText("")
@@ -58,7 +76,9 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
 
         generateJob?.cancel()
         generateJob = lifecycleScope.launch {
-            val result = AiBookSourceGenerator.generate(url, keyword) { message ->
+            val result = AiBookSourceGenerator.generate(
+                url, keyword, loginUrl, includeExplore, fixRounds
+            ) { message ->
                 // 回调在 IO 线程，进度必须切回主线程更新 UI
                 runOnUiThread { binding.tvProgress.text = message }
             }
@@ -72,7 +92,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                         append("（AI 修正 ").append(res.fixRounds).append(" 轮）")
                     }
                     append('\n')
-                    append("四链路验证：\n")
+                    append("五链路验证：\n")
                     res.verify.forEach { v ->
                         append('[').append(if (v.ok) "通过" else "失败").append("] ")
                             .append(v.step).append("：").append(v.message).append('\n')

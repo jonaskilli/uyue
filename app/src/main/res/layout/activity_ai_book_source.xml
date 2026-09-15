@@ -56,6 +56,80 @@
                     tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
             </io.legado.app.ui.widget.text.TextInputLayout>
 
+            <io.legado.app.ui.widget.text.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="登录地址（可选，正文需登录的站点填登录页地址）">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_login_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textUri"
+                    android:maxLines="2"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="需要登录才能看正文时：填登录页地址 → 点右侧按钮登录 → 再开始生成"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="11sp" />
+
+                <io.legado.app.ui.widget.text.AccentBgTextView
+                    android:id="@+id/btn_login"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginStart="8dp"
+                    android:gravity="center"
+                    android:paddingHorizontal="14dp"
+                    android:text="去登录" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <io.legado.app.lib.theme.view.ThemeCheckBox
+                    android:id="@+id/cb_explore"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="生成发现页（分类列表，内容更长耗时更久）"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="AI修正次数"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="13sp" />
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_fix_rounds"
+                    android:layout_width="52dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:gravity="center"
+                    android:inputType="number"
+                    android:maxLength="1"
+                    android:text="2"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </LinearLayout>
+
             <io.legado.app.ui.widget.text.AccentBgTextView
                 android:id="@+id/btn_generate"
                 android:layout_width="match_parent"
@@ -105,7 +179,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:lineSpacingExtra="3dp"
-                android:text="说明：\n1. 生成过程会自动抓取「首页 → 搜索页 → 详情页 → 目录页 → 正文页」，再把源码交给 AI 推断规则，通常需要几十秒；\n2. AI 接口沿用「角色档案设置」里的配置（本地混元太极网关）；\n3. 生成结果仅供参考，导入后建议在「书源管理」里做一次「校验书源」，失效的规则可手动微调；\n4. 需要 JS 渲染、验证码或登录才能看的站点，生成成功率会明显偏低。"
+                android:text="说明：\n1. 生成过程会自动抓取「首页 → 搜索页 → 详情页 → 目录页 → 正文页 → 分类页」，再把源码交给 AI 推断规则，通常需要几十秒；\n2. AI 接口沿用「角色档案设置」里的配置（本地混元太极网关）；\n3. 生成后会自动做 5 项实测：搜索 / 详情 / 目录 / 正文 / 发现页，失败环节自动交给 AI 修正（最多 2 轮）；\n4. 正文需要登录的站点：填「登录地址」→ 点「去登录」完成登录 → 再生成，采集与阅读都会自动使用登录状态；生成的登录地址也会写入书源，Cookie 失效时可在「书源管理→登录」里重新登录；\n5. 生成结果仅供参考，导入后建议在「书源管理」里做一次「校验书源」，失效的规则可手动微调；\n6. 需要 JS 渲染、验证码的站点，生成成功率会明显偏低。"
                 android:textColor="@color/secondaryText"
                 android:textSize="12sp" />
 
