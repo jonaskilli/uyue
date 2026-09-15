@@ -20,6 +20,7 @@ import com.bumptech.glide.Glide
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.constant.EventBus
+import io.legado.app.constant.PreferKey
 import io.legado.app.databinding.DialogVnStageBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
@@ -30,7 +31,9 @@ import io.legado.app.model.AiProfileService
 import io.legado.app.model.ReadBook
 import io.legado.app.model.VnParagraph
 import io.legado.app.tts.voice.ScriptCharacterRepository
+import io.legado.app.utils.getPrefString
 import io.legado.app.utils.observeEvent
+import io.legado.app.utils.sysScreenOffTime
 import io.legado.app.utils.postEvent
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
@@ -114,6 +117,11 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /** 屏幕超时设置（毫秒），跟随阅读页"屏幕超时"设置；< 0 表示常亮 */
+    private var screenTimeOut: Long = 0
+    private val screenOffHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val screenOffRunnable by lazy { Runnable { keepDialogScreenOn(false) } }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setStyle(STYLE_NO_FRAME, R.style.dialog_style_material)
@@ -150,6 +158,8 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             }
             WindowCompat.setDecorFitsSystemWindows(this, false)
         }
+        // 跟随阅读页「屏幕超时」设置（含常亮），应用到本视觉小说界面的 window
+        upScreenTimeOut()
     }
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
@@ -991,5 +1001,48 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         portraitPollJob?.cancel()
         portraitPollJob = null
         VnBackgroundManager.release()
+        // 清理屏幕超时计时器，避免泄漏；退出后由朗读界面/阅读界面自行管理屏幕状态
+        screenOffHandler.removeCallbacks(screenOffRunnable)
+    }
+
+    /**
+     * 读取「屏幕超时」设置并应用到本视觉小说界面的 window。
+     * 与朗读大图界面（FullscreenAiImageDialog）保持一致：常亮保持常亮；
+     * 设定时间大于系统息屏时间则在该时间后允许息屏；默认使用系统设置。
+     */
+    private fun upScreenTimeOut() {
+        val keepLightPrefer = getPrefString(PreferKey.keepLight)?.toIntOrNull() ?: 0
+        screenTimeOut = keepLightPrefer * 1000L
+        screenOffTimerStart()
+    }
+
+    private fun screenOffTimerStart() {
+        screenOffHandler.post {
+            if (screenTimeOut < 0) {
+                keepDialogScreenOn(true)
+                return@post
+            }
+            val t = screenTimeOut - requireContext().sysScreenOffTime
+            if (t > 0) {
+                keepDialogScreenOn(true)
+                screenOffHandler.removeCallbacks(screenOffRunnable)
+                screenOffHandler.postDelayed(screenOffRunnable, screenTimeOut)
+            } else {
+                keepDialogScreenOn(false)
+            }
+        }
+    }
+
+    /** 给本 Dialog 的 window 添加/清除保持屏幕常亮标志 */
+    private fun keepDialogScreenOn(on: Boolean) {
+        val window = dialog?.window ?: return
+        val isScreenOn =
+            (window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0
+        if (on == isScreenOn) return
+        if (on) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 }
