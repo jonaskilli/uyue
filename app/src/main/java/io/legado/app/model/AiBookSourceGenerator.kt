@@ -433,7 +433,7 @@ object AiBookSourceGenerator {
             .replace("{seed}", seedUrl)
             .replace("{searchHint}", searchHint)
             .replace("{meta}", metaText)
-            .replace("{pages}", sb.toString())
+            .replace("{pages}", sb.toString()) + PATTERN_LIBRARY
         val raw = chat(user, 4000) ?: return null
         val json = extractJson(raw) ?: return null
         return GSON.fromJsonObject<BookSource>(json).getOrNull()
@@ -466,7 +466,7 @@ object AiBookSourceGenerator {
         }
         val user = FIX_PROMPT
             .replace("{fails}", sb.toString())
-            .replace("{source}", current)
+            .replace("{source}", current) + PATTERN_LIBRARY
         val raw = chat(user, 4000) ?: return null
         val json = extractJson(raw) ?: return null
         return GSON.fromJsonObject<BookSource>(json).getOrNull()
@@ -668,6 +668,11 @@ object AiBookSourceGenerator {
         下面是一个网页的 HTML。请判断它是否是小说网站的有效页面，并找出搜索入口。
         注意：很多手机站的真实搜索地址写在页面的 JavaScript 里（如 location.href='/Search/'+关键词，
         或 /search.php?keyword=），请检查页面中保留的 <script> 内容；表单没有 action 属性时尤其如此。
+        常见搜索路径形态（**仅当与页面表单/脚本实际吻合时才采用，页面实际结构优先于模板**）：
+        /search.php?keyword={{key}}、/Search/{{key}}、/search?q={{key}}、/search?kw={{key}}、
+        /modules/article/search.php?searchkey={{key}}（杰奇CMS）、/e/search/index.php（帝国CMS，POST）、
+        /s.php?ie=gbk&q={{key}}、/api/search?q={{key}}。
+        不要因为模板存在就套用页面里不存在的路径；页面表单/JS 明确给出的搜索地址永远优先。
         只输出 JSON（不要解释）：
         {"isNovelSite": true或false,
          "searchUrl": "可直接使用的搜索请求地址，关键词位置用 {{key}} 占位，例如 https://www.x.com/Search/{{key}}；若必须 POST 则写成 {\"method\":\"POST\",\"body\":\"参数名={{key}}&其他隐藏参数=值\"}；找不到填 null",
@@ -711,11 +716,74 @@ object AiBookSourceGenerator {
         这是疑似正文页的网页 HTML。请判断它是否是小说章节正文页。
         注意：如果页面更像书籍详情页（含书籍简介、加入书架按钮、章节链接列表）而不是正文，
         hasContent 要填 false 并在 problem 里说明。
+        正文容器命名因站而异，常见候选（按出现频率）：
+        content、htmlContent、nr1、chaptercontent、booktxt、novelcontent、read-content、
+        TextContent、article、con、nr、txt、BookText、acontent、readcontent。
+        只要页面存在上述之一（或其他明显正文容器）且其中是章节正文，hasContent 就填 true。
         只输出 JSON（不要解释）：
         {"isChapter": true或false,
          "hasContent": true或false,
          "nextContentUrl": "正文分页或下一章的完整网址，没有填 null",
          "problem": "异常时简述原因（如：其实是详情页/是目录页/正文为空/是验证码页），正常则留空"}
+    """.trimIndent()
+
+    /**
+     * 成熟书源模式库：从 4770 个社区验证书源（aoaostar 全量 3907 + 1629 精品等）统计提炼。
+     * 拼接在生成/修正 prompt 之后，让 AI 优先套用已被大量站点验证过的规则形态。
+     */
+    private val PATTERN_LIBRARY = """
+
+
+        【成熟书源模式库】（来自 4770 个社区验证书源的统计，规则形态优先按此套用，再按页面实际结构微调）
+
+        一、搜索入口（按站点程序套用；{{key}} 为关键词，{{page}} 为页码）
+        · 杰奇CMS（页面含 /modules/article/ 或 /books/数字/ 结构）：
+          GET /modules/article/search.php?searchkey={{key}}&searchtype=articlename&page={{page}}
+        · 帝国CMS：POST /e/search/index.php，body: show=title&keyboard={{key}}
+        · 手机站常见：GET /Search/{{key}}、/search.php?keyword={{key}}、/search?q={{key}}、
+          /s?q={{key}}、/search?kw={{key}}、/search?keyword={{key}}、/api/search?q={{key}}、/ar.php?keyWord={{key}}
+        · 表单参数名常见：searchkey、keyword、q、s、kw、keyWord、searchname
+        · 搜索地址写在 <script> 里（location.href='/Search/'+关键词）时直接采用该地址
+        · 结果分页：URL 加 &page={{page}}；需要首页判断时用 {{page==1?首页URL:后续URL}}
+
+        二、搜索结果 bookList 常见写法
+        class.bookbox（笔趣阁系）｜id.sitembox@tag.dl｜class.grid@tag.tr!0（!0 排除表头）｜.item｜id.content@ul@tag.li
+
+        三、详情页常见写法
+        · 书名：id.info@h1@text##\\（.*|免费阅读|全文.*阅读；或 meta 属性 [property=og:novel:book_name]@content
+        · 作者：[property=og:novel:author]@content；简介：id.intro@text 或 [property=og:description]@content
+        · 约 7 成站点目录就在详情页（tocUrl 留空）；有独立目录页时优先「查看全部章节/目录」链接
+        · 详情页的「最新章节」区块不是目录
+
+        四、目录 chapterList 常见写法
+        id.list@tag.dd（杰奇CMS）｜class.listmain@dd｜class.zjlist@tag.dd｜dl@dd!0
+        · 列表前几项常是「最新章节」推荐，用 !0:1:2:3 排除，或从完整列表容器取 dd/li
+        · 目录分页 nextTocUrl：text.下一页@href 或 class.page@tag.a.-1@href
+
+        五、正文容器候选（按出现频率，取页面实际存在的那个）
+        id.content ＞ id.htmlContent ＞ id.nr1 ＞ id.chaptercontent ＞ id.booktxt ＞ id.novelcontent ＞
+        id.read-content ＞ id.TextContent ＞ article ＞ id.con ＞ id.nr ＞ id.txt ＞ id.BookText ＞
+        id.acontent ＞ id.readcontent ＞ id.cont-body ＞ id.page-content ＞ id.articlecontent ＞
+        class.article-content ＞ id.content1 ＞ class.panel-body ＞ class.read-content ＞ class.txt
+        · 规则用 @html 保留段落；正文由 <p> 分段时可用 @textNodes
+        · 正文分页/翻章 nextContentUrl：text.下一页@href 或 text.下一章@href
+
+        六、正文净化（## 后接竖线分隔的正则；页面有广告注入文本时附加）
+        常见广告句式：天才一秒记住.*｜一秒记住.*｜www\\..*com｜请记住本书首发域名.*｜最新章节.*｜笔趣阁
+        写法示例：id.content@html##天才一秒记住.*|请记住本书首发域名.*
+        · 章节名带卷前缀/求收藏时净化：tag.a@text##正文卷.|正文.|VIP卷.|默认卷.|【求收藏】|（.*）
+
+        七、meta 属性系列（正规站优先用，稳定可靠）
+        · 书名 [property=og:novel:book_name]@content　作者 [property=og:novel:author]@content
+        · 封面 [property=og:image]@content　最新章 [property=og:novel:latest_chapter_name]@content
+        · 简介 [property=og:description]@content　封面也常用 id.fmimg@img@src
+
+        八、searchUrl 选项与杂项
+        · GBK 编码站点：URL 加 ,{"charset":"gbk"}（1111 个书源在用）；charset:"auto" 可自动检测
+        · 需要执行页面 JS 才有数据时加 {"webView":true}
+        · API 型站点（页面是 JSON）用 $ 规则：bookList 用 $..data[*] 等，字段用 $.name
+        · 站点拒绝请求时给书源配 header（手机 UA 与 Referer）
+        · 不要给 chapterList 主动加反转/排序处理，按页面章节链接的自然顺序写规则即可
     """.trimIndent()
 
     private val CHECK_CATEGORY = """
