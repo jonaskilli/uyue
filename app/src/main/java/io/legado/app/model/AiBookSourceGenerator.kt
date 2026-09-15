@@ -24,6 +24,7 @@ import java.net.InetAddress
 import java.net.UnknownHostException
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -207,13 +208,34 @@ object AiBookSourceGenerator {
                 } else {
                     searchDisabled = true
                 }
+                // 纯代码复核只记录提示，不覆盖 AI 给的结果——原逻辑优先，
+                // 真正替换交给下面「搜索被判定不可用」时的兜底
+                val listHtml0 = listHtml
+                if (listHtml0 != null && countBookLinks(listHtml0, listUrl) < 2) {
+                    meta["搜索结果复核"] = "搜索页里没能数出指向书籍详情页的链接，" +
+                        "请核对 searchUrl 是否真能搜到书（{{key}} 位置、参数名、隐藏字段是否正确）。"
+                }
             } else {
                 onProgress("首页未识别出搜索入口…")
                 searchDisabled = true
             }
+            // ===== 原搜索逻辑判定不可用后的兜底：改按站内搜索表单推导地址 =====
+            if (searchDisabled) {
+                onProgress("搜索入口不可用，改从站内搜索表单推导…")
+                bestSearchCandidate(homeHtml, seed, testKeyword)?.let { (tpl, html) ->
+                    val url = fillKey(tpl.substringBefore(",{\""), testKeyword)
+                    pages.add(Page("搜索结果页(表单推导)", url, html))
+                    searchTemplate = tpl
+                    listUrl = url
+                    listHtml = html
+                    searchCheck = aiCheckPage(CHECK_SEARCH, html, url, testKeyword)
+                    searchDisabled = false
+                }
+            }
             var detailUrl = searchCheck?.str("bookUrl")?.takeIf { it.startsWith("http") }
-            if (detailUrl == null && listHtml != null) {
-                detailUrl = firstBookLink(listHtml, listUrl.ifBlank { seed })
+            val listHtml1 = listHtml
+            if (detailUrl == null && listHtml1 != null) {
+                detailUrl = firstBookLink(listHtml1, listUrl.ifBlank { seed })
             }
 
             // 搜索不可用时的降级：用分类页当搜索入口（书源仍可搜索浏览，只是结果不按关键词过滤）
@@ -268,12 +290,14 @@ object AiBookSourceGenerator {
             meta["详情质检"] = infoCheck?.str("problem")?.takeIf { it.isNotBlank() }
                 ?: if (detailHtml != null) "通过" else "未抓到"
 
+
             // ---------- 4) 目录页 ----------
             // 手动指定优先：用户填了目录页网址就直接用，并在书籍信息页源码里把这个入口挖出来；
             // 没填才走「多候选竞速，取章节链接最多的当目录」。
             var tocHtml: String? = null
             var tocUrl = ""
             var tocCheck: JsonObject? = null
+            var tocPagerRule: String? = null
             if (manualToc != null) {
                 onProgress("抓取目录页（手动指定）…")
                 val html = fetch(manualToc)
@@ -292,7 +316,19 @@ object AiBookSourceGenerator {
                     meta["目录入口定位"] = where
                     onProgress(where.substringBefore('\n').take(100))
                 } else {
-                    onProgress("手动指定的目录页抓取失败，回退自动查找…")
+                    // 目录页与书籍信息页是同一地址（只多个页内锚点）时，请求到的本来就是同一份 HTML，
+                    // 直接复用已抓到的信息页内容，不必回退重找
+                    if (detailHtml != null && urlKey(manualToc) == urlKey(detailUrlFinal ?: seed)) {
+                        tocUrl = manualToc
+                        tocHtml = detailHtml
+                        meta["目录选择"] = "用户手动指定：$manualToc（与书籍信息页同一地址，复用已抓内容）"
+                        tocCheck = aiCheckPage(CHECK_TOC, detailHtml, manualToc)
+                        meta["目录入口定位"] = "目录页与书籍信息页是同一个地址（仅页内锚点不同），" +
+                            "页面上未必有指向它的入口链接，ruleBookInfo.tocUrl 请用「目录地址推导」的拼接写法"
+                        onProgress("手动目录页与书籍信息页同址，复用已抓内容…")
+                    } else {
+                        onProgress("手动指定的目录页抓取失败，回退自动查找…")
+                    }
                 }
             }
             if (tocHtml == null) {
@@ -372,12 +408,57 @@ object AiBookSourceGenerator {
                     onProgress("未找到明确目录页，交给 AI 从已有页面推断")
                 }
             }
+            // ===== 以下为原逻辑（手动指定 / 多候选竞速）都没找出目录页时的兜底 =====
+            val infoHtml = detailHtml
+            if (tocHtml == null && infoHtml != null && countChapterLinks(infoHtml) >= 8) {
+                val du = detailUrlFinal ?: seed
+                tocUrl = du
+                tocHtml = infoHtml
+                tocCheck = aiCheckPage(CHECK_TOC, infoHtml, du)
+                meta["目录选择"] =
+                    "目录候选均未命中，改用书籍信息页本身当目录页" +
+                        "（页内 ${countChapterLinks(infoHtml)} 个章节链接）"
+                onProgress("目录候选均未命中，改用书籍信息页当目录页…")
+            }
+            // 目录页确定后再补提示：目录就是信息页 → tocUrl 留空；并给出章节区块结构
+            val tocHtml0 = tocHtml
+            if (tocHtml0 != null) {
+                tocPager(tocHtml0, tocUrl.ifBlank { seed })?.let { (txt, rule) ->
+                    meta["目录分页"] = txt
+                    tocPagerRule = rule
+                }
+                if (detailUrlFinal != null && cleanUrl(tocUrl) == cleanUrl(detailUrlFinal)) {
+                    meta["书籍信息页即目录"] =
+                        "本次采用的目录页就是书籍信息页本身（本书没有独立目录页）：" +
+                            "ruleBookInfo.tocUrl 建议留空（留空 = 直接用书籍信息页当目录页），" +
+                            "不要把「开始阅读」那种指向第一章正文的链接填进 tocUrl" +
+                            "（那会让目录页变成第一章正文，章节列表直接为空）。"
+                }
+                describeChapterBlocks(tocHtml0, tocUrl.ifBlank { seed })
+                    ?.let { meta["章节区块"] = it }
+            }
             meta["目录质检"] = tocCheck?.str("problem")?.takeIf { it.isNotBlank() }
                 ?: if (tocHtml != null) "通过" else "未抓到"
+            // AI 在目录质检里给出的下一页地址：原先只取了 problem，翻页信息被丢掉了，
+            // 于是目录一分页，生成的书源就只有第一页的章节
+            tocCheck?.str("nextTocUrl")?.takeIf { it.startsWith("http") }?.let { next ->
+                if (meta["目录分页"] == null) {
+                    meta["目录分页"] =
+                        "该目录是分页的，下一页为 $next；ruleToc.nextTocUrl 必须填写" +
+                            "（如 text.下一页@href），否则书源只能拿到第一页的章节。"
+                }
+            }
             // 目录页地址能不能按书籍编号从详情页地址推导出来——能推导就给 AI 一条可直接抄的规则，
             // 这比「详情页里那个入口链接的选择器」可靠得多（那个链接常常没有 class/id）
             if (tocUrl.isNotBlank() && detailUrlFinal != null) {
                 deriveTocUrlRule(detailUrlFinal, tocUrl)?.let { meta["目录地址推导"] = it }
+            }
+            // 在书籍信息页里找不到指向目录页的入口链接时，明确让 AI 走拼接兜底（不要编造选择器）
+            val locate = meta["目录入口定位"]
+            if (locate != null && locate.contains("没有直接指向") && meta["目录地址推导"] != null) {
+                meta["目录入口定位"] = locate +
+                    "\n已在书籍信息页里确认找不到指向该目录页的链接，" +
+                    "请直接采用「目录地址推导」里的拼接写法，不要编造选择器。"
             }
             val chapterOrder = tocCheck?.str("order").orEmpty()
 
@@ -475,6 +556,60 @@ object AiBookSourceGenerator {
                 ensureMobileUa(fixed)
                 source = fixed
                 report = verifySource(source, testKeyword, pages, onProgress)
+            }
+
+            // ---------- 阶段四：AI 修不动时的兜底 ----------
+            // 只在上面 maxRounds 轮 AI 修正全部用尽后触发；触发后重新验证，
+            // 并再给同样 maxRounds 轮的 AI 修正机会——兜底与原流程享有同等修复次数
+            if (report.any { !it.ok }) {
+                val beforeFail = report.count { !it.ok }
+                val backupTocUrl = source.getBookInfoRule().tocUrl
+                val backupSearchUrl = source.searchUrl
+                val changed = applyFallbacks(
+                    source, report, homeHtml, seed, testKeyword, tocUrl, detailUrlFinal, contentUrl
+                )
+                if (changed) {
+                    onProgress("AI 修正 $maxRounds 轮仍未通过，改用兜底方案重试…")
+                    var after = verifySource(source, testKeyword, pages, onProgress)
+                    // 兜底必须让情况变好，否则原样撤回——不能因为兜底把原本能用的一环弄坏
+                    if (after.count { !it.ok } >= beforeFail) {
+                        onProgress("兜底未改善，已撤回原有规则…")
+                        source.getBookInfoRule().tocUrl = backupTocUrl
+                        source.searchUrl = backupSearchUrl
+                        after = verifySource(source, testKeyword, pages, onProgress)
+                    }
+                    report = after
+                    var round2 = 0
+                    while (report.any { !it.ok } && round2 < maxRounds) {
+                        round2++
+                        onProgress(
+                            "兜底方案仍未通过（${
+                                report.filter { !it.ok }.joinToString("、") { it.step }
+                            }），正在让 AI 修正（第 $round2/$maxRounds 轮）…"
+                        )
+                        val fixed = fixSource(source, report, pages) ?: break
+                        ensureMobileUa(fixed)
+                        source = fixed
+                        report = verifySource(source, testKeyword, pages, onProgress)
+                    }
+                    fixRound += round2
+                }
+            }
+
+            // ---------- 阶段五：目录分页的翻页规则补全 ----------
+            // 目录验证能过、但规则里没有 nextTocUrl 时，书源只能拿到第一页章节。
+            // 补上后重新验证：结果没变差就保留，变差就撤回（不改变原本可用的书源）
+            val pager = tocPagerRule
+            val tocOk = report.firstOrNull { it.step == "目录" }?.ok == true
+            if (pager != null && tocOk && source.getTocRule().nextTocUrl.isNullOrBlank()) {
+                source.getTocRule().nextTocUrl = pager
+                val recheck = verifySource(source, testKeyword, pages, onProgress)
+                if (recheck.firstOrNull { it.step == "目录" }?.ok == true) {
+                    report = recheck
+                } else {
+                    // 补翻页反而把目录弄坏了，撤回
+                    source.getTocRule().nextTocUrl = null
+                }
             }
 
             if (source.bookSourceName.isBlank()) source.bookSourceName = "AI生成书源"
@@ -611,6 +746,82 @@ object AiBookSourceGenerator {
         return template.replace("{{key}}", key)
     }
 
+    /**
+     * 从首页的搜索表单推导搜索地址——AI 猜错搜索入口（编造不存在的路径、漏掉隐藏字段、
+     * 该用 POST 却写成 GET）时的纯代码兜底。POST 形式排在前面，因为它最贴近表单真实行为。
+     */
+    private fun deriveSearchUrls(homeHtml: String, homeUrl: String): List<String> {
+        val doc = runCatching { Jsoup.parse(homeHtml, homeUrl) }.getOrNull() ?: return emptyList()
+        val out = LinkedHashSet<String>()
+        val keyNames = listOf(
+            "keyword", "keywords", "key", "wd", "q", "searchkey", "searchword", "kw", "s"
+        )
+        for (form in doc.select("form")) {
+            val action = form.attr("abs:action").takeIf { it.startsWith("http") } ?: continue
+            val isPost = form.attr("method").trim().equals("post", true)
+            val inputs = form.select("input[name]")
+            val keyInput = inputs.firstOrNull { i ->
+                val n = i.attr("name").lowercase()
+                val type = i.attr("type").lowercase()
+                keyNames.any { it == n } && (type.isEmpty() || type == "text" || type == "search")
+            } ?: continue
+            val name = keyInput.attr("name")
+            val hidden = inputs.filter { it !== keyInput && it.attr("name").isNotBlank() }
+                .filter { it.attr("type").lowercase() == "hidden" }
+                .joinToString("&") { "${it.attr("name")}=${it.attr("value")}" }
+            val pairs = if (hidden.isBlank()) "$name={{key}}" else "$name={{key}}&$hidden"
+            if (isPost) out.add("$action,{\"method\":\"POST\",\"body\":\"$pairs\"}")
+            out.add("$action?$pairs")
+        }
+        return out.toList()
+    }
+
+    /** 搜索结果页里指向书籍详情页的链接数量（纯代码复核：搜索地址是否真的能搜到书） */
+    private fun countBookLinks(html: String, baseUrl: String): Int {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return 0
+        val chapter = Regex("第\\s*[0-9零〇一二两三四五六七八九十百千万]+\\s*[章节回]")
+        val bad = listOf(
+            "首页", "登录", "注册", "排行", "书架", "下一页", "上一页", "尾页", "更多", "搜索",
+            "返回", "下载", "收藏", "帮助", "关于", "联系", "分类", "全本", "阅读记录", "顶部"
+        )
+        val host = hostOf(baseUrl)
+        val urls = HashSet<String>()
+        for (a in doc.select("a[href]")) {
+            val t = a.text().trim()
+            val href = a.attr("abs:href")
+            if (!href.startsWith("http") || t.isBlank() || t.length > 40) continue
+            if (bad.any { t.contains(it) } || chapter.containsMatchIn(t)) continue
+            if (host != null && hostOf(href) != host) continue
+            val path = runCatching { java.net.URI(href).path }.getOrNull() ?: continue
+            if (Regex("\\.(css|js|jpg|jpeg|png|gif|txt|zip|html?)$", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(path)
+            ) continue
+            // 书籍详情页：路径里通常带这本书的数字 id
+            if (!Regex("/[a-zA-Z_]*\\d{2,}").containsMatchIn(path)) continue
+            urls.add(href)
+        }
+        return urls.size
+    }
+
+    /** 逐个试候选搜索地址，取能数出书籍链接最多的那个（返回 模板 与 抓到的页面） */
+    private fun bestSearchCandidate(
+        homeHtml: String,
+        homeUrl: String,
+        keyword: String
+    ): Pair<String, String>? {
+        var best: Pair<String, String>? = null
+        var bestCount = 1
+        for (tpl in deriveSearchUrls(homeHtml, homeUrl).take(4)) {
+            val html = fetchPage(tpl, keyword) ?: continue
+            val n = countBookLinks(html, fillKey(tpl.substringBefore(",{\""), keyword))
+            if (n > bestCount) {
+                bestCount = n
+                best = tpl to html
+            }
+        }
+        return best
+    }
+
     /** 搜索结果页里最像「书籍详情页」的链接（AI 不可用时的兜底） */
     private fun firstBookLink(html: String, baseUrl: String): String? {
         val doc = Jsoup.parse(html, baseUrl)
@@ -680,6 +891,126 @@ object AiBookSourceGenerator {
         return doc.select("a[href]").count { chapterPattern.containsMatchIn(it.text()) }
     }
 
+    /**
+     * 书籍信息页里常常同时存在两个章节区块：「最新章节」（少量、倒序）与「全部章节列表」（完整、正序），
+     * 二者还常常挤在同一个容器里（div 未闭合导致）。AI 分不清就会把最新章节那几章当成完整目录，
+     * 或把两段一起取——章节重复、首章也不是第 1 章。这里用纯代码把区块结构与分界点算出来。
+     */
+    private fun describeChapterBlocks(html: String, baseUrl: String): String? {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return null
+        val pattern = Regex("第\\s*[0-9零〇一二两三四五六七八九十百千万]+\\s*[章节回]")
+        val blocks = ArrayList<Pair<Element, List<Element>>>()
+        for (el in doc.select("div,ul,ol")) {
+            val links = el.select("a[href]").filter { pattern.containsMatchIn(it.text()) }
+            if (links.size >= 3) blocks.add(el to links)
+        }
+        if (blocks.isEmpty()) return null
+        // 只描述最内层容器：链接数相同的外层容器不必重复
+        val inner = blocks.filter { b ->
+            blocks.none { o ->
+                o !== b && o.second.size == b.second.size && isAncestorOf(o.first, b.first)
+            }
+        }
+        return buildString {
+            append("页面里的章节区块（务必区分「最新章节」与「全部章节列表」）：\n")
+            inner.sortedByDescending { it.second.size }.take(3).forEachIndexed { i, (el, links) ->
+                append("  ${i + 1}) <").append(el.tagName())
+                if (el.id().isNotBlank()) append(" id=").append(el.id())
+                if (el.className().isNotBlank()) append(" class=").append(el.className())
+                append("> 共 ").append(links.size).append(" 条章节链接；")
+                append("开头三条：").append(links.take(3).joinToString(" / ") { it.text().trim() })
+                append("；末尾三条：").append(links.takeLast(3).joinToString(" / ") { it.text().trim() })
+                append("\n")
+                // 直接给出可照抄的 chapterList 写法，减少 AI 自己拼选择器带来的随机性
+                append("     推荐写法：ruleToc.chapterList = ")
+                append(suggestChapterList(el, links)).append("\n")
+                val split = fullListStartIndex(links)
+                if (split > 0) {
+                    append("     ⚠ 前 ").append(split).append(" 条是倒序的「最新章节」，")
+                    append("完整目录从第 ").append(split + 1).append(" 条（「")
+                    append(links[split].text().trim()).append("」）开始。")
+                    append("优先用能精确定位到「全部章节列表」那个容器的选择器；")
+                    append("实在区分不开时，宁可把前面这几条最新章节一起带上（多几条不影响阅读），")
+                    append("也不要写没把握的 JS 截取规则——规则写错会导致整个目录解析失败。\n")
+                }
+            }
+        }
+    }
+
+    /**
+     * 目录分页：目录一多站点就会分页（本站每页只列 50 章），规则里没有 nextTocUrl 时
+     * 书源只能拿到第一页的章节。这里用纯代码找出「下一页」并给出可直接用的规则。
+     * 返回 Pair(给 AI 的说明, 可直接写入 ruleToc.nextTocUrl 的规则)。
+     */
+    private fun tocPager(html: String, baseUrl: String): Pair<String, String>? {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return null
+        val words = listOf("下一页", "下页", "后页")
+        val hit = doc.select("a[href]").firstOrNull { a -> words.any { a.text().trim() == it } }
+            ?: doc.select("a[href]").firstOrNull { a -> words.any { a.text().trim().contains(it) } }
+            ?: return null
+        val href = hit.attr("abs:href")
+        if (!href.startsWith("http")) return null
+        val word = words.first { hit.text().trim().contains(it) }
+        val rule = "text.$word@href"
+        val parent = hit.parent()
+        val boxCls = parent?.className().orEmpty().trim().split(Regex("\\s+")).firstOrNull()
+        val text = buildString {
+            append("【目录分页】这个目录是分页的：当前页只列出一部分章节，")
+            append("「").append(hit.text().trim()).append("」指向下一页 ").append(href).append("。\n")
+            append("ruleToc.nextTocUrl 必须填，否则书源只能拿到第一页的章节；可直接写：").append(rule)
+            if (!boxCls.isNullOrBlank()) append("（也可写 class.").append(boxCls).append("@tag.a@href）")
+            append("。\n分页导航 HTML：")
+            append((parent?.outerHtml() ?: hit.outerHtml()).replace(Regex("\\s+"), " ").trim().take(400))
+        }
+        return text to rule
+    }
+
+    /**
+     * 按容器与链接结构直接拼出 chapterList 选择器，作为给 AI 的确定性建议。
+     * 链接外层还有一层 p/li 时用两级写法（legado 常见形态）。
+     */
+    private fun suggestChapterList(container: Element, links: List<Element>): String {
+        val head = when {
+            container.className().isNotBlank() ->
+                "class." + container.className().trim().split(Regex("\\s+")).first()
+            container.id().isNotBlank() -> "id." + container.id()
+            else -> "tag." + container.tagName()
+        }
+        val wrapper = links.firstOrNull()?.parent()
+        return if (wrapper != null && wrapper !== container &&
+            wrapper.tagName() in listOf("p", "li", "dd", "span")
+        ) {
+            "$head@tag.${wrapper.tagName()}@tag.a"
+        } else {
+            "$head@tag.a"
+        }
+    }
+
+    /** 完整目录的起点：章节序号最小的那条（它前面若还有倒序的最新章节，起点就 > 0） */
+    private fun fullListStartIndex(links: List<Element>): Int {
+        var minIdx = -1
+        var minVal = Long.MAX_VALUE
+        links.forEachIndexed { i, a ->
+            val n = Regex("第\\s*([0-9]+)\\s*[章节回]").find(a.text().trim())
+                ?.groupValues?.get(1)?.toLongOrNull() ?: return@forEachIndexed
+            if (n < minVal) {
+                minVal = n
+                minIdx = i
+            }
+        }
+        // 最小值确实接近第 1 章、且不在开头，才认为前面混了「最新章节」
+        return if (minIdx > 0 && minVal <= 3) minIdx else 0
+    }
+
+    private fun isAncestorOf(parent: Element, child: Element): Boolean {
+        var p = child.parent()
+        while (p != null) {
+            if (p === parent) return true
+            p = p.parent()
+        }
+        return false
+    }
+
     /** 目录页里的第一章链接（AI 不可用时的兜底，感知正倒序） */
     private fun firstChapterLink(html: String, baseUrl: String, desc: Boolean): String? {
         val doc = Jsoup.parse(html, baseUrl)
@@ -697,22 +1028,47 @@ object AiBookSourceGenerator {
     /**
      * 在书籍信息页源码里定位指向指定目录页的那个 <a>，把它的文字、href、所属容器结构与
      * 上下文 HTML 直接挖出来——写 ruleBookInfo.tocUrl 时照这个位置写就不会错。
+     *
+     * 找不到的兜底顺序：① 目录页就是信息页加锚点 → 按「信息页地址+#锚点」拼；
+     * ② 看「目录地址推导」里按编号/固定后缀拼出的规则；③ 都没有且目录就在信息页里才留空。
      */
     private fun locateTocAnchor(detailHtml: String, baseUrl: String, tocUrl: String): String {
         val doc = runCatching { Jsoup.parse(detailHtml, baseUrl) }.getOrNull()
             ?: return "书籍信息页解析失败，无法定位目录入口"
+        // 原逻辑：先精确匹配（去 # 锚点、去尾斜杠、忽略 http/https 差异），
+        // 再退一级按上级路径匹配——命中就按原样把入口位置交给 AI
         val target = urlKey(tocUrl)
         val anchors = doc.select("a[href]")
-        // 先精确匹配（去 # 锚点、去尾斜杠、忽略 http/https 差异），再退一级按上级路径匹配
         val hit = anchors.firstOrNull { urlKey(it.attr("abs:href")) == target }
             ?: anchors.firstOrNull { looseUrlKey(it.attr("abs:href")) == looseUrlKey(tocUrl) }
-            ?: return buildString {
-                append("书籍信息页里没有直接指向该目录页的 <a> 链接")
-                append("（可能是 JS 动态拼接，或目录页与书籍信息页不同域）。")
-                append("此时 ruleBookInfo.tocUrl 不要用不存在的选择器编造：")
-                append("优先看采集确认里的「目录地址推导」按地址规律拼；")
-                append("确无规律且目录章节就在书籍信息页里时才留空。")
+        if (hit != null) return describeAnchor(hit)
+        // —— 以下都是原逻辑找不到入口后的兜底，不改变原本能命中的情况 ——
+        // ① 目录页就是书籍信息页加个页内锚点（.../content/221532 → .../content/221532#chapters）
+        val anchor = tocUrl.substringAfter('#', "").trim()
+        if (anchor.isNotBlank() && urlKey(baseUrl) == urlKey(tocUrl)) {
+            val a = doc.select("a[href]").firstOrNull {
+                it.attr("href").substringAfter('#') == anchor
             }
+            if (a != null) return describeAnchor(a)
+            return buildString {
+                append("书籍信息页里没有指向该目录页的链接，也没有 href=\"#").append(anchor)
+                append("\" 这样的页内锚点链接——这本书的目录章节就渲染在书籍信息页里，")
+                append("目录页地址 = 书籍信息页地址 + #").append(anchor).append("。")
+                append("ruleBookInfo.tocUrl 可改用「目录地址推导」里的拼接写法（不要编造不存在的选择器），")
+                append("ruleToc 按书籍信息页里的完整章节列表容器写，不要只取「最新章节」区块。")
+            }
+        }
+        return buildString {
+            append("书籍信息页里没有直接指向该目录页的 <a> 链接")
+            append("（可能是 JS 动态拼接，或目录页与书籍信息页不同域）。")
+            append("此时 ruleBookInfo.tocUrl 不要用不存在的选择器编造：")
+            append("先看「目录地址推导」里有没有可用的拼接写法，有就采用；")
+            append("都没有、且目录章节确实就在书籍信息页里时才留空。")
+        }
+    }
+
+    /** 把找到的那个目录入口 <a> 的位置信息描述清楚，供 AI 抄成选择器 */
+    private fun describeAnchor(hit: Element): String {
         val parent = hit.parent()
         val grand = parent?.parent()
         val siblingLinks = parent?.children()
@@ -750,36 +1106,176 @@ object AiBookSourceGenerator {
      * 但详情页里那个入口链接往往没有任何 class/id 可用（甚至压根没有入口链接）。
      * 这里按「书籍编号」把可直接在 legado 里用的 tocUrl JS 规则算出来交给 AI，
      * 避免 AI 把 tocUrl 留空（目录退化成详情页几章）或写死某一本书的地址（所有书共用一份目录）。
+     *
+     * 兜底顺序：① 同页锚点 ② 信息页地址+固定后缀 ③ 同目录换末段文件名 ④ 按书籍标识派生。
+     * 具体命中哪一种完全由这两个网址的实际差分决定，不预设任何固定形态。
      */
     private fun deriveTocUrlRule(infoUrl: String, tocUrl: String): String? {
         if (infoUrl.isBlank() || tocUrl.isBlank()) return null
-        if (hostOf(infoUrl) == null || hostOf(infoUrl) != hostOf(tocUrl)) return null
-        // 书籍编号：详情页地址末段的数字（.../novel/113846.html → 113846）
-        val bookId = Regex("/(\\d+)\\.html").find(infoUrl)?.groupValues?.get(1)
-            ?: Regex("/(\\d+)/?$").find(infoUrl)?.groupValues?.get(1)
-            ?: return null
-        // 编号必须在目录页地址里出现且只出现一次，才是「按编号派生」的关系
-        val start = tocUrl.indexOf(bookId)
-        if (start < 0 || tocUrl.indexOf(bookId, start + 1) >= 0) return null
+        // ===== 原逻辑（一字不动地保留）：同域 + 按数字书籍编号派生 =====
+        if (hostOf(infoUrl) != null && hostOf(infoUrl) == hostOf(tocUrl)) {
+            // 书籍编号：详情页地址末段的数字（.../novel/113846.html → 113846）
+            val bookId = Regex("/(\\d+)\\.html").find(infoUrl)?.groupValues?.get(1)
+                ?: Regex("/(\\d+)/?$").find(infoUrl)?.groupValues?.get(1)
+            if (bookId != null) {
+                // 编号必须在目录页地址里出现且只出现一次，才是「按编号派生」的关系
+                val start = tocUrl.indexOf(bookId)
+                if (start >= 0 && tocUrl.indexOf(bookId, start + 1) < 0) {
+                    val prefix = tocUrl.substring(0, start)
+                    val suffix = tocUrl.substring(start + bookId.length)
+                    if (prefix.isNotBlank()) {
+                        // 用 JS 字符串切分取编号，不用正则——避免 \d 这类写法在书源 JSON 里多层转义出错
+                        val rule = "<js>var u=baseUrl.split(\"?\")[0];" +
+                            "var n=u.substring(u.lastIndexOf(\"/\")+1).split(\".\")[0];" +
+                            "\"$prefix\"+n+\"$suffix\"</js>"
+                        return buildString {
+                            append("【目录地址推导】这两个网址存在固定规律：")
+                            append("书籍详情页 ").append(infoUrl).append(" → 目录页 ").append(tocUrl)
+                            append("，其中的书籍编号是 ").append(bookId).append("。\n")
+                            append("书籍信息页里那个入口链接往往没有可定位的 class/id（甚至根本没有入口链接），")
+                            append("所以 ruleBookInfo.tocUrl 不要留空、也不要写死某一本书的地址")
+                            append("（写死会让所有书都打开同一本书的目录），")
+                            append("应当按上面的规律用 JS 取出书籍编号再拼装。本站可直接使用的写法：\n")
+                            append(rule)
+                            append("\n（legado JS 规则：baseUrl 是书籍详情页地址；")
+                            append("上式先去掉可能带的 ? 参数，再取末段编号 ").append(bookId)
+                            append("，拼成 ").append(prefix).append("编号").append(suffix).append("）")
+                        }
+                    }
+                }
+            }
+        }
+        // ===== 原逻辑推不出来时，才依次尝试下面这些兜底写法 =====
+        deriveAnchorRule(infoUrl, tocUrl)?.let { return it }
+        deriveSuffixRule(infoUrl, tocUrl)?.let { return it }
+        deriveSiblingRule(infoUrl, tocUrl)?.let { return it }
+        deriveIdRule(infoUrl, tocUrl)?.let { return it }
+        // 目录页与书籍信息页完全是同一个地址：没有独立目录页，tocUrl 应留空
+        if (cleanUrl(infoUrl) == cleanUrl(tocUrl)) {
+            return buildString {
+                append("【目录地址推导】目录页地址与书籍信息页地址完全相同（").append(infoUrl).append("），")
+                append("本书没有独立目录页，目录章节就渲染在书籍信息页里。\n")
+                append("ruleBookInfo.tocUrl 建议留空（留空 = 直接用书籍信息页当目录页），")
+                append("不要填任何地址，尤其不要把「开始阅读」那种指向第一章正文的链接填进去")
+                append("（那会让目录页变成第一章正文，章节列表直接为空）。")
+                append("ruleToc 按「章节区块」里指出的完整目录部分写。")
+            }
+        }
+        return null
+    }
+
+    /** 目录页与书籍信息页在同一目录，只是末段文件名不同（.../1/index.html → .../1/catalog.html） */
+    private fun deriveSiblingRule(infoUrl: String, tocUrl: String): String? {
+        val i = cleanUrl(infoUrl)
+        val t = cleanUrl(tocUrl)
+        if (i.isBlank() || t.isBlank() || i == t) return null
+        val iDir = i.substringBeforeLast('/', "")
+        val tDir = t.substringBeforeLast('/', "")
+        if (iDir.isBlank() || iDir != tDir) return null
+        val file = t.substringAfterLast('/')
+        if (file.isBlank() || file.contains('"')) return null
+        val rule = "<js>${BASE_URL_JS}u.substring(0,u.lastIndexOf(\"/\")+1)+\"$file\"</js>"
+        return buildString {
+            append("【目录地址推导】目录页与书籍信息页在同一个目录，只换了末段文件名：")
+            append("书籍信息页 ").append(infoUrl).append(" → 目录页 ").append(tocUrl).append("。\n")
+            append("所以 ruleBookInfo.tocUrl 不要留空、也不要写死某一本书的地址")
+            append("（写死会让所有书都打开同一本书的目录），")
+            append("按「取书籍详情页所在目录 + 固定文件名」拼装。本站可直接使用的写法：\n")
+            append(rule)
+            append("\n（legado JS 规则：baseUrl 是书籍详情页地址；去掉 ? 参数、# 锚点与末尾斜杠后")
+            append("取到目录部分，再拼上 ").append(file).append("）")
+        }
+    }
+
+    /**
+     * 目录页地址里含有书籍信息页的「书籍标识」：
+     * /novel/113846.html → /novel/list/113846/1.html、/book/abc-123 → /toc/abc-123.html。
+     * 标识不限于纯数字——用字母数字 slug 当书号的站点同样适用。
+     */
+    private fun deriveIdRule(infoUrl: String, tocUrl: String): String? {
+        val id = bookIdOf(infoUrl) ?: return null
+        // 标识必须在目录页地址里出现且只出现一次，才是「按标识派生」的关系
+        val start = tocUrl.indexOf(id)
+        if (start < 0 || tocUrl.indexOf(id, start + 1) >= 0) return null
         val prefix = tocUrl.substring(0, start)
-        val suffix = tocUrl.substring(start + bookId.length)
-        if (prefix.isBlank()) return null
-        // 用 JS 字符串切分取编号，不用正则——避免 \d 这类写法在书源 JSON 里多层转义出错
-        val rule = "<js>var u=baseUrl.split(\"?\")[0];" +
-            "var n=u.substring(u.lastIndexOf(\"/\")+1).split(\".\")[0];" +
+        val suffix = tocUrl.substring(start + id.length)
+        if (prefix.isBlank() || prefix.contains('"') || suffix.contains('"')) return null
+        // 用 JS 字符串切分取标识，不用正则——避免 \d 这类写法在书源 JSON 里多层转义出错
+        val rule = "<js>${BASE_URL_JS}var n=u.substring(u.lastIndexOf(\"/\")+1).split(\".\")[0];" +
             "\"$prefix\"+n+\"$suffix\"</js>"
         return buildString {
             append("【目录地址推导】这两个网址存在固定规律：")
-            append("书籍详情页 ").append(infoUrl).append(" → 目录页 ").append(tocUrl)
-            append("，其中的书籍编号是 ").append(bookId).append("。\n")
+            append("书籍信息页 ").append(infoUrl).append(" → 目录页 ").append(tocUrl)
+            append("，其中随书变化的标识是 ").append(id).append("。\n")
             append("书籍信息页里那个入口链接往往没有可定位的 class/id（甚至根本没有入口链接），")
             append("所以 ruleBookInfo.tocUrl 不要留空、也不要写死某一本书的地址")
             append("（写死会让所有书都打开同一本书的目录），")
-            append("应当按上面的规律用 JS 取出书籍编号再拼装。本站可直接使用的写法：\n")
+            append("应当按上面的规律用 JS 取出书籍标识再拼装。本站可直接使用的写法：\n")
             append(rule)
             append("\n（legado JS 规则：baseUrl 是书籍详情页地址；")
-            append("上式先去掉可能带的 ? 参数，再取末段编号 ").append(bookId)
-            append("，拼成 ").append(prefix).append("编号").append(suffix).append("）")
+            append("先去掉 ? 参数、# 锚点与末尾斜杠，再取末段标识 ").append(id)
+            append("，拼成 ").append(prefix).append("标识").append(suffix).append("）")
+        }
+    }
+
+    /** 书籍标识：书籍信息页地址末段去掉扩展名（数字编号、字母数字 slug 都认） */
+    private fun bookIdOf(infoUrl: String): String? {
+        val last = cleanUrl(infoUrl).substringAfterLast('/')
+        val id = last.substringBefore('.')
+        if (id.length < 2 || id.contains('"')) return null
+        // index/book/info 这类通用文件名不是书籍标识
+        if (id.equals("index", true) || id.equals("book", true) || id.equals("info", true)) return null
+        if (!Regex("[A-Za-z0-9_-]+").matches(id)) return null
+        return id
+    }
+
+    /** 去掉 ? 参数、# 锚点与末尾斜杠，便于比较两个地址的路径关系 */
+    private fun cleanUrl(u: String): String =
+        u.substringBefore('#').substringBefore('?').trimEnd('/')
+
+    /** legado JS 片段：取到干净的书籍详情页地址（去掉 ? 参数、# 锚点与末尾斜杠） */
+    private val BASE_URL_JS =
+        "var u=baseUrl.split(\"#\")[0].split(\"?\")[0];while(u.slice(-1)==\"/\")u=u.slice(0,-1);"
+
+    /**
+     * 目录页与书籍信息页是同一个地址，只多了页内锚点（.../content/221532 → .../content/221532#chapters）。
+     * 这类站点的目录章节就渲染在信息页里，页面上常常根本没有指向它的入口链接，
+     * 于是最后用「书籍信息页地址 + #锚点」拼出目录页地址，这是最可靠的兜底。
+     */
+    private fun deriveAnchorRule(infoUrl: String, tocUrl: String): String? {
+        val anchor = tocUrl.substringAfter('#', "").trim()
+        if (anchor.isBlank() || anchor.contains('"')) return null
+        if (urlKey(infoUrl) != urlKey(tocUrl)) return null
+        val rule = "<js>${BASE_URL_JS}u+\"#$anchor\"</js>"
+        return buildString {
+            append("【目录地址推导】目录页与书籍信息页是同一个地址，只多了页内锚点 #").append(anchor)
+            append("：\n  书籍信息页 ").append(infoUrl).append("\n  目录页     ").append(tocUrl).append("\n")
+            append("说明这本书的目录章节就渲染在书籍信息页里（锚点只是页内定位，请求到的是同一份 HTML）。")
+            append("所以 ruleBookInfo.tocUrl 不要留空，也不要去找页面上不存在的入口链接，")
+            append("直接由书籍信息页地址拼上这个锚点即可。本站可直接使用的写法：\n")
+            append(rule)
+            append("\n（legado JS 规则：baseUrl 是书籍详情页地址；先去掉可能带的 ? 参数和 # 部分，")
+            append("再拼上 #").append(anchor).append("；")
+            append("ruleToc 按这一页里的完整章节列表容器写，不要只取「最新章节」区块）")
+        }
+    }
+
+    /** 目录页 = 书籍信息页地址 + 固定后缀（如 /book/1 → /book/1/catalog） */
+    private fun deriveSuffixRule(infoUrl: String, tocUrl: String): String? {
+        val base = infoUrl.substringBefore('#').substringBefore('?').trimEnd('/')
+        if (base.isBlank() || !tocUrl.startsWith(base, true)) return null
+        val suffix = tocUrl.substring(base.length)
+        if (suffix.isBlank() || suffix == "/" || suffix.contains('"')) return null
+        val rule = "<js>${BASE_URL_JS}u+\"$suffix\"</js>"
+        return buildString {
+            append("【目录地址推导】目录页地址就是书籍信息页地址加上固定后缀：")
+            append("书籍信息页 ").append(infoUrl).append(" → 目录页 ").append(tocUrl).append("。\n")
+            append("书籍信息页里那个入口链接往往没有可定位的 class/id（甚至根本没有入口链接），")
+            append("所以 ruleBookInfo.tocUrl 不要留空、也不要写死某一本书的地址")
+            append("（写死会让所有书都打开同一本书的目录）。本站可直接使用的写法：\n")
+            append(rule)
+            append("\n（legado JS 规则：baseUrl 是书籍详情页地址；先去掉 ? 参数、# 锚点与末尾斜杠，")
+            append("再拼上 ").append(suffix).append("）")
         }
     }
 
@@ -878,6 +1374,53 @@ object AiBookSourceGenerator {
         val raw = chat(user, 8000) ?: return null
         val json = extractJson(raw) ?: return null
         return GSON.fromJsonObject<BookSource>(json).getOrNull()
+    }
+
+    /**
+     * AI 修不动时的纯代码兜底——只在 fixRounds 轮 AI 修正全部失败后才被调用：
+     * · 目录环节失败，且目录页就是书籍信息页（两者同址）→ 清空 ruleBookInfo.tocUrl，
+     *   留空即等于「直接用书籍详情页当目录页」，正是目录与信息页同页的站点要的写法；
+     * · 搜索环节失败 → 换成从站内搜索表单推导出的地址（带表单真实的 method 与隐藏字段）。
+     * 改完由调用方重新验证，并再给同样轮数的 AI 修正机会，不会直接判失败。
+     */
+    private fun applyFallbacks(
+        source: BookSource,
+        report: List<VerifyItem>,
+        homeHtml: String,
+        seed: String,
+        keyword: String,
+        tocUrl: String,
+        infoUrl: String?,
+        contentUrl: String?
+    ): Boolean {
+        var changed = false
+        val failed = report.filter { !it.ok }.map { it.step }.toSet()
+        if ("目录" in failed && tocUrl.isNotBlank()) {
+            // 目录就是书籍信息页，或目录页地址被填成了第一章正文页
+            // （很多站的「开始阅读」按钮 href 就是第一章，填进去目录必然为空）
+            val sameAsInfo = !infoUrl.isNullOrBlank() && cleanUrl(tocUrl) == cleanUrl(infoUrl!!)
+            val sameAsContent =
+                !contentUrl.isNullOrBlank() && cleanUrl(tocUrl) == cleanUrl(contentUrl!!)
+            if (sameAsInfo || sameAsContent) {
+                val info = source.getBookInfoRule()
+                val cur = info.tocUrl
+                // 只清「把网址写死」这种必然出错的写法（写死会让所有书打开同一页）；
+                // 选择器 / JS 规则可能是 AI 写对的结果，不能一并清掉
+                if (!cur.isNullOrBlank() && cur.trim().startsWith("http")) {
+                    info.tocUrl = null
+                    changed = true
+                }
+            }
+        }
+        if ("搜索" in failed) {
+            bestSearchCandidate(homeHtml, seed, keyword)?.let { (tpl, _) ->
+                if (source.searchUrl != tpl) {
+                    source.searchUrl = tpl
+                    changed = true
+                }
+            }
+        }
+        return changed
     }
 
     /** 让 AI 修正验证失败的环节（附失败原因与对应页面的真实 HTML） */
@@ -1082,11 +1625,27 @@ object AiBookSourceGenerator {
         val one = doc.html()
             .replace(Regex(">\\s+<"), "><")
             .replace(Regex("[ \\t]{2,}"), " ")
-        return if (one.length > MAX_PAGE_CHARS) {
-            one.take(MAX_PAGE_CHARS) + "\n<!-- 内容过长已截断 -->"
+        if (one.length <= MAX_PAGE_CHARS) return one
+        // 截断会丢掉页面尾部的分页导航（「下一页」），AI 看不到就不会写目录翻页规则，
+        // 这里单独把分页区补回截断内容后面
+        val pager = pagerHtml(doc)
+        val head = one.take(MAX_PAGE_CHARS)
+        return if (pager.isNotBlank() && !head.contains(pager)) {
+            head + "\n<!-- 内容过长已截断，以下是页面尾部的分页导航 -->" + pager
         } else {
-            one
+            head + "\n<!-- 内容过长已截断 -->"
         }
+    }
+
+    /** 页面尾部的分页导航区 HTML（含「下一页/下页/后页」的链接），供截断时补回 */
+    private fun pagerHtml(doc: org.jsoup.nodes.Document): String {
+        val words = listOf("下一页", "下页", "后页", "尾页", "末页")
+        val hit = doc.select("a[href]").firstOrNull { a ->
+            val t = a.text().trim()
+            words.any { t == it || t.contains(it) }
+        } ?: return ""
+        val box = hit.parent()?.takeIf { it.html().length in 1..800 } ?: hit
+        return box.outerHtml().replace(Regex("\\s+"), " ").trim().take(600)
     }
 
     /** 两页内容是否基本相同：识别「搜索被 301 回首页」「章节链接是死链指回详情页」这类软失败 */
@@ -1301,14 +1860,20 @@ object AiBookSourceGenerator {
           在页面 script 里找 api/接口线索，或套用站点的 JSON 搜索接口，或改用 {"webView":true}
 
         十一、目录页地址与详情页存在规律时（ruleBookInfo.tocUrl 的写法）
-        · 典型形态：详情页 /novel/113846.html → 目录页 /novel/list/113846/1.html（书籍编号相同）
+        · 举例（仅为说明形态，实际形态以本站「目录地址推导」为准）：
+          详情页 /novel/113846.html → 目录页 /novel/list/113846/1.html（书籍编号相同）
         · 这类站点详情页里常常没有「目录」链接；有的也只是一串省略号
           （<li><a href="/novel/list/113846/1.html">......</a></li>），li/ul 上没有任何 class/id 可选
         · 所以 tocUrl 不要留空（会退化成只拿到详情页那几个最新章节），
           更不要写死某一本书的目录地址（会导致所有书都跑去打开同一本书的目录）
-        · 正确写法：用 JS 从书籍详情页地址末段取出编号再拼装（刻意不用正则，
-          免得 \\d 这类写法在书源 JSON 里被多层转义写错），例如
-          <js>var u=baseUrl.split("?")[0];var n=u.substring(u.lastIndexOf("/")+1).split(".")[0];"https://x.com/novel/list/"+n+"/1.html"</js>
+        · 正确写法：用 JS 从书籍详情页地址里取出随书变化的那一段再拼装（刻意不用正则，
+          免得 \\d 这类写法在书源 JSON 里被多层转义写错），形如
+          <js>var u=baseUrl.split("#")[0].split("?")[0];...;u 或 n 再拼上固定部分</js>
+        · 按编号拼不出规律时，「目录地址推导」还可能给出其它形态（信息页地址加页内锚点或固定后缀、
+          同一目录换末段文件名、按书籍标识拼等）；没有推导结果时仍按「目录入口定位」写选择器
+        · 顺序是：入口链接能写出可靠选择器就写选择器；只有选择器不可靠
+          （入口链接没有 class/id、或压根找不到入口链接）时才改用「目录地址推导」里的拼接写法。
+          绝不允许用页面上不存在的选择器编造 tocUrl，也不允许写死某一本书的地址
         · 采集确认里的「目录地址推导」已按本站实际网址算好这条写法，直接采用
     """.trimIndent()
 
@@ -1363,7 +1928,7 @@ object AiBookSourceGenerator {
         4. 采集确认里的书名/作者/第一章网址必须与规则解析结果吻合；
         5. {exploreHardRule}
         6. searchUrl 与 exploreUrl 是两个完全不同的东西，绝不能混写：searchUrl 是**单个**搜索请求地址且必须含 {{key}}；exploreUrl 是**多行**「分类名::网址」列表且不含 {{key}}；
-        7. ruleBookInfo.tocUrl 的写法按优先级：① 采集确认里有「目录地址推导」时，必须采用其中给出的 JS 规则（由书籍详情页地址按编号拼出目录页地址，最可靠）；② 仅当「目录入口定位」里那个链接的容器有明确 class/id 时，才写成选择器规则（如 class.xxx@tag.a@href、text.目录@href）；③ 两者都没有、且目录章节确实就在书籍信息页里时才留空。绝不允许把某一本书的目录地址写死进 tocUrl，也不允许用页面上不存在的选择器编造。
+        7. ruleBookInfo.tocUrl 的写法按优先级：① 采集确认里有「目录地址推导」且其中是明确的地址规律时，采用给出的 JS 规则（通常是按书籍编号拼，也可能是信息页地址加固定后缀/页内锚点等）；② 「目录入口定位」里那个链接的容器有明确 class/id 时，写成选择器规则（如 class.xxx@tag.a@href、text.目录@href）；③ 目录就是书籍信息页本身时留空；④ 都没有才留空。绝不允许把某一本书的目录地址写死进 tocUrl，也不允许用页面上不存在的选择器编造。
     """.trimIndent()
 
     private val FIX_PROMPT = """
