@@ -115,6 +115,9 @@ object AiBookSourceGenerator {
     /** 一个抓到并质检过的页面 */
     private data class Page(val role: String, val url: String, val html: String)
 
+    /** 目录页候选：来源决定抓取优先级，html 已抓到时复用 */
+    private data class TocCandidate(val url: String, val html: String?, val source: String)
+
     /** 验证报告条目 */
     data class VerifyItem(val step: String, val ok: Boolean, val message: String)
 
@@ -133,10 +136,18 @@ object AiBookSourceGenerator {
         loginUrl: String? = null,
         includeExplore: Boolean = false,
         fixRounds: Int = 2,
+        manualBookInfo: String? = null,
+        manualTocUrl: String? = null,
         onProgress: (String) -> Unit
     ): Result<GenResult> = withContext(Dispatchers.IO) {
         runCatching {
             val seed = normalize(seedUrl)
+            // 手动指定的页面：用户填了就优先使用，不再靠程序猜
+            val manualInfo = manualBookInfo?.trim()?.takeIf { it.isNotBlank() }?.let { normalize(it) }
+            // 目录框里可以填网址，也可以直接填目录入口的链接文字（如「查看全部章节」「......」）
+            val manualTocRaw = manualTocUrl?.trim()?.takeIf { it.isNotBlank() }
+            val manualToc = manualTocRaw?.takeIf { looksLikeUrl(it) }?.let { normalize(it) }
+            val manualTocText = manualTocRaw?.takeUnless { looksLikeUrl(it) }
             val pages = ArrayList<Page>(6)
             val meta = HashMap<String, String>()
             if (!loginUrl.isNullOrBlank()) {
@@ -239,9 +250,10 @@ object AiBookSourceGenerator {
             var detailHtml: String? = null
             var infoCheck: JsonObject? = null
             var detailPageIsToc = false
-            val detailUrlFinal = detailUrl
+            // 手动指定的书籍信息页优先，不再依赖搜索结果里猜出来的详情页
+            val detailUrlFinal = manualInfo ?: detailUrl
             if (detailUrlFinal != null) {
-                onProgress("抓取书籍详情页…")
+                onProgress(if (manualInfo != null) "抓取书籍信息页（手动指定）…" else "抓取书籍详情页…")
                 detailHtml = fetch(detailUrlFinal)
                 if (detailHtml != null) {
                     pages.add(Page("书籍详情页", detailUrlFinal, detailHtml))
@@ -256,55 +268,117 @@ object AiBookSourceGenerator {
             meta["详情质检"] = infoCheck?.str("problem")?.takeIf { it.isNotBlank() }
                 ?: if (detailHtml != null) "通过" else "未抓到"
 
-            // ---------- 4) 目录页：多候选竞速，取章节链接最多的当目录 ----------
-            // 很多站详情页只挂一部分章节（最新章节区块/前几章），另有「全部目录」独立页。
-            // 把详情页本身、AI 给的目录地址、详情页里的目录文字链接全部作为候选，
-            // 逐个抓取并统计章节链接数，数量最多的才是真正目录（纯代码计数，不耗 AI）。
+            // ---------- 4) 目录页 ----------
+            // 手动指定优先：用户填了目录页网址就直接用，并在书籍信息页源码里把这个入口挖出来；
+            // 没填才走「多候选竞速，取章节链接最多的当目录」。
             var tocHtml: String? = null
             var tocUrl = ""
             var tocCheck: JsonObject? = null
-            data class TocCandidate(val url: String, val html: String?, val source: String)
-            val tocCandidates = ArrayList<TocCandidate>()
-            if (detailPageIsToc && detailHtml != null && detailUrlFinal != null) {
-                tocCandidates.add(TocCandidate(detailUrlFinal, detailHtml, "详情页"))
-            }
-            infoCheck?.str("tocUrl")?.takeIf {
-                it.startsWith("http") && it != detailUrlFinal
-            }?.let { tocCandidates.add(TocCandidate(it, null, "AI目录链接")) }
-            detailHtml?.let { dh ->
-                val du = detailUrlFinal ?: seed
-                heuristicTocLinks(dh, du).forEach { u ->
-                    if (u != detailUrlFinal && tocCandidates.none { it.url == u }) {
-                        tocCandidates.add(TocCandidate(u, null, "页面目录链接"))
+            if (manualToc != null) {
+                onProgress("抓取目录页（手动指定）…")
+                val html = fetch(manualToc)
+                if (html != null) {
+                    tocUrl = manualToc
+                    tocHtml = html
+                    if (pages.none { it.url == manualToc }) {
+                        pages.add(Page("目录页", manualToc, html))
                     }
+                    meta["目录选择"] = "用户手动指定：$manualToc"
+                    tocCheck = aiCheckPage(CHECK_TOC, html, manualToc)
+                    // 目录规则的难点是「书籍信息页里怎么拿到这个地址」，直接把入口位置交给 AI
+                    val where = detailHtml?.let {
+                        locateTocAnchor(it, detailUrlFinal ?: seed, manualToc)
+                    } ?: "书籍信息页未抓取到，无法定位目录入口"
+                    meta["目录入口定位"] = where
+                    onProgress(where.substringBefore('\n').take(100))
+                } else {
+                    onProgress("手动指定的目录页抓取失败，回退自动查找…")
                 }
             }
-            if (tocCandidates.isNotEmpty()) {
-                var best: TocCandidate? = null
-                var bestCount = -1
-                for (cand in tocCandidates.take(4)) {
-                    val html = cand.html ?: fetch(cand.url) ?: continue
-                    val count = countChapterLinks(html)
-                    onProgress("目录候选「${cand.source}」章节链接 $count 个")
-                    if (count > bestCount) {
-                        bestCount = count
-                        best = TocCandidate(cand.url, html, cand.source)
+            if (tocHtml == null) {
+                if (manualTocText != null) {
+                    // 用户填的是入口文字而不是网址：按这段文字在书籍信息页里找对应链接
+                    onProgress("按你指定的入口「$manualTocText」在书籍信息页里找目录链接…")
+                    meta["目录入口指定"] =
+                        "用户指定：书籍信息页里文字为「$manualTocText」的链接就是目录入口，" +
+                            "ruleBookInfo.tocUrl 必须能取到这个链接"
+                }
+                // 多候选竞速，取章节链接最多的当目录
+                // 很多站详情页只挂一部分章节（最新章节区块/前几章），另有「全部目录」独立页。
+                // 把详情页本身、AI 给的目录地址、详情页里的目录文字链接全部作为候选，
+                // 逐个抓取并统计章节链接数，数量最多的才是真正目录（纯代码计数，不耗 AI）。
+                val tocCandidates = ArrayList<TocCandidate>()
+                if (detailPageIsToc && detailHtml != null && detailUrlFinal != null) {
+                    tocCandidates.add(TocCandidate(detailUrlFinal, detailHtml, "详情页"))
+                }
+                infoCheck?.str("tocUrl")?.takeIf {
+                    it.startsWith("http") && it != detailUrlFinal
+                }?.let { tocCandidates.add(TocCandidate(it, null, "AI目录链接")) }
+                // heuristicTocLinks 的排序保证：用户指定的入口文字命中的链接排在最前
+                var preferredUrl: String? = null
+                detailHtml?.let { dh ->
+                    val du = detailUrlFinal ?: seed
+                    val extra = manualTocText?.let { listOf(it) } ?: emptyList()
+                    val links = heuristicTocLinks(dh, du, extra)
+                    if (manualTocText != null) preferredUrl = links.firstOrNull()
+                    links.forEach { u ->
+                        if (u != detailUrlFinal && tocCandidates.none { it.url == u }) {
+                            tocCandidates.add(TocCandidate(u, null, "页面目录链接"))
+                        }
                     }
                 }
-                best?.let { b ->
-                    tocUrl = b.url
-                    tocHtml = b.html
-                    if (b.source != "详情页" && pages.none { it.url == b.url }) {
-                        pages.add(Page("目录页", b.url, b.html ?: ""))
-                    }
-                    meta["目录选择"] = "候选 ${tocCandidates.size} 个，选中「${b.source}」（${bestCount} 个章节链接）"
-                    tocCheck = aiCheckPage(CHECK_TOC, b.html ?: "", b.url)
+                if (manualTocText != null && preferredUrl == null) {
+                    onProgress("书籍信息页里没找到文字为「$manualTocText」的链接，改为自动查找…")
                 }
-            } else {
-                onProgress("未找到明确目录页，交给 AI 从已有页面推断")
+                if (tocCandidates.isNotEmpty()) {
+                    var best: TocCandidate? = null
+                    var bestCount = -1
+                    // 用户指定了入口文字：这个链接抓得到且里面有章节链接就直接采用，不再参与竞速
+                    val pref = preferredUrl
+                    if (pref != null) {
+                        fetch(pref)?.let { html ->
+                            val count = countChapterLinks(html)
+                            onProgress("你指定的入口「$manualTocText」→ $pref（章节链接 $count 个）")
+                            if (count > 0) {
+                                bestCount = count
+                                best = TocCandidate(pref, html, "用户指定入口")
+                            }
+                        }
+                    }
+                    if (best == null) {
+                        // 上限放宽到 12 个：详情页上的目录文字链接、省略号入口、用户自定义入口
+                        // 都可能排在后面，名额太少会把真正的目录页截断掉
+                        for (cand in tocCandidates.take(12)) {
+                            val html = cand.html ?: fetch(cand.url) ?: continue
+                            val count = countChapterLinks(html)
+                            onProgress("目录候选「${cand.source}」章节链接 $count 个")
+                            if (count > bestCount) {
+                                bestCount = count
+                                best = TocCandidate(cand.url, html, cand.source)
+                            }
+                        }
+                    }
+                    best?.let { b ->
+                        tocUrl = b.url
+                        tocHtml = b.html
+                        if (b.source != "详情页" && pages.none { it.url == b.url }) {
+                            pages.add(Page("目录页", b.url, b.html ?: ""))
+                        }
+                        meta["目录选择"] =
+                            "候选 ${tocCandidates.size} 个，选中「${b.source}」（${bestCount} 个章节链接）"
+                        tocCheck = aiCheckPage(CHECK_TOC, b.html ?: "", b.url)
+                    }
+                } else {
+                    onProgress("未找到明确目录页，交给 AI 从已有页面推断")
+                }
             }
             meta["目录质检"] = tocCheck?.str("problem")?.takeIf { it.isNotBlank() }
                 ?: if (tocHtml != null) "通过" else "未抓到"
+            // 目录页地址能不能按书籍编号从详情页地址推导出来——能推导就给 AI 一条可直接抄的规则，
+            // 这比「详情页里那个入口链接的选择器」可靠得多（那个链接常常没有 class/id）
+            if (tocUrl.isNotBlank() && detailUrlFinal != null) {
+                deriveTocUrlRule(detailUrlFinal, tocUrl)?.let { meta["目录地址推导"] = it }
+            }
             val chapterOrder = tocCheck?.str("order").orEmpty()
 
             // ---------- 5) 正文页 ----------
@@ -558,20 +632,41 @@ object AiBookSourceGenerator {
     }
 
     /**
-     * 详情页里的目录入口链接：文字含「目录/全部章节/章节列表」等。
+     * 详情页里的目录入口链接：文字含「目录/全部章节/章节列表」等，
+     * 或文字就是一串省略号（......、…、···）——有些站点只给一个点，点进去才是完整目录。
      * 用于目录多候选竞速——很多站详情页只挂部分章节，真正的完整目录在独立页。
      */
-    private fun heuristicTocLinks(detailHtml: String, baseUrl: String): List<String> {
+    private fun heuristicTocLinks(
+        detailHtml: String,
+        baseUrl: String,
+        extraKeywords: List<String> = emptyList()
+    ): List<String> {
         val doc = Jsoup.parse(detailHtml, baseUrl)
-        val keywords = listOf("目录", "全部章节", "章节列表", "查看全部", "完整目录", "所有章节")
-        return doc.select("a[href]")
-            .filter { a ->
-                val t = a.text().trim()
-                t.length <= 12 && keywords.any { t.contains(it) } &&
-                    a.attr("abs:href").startsWith("http")
+        val keywords = listOf(
+            "目录", "全部章节", "章节列表", "查看全部", "完整目录", "所有章节",
+            "查看全部章节", "章节目录", "全部章节列表", "查看目录", "进入目录"
+        )
+        // 纯省略号入口：有些站的目录入口不给任何文字，就是 ...... / … / ··· / ••• 一串点，
+        // 点进去才是完整目录页——必须认，否则这类站点永远找不到目录
+        val ellipsis = Regex("^[.．。·•…・,、\\s]{2,}$")
+        // 用户在目录框里指定的入口文字优先级最高（可能就是「......」这类站点自定义写法）
+        val extra = extraKeywords.map { it.trim() }.filter { it.isNotBlank() }
+        val top = LinkedHashSet<String>()
+        val strong = LinkedHashSet<String>()
+        val weak = LinkedHashSet<String>()
+        doc.select("a[href]").forEach { a ->
+            val href = a.attr("abs:href")
+            if (!href.startsWith("http")) return@forEach
+            val t = a.text().trim()
+            when {
+                extra.any { t.contains(it) } -> top.add(href)
+                t.length <= 16 && keywords.any { t.contains(it) } -> strong.add(href)
+                ellipsis.matches(t) -> weak.add(href)
             }
-            .map { it.attr("abs:href") }
-            .distinct()
+        }
+        // 用户指定 > 强特征（明确的目录文字）> 弱特征（纯省略号）：
+        // 候选抓取有数量上限，排在前面才不会被截断丢掉
+        return (top + strong + weak).distinct()
     }
 
     /**
@@ -599,8 +694,128 @@ object AiBookSourceGenerator {
         return target?.attr("abs:href")
     }
 
+    /**
+     * 在书籍信息页源码里定位指向指定目录页的那个 <a>，把它的文字、href、所属容器结构与
+     * 上下文 HTML 直接挖出来——写 ruleBookInfo.tocUrl 时照这个位置写就不会错。
+     */
+    private fun locateTocAnchor(detailHtml: String, baseUrl: String, tocUrl: String): String {
+        val doc = runCatching { Jsoup.parse(detailHtml, baseUrl) }.getOrNull()
+            ?: return "书籍信息页解析失败，无法定位目录入口"
+        val target = urlKey(tocUrl)
+        val anchors = doc.select("a[href]")
+        // 先精确匹配（去 # 锚点、去尾斜杠、忽略 http/https 差异），再退一级按上级路径匹配
+        val hit = anchors.firstOrNull { urlKey(it.attr("abs:href")) == target }
+            ?: anchors.firstOrNull { looseUrlKey(it.attr("abs:href")) == looseUrlKey(tocUrl) }
+            ?: return buildString {
+                append("书籍信息页里没有直接指向该目录页的 <a> 链接")
+                append("（可能是 JS 动态拼接，或目录页与书籍信息页不同域）。")
+                append("此时 ruleBookInfo.tocUrl 不要用不存在的选择器编造：")
+                append("优先看采集确认里的「目录地址推导」按地址规律拼；")
+                append("确无规律且目录章节就在书籍信息页里时才留空。")
+            }
+        val parent = hit.parent()
+        val grand = parent?.parent()
+        val siblingLinks = parent?.children()
+            ?.count { it.tagName() == "a" && it.hasAttr("href") } ?: 1
+        val index = parent?.children()?.indexOf(hit)?.plus(1) ?: 0
+        val ctx = (parent?.html() ?: hit.outerHtml())
+            .replace(Regex("\\s+"), " ").trim().take(500)
+        return buildString {
+            append("目录入口链接：文字「").append(hit.text().trim()).append("」，")
+            append("href=\"").append(hit.attr("href")).append("\"")
+            append("（绝对地址 ").append(hit.attr("abs:href")).append("）")
+            if (hit.className().isNotBlank()) append("，a.class=").append(hit.className())
+            if (hit.id().isNotBlank()) append("，a.id=").append(hit.id())
+            append("；所在容器 ")
+            if (parent != null) {
+                append("<").append(parent.tagName()).append(">")
+                if (parent.id().isNotBlank()) append(" id=").append(parent.id())
+                if (parent.className().isNotBlank()) append(" class=").append(parent.className())
+            } else {
+                append("（未知）")
+            }
+            append("，是容器内第 ").append(index).append(" 个子元素（该容器共 ")
+            append(siblingLinks).append(" 个链接）")
+            if (grand != null) {
+                append("，上层 <").append(grand.tagName()).append(">")
+                if (grand.id().isNotBlank()) append(" id=").append(grand.id())
+                if (grand.className().isNotBlank()) append(" class=").append(grand.className())
+            }
+            append("。\n容器 HTML 片段：").append(ctx)
+        }
+    }
+
+    /**
+     * 目录页与书籍详情页之间常有固定地址规律（如 /novel/113846.html → /novel/list/113846/1.html），
+     * 但详情页里那个入口链接往往没有任何 class/id 可用（甚至压根没有入口链接）。
+     * 这里按「书籍编号」把可直接在 legado 里用的 tocUrl JS 规则算出来交给 AI，
+     * 避免 AI 把 tocUrl 留空（目录退化成详情页几章）或写死某一本书的地址（所有书共用一份目录）。
+     */
+    private fun deriveTocUrlRule(infoUrl: String, tocUrl: String): String? {
+        if (infoUrl.isBlank() || tocUrl.isBlank()) return null
+        if (hostOf(infoUrl) == null || hostOf(infoUrl) != hostOf(tocUrl)) return null
+        // 书籍编号：详情页地址末段的数字（.../novel/113846.html → 113846）
+        val bookId = Regex("/(\\d+)\\.html").find(infoUrl)?.groupValues?.get(1)
+            ?: Regex("/(\\d+)/?$").find(infoUrl)?.groupValues?.get(1)
+            ?: return null
+        // 编号必须在目录页地址里出现且只出现一次，才是「按编号派生」的关系
+        val start = tocUrl.indexOf(bookId)
+        if (start < 0 || tocUrl.indexOf(bookId, start + 1) >= 0) return null
+        val prefix = tocUrl.substring(0, start)
+        val suffix = tocUrl.substring(start + bookId.length)
+        if (prefix.isBlank()) return null
+        // 用 JS 字符串切分取编号，不用正则——避免 \d 这类写法在书源 JSON 里多层转义出错
+        val rule = "<js>var u=baseUrl.split(\"?\")[0];" +
+            "var n=u.substring(u.lastIndexOf(\"/\")+1).split(\".\")[0];" +
+            "\"$prefix\"+n+\"$suffix\"</js>"
+        return buildString {
+            append("【目录地址推导】这两个网址存在固定规律：")
+            append("书籍详情页 ").append(infoUrl).append(" → 目录页 ").append(tocUrl)
+            append("，其中的书籍编号是 ").append(bookId).append("。\n")
+            append("书籍信息页里那个入口链接往往没有可定位的 class/id（甚至根本没有入口链接），")
+            append("所以 ruleBookInfo.tocUrl 不要留空、也不要写死某一本书的地址")
+            append("（写死会让所有书都打开同一本书的目录），")
+            append("应当按上面的规律用 JS 取出书籍编号再拼装。本站可直接使用的写法：\n")
+            append(rule)
+            append("\n（legado JS 规则：baseUrl 是书籍详情页地址；")
+            append("上式先去掉可能带的 ? 参数，再取末段编号 ").append(bookId)
+            append("，拼成 ").append(prefix).append("编号").append(suffix).append("）")
+        }
+    }
+
+    /** URL 归一化：去锚点、去尾斜杠、https 视同 http，用于判断两个地址是否同一页 */
+    private fun urlKey(u: String): String {
+        var s = u.trim()
+        val hash = s.indexOf('#')
+        if (hash >= 0) s = s.substring(0, hash)
+        s = s.trimEnd('/')
+        if (s.startsWith("https://")) s = "http://" + s.removePrefix("https://")
+        return s
+    }
+
+    /** 宽松归一化：再去掉最后一级路径，用于「/book/1/」与「/book/1/index.html」这类差异 */
+    private fun looseUrlKey(u: String): String {
+        val k = urlKey(u)
+        val i = k.lastIndexOf('/')
+        return if (i > 8) k.substring(0, i) else k
+    }
+
     private fun hostOf(url: String): String? =
         runCatching { java.net.URI(url).host }.getOrNull()
+
+    /** 形如域名/网址的输入：www.x.com、m.x.com/mulu/1.html */
+    private val URL_LIKE = Regex("^(?:[\\w-]+\\.)+[a-zA-Z]{2,}(?:[:/?#].*)?$")
+
+    /**
+     * 判断目录输入框里填的是「网址」还是「目录入口的文字」。
+     * 网址直接抓取；不是网址的（如「查看全部章节」「......」「更多章节」）
+     * 就当作入口文字，去书籍信息页里匹配对应链接。
+     */
+    private fun looksLikeUrl(s: String): Boolean {
+        if (s.contains(" ") || s.contains("\n")) return false
+        return s.startsWith("http://", true) || s.startsWith("https://", true) ||
+            s.startsWith("//") || URL_LIKE.matches(s)
+    }
 
     // ==================== AI 质检 / 生成 / 修正 ====================
 
@@ -970,7 +1185,9 @@ object AiBookSourceGenerator {
     private val CHECK_INFO = """
         这是疑似书籍详情页的网页 HTML。请判断它是否包含书籍信息。
         注意：详情页上的「最新章节」区块不是目录页；「点击阅读/开始阅读」链接可能指向第一章甚至失效，
-        目录页地址优先选「查看全部章节/章节目录/完整目录」这类链接。
+        目录页地址优先选「查看全部章节/章节目录/完整目录」这类链接；
+        有些站点的目录入口不给文字提示，就是一串省略号（......、…、···）或「查看全部章节>」，
+        这类链接同样要当作目录页地址填进 tocUrl。
         只输出 JSON（不要解释）：
         {"isBookInfo": true或false,
          "name": "书名，没有填 null",
@@ -1082,6 +1299,17 @@ object AiBookSourceGenerator {
           coverUrl: https://static.zongheng.com{{$.coverUrl}}
         · 遇到搜索结果页 <title> 正常但列表区域空无一物时，优先怀疑 JS 渲染：
           在页面 script 里找 api/接口线索，或套用站点的 JSON 搜索接口，或改用 {"webView":true}
+
+        十一、目录页地址与详情页存在规律时（ruleBookInfo.tocUrl 的写法）
+        · 典型形态：详情页 /novel/113846.html → 目录页 /novel/list/113846/1.html（书籍编号相同）
+        · 这类站点详情页里常常没有「目录」链接；有的也只是一串省略号
+          （<li><a href="/novel/list/113846/1.html">......</a></li>），li/ul 上没有任何 class/id 可选
+        · 所以 tocUrl 不要留空（会退化成只拿到详情页那几个最新章节），
+          更不要写死某一本书的目录地址（会导致所有书都跑去打开同一本书的目录）
+        · 正确写法：用 JS 从书籍详情页地址末段取出编号再拼装（刻意不用正则，
+          免得 \\d 这类写法在书源 JSON 里被多层转义写错），例如
+          <js>var u=baseUrl.split("?")[0];var n=u.substring(u.lastIndexOf("/")+1).split(".")[0];"https://x.com/novel/list/"+n+"/1.html"</js>
+        · 采集确认里的「目录地址推导」已按本站实际网址算好这条写法，直接采用
     """.trimIndent()
 
     private val CHECK_CATEGORY = """
@@ -1134,7 +1362,8 @@ object AiBookSourceGenerator {
         3. 章节列表排除「最新章节」推荐区，取完整章节列表容器；
         4. 采集确认里的书名/作者/第一章网址必须与规则解析结果吻合；
         5. {exploreHardRule}
-        6. searchUrl 与 exploreUrl 是两个完全不同的东西，绝不能混写：searchUrl 是**单个**搜索请求地址且必须含 {{key}}；exploreUrl 是**多行**「分类名::网址」列表且不含 {{key}}。
+        6. searchUrl 与 exploreUrl 是两个完全不同的东西，绝不能混写：searchUrl 是**单个**搜索请求地址且必须含 {{key}}；exploreUrl 是**多行**「分类名::网址」列表且不含 {{key}}；
+        7. ruleBookInfo.tocUrl 的写法按优先级：① 采集确认里有「目录地址推导」时，必须采用其中给出的 JS 规则（由书籍详情页地址按编号拼出目录页地址，最可靠）；② 仅当「目录入口定位」里那个链接的容器有明确 class/id 时，才写成选择器规则（如 class.xxx@tag.a@href、text.目录@href）；③ 两者都没有、且目录章节确实就在书籍信息页里时才留空。绝不允许把某一本书的目录地址写死进 tocUrl，也不允许用页面上不存在的选择器编造。
     """.trimIndent()
 
     private val FIX_PROMPT = """

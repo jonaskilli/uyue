@@ -60,6 +60,45 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
+                android:hint="书籍信息页网址（可选，填某一本书的详情页）">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_book_info_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textUri"
+                    android:maxLines="3"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
+
+            <io.legado.app.ui.widget.text.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="这本书的目录页网址（可选；也可填目录入口的文字，如 查看全部章节、......）">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_toc_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textUri"
+                    android:maxLines="3"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:lineSpacingExtra="2dp"
+                android:text="上面两个填了就用你指定的页面，程序不再去猜；同时会在书籍信息页源码里标出「这个目录网址位于哪个位置」（链接文字 / href / 所属容器 / 上下文 HTML），写目录规则时直接照它来。目录页那栏填网址或入口文字（如 查看全部章节、......）都可以，填文字就按文字去书籍信息页里找对应链接。"
+                android:textColor="@color/secondaryText"
+                android:textSize="11sp" />
+
+            <io.legado.app.ui.widget.text.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:hint="登录地址（可选，正文需登录的站点填登录页地址）">
 
                 <io.legado.app.lib.theme.view.ThemeEditText
@@ -179,7 +218,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:lineSpacingExtra="3dp"
-                android:text="说明：\n1. 生成过程会自动抓取「首页 → 搜索页 → 详情页 → 目录页 → 正文页 → 分类页」，再把源码交给 AI 推断规则，通常需要几十秒；\n2. AI 接口沿用「角色档案设置」里的配置（本地混元太极网关）；\n3. 生成后会自动做 5 项实测：搜索 / 详情 / 目录 / 正文 / 发现页，失败环节自动交给 AI 修正（最多 2 轮）；\n4. 正文需要登录的站点：填「登录地址」→ 点「去登录」完成登录 → 再生成，采集与阅读都会自动使用登录状态；生成的登录地址也会写入书源，Cookie 失效时可在「书源管理→登录」里重新登录；\n5. 生成结果仅供参考，导入后建议在「书源管理」里做一次「校验书源」，失效的规则可手动微调；\n6. 需要 JS 渲染、验证码的站点，生成成功率会明显偏低。"
+                android:text="说明：\n1. 生成过程会自动抓取「首页 → 搜索页 → 详情页 → 目录页 → 正文页 → 分类页」，再把源码交给 AI 推断规则，通常需要几十秒；\n2. AI 接口沿用「角色档案设置」里的配置（本地混元太极网关）；\n3. 生成后会自动做 5 项实测：搜索 / 详情 / 目录 / 正文 / 发现页，失败环节自动交给 AI 修正（最多 2 轮）；\n4. 正文需要登录的站点：填「登录地址」→ 点「去登录」完成登录 → 再生成，采集与阅读都会自动使用登录状态；生成的登录地址也会写入书源，Cookie 失效时可在「书源管理→登录」里重新登录；\n5. 生成结果仅供参考，导入后建议在「书源管理」里做一次「校验书源」，失效的规则可手动微调；\n6. 需要 JS 渲染、验证码的站点，生成成功率会明显偏低；\n7. 程序猜不准目录时：手动填「书籍信息页网址」和这本书的「目录页网址」，生成过程会直接用这两个页面，并标出目录网址在书籍信息页里的具体位置。"
                 android:textColor="@color/secondaryText"
                 android:textSize="12sp" />
 

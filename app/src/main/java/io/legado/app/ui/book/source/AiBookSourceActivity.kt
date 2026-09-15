@@ -67,6 +67,11 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         val includeExplore = binding.cbExplore.isChecked
         val fixRounds = binding.etFixRounds.text?.toString()?.trim()
             ?.toIntOrNull()?.coerceIn(0, 8) ?: 2
+        // 手动指定：填了就直接用这两个页面，跳过「程序猜详情页 / 猜目录页」
+        val bookInfoUrl = binding.etBookInfoUrl.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
+        val tocUrl = binding.etTocUrl.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
 
         generated = null
         binding.etResult.setText("")
@@ -77,7 +82,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         generateJob?.cancel()
         generateJob = lifecycleScope.launch {
             val result = AiBookSourceGenerator.generate(
-                url, keyword, loginUrl, includeExplore, fixRounds
+                url, keyword, loginUrl, includeExplore, fixRounds, bookInfoUrl, tocUrl
             ) { message ->
                 // 回调在 IO 线程，进度必须切回主线程更新 UI
                 runOnUiThread { binding.tvProgress.text = message }
