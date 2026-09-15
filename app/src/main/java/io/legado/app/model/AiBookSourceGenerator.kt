@@ -6,14 +6,21 @@ import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookSource
+import io.legado.app.help.http.BackstageWebView
+import io.legado.app.help.http.okHttpClient
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonObject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
+import java.net.InetAddress
+import java.net.UnknownHostException
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.Jsoup
 import java.net.URLEncoder
@@ -43,11 +50,51 @@ object AiBookSourceGenerator {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
         .followRedirects(true)
+        // 强制 HTTP/1.1：部分站点服务器 h2 流实现有 Bug（崩流 INTERNAL_ERROR），浏览器会自动降级而 OkHttp 不会
+        .protocols(listOf(Protocol.HTTP_1_1))
         .build()
 
     private val postClient = client.newBuilder()
         .readTimeout(25, TimeUnit.SECONDS)
         .build()
+
+    /** 全局栈降级客户端：带 Cronet 拦截器（与浏览器同源），同样强制 HTTP/1.1 */
+    private val globalClient = okHttpClient.newBuilder()
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .build()
+
+    /**
+     * DoH（加密 DNS）客户端：浏览器有"安全 DNS"可绕过运营商 DNS 污染，
+     * 普通 OkHttp 走系统 DNS 被污染时会出现"浏览器能开、App 无法访问"（Cloudflare 站常见）。
+     * 用阿里 DoH 为主、腾讯 DoH 为备，JSON API（RFC8484）零额外依赖；
+     * 两个 DoH 服务域名本身在国内不污染，bootstrap 走系统 DNS 即可。
+     */
+    private val dohClients: List<OkHttpClient> by lazy {
+        listOf(
+            "https://dns.alidns.cn/resolve",
+            "https://doh.pub/dns-query"
+        ).map { base ->
+            client.newBuilder().dns(Dns { host ->
+                val ips = queryDoh("$base?name=$host&type=A")
+                    ?: throw UnknownHostException("DoH 解析失败: $host")
+                ips.map { InetAddress.getByName(it) }
+            }).build()
+        }
+    }
+
+    /** DoH JSON 查询，返回 A 记录 IP 列表；失败返回 null 触发下一个 DoH 服务 */
+    private fun queryDoh(url: String): List<String>? = runCatching {
+        val req = Request.Builder().url(url).header("Accept", "application/dns-json").build()
+        client.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) return@use null
+            val obj = JsonParser.parseString(r.body.string()).asJsonObject
+            if (obj.get("Status")?.asInt != 0) return@use null
+            obj.getAsJsonArray("Answer")
+                ?.mapNotNull { runCatching { it.asJsonObject.get("data").asString }.getOrNull() }
+                ?.filter { it.matches(Regex("([0-9]{1,3}\\.){3}[0-9]{1,3}")) }
+                ?.takeIf { it.isNotEmpty() }
+        }
+    }.onFailure { AppLog.put("[AI书源] DoH 查询异常：${it.message}") }.getOrNull()
 
     private const val MOBILE_UA =
         "Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -57,7 +104,7 @@ object AiBookSourceGenerator {
             "Chrome/120.0.0.0 Safari/537.36"
 
     /** 单页送给 AI 的最大字符数 */
-    private const val MAX_PAGE_CHARS = 8000
+    private const val MAX_PAGE_CHARS = 12000
 
     /** 验证失败后允许 AI 修正的轮数 */
     private const val MAX_FIX_ROUNDS = 2
@@ -308,14 +355,61 @@ object AiBookSourceGenerator {
         }
     }
 
-    private fun fetch(url: String, pcUa: Boolean = false): String? = runCatching {
+    /**
+     * 抓取页面：先用内置客户端，失败自动降级到 legado 全局网络栈。
+     * 降级原因（实测案例）：
+     * · 部分站点服务器有 HTTP/2 流 Bug（m.qbmfxs.com 动态路径 INTERNAL_ERROR 崩流），
+     *   浏览器会自动降级 HTTP/1.1 而 OkHttp 不会 → 内置客户端已强制 HTTP/1.1；
+     * · 部分 WAF 对请求头不全的请求直接重置连接（需 Accept/Referer 等完整头）；
+     * · 设备上浏览器有安全 DNS 可绕过 DNS 污染，直连 OkHttp 不能——
+     *   全局栈带 Cronet 拦截器（与 Chrome 同源网络栈），行为与浏览器一致。
+     */
+    private fun fetch(url: String, pcUa: Boolean = false): String? {
+        fetchBy(client, url, pcUa)?.let { return it }
+        // 系统 DNS 失败 → 依次尝试 DoH（防 DNS 污染）
+        for (c in dohClients) {
+            fetchBy(c, url, pcUa)?.let {
+                AppLog.put("[AI书源] 系统 DNS 抓取失败，DoH 解析后成功：$url")
+                return it
+            }
+        }
+        fetchBy(globalClient, url, pcUa)?.let {
+            AppLog.put("[AI书源] 已通过全局网络栈降级抓取成功：$url")
+            return it
+        }
+        // 最后兜底：WebView 真浏览器内核抓取——与用户浏览器完全同源
+        // （系统网络栈、QUIC、ECH 等，浏览器能开的它就能开），解决 SNI 干扰等顽固问题
+        return fetchByWebView(url)?.also {
+            AppLog.put("[AI书源] 所有网络栈均失败，WebView 内核抓取成功：$url")
+        }
+    }
+
+    /** 用后台 WebView（真浏览器内核）抓取页面，必须在后台线程调用 */
+    private fun fetchByWebView(url: String): String? = runCatching {
+        runBlocking {
+            BackstageWebView(
+                url = url,
+                headerMap = mapOf("User-Agent" to MOBILE_UA),
+                tag = "AiBookSource"
+            ).getStrResponse().body?.takeIf { it.isNotBlank() }
+        }
+    }.onFailure {
+        AppLog.put("[AI书源] WebView 抓取失败：${it.message}", it)
+    }.getOrNull()
+
+    private fun fetchBy(c: OkHttpClient, url: String, pcUa: Boolean): String? = runCatching {
+        val referer = runCatching {
+            val u = java.net.URI(url)
+            "${u.scheme}://${u.host}/"
+        }.getOrDefault("")
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", if (pcUa) PC_UA else MOBILE_UA)
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .header("Referer", referer)
             .build()
-        client.newCall(request).execute().use { response ->
+        c.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 AppLog.put("[AI书源] 抓取失败 HTTP ${response.code}：$url")
                 return@use null
@@ -338,22 +432,31 @@ object AiBookSourceGenerator {
         if (!option.str("method").equals("post", true)) return fetch(fillKey(url, keyword))
         val body = fillKey(option.str("body") ?: "", keyword)
         val charset = option.str("charset")?.takeIf { it.isNotBlank() } ?: "UTF-8"
-        return runCatching {
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", MOBILE_UA)
-                .header("Content-Type", "application/x-www-form-urlencoded; charset=$charset")
-                .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
-                .build()
-            postClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    AppLog.put("[AI书源] 搜索 POST 失败 HTTP ${response.code}：$url")
-                    return@use null
-                }
-                response.body.string().takeIf { it.isNotBlank() }
+        return postBy(postClient, url, body, charset)
+            ?: postBy(globalClient, url, body, charset)?.also {
+                AppLog.put("[AI书源] 搜索 POST 直连失败，已通过全局网络栈降级成功：$url")
             }
-        }.onFailure { AppLog.put("[AI书源] 搜索 POST 异常：${it.message}", it) }.getOrNull()
     }
+
+    private fun postBy(c: OkHttpClient, url: String, body: String, charset: String): String? = runCatching {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", MOBILE_UA)
+            .header("Referer", runCatching {
+                val u = java.net.URI(url)
+                "${u.scheme}://${u.host}/"
+            }.getOrDefault(""))
+            .header("Content-Type", "application/x-www-form-urlencoded; charset=$charset")
+            .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+            .build()
+        c.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                AppLog.put("[AI书源] 搜索 POST 失败 HTTP ${response.code}：$url")
+                return@use null
+            }
+            response.body.string().takeIf { it.isNotBlank() }
+        }
+    }.onFailure { AppLog.put("[AI书源] 搜索 POST 异常：${it.message}", it) }.getOrNull()
 
     private fun fillKey(template: String, keyword: String): String {
         val key = runCatching { URLEncoder.encode(keyword, "UTF-8") }.getOrDefault(keyword)
@@ -682,10 +785,12 @@ object AiBookSourceGenerator {
 
     private val CHECK_SEARCH = """
         这是用关键词「{keyword}」请求后的网页 HTML。请判断是否真的返回了搜索结果。
+        注意：如果页面 <title> 正常但列表区域空无一物、结构是空壳（script 加载的 SPA），
+        说明搜索结果由 JS 渲染，要在 problem 里写明「搜索结果由JS渲染」。
         只输出 JSON（不要解释）：
         {"isSearchResult": true或false,
          "bookUrl": "搜索结果里第一本小说的详情页完整网址；没有结果填 null",
-         "problem": "无效时简述原因（如：无搜索结果/是验证码页/被重定向到首页/是登录页），正常则留空"}
+         "problem": "无效时简述原因（如：无搜索结果/是验证码页/被重定向到首页/是登录页/搜索结果由JS渲染），正常则留空"}
     """.trimIndent()
 
     private val CHECK_INFO = """
@@ -784,6 +889,15 @@ object AiBookSourceGenerator {
         · API 型站点（页面是 JSON）用 $ 规则：bookList 用 $..data[*] 等，字段用 $.name
         · 站点拒绝请求时给书源配 header（手机 UA 与 Referer）
         · 不要给 chapterList 主动加反转/排序处理，按页面章节链接的自然顺序写规则即可
+
+        九、知名大站的已验证方案（HTML 搜索页多为 JS 渲染，直接套用其 JSON 接口）
+        · 纵横中文网（zongheng.com 系，含 comic.zongheng.com）：
+          searchUrl: https://search.zongheng.com/search/book?keyword={{key}}&sort=null&pageNo=1&pageNum=20&isFromHuayu=0
+          bookList: $.data.datas.list[*]　name: $.name　author: $.authorName
+          bookUrl: https://www.zongheng.com/book/{{$.bookId}}
+          coverUrl: https://static.zongheng.com{{$.coverUrl}}
+        · 遇到搜索结果页 <title> 正常但列表区域空无一物时，优先怀疑 JS 渲染：
+          在页面 script 里找 api/接口线索，或套用站点的 JSON 搜索接口，或改用 {"webView":true}
     """.trimIndent()
 
     private val CHECK_CATEGORY = """
