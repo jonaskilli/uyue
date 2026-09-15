@@ -21,6 +21,7 @@ import io.legado.app.service.WebService
 import io.legado.app.ui.about.AboutActivity
 import io.legado.app.ui.about.ReadRecordActivity
 import io.legado.app.ui.book.bookmark.AllBookmarkActivity
+import io.legado.app.ui.book.source.AiBookSourceActivity
 import io.legado.app.ui.book.source.manage.BookSourceActivity
 import io.legado.app.ui.book.toc.rule.TxtTocRuleActivity
 import io.legado.app.ui.config.ConfigActivity
@@ -153,6 +154,7 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
                 "ttsPluginManage" -> startActivity<TtsPluginActivity>()
                 "hunyuanTaiji" -> startActivity<io.legado.app.ui.hunyuan.HunyuanTaijiActivity>()
                 "soundEffectRuleManage" -> startActivity<SoundEffectRuleActivity>()
+                "aiBookSourceGenerate" -> startActivity<AiBookSourceActivity>()
                 "dictRuleManage" -> startActivity<DictRuleActivity>()
                 "txtTocRuleManage" -> startActivity<TxtTocRuleActivity>()
                 "bookmark" -> startActivity<AllBookmarkActivity>()

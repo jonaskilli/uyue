@@ -51,6 +51,12 @@
         android:title="音效规则管理" />
 
     <io.legado.app.lib.prefs.Preference
+        android:icon="@drawable/ic_cfg_source"
+        android:key="aiBookSourceGenerate"
+        android:summary="填入小说网站地址，抓取页面后由 AI 推断搜索/详情/目录/正文规则，生成可导入的书源"
+        android:title="AI 生成书源" />
+
+    <io.legado.app.lib.prefs.Preference
         android:icon="@drawable/ic_translate"
         android:key="dictRuleManage"
         android:summary="@string/config_dict_rule"

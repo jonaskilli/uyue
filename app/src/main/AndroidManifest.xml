@@ -261,6 +261,13 @@
             android:label="音效规则管理"
             android:launchMode="singleTop"
             android:screenOrientation="behind" />
+        <!-- AI 生成书源界面 -->
+        <activity
+            android:name=".ui.book.source.AiBookSourceActivity"
+            android:label="AI 生成书源"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind"
+            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.soundeffect.SoundEffectRuleEditActivity"
             android:label="编辑音效规则"
