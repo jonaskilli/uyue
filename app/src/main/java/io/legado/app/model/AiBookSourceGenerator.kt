@@ -572,6 +572,8 @@ object AiBookSourceGenerator {
             var source = askGenerate(pages, seed, searchTemplate, meta, includeExplore, singleBook)
                 ?: error("AI 未返回书源。请确认「角色档案设置」里已配置接口（接口@@模型@@密钥）")
             ensureMobileUa(source)
+            // 目录全候选竞速：AI 规则与纯代码推导的所有容器在真实页面上比拼，取章节最完整的
+            refineTocRules(source, pages, onProgress)
             // 写入登录地址：Cookie 失效时可在「书源管理→登录」重新登录，
             // 登录后的 Cookie 由 legado 按域名自动注入书源请求
             if (!loginUrl.isNullOrBlank()) {
@@ -590,6 +592,7 @@ object AiBookSourceGenerator {
                 )
                 val fixed = fixSource(source, report, pages) ?: break
                 ensureMobileUa(fixed)
+                refineTocRules(fixed, pages, onProgress)
                 source = fixed
                 report = verifySource(source, testKeyword, pages, onProgress, singleBook)
             }
@@ -625,6 +628,7 @@ object AiBookSourceGenerator {
                         )
                         val fixed = fixSource(source, report, pages) ?: break
                         ensureMobileUa(fixed)
+                        refineTocRules(fixed, pages, onProgress)
                         source = fixed
                         report = verifySource(source, testKeyword, pages, onProgress, singleBook)
                     }
@@ -1537,6 +1541,272 @@ object AiBookSourceGenerator {
             map[AppConst.UA_NAME] = MOBILE_UA
             source.header = GSON.toJson(map)
         }
+    }
+
+    // ==================== 目录全候选竞速（每次生成都执行，源自 5541 书源统计特征） ====================
+
+    /** 「第X章/节/回」式章节标题——数字部分必须带捕获组，chapterNo 要取它 */
+    private val CHAPTER_TITLE_RE = Regex("第\\s*([0-9零〇一二两三四五六七八九十百千万]+)\\s*[章节回]")
+
+    /** 数字开头的章节名（有些站章节名就是「1大器晚成系统开启！」这种，没有「第X章」） */
+    private val NUM_CHAPTER_RE = Regex("^\\s*\\d{1,5}\\s*[\\u4e00-\\u9fa5A-Za-z（(]")
+
+    /** 是否像章节标题（两种形态都认） */
+    private fun isChapterText(t: String): Boolean =
+        t.isNotBlank() && (CHAPTER_TITLE_RE.containsMatchIn(t) || NUM_CHAPTER_RE.containsMatchIn(t))
+
+    /** 取章节序号：优先「第N章」，其次「数字开头」；取不到返回 null */
+    private fun chapterNo(text: String): Int? {
+        CHAPTER_TITLE_RE.find(text)?.let { m ->
+            val raw = m.groupValues[1]
+            raw.toIntOrNull()?.let { return it }
+            return cnToInt(raw)
+        }
+        return Regex("^\\s*(\\d{1,5})").find(text)?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    /** 简单中文数字转阿拉伯数字（一~万，够目录排序用） */
+    private fun cnToInt(s: String): Int? {
+        if (s.isBlank()) return null
+        val map = mapOf(
+            '零' to 0, '〇' to 0, '一' to 1, '二' to 2, '两' to 2, '三' to 3, '四' to 4,
+            '五' to 5, '六' to 6, '七' to 7, '八' to 8, '九' to 9
+        )
+        if (s == "十") return 10
+        var total = 0
+        var cur = 0
+        for (ch in s) {
+            when {
+                ch in map -> cur = map.getValue(ch)
+                ch == '十' -> { total += (if (cur == 0) 1 else cur) * 10; cur = 0 }
+                ch == '百' -> { total += (if (cur == 0) 1 else cur) * 100; cur = 0 }
+                ch == '千' -> { total += (if (cur == 0) 1 else cur) * 1000; cur = 0 }
+                ch == '万' -> { total = (total + cur) * 10000; cur = 0 }
+                else -> return null
+            }
+        }
+        return total + cur
+    }
+
+    /** 最长「连续自增」章节段：返回 (长度, 起始章号)，用于识别完整目录、避开最新章/推荐位 */
+    private fun longestRun(nums: List<Int>): Pair<Int, Int?> {
+        if (nums.isEmpty()) return 0 to null
+        var best = 1
+        var cur = 1
+        var bestStart = nums[0]
+        var curStart = nums[0]
+        for (i in 1 until nums.size) {
+            if (nums[i] == nums[i - 1] + 1) {
+                cur++
+                if (cur > best) {
+                    best = cur
+                    bestStart = curStart
+                }
+            } else {
+                cur = 1
+                curStart = nums[i]
+            }
+        }
+        return best to bestStart
+    }
+
+    /**
+     * legado 选择器 → CSS（仅供 Jsoup 粗测用）。
+     * 支持 class./id./tag./裸 css 与多级 @ 串联；JS/JSON/XPath/属性步骤一律返回 null（不参与粗测）
+     */
+    private fun legadoToCss(sel: String): String? {
+        val first = sel.trim().split("||").firstOrNull()?.trim().orEmpty()
+        if (first.isBlank()) return null
+        if (first.contains("<js>") || first.contains("@js:") || first.startsWith("$") ||
+            first.startsWith("//") || first.startsWith("@")
+        ) return null
+        val parts = first.split("@").map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return null
+        fun clsOf(prefix: String) = prefix.removePrefix("class.").trim()
+            .split(Regex("\\s+")).filter { it.isNotBlank() }.joinToString(".")
+        val sb = StringBuilder()
+        val head = parts[0]
+        when {
+            head.startsWith("class.") -> sb.append(".").append(clsOf(head))
+            head.startsWith("id.") -> sb.append("#").append(head.removePrefix("id."))
+            head.startsWith("tag.") -> sb.append(head.removePrefix("tag."))
+            head.startsWith(".") || head.startsWith("#") -> sb.append(head)
+            head.matches(Regex("[A-Za-z][\\w-]*")) -> sb.append(head)
+            else -> return null
+        }
+        for (p in parts.drop(1)) {
+            when {
+                p.startsWith("tag.") -> sb.append(" ").append(p.removePrefix("tag."))
+                p.startsWith("class.") -> sb.append(".").append(clsOf(p))
+                p.startsWith(".") -> sb.append(" ").append(p)
+                p.matches(Regex("[A-Za-z][\\w-]*")) -> sb.append(" ").append(p)
+                else -> break
+            }
+        }
+        return sb.toString()
+    }
+
+    /** 收集一批元素里的章节标题文字（元素本身是 <a> 时也算） */
+    private fun chapterTextsOf(els: Collection<Element>): List<String> {
+        val out = ArrayList<String>()
+        for (e in els) {
+            if (e.tagName() == "a" && isChapterText(e.text())) {
+                out.add(e.text())
+            } else {
+                e.select("a[href]").forEach { a -> if (isChapterText(a.text())) out.add(a.text()) }
+            }
+        }
+        return out
+    }
+
+    /** 目录候选：选择器 / 连续段长度 / 段起点 / 章节条数 */
+    private data class TocCand(val sel: String, val run: Int, val start: Int, val count: Int)
+
+    /** 用 Jsoup 粗测一个 chapterList 选择器在页面上的表现 */
+    private fun scoreChapterSel(html: String, sel: String?): TocCand? {
+        if (sel.isNullOrBlank()) return null
+        val css = legadoToCss(sel) ?: return null
+        val doc = runCatching { Jsoup.parse(html) }.getOrNull() ?: return null
+        val els = runCatching { doc.select(css) }.getOrNull() ?: return null
+        val texts = chapterTextsOf(els)
+        if (texts.isEmpty()) return null
+        val nums = texts.mapNotNull { chapterNo(it) }
+        val (run, start) = longestRun(nums)
+        return TocCand(sel, run, start ?: Int.MAX_VALUE, texts.size)
+    }
+
+    /** 更优判定：连续段更长 > 段起点更接近第1章 > 章节更多 */
+    private fun betterCand(a: TocCand, b: TocCand): Boolean = when {
+        a.run != b.run -> a.run > b.run
+        a.start != b.start -> a.start < b.start
+        else -> a.count > b.count
+    }
+
+    /** 候选竞速：全部候选一起比，取「章节最完整」的那个 */
+    private fun pickBestChapterList(html: String, cands: List<String>): TocCand? {
+        var best: TocCand? = null
+        for (c in cands) {
+            val s = scoreChapterSel(html, c) ?: continue
+            if (s.count == 0) continue
+            val b = best
+            if (b == null || betterCand(s, b)) best = s
+        }
+        return best
+    }
+
+    /** 给容器找一个「全局章节数不膨胀」的 legado 选择器（避免 class.box 命中一堆无关元素） */
+    private fun candidateCss(el: Element, doc: org.jsoup.nodes.Document): String? {
+        val local = chapterTextsOf(listOf(el)).size
+        if (local <= 0) return null
+        val variants = ArrayList<String>()
+        if (el.id().isNotBlank()) variants.add("id." + el.id())
+        val cls = el.classNames().filter { it.matches(Regex("[A-Za-z_][\\w-]*")) }
+        if (cls.isNotEmpty()) {
+            variants.add("class." + cls.joinToString("."))
+            variants.add("class." + cls.first())
+            variants.add("tag.${el.tagName()}.${cls.first()}")
+        }
+        variants.add("tag." + el.tagName())
+        var tight: Pair<String, Int>? = null
+        for (v in variants) {
+            val css = legadoToCss(v) ?: continue
+            val got = runCatching { doc.select(css) }.getOrNull() ?: continue
+            val n = chapterTextsOf(got).size
+            if (n < local) continue
+            if (n == local) return v
+            val t = tight
+            if (t == null || n < t.second) tight = v to n
+        }
+        return tight?.first
+    }
+
+    /**
+     * 「最新章节 / 排行榜 / 推荐位 / 最近更新」这类区块不是完整目录，
+     * 即使章号连续也不能当目录用——否则会把书源从「完整目录」换成「十几条最新章」。
+     */
+    private fun isNotTocBlock(el: Element): Boolean {
+        val words = listOf(
+            "最新", "最近更新", "排行", "推荐", "热门", "猜你喜欢",
+            "zuixin", "paihang", "tuijian", "remen", "rank", "hot"
+        )
+        var p: Element? = el
+        var d = 0
+        while (p != null && d < 3) {
+            val id = p.id().lowercase()
+            val cls = p.className().lowercase()
+            if (words.any { id.contains(it) || cls.contains(it) }) return true
+            p = p.parent()
+            d++
+        }
+        // 区块上方常放标题（如 <h3>最新章节</h3>、<h2>热门推荐</h2>）
+        val headText = el.previousElementSibling()?.text().orEmpty() +
+            el.parent()?.children()?.firstOrNull()?.takeIf { it.tagName().startsWith("h") }?.text().orEmpty()
+        return words.any { headText.contains(it) }
+    }
+
+    /** 纯代码推导章节列表候选（镜像 5541 书源里稳定的容器写法） */
+    private fun autoChapterCandidates(html: String, baseUrl: String): List<String> {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return emptyList()
+        val links = doc.select("a[href]").filter { isChapterText(it.text()) }
+        if (links.size < 3) return emptyList()
+        val els = LinkedHashSet<Element>()
+        for (a in links) {
+            var p: Element? = a.parent()
+            var d = 0
+            while (p != null && d < 5) {
+                els.add(p)
+                p = p.parent()
+                d++
+            }
+        }
+        val cands = ArrayList<TocCand>()
+        for (el in els) {
+            val texts = chapterTextsOf(listOf(el))
+            if (texts.size < 3) continue
+            // 最新章节/排行/推荐区块一律不参选
+            if (isNotTocBlock(el)) continue
+            val css = candidateCss(el, doc) ?: continue
+            val nums = texts.mapNotNull { chapterNo(it) }
+            val (run, start) = longestRun(nums)
+            cands.add(TocCand("$css@tag.a", run, start ?: Int.MAX_VALUE, texts.size))
+        }
+        return cands.sortedWith(
+            compareByDescending<TocCand> { it.run }.thenBy { it.start }.thenByDescending { it.count }
+        ).map { it.sel }.distinct().take(6)
+    }
+
+    /**
+     * 目录全候选竞速：把 AI 给的 chapterList 与纯代码推导的所有候选容器，
+     * 一起放到真实目录页 HTML 上比拼，取「章节最完整」的那个。
+     *
+     * 安全门槛（关键）——不能把原本可用的书源改坏：
+     * · 只在「目录页」上比（页面就是书源真正要用的那个目录页，不跨页乱比）；
+     * · AI 规则能粗测时，候选必须「条数不少于 AI 且连续段严格更长」才允许替换；
+     * · AI 规则取不到时才允许候选顶上，且候选自身要像个完整目录（≥8 条）；
+     * · JS/JSON 等无法粗测的规则一律不动。
+     */
+    private fun refineTocRules(source: BookSource, pages: List<Page>, onProgress: (String) -> Unit) {
+        val toc = source.getTocRule()
+        val cur = toc.chapterList
+        val page = pages.firstOrNull { it.role == "目录页" && it.html.isNotBlank() } ?: return
+        val cands = ArrayList<String>()
+        if (!cur.isNullOrBlank()) cands.add(cur)
+        cands.addAll(autoChapterCandidates(page.html, page.url))
+        if (cands.size <= 1) return
+        val curScore = scoreChapterSel(page.html, cur)
+        // 无法粗测的非空规则（JS/JSON/XPath）原样保留，避免误伤
+        if (!cur.isNullOrBlank() && curScore == null) return
+        val best = pickBestChapterList(page.html, cands) ?: return
+        if (best.sel == cur) return
+        if (curScore != null) {
+            // 原规则可用：候选必须不更少、且连续段严格更长，才有资格替换
+            if (best.count < curScore.count || best.run <= curScore.run) return
+        } else {
+            // 原规则取不到：候选自己要像个完整目录
+            if (best.count < 8 || best.run < 3) return
+        }
+        toc.chapterList = best.sel
+        onProgress("目录优选：${best.sel} 胜出（连续 ${best.run} 章 / 共 ${best.count} 条）")
     }
 
     // ==================== 阶段三：四链路实测 ====================
