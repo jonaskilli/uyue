@@ -154,8 +154,25 @@ object BookInfo {
         currentCoroutineContext().ensureActive()
         if (!book.isWebFile) {
             Debug.log(bookSource.bookSourceUrl, "┌获取目录链接")
-            book.tocUrl = analyzeRule.getString(infoRule.tocUrl, isUrl = true)
-            if (book.tocUrl.isEmpty()) book.tocUrl = baseUrl
+            // 候选一：页面里提取的目录入口链接
+            val pageToc = analyzeRule.getString(infoRule.tocUrl, isUrl = true)
+            // 候选二：书源自带「详情页地址→目录页地址」的正则规则（AI 生成时按两个网址推导，
+            // 作用于书籍自身地址 baseUrl）。不再仅作兜底，而是与页面提取的链接并列作为备选。
+            var regexToc: String? = null
+            if (!infoRule.tocUrlRegex.isNullOrBlank()) {
+                regexToc = runCatching {
+                    AnalyzeRule(book, bookSource)
+                        .setContent("").setBaseUrl(baseUrl)
+                        .also { it.setRedirectUrl(redirectUrl) }
+                        .getString(infoRule.tocUrlRegex, isUrl = true)
+                }.getOrNull()
+                    ?.takeIf { it.isNotBlank() && it != baseUrl }
+                Debug.log(bookSource.bookSourceUrl, "└目录正则候选:${regexToc ?: "（无/无效）"}")
+            }
+            // 两个候选并列：优先页面提取到的可用链接，否则用正则候选，都没有才退化成 baseUrl
+            book.tocUrl = pageToc.takeIf { it.isNotBlank() && it != baseUrl }
+                ?: regexToc
+                ?: baseUrl
             if (book.tocUrl == baseUrl) {
                 book.tocHtml = body
             }

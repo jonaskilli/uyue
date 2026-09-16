@@ -144,14 +144,43 @@ object AiBookSourceGenerator {
     ): Result<GenResult> = withContext(Dispatchers.IO) {
         runCatching {
             val seed = normalize(seedUrl)
+            AppLog.put(
+                "[AI书源] generate 开始：manualBookInfo=${manualBookInfo?.take(120)}, " +
+                "manualTocUrl=${manualTocUrl?.take(120)}, keyword=$keyword"
+            )
             // 手动指定的页面：用户填了就优先使用，不再靠程序猜
             val manualInfo = manualBookInfo?.trim()?.takeIf { it.isNotBlank() }?.let { normalize(it) }
             // 目录框里可以填网址，也可以直接填目录入口的链接文字（如「查看全部章节」「......」）
             val manualTocRaw = manualTocUrl?.trim()?.takeIf { it.isNotBlank() }
             val manualToc = manualTocRaw?.takeIf { looksLikeUrl(it) }?.let { normalize(it) }
             val manualTocText = manualTocRaw?.takeUnless { looksLikeUrl(it) }
-            val pages = ArrayList<Page>(6)
             val meta = HashMap<String, String>()
+            // 用户同时填了「书籍详情页」与「目录页」两个网址：调一次 AI 推导二者的地址规律，
+            // 得到一个能把详情页地址换成目录页地址的正则兜底规则（作用于 baseUrl）。
+            // 仅当两个网址都给了且不同才调用，避免无谓的请求；推导不出则返回 null。
+            AppLog.put("[AI书源] 目录正则推导判断：manualInfo=$manualInfo | manualToc=$manualToc")
+            val aiTocRegex = if (manualInfo != null && manualToc != null) {
+                askTocUrlRegex(manualInfo, manualToc, onProgress)?.also { rx ->
+                    meta["目录地址正则推导(AI)"] = buildString {
+                        append("用户同时提供了书籍详情页与目录页网址，已用 AI 推导出二者的地址规律：")
+                        append("\n  详情页：").append(manualInfo)
+                        append("\n  目录页：").append(manualToc)
+                        append("\n  可直接套在书籍详情页自身地址(baseUrl)上的正则兜底规则")
+                        append("（ruleBookInfo.tocUrl 取不到目录入口链接时使用）：")
+                        append("\n  ").append(rx)
+                        append("\n  建议 ruleBookInfo.tocUrl 优先从页面提取目录入口链接；")
+                        append("若页面没有可靠入口链接，直接采用上面的 baseUrl 正则兜底写法")
+                        append("（不要写死某一本书的地址，否则所有书会打开同一份目录）。")
+                    }
+                }
+            } else {
+                AppLog.put(
+                    "[AI书源] 跳过目录地址正则 AI 推导：需同时在「书籍详情页网址」与「目录页网址」两框填真实网址" +
+                    "（当前 manualInfo=$manualInfo, manualToc=$manualToc）"
+                )
+                null
+            }
+            val pages = ArrayList<Page>(6)
             if (!loginUrl.isNullOrBlank()) {
                 val cookie = CookieStore.getCookie(seed)
                 meta["登录"] = if (cookie.isNotBlank()) {
@@ -572,6 +601,9 @@ object AiBookSourceGenerator {
             var source = askGenerate(pages, seed, searchTemplate, meta, includeExplore, singleBook)
                 ?: error("AI 未返回书源。请确认「角色档案设置」里已配置接口（接口@@模型@@密钥）")
             ensureMobileUa(source)
+            // 目录地址正则兜底：把「详情页→目录页」的 AI 正则写进书源，
+            // 运行时若书籍详情页取不到目录入口链接，就靠它把详情页地址换成目录页地址
+            aiTocRegex?.let { source.getBookInfoRule().tocUrlRegex = it }
             // 目录全候选竞速：AI 规则与纯代码推导的所有容器在真实页面上比拼，取章节最完整的
             refineTocRules(source, pages, onProgress)
             // 写入登录地址：Cookie 失效时可在「书源管理→登录」重新登录，
@@ -1164,9 +1196,60 @@ object AiBookSourceGenerator {
      * 这里按「书籍编号」把可直接在 legado 里用的 tocUrl JS 规则算出来交给 AI，
      * 避免 AI 把 tocUrl 留空（目录退化成详情页几章）或写死某一本书的地址（所有书共用一份目录）。
      *
-     * 兜底顺序：① 同页锚点 ② 信息页地址+固定后缀 ③ 同目录换末段文件名 ④ 按书籍标识派生。
+     * 候选顺序：① 同页锚点 ② 信息页地址+固定后缀 ③ 同目录换末段文件名 ④ 按书籍标识派生。
      * 具体命中哪一种完全由这两个网址的实际差分决定，不预设任何固定形态。
      */
+    /**
+     * 用户同时填了书籍详情页与目录页网址时，调一次 AI 推导「详情页地址 → 目录页地址」的正则，
+     * 返回可直接写入书源、作用在 baseUrl（书籍自身地址）上的 legado <js> 候选规则：
+     *   <js>baseUrl.replace(new RegExp("PATTERN","g"),"REPLACEMENT")</js>
+     * 大部分小说站地址里那段数字/字母就是书籍 ID，详情页与目录页共用，AI 很容易识别。
+     * 校验：必须用 infoUrl 套这个正则严格等于 tocUrl 才采用；推导不出或两网址相同则返回 null。
+     */
+    private fun askTocUrlRegex(
+        infoUrl: String,
+        tocUrl: String,
+        onProgress: (String) -> Unit
+    ): String? {
+        if (infoUrl.isBlank() || tocUrl.isBlank() || cleanUrl(infoUrl) == cleanUrl(tocUrl)) {
+            AppLog.put("[AI书源] 目录地址正则推导跳过：两网址为空或相同（infoUrl=$infoUrl, tocUrl=$tocUrl）")
+            return null
+        }
+        val prompt = ASK_TOC_REGEX.format(infoUrl, tocUrl)
+        val raw = chat(prompt, 600) ?: run {
+            AppLog.put("[AI书源] 目录地址正则推导失败：AI 接口无返回（检查网络/API 密钥是否可用）")
+            return null
+        }
+        val obj = parseJsonObject(raw) ?: run {
+            AppLog.put("[AI书源] 目录地址正则推导失败：AI 返回无法解析为 JSON：${raw.take(200)}")
+            return null
+        }
+        val pattern = obj.str("pattern")?.takeIf { it.isNotBlank() } ?: run {
+            AppLog.put("[AI书源] 目录地址正则推导失败：AI 未给出可用的 pattern")
+            return null
+        }
+        val replacement = obj.str("replacement").orEmpty()
+        // 本地校验：正则必须能把详情页地址严格变成目录页地址，才敢写进书源兜底
+        val out = runCatching { infoUrl.replace(Regex(pattern), replacement) }.getOrNull()
+        if (out != tocUrl) {
+            AppLog.put("[AI书源] 目录地址正则推导失败：正则校验不通过，详情页 $infoUrl 套用后=$out 期望目录页=$tocUrl")
+            return null
+        }
+        // 把 pattern/replacement 序列化成合法的 JS 字符串字面量（GSON 负责转义），
+        // 拼成 baseUrl.replace(new RegExp("...","g"),"...")，让 legado 在书籍自身地址上套用
+        val js = "<js>baseUrl.replace(new RegExp(${GSON.toJson(pattern)}, \"g\"), " +
+            "${GSON.toJson(replacement)})</js>"
+        AppLog.put("[AI书源] 目录地址正则候选推导成功：$infoUrl → $tocUrl  ($js)")
+        // 把「书籍详情页网址用正则转换」的结果直接提示出来，方便人工核对转换是否正确
+        onProgress(
+            "【AI 目录地址正则推导】\n" +
+            "  书籍详情页：$infoUrl\n" +
+            "  转换后目录页：$out\n" +
+            "  规则：$js"
+        )
+        return js
+    }
+
     private fun deriveTocUrlRule(infoUrl: String, tocUrl: String): String? {
         if (infoUrl.isBlank() || tocUrl.isBlank()) return null
         // ===== 原逻辑（一字不动地保留）：同域 + 按数字书籍编号派生 =====
@@ -2121,6 +2204,32 @@ object AiBookSourceGenerator {
          "hasContent": true或false,
          "nextContentUrl": "正文分页或下一章的完整网址，没有填 null",
          "problem": "异常时简述原因（如：其实是详情页/是目录页/正文为空/是验证码页），正常则留空"}
+    """.trimIndent()
+
+    /**
+     * 目录地址正则推导：用户同时提供了书籍详情页网址与目录页网址时，让 AI 找出二者地址规律，
+     * 给出一个能把「详情页地址」换成「目录页地址」的正则（作用于书籍自身地址 baseUrl）。
+     * 大部分小说站地址里那串数字就是书籍 ID，详情页与目录页共用，AI 很容易识别出来。
+     * 只输出 JSON（不要解释）：
+     * {"pattern": "匹配详情页地址的正则（Java/Kotlin 正则语法，可用 (\\d+) 之类捕获组）",
+     *  "replacement": "替换串，捕获组用 $1 $2 引用；整体需满足 infoUrl.replace(pattern, replacement) == tocUrl"}
+     */
+    private val ASK_TOC_REGEX = """
+        书籍详情页完整网址：%1${"$"}s
+        目录页完整网址：     %2${"$"}s
+        请找出这两个网址之间的固定规律（通常是其中一段数字/字母是同一本书的 ID），
+        写一个正则表达式：把详情页网址替换成目录页网址。
+        要求：
+        1）pattern 用 Java/Kotlin 正则语法（例如 /book/(\d+)\.html 写成 book/(\d+)\.html）；
+        2）replacement 用 $1 $2 引用捕获组，必须保证 infoUrl.replace(pattern, replacement) 严格等于 tocUrl；
+        3）如果两网址仅在末尾路径/文件名/某段数字不同，就抓那段差异做捕获组，不要写死整本书的地址；
+        4）若两个网址完全相同（详情页即目录页），pattern 填 ""、replacement 填 ""。
+
+        【输出格式，必须严格遵守】
+        你只能且必须输出一行 JSON，不要任何解释、不要 Markdown 代码块包裹、不要换行以外的多余字符。
+        JSON 必须同时包含 pattern 与 replacement 两个字段，格式如下（这是示例，不是你的答案）：
+        {"pattern":"novel/(\\d+)\\.html","replacement":"novel/list/$1/1.html"}
+        再次强调：只输出上面这种一行 JSON，其它什么都不要写。
     """.trimIndent()
 
     /**

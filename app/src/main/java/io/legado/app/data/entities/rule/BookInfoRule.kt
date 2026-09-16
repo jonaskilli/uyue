@@ -19,6 +19,7 @@ data class BookInfoRule(
     var updateTime: String? = null,
     var coverUrl: String? = null,
     var tocUrl: String? = null,
+    var tocUrlRegex: String? = null,
     var wordCount: String? = null,
     var canReName: String? = null,
     var downloadUrls: String? = null
