@@ -139,6 +139,7 @@ object AiBookSourceGenerator {
         fixRounds: Int = 2,
         manualBookInfo: String? = null,
         manualTocUrl: String? = null,
+        singleBook: Boolean = false,
         onProgress: (String) -> Unit
     ): Result<GenResult> = withContext(Dispatchers.IO) {
         runCatching {
@@ -161,27 +162,36 @@ object AiBookSourceGenerator {
             }
 
             // ---------- 1) 首页 ----------
-            onProgress("抓取首页…")
-            var homeHtml = fetch(seed) ?: error("无法访问该地址：$seed")
-            pages.add(Page("首页", seed, homeHtml))
-            var homeCheck = aiCheckPage(CHECK_HOME, homeHtml, seed)
-            var searchTemplate: String? = homeCheck?.str("searchUrl")
-            val testKeyword = homeCheck?.str("suggestKeyword").takeUnless { it.isNullOrBlank() }
-                ?: keyword
-            if (homeCheck?.bool("isNovelSite") == false) {
-                onProgress("首页疑似不是小说站，用电脑版 UA 重试…")
-                homeHtml = fetch(seed, pcUa = true) ?: homeHtml
+            // 单本模式不需要首页：没有搜索也没有发现，只抓这一本书自己的页面
+            var homeHtml = ""
+            var homeCheck: JsonObject? = null
+            var searchTemplate: String? = null
+            var testKeyword = keyword
+            if (!singleBook) {
+                onProgress("抓取首页…")
+                homeHtml = fetch(seed) ?: error("无法访问该地址：$seed")
+                pages.add(Page("首页", seed, homeHtml))
                 homeCheck = aiCheckPage(CHECK_HOME, homeHtml, seed)
-                searchTemplate = homeCheck?.str("searchUrl") ?: searchTemplate
+                searchTemplate = homeCheck?.str("searchUrl")
+                testKeyword = homeCheck?.str("suggestKeyword").takeUnless { it.isNullOrBlank() }
+                    ?: keyword
+                if (homeCheck?.bool("isNovelSite") == false) {
+                    onProgress("首页疑似不是小说站，用电脑版 UA 重试…")
+                    homeHtml = fetch(seed, pcUa = true) ?: homeHtml
+                    homeCheck = aiCheckPage(CHECK_HOME, homeHtml, seed)
+                    searchTemplate = homeCheck?.str("searchUrl") ?: searchTemplate
+                }
+                meta["首页质检"] = homeCheck?.str("problem")?.takeIf { it.isNotBlank() } ?: "通过"
             }
-            meta["首页质检"] = homeCheck?.str("problem")?.takeIf { it.isNotBlank() } ?: "通过"
 
             // ---------- 2) 搜索页 ----------
             var listHtml: String? = null
             var listUrl = ""
             var searchCheck: JsonObject? = null
             var searchDisabled = false
-            if (!searchTemplate.isNullOrBlank()) {
+            if (singleBook) {
+                onProgress("单本模式：跳过搜索与发现，只抓这本书的信息页、目录页、正文页…")
+            } else if (!searchTemplate.isNullOrBlank()) {
                 onProgress("搜索关键词「$testKeyword」…")
                 listUrl = fillKey(searchTemplate, testKeyword)
                 listHtml = fetchPage(searchTemplate, testKeyword)
@@ -279,16 +289,26 @@ object AiBookSourceGenerator {
                 detailHtml = fetch(detailUrlFinal)
                 if (detailHtml != null) {
                     pages.add(Page("书籍详情页", detailUrlFinal, detailHtml))
-                    infoCheck = aiCheckPage(CHECK_INFO, detailHtml, detailUrlFinal)
-                    detailPageIsToc = infoCheck?.bool("isAlsoToc") == true
-                    meta["书名"] = infoCheck?.str("name").orEmpty()
-                    meta["作者"] = infoCheck?.str("author").orEmpty()
+                    if (singleBook) {
+                        // 单本模式：页面是用户手动指定的，可信，跳过 AI 质检省时间；
+                        // 目录是否就在信息页里用纯代码判断（章节链接够多即是）
+                        detailPageIsToc = countChapterLinks(detailHtml) >= 8
+                    } else {
+                        infoCheck = aiCheckPage(CHECK_INFO, detailHtml, detailUrlFinal)
+                        detailPageIsToc = infoCheck?.bool("isAlsoToc") == true
+                        meta["书名"] = infoCheck?.str("name").orEmpty()
+                        meta["作者"] = infoCheck?.str("author").orEmpty()
+                    }
                 }
             } else {
                 meta["详情质检"] = "未获得详情页"
             }
-            meta["详情质检"] = infoCheck?.str("problem")?.takeIf { it.isNotBlank() }
-                ?: if (detailHtml != null) "通过" else "未抓到"
+            meta["详情质检"] = if (singleBook) {
+                if (detailHtml != null) "单本模式：页面为手动指定，已跳过 AI 质检" else "未抓到"
+            } else {
+                infoCheck?.str("problem")?.takeIf { it.isNotBlank() }
+                    ?: if (detailHtml != null) "通过" else "未抓到"
+            }
 
 
             // ---------- 4) 目录页 ----------
@@ -301,14 +321,21 @@ object AiBookSourceGenerator {
             if (manualToc != null) {
                 onProgress("抓取目录页（手动指定）…")
                 val html = fetch(manualToc)
-                if (html != null) {
+                // 校验：手动填的地址可能其实是正文页/错误页（页面里没有章节链接），
+                // 这时不采信，回退到自动定位目录——单本模式尤其需要这个容错
+                val manualCount = html?.let { countChapterLinks(it) } ?: 0
+                val detailCount = detailHtml?.let { countChapterLinks(it) } ?: 0
+                if (html != null && manualCount == 0 && detailCount > 0) {
+                    onProgress("你填的目录页里没有章节链接（可能填成了正文页），改为自动定位目录…")
+                } else if (html != null) {
                     tocUrl = manualToc
                     tocHtml = html
                     if (pages.none { it.url == manualToc }) {
                         pages.add(Page("目录页", manualToc, html))
                     }
                     meta["目录选择"] = "用户手动指定：$manualToc"
-                    tocCheck = aiCheckPage(CHECK_TOC, html, manualToc)
+                    // 单本模式：手动指定的目录页可信，跳过 AI 质检
+                    tocCheck = if (!singleBook) aiCheckPage(CHECK_TOC, html, manualToc) else null
                     // 目录规则的难点是「书籍信息页里怎么拿到这个地址」，直接把入口位置交给 AI
                     val where = detailHtml?.let {
                         locateTocAnchor(it, detailUrlFinal ?: seed, manualToc)
@@ -322,7 +349,7 @@ object AiBookSourceGenerator {
                         tocUrl = manualToc
                         tocHtml = detailHtml
                         meta["目录选择"] = "用户手动指定：$manualToc（与书籍信息页同一地址，复用已抓内容）"
-                        tocCheck = aiCheckPage(CHECK_TOC, detailHtml, manualToc)
+                        tocCheck = if (!singleBook) aiCheckPage(CHECK_TOC, detailHtml, manualToc) else null
                         meta["目录入口定位"] = "目录页与书籍信息页是同一个地址（仅页内锚点不同），" +
                             "页面上未必有指向它的入口链接，ruleBookInfo.tocUrl 请用「目录地址推导」的拼接写法"
                         onProgress("手动目录页与书籍信息页同址，复用已抓内容…")
@@ -402,7 +429,7 @@ object AiBookSourceGenerator {
                         }
                         meta["目录选择"] =
                             "候选 ${tocCandidates.size} 个，选中「${b.source}」（${bestCount} 个章节链接）"
-                        tocCheck = aiCheckPage(CHECK_TOC, b.html ?: "", b.url)
+                        tocCheck = if (!singleBook) aiCheckPage(CHECK_TOC, b.html ?: "", b.url) else null
                     }
                 } else {
                     onProgress("未找到明确目录页，交给 AI 从已有页面推断")
@@ -437,8 +464,12 @@ object AiBookSourceGenerator {
                 describeChapterBlocks(tocHtml0, tocUrl.ifBlank { seed })
                     ?.let { meta["章节区块"] = it }
             }
-            meta["目录质检"] = tocCheck?.str("problem")?.takeIf { it.isNotBlank() }
-                ?: if (tocHtml != null) "通过" else "未抓到"
+            meta["目录质检"] = if (singleBook) {
+                if (tocHtml != null) "单本模式：目录页为手动指定，已跳过 AI 质检" else "未抓到"
+            } else {
+                tocCheck?.str("problem")?.takeIf { it.isNotBlank() }
+                    ?: if (tocHtml != null) "通过" else "未抓到"
+            }
             // AI 在目录质检里给出的下一页地址：原先只取了 problem，翻页信息被丢掉了，
             // 于是目录一分页，生成的书源就只有第一页的章节
             tocCheck?.str("nextTocUrl")?.takeIf { it.startsWith("http") }?.let { next ->
@@ -494,20 +525,25 @@ object AiBookSourceGenerator {
                 contentHtml?.let { html ->
                     val url = contentUrl ?: return@let
                     pages.add(Page("正文页", url, html))
-                    val c = aiCheckPage(CHECK_CONTENT, html, url)
-                    meta["正文质检"] = c?.str("problem")?.takeIf { p -> p.isNotBlank() }
-                        ?: if (c?.bool("hasContent") == true) "通过" else "疑似无正文"
-                    if (c?.bool("hasContent") != true) {
-                        onProgress("正文页异常，用电脑版 UA 重试…")
-                        fetch(url, pcUa = true)?.let {
-                            pages.add(Page("正文页(重试)", url, it))
+                    if (singleBook) {
+                        // 单本模式：跳过 AI 质检，正文规则是否可用由后面的实测验证
+                        meta["正文质检"] = "单本模式：已跳过 AI 质检"
+                    } else {
+                        val c = aiCheckPage(CHECK_CONTENT, html, url)
+                        meta["正文质检"] = c?.str("problem")?.takeIf { p -> p.isNotBlank() }
+                            ?: if (c?.bool("hasContent") == true) "通过" else "疑似无正文"
+                        if (c?.bool("hasContent") != true) {
+                            onProgress("正文页异常，用电脑版 UA 重试…")
+                            fetch(url, pcUa = true)?.let {
+                                pages.add(Page("正文页(重试)", url, it))
+                            }
                         }
                     }
                 }
             }
 
             // ---------- 6) 分类列表页（发现页用，勾选了才采集） ----------
-            if (includeExplore && pages.none { it.role.startsWith("分类列表页") }) {
+            if (!singleBook && includeExplore && pages.none { it.role.startsWith("分类列表页") }) {
                 val classUrl = homeCheck?.str("firstCategoryUrl")
                     ?.takeIf { it.isNotBlank() }
                     ?.let { fillKey(it, testKeyword).replace("{{page}}", "1") }
@@ -533,7 +569,7 @@ object AiBookSourceGenerator {
 
             // ---------- 阶段二：生成书源 ----------
             onProgress("已采集 ${pages.size} 个页面，正在交给 AI 生成书源规则…")
-            var source = askGenerate(pages, seed, searchTemplate, meta, includeExplore)
+            var source = askGenerate(pages, seed, searchTemplate, meta, includeExplore, singleBook)
                 ?: error("AI 未返回书源。请确认「角色档案设置」里已配置接口（接口@@模型@@密钥）")
             ensureMobileUa(source)
             // 写入登录地址：Cookie 失效时可在「书源管理→登录」重新登录，
@@ -545,7 +581,7 @@ object AiBookSourceGenerator {
             // ---------- 阶段三：五链路实测 + 失败修正 ----------
             val maxRounds = fixRounds.coerceIn(0, 8)
             var fixRound = 0
-            var report = verifySource(source, testKeyword, pages, onProgress)
+            var report = verifySource(source, testKeyword, pages, onProgress, singleBook)
             while (report.any { !it.ok } && fixRound < maxRounds) {
                 fixRound++
                 onProgress(
@@ -555,7 +591,7 @@ object AiBookSourceGenerator {
                 val fixed = fixSource(source, report, pages) ?: break
                 ensureMobileUa(fixed)
                 source = fixed
-                report = verifySource(source, testKeyword, pages, onProgress)
+                report = verifySource(source, testKeyword, pages, onProgress, singleBook)
             }
 
             // ---------- 阶段四：AI 修不动时的兜底 ----------
@@ -570,13 +606,13 @@ object AiBookSourceGenerator {
                 )
                 if (changed) {
                     onProgress("AI 修正 $maxRounds 轮仍未通过，改用兜底方案重试…")
-                    var after = verifySource(source, testKeyword, pages, onProgress)
+                    var after = verifySource(source, testKeyword, pages, onProgress, singleBook)
                     // 兜底必须让情况变好，否则原样撤回——不能因为兜底把原本能用的一环弄坏
                     if (after.count { !it.ok } >= beforeFail) {
                         onProgress("兜底未改善，已撤回原有规则…")
                         source.getBookInfoRule().tocUrl = backupTocUrl
                         source.searchUrl = backupSearchUrl
-                        after = verifySource(source, testKeyword, pages, onProgress)
+                        after = verifySource(source, testKeyword, pages, onProgress, singleBook)
                     }
                     report = after
                     var round2 = 0
@@ -590,7 +626,7 @@ object AiBookSourceGenerator {
                         val fixed = fixSource(source, report, pages) ?: break
                         ensureMobileUa(fixed)
                         source = fixed
-                        report = verifySource(source, testKeyword, pages, onProgress)
+                        report = verifySource(source, testKeyword, pages, onProgress, singleBook)
                     }
                     fixRound += round2
                 }
@@ -603,7 +639,7 @@ object AiBookSourceGenerator {
             val tocOk = report.firstOrNull { it.step == "目录" }?.ok == true
             if (pager != null && tocOk && source.getTocRule().nextTocUrl.isNullOrBlank()) {
                 source.getTocRule().nextTocUrl = pager
-                val recheck = verifySource(source, testKeyword, pages, onProgress)
+                val recheck = verifySource(source, testKeyword, pages, onProgress, singleBook)
                 if (recheck.firstOrNull { it.step == "目录" }?.ok == true) {
                     report = recheck
                 } else {
@@ -612,6 +648,23 @@ object AiBookSourceGenerator {
                 }
             }
 
+            if (singleBook) {
+                // 单本书源：只服务于这一本书，搜索与发现都留空；
+                // 名字与地址带上书名，避免与同站的其它书源撞车。
+                // 跳过了详情页 AI 质检，书名从验证报告的「详情」项里取
+                val name = meta["书名"].orEmpty().trim().ifBlank {
+                    Regex("《(.+?)》")
+                        .find(report.firstOrNull { it.step == "详情" }?.message.orEmpty())
+                        ?.groupValues?.get(1).orEmpty()
+                }.ifBlank { source.bookSourceName }
+                source.searchUrl = null
+                source.exploreUrl = null
+                source.bookSourceGroup = "单本"
+                if (name.isNotBlank()) {
+                    source.bookSourceName = "单本·$name"
+                    source.bookSourceUrl = "$seed#$name"
+                }
+            }
             if (source.bookSourceName.isBlank()) source.bookSourceName = "AI生成书源"
             if (source.bookSourceGroup.isNullOrBlank()) source.bookSourceGroup = "AI生成"
 
@@ -1335,7 +1388,8 @@ object AiBookSourceGenerator {
         seedUrl: String,
         searchTemplate: String?,
         meta: Map<String, String>,
-        includeExplore: Boolean
+        includeExplore: Boolean,
+        singleBook: Boolean = false
     ): BookSource? {
         // 发现页字段按需拼接：不勾选时完全不出现，JSON 更紧凑、输出截断风险更低
         val exploreFields = if (includeExplore) {
@@ -1361,9 +1415,14 @@ object AiBookSourceGenerator {
             sb.append("```html\n").append(cleanHtml(page.html)).append("\n```\n\n")
         }
         val metaText = meta.entries.joinToString("\n") { "- ${it.key}：${it.value}" }
-        val searchHint = searchTemplate?.takeIf { it.isNotBlank() }
-            ?: "（未识别出搜索入口，searchUrl 依据页面推断，不确定留空）"
-        val user = USER_PROMPT
+        val searchHint = if (singleBook) {
+            "（单本模式：这个书源只服务于当前这一本书，不要求搜索与发现。" +
+                "searchUrl 与 exploreUrl 必须留空字符串，只把 ruleBookInfo / ruleToc / ruleContent 写对即可）"
+        } else {
+            searchTemplate?.takeIf { it.isNotBlank() }
+                ?: "（未识别出搜索入口，searchUrl 依据页面推断，不确定留空）"
+        }
+        val base = USER_PROMPT
             .replace("{seed}", seedUrl)
             .replace("{searchHint}", searchHint)
             .replace("{meta}", metaText)
@@ -1371,6 +1430,12 @@ object AiBookSourceGenerator {
             .replace("{exploreFields}", exploreFields)
             .replace("{exploreRule}", exploreRule)
             .replace("{exploreHardRule}", exploreHardRule) + PATTERN_LIBRARY
+        // 单本模式：模板里的 searchUrl 字段说明一并置空，避免 AI 困惑着去编搜索地址
+        val user = if (singleBook) {
+            base.replace(Regex("\"searchUrl\":\\s*\"[^\"]*\""), "\"searchUrl\": \"\"")
+        } else {
+            base
+        }
         val raw = chat(user, 8000) ?: return null
         val json = extractJson(raw) ?: return null
         return GSON.fromJsonObject<BookSource>(json).getOrNull()
@@ -1481,24 +1546,30 @@ object AiBookSourceGenerator {
         source: BookSource,
         keyword: String,
         pages: List<Page>,
-        onProgress: (String) -> Unit
+        onProgress: (String) -> Unit,
+        skipSearch: Boolean = false
     ): List<VerifyItem> {
         val report = ArrayList<VerifyItem>(4)
         var book: Book? = null
 
-        onProgress("验证 ①/⑤：搜索…")
-        runCatching {
-            if (source.searchUrl.isNullOrBlank()) error("searchUrl 为空")
-            if (source.searchUrl!!.contains("::")) {
-                error("searchUrl 写成了「分类名::网址」的分类列表格式——那是 exploreUrl 的格式，searchUrl 必须是单个搜索地址且含 {{key}}")
+        if (skipSearch) {
+            // 单本模式：这个书源本来就没有搜索，只验详情/目录/正文
+            report.add(VerifyItem("搜索", true, "单本模式，已跳过（本书源不含搜索）"))
+        } else {
+            onProgress("验证 ①/⑤：搜索…")
+            runCatching {
+                if (source.searchUrl.isNullOrBlank()) error("searchUrl 为空")
+                if (source.searchUrl!!.contains("::")) {
+                    error("searchUrl 写成了「分类名::网址」的分类列表格式——那是 exploreUrl 的格式，searchUrl 必须是单个搜索地址且含 {{key}}")
+                }
+                val books = WebBook.searchBookAwait(source, keyword, 1)
+                if (books.isEmpty()) error("搜索无结果")
+                val first = books.first()
+                book = first.toBook().also { it.origin = source.bookSourceUrl }
+                report.add(VerifyItem("搜索", true, "搜到 ${books.size} 本，第一本《${first.name}》"))
+            }.onFailure {
+                report.add(VerifyItem("搜索", false, it.message ?: "执行异常"))
             }
-            val books = WebBook.searchBookAwait(source, keyword, 1)
-            if (books.isEmpty()) error("搜索无结果")
-            val first = books.first()
-            book = first.toBook().also { it.origin = source.bookSourceUrl }
-            report.add(VerifyItem("搜索", true, "搜到 ${books.size} 本，第一本《${first.name}》"))
-        }.onFailure {
-            report.add(VerifyItem("搜索", false, it.message ?: "执行异常"))
         }
 
         onProgress("验证 ②/⑤：书籍详情…")
