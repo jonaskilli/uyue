@@ -282,6 +282,16 @@ object ProxyServer {
     @Volatile private var longcatConfigList: List<String> = emptyList()
     private val longcatRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
 
+    /** 设置混元3（CNB）的登录 Cookie 列表（浏览器登录后提取，含 CNBSESSION / csrfkey）。 */
+    fun setCnbCookieList(list: List<String>) {
+        CnbClient.setCookieList(list)
+        // Cookie 变更后异步强制刷新一次登录态 csrftoken，
+        // 否则会继续沿用旧会话凭证（表现为刚提取完仍提示未登录）。
+        thread(name = "cnb-auth-refresh") {
+            runCatching { CnbClient.ensureAuth(force = true) }
+        }
+    }
+
     /** 设置参与轮换的 LongCat 配置列表（自动过滤空值）。 */
     fun setLongCatConfigList(list: List<String>) {
         synchronized(longcatLock) {

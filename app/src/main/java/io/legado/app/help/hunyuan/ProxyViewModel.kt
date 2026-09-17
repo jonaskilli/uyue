@@ -61,6 +61,9 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     /** 千问（Qwen）Cookie 列表（索引 0 为「默认Cookie」，含 tongyi_sso_ticket），支持多个并自动轮换。 */
     private val qwenCookies = MutableStateFlow(loadList("qwen_cookies", "qwen_cookie"))
 
+    /** 混元3（CNB）登录 Cookie 列表，需在内置浏览器登录 cnb.cool 后提取（含 CNBSESSION）。 */
+    private val cnbCookies = MutableStateFlow(loadList("cnb_cookies", "cnb_cookie"))
+
     /** DeepSeek Bearer Token 列表（索引 0 为「默认Token」），支持多个并自动轮换。 */
     private val deepseekTokens = MutableStateFlow(loadList("deepseek_tokens", "deepseek_token"))
 
@@ -99,10 +102,11 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 当前服务商对应的凭证列表（供 UI 展示/编辑）。 */
-    val cookies: StateFlow<List<String>> = combine(provider, doubaoCookies, kimiCookies, qwenCookies) { p, d, k, q ->
+    val cookies: StateFlow<List<String>> = combine(provider, doubaoCookies, kimiCookies, qwenCookies, cnbCookies) { p, d, k, q, c ->
         when (p) {
             "kimi" -> k
             "qwen" -> q
+            "cnb" -> c
             else -> d
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, doubaoCookies.value)
@@ -131,6 +135,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         val key = when (p) {
             "kimi" -> "kimi_cookie_selected"
             "qwen" -> "qwen_cookie_selected"
+            "cnb" -> "cnb_cookie_selected"
             else -> "doubao_cookie_selected"
         }
         val list = when (p) {
@@ -145,6 +150,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         when (provider.value) {
             "kimi" -> kimiCookies
             "qwen" -> qwenCookies
+            "cnb" -> cnbCookies
             else -> doubaoCookies
         }
 
@@ -154,6 +160,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         val key = when (provider.value) {
             "kimi" -> "kimi_cookies"
             "qwen" -> "qwen_cookies"
+            "cnb" -> "cnb_cookies"
             else -> "doubao_cookies"
         }
         prefs.edit().putString(key, arr.toString()).apply()
@@ -163,6 +170,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         val key = when (provider.value) {
             "kimi" -> "kimi_cookie_selected"
             "qwen" -> "qwen_cookie_selected"
+            "cnb" -> "cnb_cookie_selected"
             else -> "doubao_cookie_selected"
         }
         prefs.edit().putInt(key, selectedIndex.value).apply()
@@ -193,6 +201,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         val key = when (p) {
             "kimi" -> "kimi_cookie_selected"
             "qwen" -> "qwen_cookie_selected"
+            "cnb" -> "cnb_cookie_selected"
             else -> "doubao_cookie_selected"
         }
         val list = activeList().value
@@ -237,6 +246,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.setDoubaoCookieList(doubaoCookies.value)
         ProxyServer.setKimiCookieList(kimiCookies.value)
         ProxyServer.setQwenCookieList(qwenCookies.value)
+        ProxyServer.setCnbCookieList(cnbCookies.value)
         ProxyServer.setDeepSeekTokenList(deepseekTokens.value)
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
     }

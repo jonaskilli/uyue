@@ -32,9 +32,12 @@ object CnbClient {
         .build()
     private const val BASE = "https://cnb.cool"
     private const val EXPLORE = "$BASE/explore"
-    private const val COMPLETIONS = "$BASE/ai/chat/completions"
-    private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    // 2026-09-18 起免登录失效：页面与接口迁至 NPC 路径，且必须携带登录态 Cookie
+    private const val PAGE_URL = "$BASE/npc/CodeBuddy"
+    private const val COMPLETIONS = "$BASE/npc/CodeBuddy/-/ai/chat/completions"
+    // UA 与「浏览器登录」时的一致（移动端），避免与会话指纹不匹配
+    private const val UA = "Mozilla/5.0 (Linux; Android 15; V2352A Build/AP3A.240905.015.A2) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/126.0.6478.71 Mobile Safari/537.36"
 
     const val DEFAULT_MODEL = "hy3-preview"
 
@@ -49,6 +52,30 @@ object CnbClient {
     @Volatile private var csrfkey: String = ""
     @Volatile private var csrftoken: String = ""
     @Volatile private var restored = false
+
+    /** 由混元太极界面（浏览器登录后提取）注入的登录 Cookie 列表，含 CNBSESSION / csrfkey。 */
+    @Volatile private var cookieList: List<String> = emptyList()
+    private val rotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 设置登录 Cookie 列表（自动过滤空值）。空列表时回退到游客模式。 */
+    fun setCookieList(list: List<String>) {
+        cookieList = list.map { it.trim() }.filter { it.isNotBlank() }
+    }
+
+    /**
+     * 与当前已获取的 csrftoken 配对的登录 Cookie。
+     * 取凭证与发请求必须用同一条 Cookie，否则 csrftoken 与会话不匹配会导致 401，
+     * 故轮换只在 fetchAuth 时进行，之后固定在 activeCookie 上。
+     */
+    @Volatile private var activeCookie: String = ""
+
+    /** 当前使用的登录 Cookie；未注入时返回空串。 */
+    private fun currentCookie(): String {
+        val valid = cookieList
+        if (valid.isEmpty()) return ""
+        val idx = kotlin.math.abs(rotationIdx.getAndIncrement() % valid.size)
+        return valid[idx]
+    }
     /** 上次成功获取凭证的时间戳（用于 8 小时限频）。 */
     @Volatile private var lastAuthTime = 0L
 
@@ -100,11 +127,20 @@ object CnbClient {
     }
 
     private fun fetchAuth() {
-        LogStore.d("CNB", "获取认证: GET $EXPLORE")
-        val reqBuilder = Request.Builder().url(EXPLORE)
+        val cookie = currentCookie().also { activeCookie = it }
+        // 有登录 Cookie → 走 NPC 页面拿「登录态」csrftoken；否则回退游客 explore（现已失效，仅作兜底）
+        val pageUrl = if (cookie.isNotBlank()) PAGE_URL else EXPLORE
+        LogStore.d("CNB", "获取认证: GET $pageUrl（登录态=${cookie.isNotBlank()}）")
+        val reqBuilder = Request.Builder().url(pageUrl)
             .header("User-Agent", UA)
             .header("Accept", "text/html,*/*")
-        if (csrfkey.isNotBlank()) reqBuilder.header("Cookie", "csrfkey=$csrfkey")
+        if (cookie.isNotBlank()) {
+            reqBuilder.header("Cookie", cookie)
+            // 同步 Cookie 里的 csrfkey，保证与当前登录会话一致
+            csrfKeyRe.find(cookie)?.groupValues?.get(1)?.let { csrfkey = it }
+        } else if (csrfkey.isNotBlank()) {
+            reqBuilder.header("Cookie", "csrfkey=$csrfkey")
+        }
         client.newCall(reqBuilder.build()).execute().use { resp ->
             // csrfkey 来自 Set-Cookie 响应头（页面不回显）
             val setCookie = resp.headers("set-cookie").joinToString("; ")
@@ -159,8 +195,10 @@ object CnbClient {
             .header("Accept", "text/event-stream")
             .header("User-Agent", UA)
             .header("Origin", BASE)
-            .header("Referer", "$BASE/explore")
-            .header("Cookie", "csrfkey=$csrfkey")
+            .header("Referer", PAGE_URL)
+            // 必须带完整登录 Cookie（含 CNBSESSION）：只发 csrfkey 会被判为未登录。
+            // 且与本次 csrftoken 配对的必须是同一条会话 Cookie，故用 activeCookie 而非重新轮换。
+            .header("Cookie", (activeCookie.ifBlank { currentCookie() }).ifBlank { "csrfkey=$csrfkey" })
             .header("Csrftoken", csrftoken)
             .build()
         val resp = client.newCall(req).execute()

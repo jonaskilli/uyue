@@ -497,11 +497,9 @@ fun ProxyScreen(
     }
 
     Column(modifier) {
-        // 服务商选择：豆包 / Kimi / DeepSeek
+        // 服务商选择：去掉「服务商:」前缀文字以节省横向空间，混元3 置顶
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("服务商:", style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.width(6.dp))
-            listOf("doubao" to "豆包", "kimi" to "Kimi", "qwen" to "千问", "deepseek" to "DeepSeek", "longcat" to "龙猫").forEach { (id, label) ->
+            listOf("cnb" to "混元3", "doubao" to "豆包", "kimi" to "Kimi", "qwen" to "千问", "deepseek" to "DeepSeek", "longcat" to "龙猫").forEach { (id, label) ->
                 val selected = provider == id
                 COutBtn(
                     onClick = {
@@ -544,6 +542,7 @@ fun ProxyScreen(
                     CField(
                         value = cookie, onValueChange = onCookieChange,
                         placeholder = when (provider) {
+                            "cnb" -> "在内置浏览器登录 cnb.cool 后点「提取Cookie」（csrftoken 自动获取）"
                             "kimi" -> "粘贴 kimi.com 的 Cookie（含 JWT 自动提取）"
                             "qwen" -> "粘贴 qianwen.com 的 Cookie（含 tongyi_sso_ticket）"
                             else -> "粘贴 doubao.com 的完整 Cookie 字符串"
@@ -895,6 +894,7 @@ fun BrowserScreen(
     var url by remember(provider) {
         mutableStateOf(
             when (provider) {
+                "cnb" -> "https://cnb.cool/npc/CodeBuddy"
                 "kimi" -> "https://www.kimi.com/"
                 "qwen" -> "https://www.qianwen.com/"
                 "deepseek" -> "https://chat.deepseek.com/"
@@ -911,6 +911,7 @@ fun BrowserScreen(
         capturedToken.value = null
         capturedLongCat.value = null
         val target = when (provider) {
+            "cnb" -> "https://cnb.cool/npc/CodeBuddy"
             "kimi" -> "https://www.kimi.com/"
             "qwen" -> "https://www.qianwen.com/"
             "deepseek" -> "https://chat.deepseek.com/"
@@ -956,6 +957,7 @@ fun BrowserScreen(
                 val cm = CookieManager.getInstance()
                 // 该服务商对应的 base 域（即“关键词”）。含该关键词的所有网址 Cookie 都清
                 val bases = when (p) {
+                    "cnb" -> listOf("cnb.cool")
                     "kimi" -> listOf("kimi.com")
                     "qwen" -> listOf("qianwen.com")
                     "deepseek" -> listOf("deepseek.com")
@@ -980,7 +982,7 @@ fun BrowserScreen(
                         }
                     }
                 }
-                val label = when (p) { "kimi" -> "Kimi"; "qwen" -> "千问"; "deepseek" -> "DeepSeek"; else -> "豆包" }
+                val label = when (p) { "cnb" -> "混元3"; "kimi" -> "Kimi"; "qwen" -> "千问"; "deepseek" -> "DeepSeek"; else -> "豆包" }
                 if (allNames.isEmpty()) {
                     webViewRef.value?.loadUrl(url)
                     toast = "没有可清空的 $label Cookie"
@@ -1010,7 +1012,7 @@ fun BrowserScreen(
                 }, 400)
             }
             // 服务商选择框：选择即进入对应站点；旁边「清空」按钮清该站点 Cookie（龙猫为清空配置）
-            val provItems = listOf("doubao" to "豆包", "kimi" to "Kimi", "qwen" to "千问", "deepseek" to "DeepSeek", "longcat" to "龙猫")
+            val provItems = listOf("cnb" to "混元3", "doubao" to "豆包", "kimi" to "Kimi", "qwen" to "千问", "deepseek" to "DeepSeek", "longcat" to "龙猫")
             var provExpanded by remember { mutableStateOf(false) }
             ExposedDropdownMenuBox(
                 expanded = provExpanded,
@@ -1092,6 +1094,7 @@ fun BrowserScreen(
                     // 豆包 / Kimi 采用完全相同的 Cookie 提取方式：
                     // 合并对应站点两个域（带 www 与不带）下的 Cookie，去重后以 "; " 拼接填入设置。
                     val (host1, host2, siteName) = when (provider) {
+                        "cnb" -> Triple("https://cnb.cool", "https://www.cnb.cool", "混元3")
                         "kimi" -> Triple("https://www.kimi.com", "https://kimi.com", "Kimi")
                         "qwen" -> Triple("https://www.qianwen.com", "https://qianwen.com", "千问")
                         else -> Triple("https://www.doubao.com", "https://doubao.com", "豆包")

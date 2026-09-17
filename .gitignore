@@ -18,6 +18,15 @@ app/schemas/
 /依赖/*
 # 但保留离线 SDK 安装包与打包文档
 !/依赖/sdk-packages/
+
+# 含个人登录凭证（CNBSESSION / csrftoken / API Key）的朗读脚本，禁止入库，
+# 否则分发 APP 会导致他人使用本人认证额度
+朗读脚本 混元.json
+朗读脚本*需要密钥.json
+# 外部凭证文件（手机端运行时读取，同样不入库）
+cnb_session.json
+cnb_token.json
+cnb_cookie.json
 !/依赖/sdk-packages/**
 !/依赖/打包文档.md
 build_release*.log

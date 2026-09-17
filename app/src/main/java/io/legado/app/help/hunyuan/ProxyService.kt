@@ -47,6 +47,7 @@ class ProxyService : android.app.Service() {
             val qwen = loadList(prefs, "qwen_cookies", "qwen_cookie")
             val deepseek = loadList(prefs, "deepseek_tokens", "deepseek_token")
             val longcat = loadList(prefs, "longcat_configs", "longcat_config")
+            val cnb = loadList(prefs, "cnb_cookies", "cnb_cookie")
             val stream = prefs.getBoolean("stream_mode", true)
             val mode = prefs.getString("deepseek_mode", "default") ?: "default"
             val imageSize = prefs.getString("image_size", "9:16") ?: "9:16"
@@ -58,6 +59,7 @@ class ProxyService : android.app.Service() {
             ProxyServer.setDoubaoCookieList(doubao)
             ProxyServer.setKimiCookieList(kimi)
             ProxyServer.setQwenCookieList(qwen)
+            ProxyServer.setCnbCookieList(cnb)
             ProxyServer.setDeepSeekTokenList(deepseek)
             ProxyServer.setLongCatConfigList(longcat)
 
