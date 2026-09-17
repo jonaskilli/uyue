@@ -1979,7 +1979,13 @@ object ProxyServer {
         sb.toString()
     }
 
-    /** 混元3 / CNB：上游非流式时直接取 JSON 的 content，流式时聚合 SSE。 */
+    /**
+     * 混元3 / CNB（进程内）。
+     *
+     * 上游请求体与 Ktor 路由完全一致（同样用 [streamMode]），保证开/不开服务结果一致；
+     * 进程内只是把结果一次性聚合成 JSON 返回。
+     * 解析兼容两种上游返回：SSE（streamMode=true）或 JSON（streamMode=false）。
+     */
     private suspend fun cnbText(req: ChatCompletionRequest): String {
         val model = mapModel(req.model)
         val body = org.json.JSONObject().apply {
@@ -1998,16 +2004,25 @@ object ProxyServer {
         }.toString()
         return upstream("CNB") {
             CnbClient.chatCompletion(body).use { resp ->
-                if (streamMode) {
-                    val sb = StringBuilder()
-                    parseCnbSse(resp.body!!.source()) { sb.append(it) }
-                    sb.toString()
-                } else {
-                    org.json.JSONObject(resp.body!!.string())
-                        .getJSONArray("choices").getJSONObject(0)
-                        .getJSONObject("message").getString("content")
-                }
+                parseCnbContent(resp.body!!.string())
             }
         }
+    }
+
+    /** 解析 CNB 返回体：优先按非流式 JSON 取 content，失败则按 SSE 聚合兜底。 */
+    private fun parseCnbContent(text: String): String {
+        val t = text.trim()
+        if (t.startsWith("{")) {
+            runCatching {
+                return org.json.JSONObject(t)
+                    .getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").getString("content")
+            }.onFailure {
+                LogStore.w("CNB", "JSON 解析失败，改按 SSE 兜底解析: ${it.message}")
+            }
+        }
+        val sb = StringBuilder()
+        parseCnbSse(okio.Buffer().apply { writeUtf8(text) }) { sb.append(it) }
+        return sb.toString()
     }
 }

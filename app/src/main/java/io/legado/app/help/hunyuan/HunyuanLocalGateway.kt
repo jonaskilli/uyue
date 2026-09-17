@@ -197,6 +197,18 @@ object HunyuanLocalGateway : Interceptor {
         ProxyServer.setDoubaoCookieList(loadList(p, "doubao_cookies", "doubao_cookie"))
         ProxyServer.setKimiCookieList(loadList(p, "kimi_cookies", "kimi_tokens"))
         ProxyServer.setQwenCookieList(loadList(p, "qwen_cookies", "qwen_cookie"))
+        // 混元3（CNB）2026-09-18 起免登录失效，必须带浏览器登录后的 Cookie（含 CNBSESSION）。
+        // 进程内直连没有「点启动」那一步，必须在此把 cnb_cookies 还原进 CnbClient，
+        // 否则 CnbClient.cookieList 为空 → 只发 csrfkey → 被判未登录（401 / 连接不上）。
+        val cnb = loadList(p, "cnb_cookies", "cnb_cookie")
+        ProxyServer.setCnbCookieList(cnb)
+        // setCnbCookieList 内部只异步刷新凭证，可能与首个请求抢跑（请求沿用上次留下的
+        // 游客 csrftoken 先失败一次再重试）。此处同步刷一次，保证首个请求就是登录态。
+        // ensureConfig 只会在非主线程被调用（主线程已被网关提前放行），可安全同步等待。
+        if (cnb.any { it.isNotBlank() }) {
+            runCatching { CnbClient.ensureAuth(force = true) }
+                .onFailure { LogStore.w("Gateway", "混元3 凭证刷新失败: ${it.message}") }
+        }
         ProxyServer.setDeepSeekTokenList(loadList(p, "deepseek_tokens", "deepseek_token"))
 
         val longcat = loadList(p, "longcat_configs", "longcat_config")

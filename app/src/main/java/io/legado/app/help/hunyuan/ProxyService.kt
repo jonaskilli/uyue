@@ -123,6 +123,9 @@ class ProxyService : android.app.Service() {
         val lcPrefs = getSharedPreferences("ds_proxy", Context.MODE_PRIVATE)
         val longcat = loadList(lcPrefs, "longcat_configs", "longcat_config")
         ProxyServer.setLongCatConfigList(longcat)
+        // 混元3（CNB）登录 Cookie 不经过 intent 传递，统一在此从配置还原，
+        // 保证任何启动路径（界面启动 / 自动恢复）都能带上登录态 Cookie。
+        ProxyServer.setCnbCookieList(loadList(lcPrefs, "cnb_cookies", "cnb_cookie"))
 
         startForeground(NOTIF_ID, buildNotification("服务运行中 · 端口 $port · ${if (stream) "流式" else "非流式"}"))
 

@@ -45,7 +45,11 @@ val IMAGE_SIZE_OPTIONS = listOf(
 
 class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("ds_proxy", Context.MODE_PRIVATE)
+    // 必须挂上混元太极本地网关：界面自带的聊天/生图框直接请求 127.0.0.1:<端口>，
+    // 不挂网关就只能连真实端口——服务未启动时必然 Failed to connect to /127.0.0.1:8801。
+    // 挂上后未启动服务时由网关进程内直连（除 DeepSeek 依赖 PoW 仍需真实端口）。
     private val http = OkHttpClient.Builder()
+        .addInterceptor(HunyuanLocalGateway)
         .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
         .build()
@@ -249,6 +253,8 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.setCnbCookieList(cnbCookies.value)
         ProxyServer.setDeepSeekTokenList(deepseekTokens.value)
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
+        // 界面改了凭证 → 让本地网关下次请求重新读取，避免沿用旧缓存
+        HunyuanLocalGateway.invalidateConfig()
     }
 
     /** 当前 DeepSeek Token（供 UI 展示/编辑，取选中下标那一条）。 */
