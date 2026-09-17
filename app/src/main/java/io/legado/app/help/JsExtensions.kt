@@ -17,6 +17,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.http.BackstageWebView
 import io.legado.app.help.http.CookieManager.cookieJarHeader
 import io.legado.app.help.http.CookieStore
+import io.legado.app.help.http.okHttpClient
 import io.legado.app.help.http.SSLHelper
 import io.legado.app.help.http.StrResponse
 import io.legado.app.help.source.SourceHelp
@@ -76,6 +77,9 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import okhttp3.Response
+import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.nio.charset.Charset
 import java.security.MessageDigest
@@ -106,6 +110,15 @@ import io.legado.app.help.config.ThemeConfig
  */
 private val ajaxHeaderFile: String
     get() = EngineDataDir.baseDir() + "response_headers.json"
+
+/**
+ * 竞速类请求（ajaxRace / ajaxRaceDelayed）的最大超时：300 秒。
+ *
+ * 朗读脚本通过 java.ajaxRaceDelayed 调用 AI 接口时，若走 ignoreTimeout 分支
+ * （忽略脚本自带 timeout），统一按此值设置 connect / write / read 三个阶段，
+ * call 阶段再额外加 10 秒余量。
+ */
+private const val AJAX_RACE_MAX_TIMEOUT_MS = 300_000L
 
 interface JsExtensions : JsEncodeUtils {
 
@@ -224,7 +237,8 @@ interface JsExtensions : JsEncodeUtils {
             thread.start()
         }
 
-        latch.await(300, TimeUnit.SECONDS)
+        // 单个请求最长 300 秒，叠加阶梯启动延迟后需留出余量，否则会先于此超时
+        latch.await(AJAX_RACE_MAX_TIMEOUT_MS + 60_000L, TimeUnit.MILLISECONDS)
         threads.forEach { it.interrupt() }
         return resultRef.get()
     }
@@ -272,7 +286,8 @@ interface JsExtensions : JsEncodeUtils {
             thread.start()
         }
 
-        latch.await(300, TimeUnit.SECONDS)
+        // 单个请求最长 300 秒，叠加阶梯启动延迟后需留出余量，否则会先于此超时
+        latch.await(AJAX_RACE_MAX_TIMEOUT_MS + 60_000L, TimeUnit.MILLISECONDS)
         threads.forEach { it.interrupt() }
         return resultRef.get()
     }
@@ -341,32 +356,67 @@ private fun saveResponseHeadersIfWebPage(
         // 其它任何脚本/请求都不保存。
         val saveHeaders = (reqMap["saveHeaders"] as? Boolean) == true
 
+        // ignoreTimeout 时统一按 300 秒（朗读脚本慢接口需要），否则用请求自带的 timeout
+        val timeoutMs = if (ignoreTimeout) AJAX_RACE_MAX_TIMEOUT_MS else timeout
+
         return if (method.equals("POST", true) && !body.isNullOrBlank()) {
             rhinoContextOrNull?.ensureActive()
-            val response = post(
-                urlStr = url,
-                body = body,
-                headers = headerMap ?: emptyMap(),
-                timeout = if (ignoreTimeout) 300_000 else timeout.toInt()
-            )
-            if (response.statusCode() == 200) {
-                response.body()
-            } else {
-                AppLog.put("ajaxRace POST ${url} error: status ${response.statusCode()}")
-                null
+            // 必须直接走 OkHttp：jsoup（HttpURLConnection）通道只能覆盖 connect / read，
+            // write / call 会继承全局客户端的 15s / 60s，使脚本设的超时失效。
+            val response = postDirect(url, body, headerMap ?: emptyMap(), timeoutMs)
+            response.use {
+                if (it.code == 200) {
+                    it.body?.string()
+                } else {
+                    AppLog.put("ajaxRace POST ${url} error: status ${it.code}")
+                    null
+                }
             }
         } else {
+            rhinoContextOrNull?.ensureActive()
             val analyzeUrl = AnalyzeUrl(
                 url,
                 headerMapF = headerMap,
                 source = getSource(),
-                callTimeout = if (ignoreTimeout) 300_000 else timeout,
+                readTimeout = timeoutMs,
+                callTimeout = timeoutMs + 10_000L,
                 coroutineContext = kotlin.coroutines.EmptyCoroutineContext
             )
             val strResponse = analyzeUrl.getStrResponse()
             if (saveHeaders) saveResponseHeadersIfWebPage(url, method, headerMap, strResponse.raw)
             strResponse.body
         }
+    }
+
+    /**
+     * 直接用 OkHttp 发起 POST，并**显式设置 connect / write / read / call 四个超时**。
+     *
+     * 不能走 jsoup(HttpURLConnection) 通道：ObsoleteUrlFactory 只实现了
+     * setConnectTimeout / setReadTimeout，writeTimeout 与 callTimeout 会一直继承
+     * [okHttpClient] 的 15s / 60s。因此即便 jsoup 设了 300 秒，
+     * 请求仍会在连接写入阶段或整体 60 秒处被掐断——这正是朗读脚本
+     * 「改了超时却依然几十秒就失败」的根因。
+     */
+    private fun postDirect(
+        urlStr: String,
+        body: String,
+        headers: Map<String, String>,
+        timeoutMs: Long
+    ): Response {
+        val contentType = headers.entries
+            .firstOrNull { it.key.equals("Content-Type", true) }
+            ?.value?.toMediaTypeOrNull()
+        val requestBuilder = Request.Builder()
+            .url(urlStr)
+            .post(body.toRequestBody(contentType))
+        headers.forEach { (k, v) -> requestBuilder.header(k, v) }
+        val client = okHttpClient.newBuilder()
+            .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout(timeoutMs + 10_000L, TimeUnit.MILLISECONDS)
+            .build()
+        return client.newCall(requestBuilder.build()).execute()
     }
 
     /**

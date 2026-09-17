@@ -591,6 +591,10 @@ class AnalyzeUrl(
         }
         return client.newBuilder().run {
             if (readTimeout != null) {
+                // 连接与写入阶段必须一并跟随 readTimeout：否则会继承全局客户端的 15s，
+                // 慢接口在连接/发送阶段就超时，调用方设置的读超时根本等不到。
+                connectTimeout(readTimeout, TimeUnit.MILLISECONDS)
+                writeTimeout(readTimeout, TimeUnit.MILLISECONDS)
                 readTimeout(readTimeout, TimeUnit.MILLISECONDS)
                 callTimeout(max(60 * 1000L, readTimeout * 2), TimeUnit.MILLISECONDS)
             }

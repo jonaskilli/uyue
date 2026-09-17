@@ -922,8 +922,10 @@ object ProxyServer {
                     val resp = ZhipuClient.chatCompletion(text, plusModel = plus)
                     try {
                         val sb = StringBuilder()
-                        parseZhipuSse(resp.body!!.source()) { sb.append(it) }
-                        sb.toString() to null
+                        // 直接取上游最后一次推送的完整文本：智谱偶发推送非前缀累积的帧，
+                        // 增量拼接会错位成乱码，最终完整文本才是最可靠的模型输出。
+                        val finalText = parseZhipuSse(resp.body!!.source()) { sb.append(it) }
+                        (finalText.ifEmpty { sb.toString() }) to null
                     } finally {
                         resp.close()
                     }
@@ -1081,8 +1083,23 @@ object ProxyServer {
         }
     }
 
-    /** 解析智谱 SSE：上游推送累积完整文本，本地计算增量（delta = newFull 去掉 prevFull 前缀）后回调。 */
-    private suspend fun parseZhipuSse(src: okio.BufferedSource, onDelta: suspend (String) -> Unit) {
+    /**
+     * 解析智谱 SSE。上游每个事件推送的是**累积完整文本**（不是增量），本地算增量后回调。
+     *
+     * ⚠ 实测智谱并非始终严格前缀累积：偶发推送与上一帧不同源的文本（重发 / 乱序 / 回退）。
+     * 原实现直接 `full.substring(prevFull.length)` 按「字符数」切分，一旦两者不是前缀关系，
+     * 就会从错误的字符位置截取，拼出 ` ```n `、`"ame"`、`"age": "青年 "age"` 这类位置错乱的
+     * 乱码——表现为「只有开头第一条损坏，其余正常」。
+     *
+     * 修正：非前缀帧**整帧丢弃**。
+     *  - 按字符数切   → 位置错乱，拼出乱码（原 bug）；
+     *  - 按公共前缀切 → 会把已发过的内容重发一遍，导致回复重复两遍；
+     * 两者都不可取。丢弃后基准 prevFull 保持不变，实测智谱后续帧会继续推送以该基准为
+     * 前缀的累积文本，内容会被自动补齐，因此既不乱码也不重复。
+     *
+     * @return 上游最后一次推送的完整文本（模型最终输出，未经增量拼接，最可靠）
+     */
+    private suspend fun parseZhipuSse(src: okio.BufferedSource, onDelta: suspend (String) -> Unit): String {
         var prevFull = ""
         val data = StringBuilder()
         while (true) {
@@ -1106,8 +1123,11 @@ object ProxyServer {
                             }
                         }
                     }
-                    if (full.length > prevFull.length) {
-                        onDelta(full.substring(prevFull.length))
+                    // 只在「严格前缀累积」时发增量；非前缀帧整帧丢弃（见函数注释）
+                    if (full != prevFull && full.startsWith(prevFull)) {
+                        if (full.length > prevFull.length) {
+                            onDelta(full.substring(prevFull.length))
+                        }
                         prevFull = full
                     }
                 } catch (_: Exception) {
@@ -1116,7 +1136,9 @@ object ProxyServer {
                 data.append(line.substring(5).trimStart()).append("\n")
             }
         }
+        return prevFull
     }
+
 
     /** 生图接口：POST /v1/images/generations → 豆包生图 / 智谱生图（按 model 区分）。 */
     private suspend fun RoutingContext.handleImageGen() {

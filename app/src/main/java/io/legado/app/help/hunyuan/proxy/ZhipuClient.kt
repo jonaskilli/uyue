@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  */
 object ZhipuClient {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(300, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
         .build()
 

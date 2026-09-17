@@ -25,7 +25,9 @@ import kotlin.jvm.Synchronized
  */
 object CnbClient {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
+        // 上层 ProxyServer 以 withTimeout(300_000) 兜底，连接阶段同步放宽，
+        // 避免慢接口在 20 秒的连接阶段就被掐断（读超时保持 0 = 不限）。
+        .connectTimeout(300, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS) // 流式读取不设超时，由上层 withTimeout 兜底
         .build()
     private const val BASE = "https://cnb.cool"
