@@ -1,5 +1,6 @@
 package io.legado.app.model
 
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import io.legado.app.constant.AppConst
@@ -20,6 +21,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.Response
 import java.net.InetAddress
 import java.net.UnknownHostException
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -222,8 +224,8 @@ object AiBookSourceGenerator {
                 onProgress("单本模式：跳过搜索与发现，只抓这本书的信息页、目录页、正文页…")
             } else if (!searchTemplate.isNullOrBlank()) {
                 onProgress("搜索关键词「$testKeyword」…")
-                listUrl = fillKey(searchTemplate, testKeyword)
-                listHtml = fetchPage(searchTemplate, testKeyword)
+                listUrl = absUrl(fillKey(searchTemplate, testKeyword), seed)
+                listHtml = fetchPage(searchTemplate, testKeyword, seed)
                 if (listHtml != null && pageSimilar(listHtml, homeHtml)) {
                     // 软失败：站点把失效的搜索请求 301 回了首页
                     onProgress("搜索地址被站点重定向回了首页…")
@@ -247,12 +249,29 @@ object AiBookSourceGenerator {
                 } else {
                     searchDisabled = true
                 }
-                // 纯代码复核只记录提示，不覆盖 AI 给的结果——原逻辑优先，
-                // 真正替换交给下面「搜索被判定不可用」时的兜底
                 val listHtml0 = listHtml
                 if (listHtml0 != null && countBookLinks(listHtml0, listUrl) < 2) {
-                    meta["搜索结果复核"] = "搜索页里没能数出指向书籍详情页的链接，" +
-                        "请核对 searchUrl 是否真能搜到书（{{key}} 位置、参数名、隐藏字段是否正确）。"
+                    // AI 给的搜索地址数不出书籍链接：主动用首页表单推导的候选（POST 优先）再竞速一次。
+                    // 社区书源里 30% 的搜索是 POST（1476 站），AI 常误写成 GET，这一步是必须的。
+                    var baseCount = countBookLinks(listHtml0, listUrl)
+                    bestSearchCandidate(homeHtml, seed, testKeyword)?.let { (tpl, html) ->
+                        val u = absUrl(fillKey(tpl.substringBefore(",{\""), testKeyword), seed)
+                        val n = countBookLinks(html, u)
+                        if (n > baseCount) {
+                            baseCount = n
+                            searchTemplate = tpl
+                            listUrl = u
+                            listHtml = html
+                            pages.add(Page("搜索结果页(竞速替换)", u, html))
+                            // detailUrl 在下面几行统一从 searchCheck 里取，这里只更新 searchCheck
+                            searchCheck = aiCheckPage(CHECK_SEARCH, html, u, testKeyword)
+                        }
+                    }
+                    if (baseCount < 2) {
+                        meta["搜索结果复核"] = "搜索页里没能数出指向书籍详情页的链接，" +
+                            "请核对 searchUrl 是否真能搜到书（{{key}} 位置、参数名、隐藏字段、" +
+                            "以及该站搜索是否需要 POST）。"
+                    }
                 }
             } else {
                 onProgress("首页未识别出搜索入口…")
@@ -262,7 +281,7 @@ object AiBookSourceGenerator {
             if (searchDisabled) {
                 onProgress("搜索入口不可用，改从站内搜索表单推导…")
                 bestSearchCandidate(homeHtml, seed, testKeyword)?.let { (tpl, html) ->
-                    val url = fillKey(tpl.substringBefore(",{\""), testKeyword)
+                    val url = absUrl(fillKey(tpl.substringBefore(",{\""), testKeyword), seed)
                     pages.add(Page("搜索结果页(表单推导)", url, html))
                     searchTemplate = tpl
                     listUrl = url
@@ -298,6 +317,20 @@ object AiBookSourceGenerator {
                                     "搜索结果为分类推荐而非按关键词过滤"
                         }
                     }
+                }
+            }
+            // JSON 搜索接口（API 型站点，458 站）：把纯代码算出的 JSONPath 直接告诉 AI
+            listHtml?.let { h ->
+                jsonBookCandidates(h)?.let { c ->
+                    meta["搜索结果(JSON)"] = "搜索接口返回的是 JSON，bookList 可直接用 ${c.list}" +
+                        "（也可写 @JSon:${c.list}）；name=${c.name}；author=${c.author}；bookUrl=${c.url}"
+                }
+            }
+            // 搜索结果分页（22% 的书源带 {{page}}）：提醒 AI 在 searchUrl 里留分页位
+            listHtml?.let { h ->
+                detectTocPagers(h, listUrl).firstOrNull()?.let { c ->
+                    meta["搜索分页"] = "搜索结果有分页（${c.desc}），searchUrl 请用 {{page}} 占位，" +
+                        "否则只能拿到第一页的搜索结果。"
                 }
             }
             meta["搜索质检"] = when {
@@ -346,7 +379,7 @@ object AiBookSourceGenerator {
             var tocHtml: String? = null
             var tocUrl = ""
             var tocCheck: JsonObject? = null
-            var tocPagerRule: String? = null
+            var tocPagerCands: List<PagerCand> = emptyList()
             if (manualToc != null) {
                 onProgress("抓取目录页（手动指定）…")
                 val html = fetch(manualToc)
@@ -479,9 +512,36 @@ object AiBookSourceGenerator {
             // 目录页确定后再补提示：目录就是信息页 → tocUrl 留空；并给出章节区块结构
             val tocHtml0 = tocHtml
             if (tocHtml0 != null) {
-                tocPager(tocHtml0, tocUrl.ifBlank { seed })?.let { (txt, rule) ->
-                    meta["目录分页"] = txt
-                    tocPagerRule = rule
+                // 翻页全形态探测：文本 / 下拉选页 / 数字页码 / JS 拼页，并给出 || 组合规则
+                val pagerCands = detectTocPagers(tocHtml0, tocUrl.ifBlank { seed })
+                if (pagerCands.isNotEmpty()) {
+                    tocPagerCands = pagerCands
+                    meta["目录分页"] = buildString {
+                        append("【目录分页】这个目录是分页的：当前页只列出一部分章节，")
+                        append("ruleToc.nextTocUrl 必须填写，否则书源只能拿到第一页的章节。\n")
+                        append("检测到的翻页形态（可直接采用，首选第一条）：\n")
+                        pagerCands.take(3).forEach {
+                            append("  · ").append(it.desc).append(" → ")
+                                .append(it.rule.take(140)).append('\n')
+                        }
+                        append("推荐写法：").append(bestPagerRule(pagerCands).orEmpty().take(160))
+                    }
+                }
+                // JSON 目录页：直接给出可用的 JSONPath 章节列表
+                jsonChapterCandidates(tocHtml0).take(2).let { list ->
+                    if (list.isNotEmpty()) {
+                        meta["章节列表候选(JSON)"] =
+                            "目录页返回的是 JSON，chapterList 可直接用：" + list.joinToString(" 或 ")
+                    }
+                }
+                // 目录入口全形态候选：写 ruleBookInfo.tocUrl 时照这里选
+                val dh = detailHtml
+                if (dh != null) {
+                    detectTocEntries(dh, detailUrlFinal ?: seed).take(4).let { entries ->
+                        if (entries.isNotEmpty()) {
+                            meta["目录入口候选"] = entries.joinToString("；") { "${it.rule}（${it.desc}）" }
+                        }
+                    }
                 }
                 if (detailUrlFinal != null && cleanUrl(tocUrl) == cleanUrl(detailUrlFinal)) {
                     meta["书籍信息页即目录"] =
@@ -604,8 +664,12 @@ object AiBookSourceGenerator {
             // 目录地址正则兜底：把「详情页→目录页」的 AI 正则写进书源，
             // 运行时若书籍详情页取不到目录入口链接，就靠它把详情页地址换成目录页地址
             aiTocRegex?.let { source.getBookInfoRule().tocUrlRegex = it }
+            // 规则语法规范化：AI 常写 :eq()/逗号多选择器/伪类等 legado 不认的写法，先纠正再竞速
+            normalizeSourceRules(source)
             // 目录全候选竞速：AI 规则与纯代码推导的所有容器在真实页面上比拼，取章节最完整的
             refineTocRules(source, pages, onProgress)
+            // 搜索结果容器竞速：搜索侧此前没有任何纯代码兜底，这里补上与目录侧同款的机制
+            refineSearchRules(source, pages, onProgress)
             // 写入登录地址：Cookie 失效时可在「书源管理→登录」重新登录，
             // 登录后的 Cookie 由 legado 按域名自动注入书源请求
             if (!loginUrl.isNullOrBlank()) {
@@ -622,9 +686,11 @@ object AiBookSourceGenerator {
                     "验证未通过（${report.filter { !it.ok }.joinToString("、") { it.step }}），" +
                         "正在让 AI 修正（第 $fixRound/$maxRounds 轮）…"
                 )
-                val fixed = fixSource(source, report, pages) ?: break
+                val fixed = fixSource(source, report, pages, meta) ?: break
                 ensureMobileUa(fixed)
+                normalizeSourceRules(fixed)
                 refineTocRules(fixed, pages, onProgress)
+                refineSearchRules(fixed, pages, onProgress)
                 source = fixed
                 report = verifySource(source, testKeyword, pages, onProgress, singleBook)
             }
@@ -658,9 +724,10 @@ object AiBookSourceGenerator {
                                 report.filter { !it.ok }.joinToString("、") { it.step }
                             }），正在让 AI 修正（第 $round2/$maxRounds 轮）…"
                         )
-                        val fixed = fixSource(source, report, pages) ?: break
+                        val fixed = fixSource(source, report, pages, meta) ?: break
                         ensureMobileUa(fixed)
                         refineTocRules(fixed, pages, onProgress)
+                refineSearchRules(fixed, pages, onProgress)
                         source = fixed
                         report = verifySource(source, testKeyword, pages, onProgress, singleBook)
                     }
@@ -668,18 +735,49 @@ object AiBookSourceGenerator {
                 }
             }
 
+            // ---------- 阶段四补：目录仍然拿不到章节时的最后手段 ----------
+            // refineTocRules 出于「不能改坏」的考虑，对 JS/JSON 这类无法粗测的规则一律不动；
+            // 但如果实测就是 0 章，保留原规则毫无意义——这里用纯代码候选强行顶一次，
+            // 验证通过才留下，否则原样撤回
+            if (report.firstOrNull { it.step == "目录" }?.ok != true) {
+                val backupChapterList = source.getTocRule().chapterList
+                if (lastResortToc(source, pages)) {
+                    val recheck = verifySource(source, testKeyword, pages, onProgress, singleBook)
+                    if (recheck.firstOrNull { it.step == "目录" }?.ok == true) {
+                        report = recheck
+                        onProgress("目录最后手段：改用纯代码候选 ${source.getTocRule().chapterList}")
+                    } else {
+                        source.getTocRule().chapterList = backupChapterList
+                    }
+                }
+            }
+
             // ---------- 阶段五：目录分页的翻页规则补全 ----------
             // 目录验证能过、但规则里没有 nextTocUrl 时，书源只能拿到第一页章节。
-            // 补上后重新验证：结果没变差就保留，变差就撤回（不改变原本可用的书源）
-            val pager = tocPagerRule
+            // 这里把探测到的翻页形态（文本 / 下拉选页 / 页码容器 / JS 拼页）逐个补上重验，
+            // 取章节数最多的那个；都没变好就撤回——不因为兜底把原本可用的书源改坏
             val tocOk = report.firstOrNull { it.step == "目录" }?.ok == true
-            if (pager != null && tocOk && source.getTocRule().nextTocUrl.isNullOrBlank()) {
-                source.getTocRule().nextTocUrl = pager
-                val recheck = verifySource(source, testKeyword, pages, onProgress, singleBook)
-                if (recheck.firstOrNull { it.step == "目录" }?.ok == true) {
-                    report = recheck
+            if (tocOk && tocPagerCands.isNotEmpty() &&
+                source.getTocRule().nextTocUrl.isNullOrBlank()
+            ) {
+                val baseCount = chapterCountOf(report)
+                var bestRule: String? = null
+                var bestCount = baseCount
+                for (c in tocPagerCands.take(3)) {
+                    source.getTocRule().nextTocUrl = c.rule
+                    val recheck = verifySource(source, testKeyword, pages, onProgress, singleBook)
+                    val n = chapterCountOf(recheck)
+                    if (recheck.firstOrNull { it.step == "目录" }?.ok == true && n > bestCount) {
+                        bestCount = n
+                        bestRule = c.rule
+                        if (n >= baseCount * 2) break // 已经翻倍，不必再试其它形态
+                    }
+                }
+                if (bestRule != null) {
+                    source.getTocRule().nextTocUrl = bestRule
+                    report = verifySource(source, testKeyword, pages, onProgress, singleBook)
+                    onProgress("目录翻页补全：$bestRule（章节 $baseCount → $bestCount）")
                 } else {
-                    // 补翻页反而把目录弄坏了，撤回
                     source.getTocRule().nextTocUrl = null
                 }
             }
@@ -728,32 +826,39 @@ object AiBookSourceGenerator {
      * · 设备上浏览器有安全 DNS 可绕过 DNS 污染，直连 OkHttp 不能——
      *   全局栈带 Cronet 拦截器（与 Chrome 同源网络栈），行为与浏览器一致。
      */
-    private fun fetch(url: String, pcUa: Boolean = false): String? {
-        fetchBy(client, url, pcUa)?.let { return it }
+    private fun fetch(
+        url: String,
+        pcUa: Boolean = false,
+        headers: Map<String, String> = emptyMap()
+    ): String? {
+        fetchBy(client, url, pcUa, headers)?.let { return it }
         // 系统 DNS 失败 → 依次尝试 DoH（防 DNS 污染）
         for (c in dohClients) {
-            fetchBy(c, url, pcUa)?.let {
+            fetchBy(c, url, pcUa, headers)?.let {
                 AppLog.put("[AI书源] 系统 DNS 抓取失败，DoH 解析后成功：$url")
                 return it
             }
         }
-        fetchBy(globalClient, url, pcUa)?.let {
+        fetchBy(globalClient, url, pcUa, headers)?.let {
             AppLog.put("[AI书源] 已通过全局网络栈降级抓取成功：$url")
             return it
         }
         // 最后兜底：WebView 真浏览器内核抓取——与用户浏览器完全同源
         // （系统网络栈、QUIC、ECH 等，浏览器能开的它就能开），解决 SNI 干扰等顽固问题
-        return fetchByWebView(url)?.also {
+        return fetchByWebView(url, headers)?.also {
             AppLog.put("[AI书源] 所有网络栈均失败，WebView 内核抓取成功：$url")
         }
     }
 
     /** 用后台 WebView（真浏览器内核）抓取页面，必须在后台线程调用 */
-    private fun fetchByWebView(url: String): String? = runCatching {
+    private fun fetchByWebView(
+        url: String,
+        headers: Map<String, String> = emptyMap()
+    ): String? = runCatching {
         runBlocking {
             BackstageWebView(
                 url = url,
-                headerMap = mapOf("User-Agent" to MOBILE_UA),
+                headerMap = mapOf("User-Agent" to MOBILE_UA) + headers,
                 tag = "AiBookSource"
             ).getStrResponse().body?.takeIf { it.isNotBlank() }
         }
@@ -761,7 +866,12 @@ object AiBookSourceGenerator {
         AppLog.put("[AI书源] WebView 抓取失败：${it.message}", it)
     }.getOrNull()
 
-    private fun fetchBy(c: OkHttpClient, url: String, pcUa: Boolean): String? = runCatching {
+    private fun fetchBy(
+        c: OkHttpClient,
+        url: String,
+        pcUa: Boolean,
+        headers: Map<String, String> = emptyMap()
+    ): String? = runCatching {
         val referer = runCatching {
             val u = java.net.URI(url)
             "${u.scheme}://${u.host}/"
@@ -772,6 +882,8 @@ object AiBookSourceGenerator {
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header("Accept-Language", "zh-CN,zh;q=0.9")
             .header("Referer", referer)
+        // 书源自带的自定义请求头（社区书源里 113 站配了 headers 选项）
+        headers.forEach { (k, v) -> builder.header(k, v) }
         // 登录态：按域名取用户在此站点登录保存的 Cookie（需要登录才能看正文的站点）
         CookieStore.getCookie(url).takeIf { it.isNotBlank() }?.let {
             builder.header("Cookie", it)
@@ -782,31 +894,92 @@ object AiBookSourceGenerator {
                 AppLog.put("[AI书源] 抓取失败 HTTP ${response.code}：$url")
                 return@use null
             }
-            response.body.string().takeIf { it.isNotBlank() }
+            val raw = response.body?.bytes() ?: return@use null
+            decodeHtml(raw, response).takeIf { it.isNotBlank() }
         }
     }.onFailure { AppLog.put("[AI书源] 抓取异常：${it.message}", it) }.getOrNull()
+
+    /**
+     * 按站点真实编码解码响应体：国内小说站大量使用 GBK（社区书源里 19% 的 searchUrl 带
+     * charset=gbk 选项），而 OkHttp 的 body.string() 默认按 UTF-8 解，GBK 页面会变成乱码，
+     * AI 拿着乱码页面写规则必然写错。这里按「响应头 → HTML meta → 默认 UTF-8」依次判定。
+     */
+    private fun decodeHtml(raw: ByteArray, response: Response): String {
+        val declared = Regex("charset=([\\w-]+)", RegexOption.IGNORE_CASE)
+            .find(response.header("Content-Type").orEmpty())?.groupValues?.get(1)
+        val enc = if (declared.isNullOrBlank()) {
+            detectCharset(raw)
+        } else if (declared.equals("gb2312", true) || declared.equals("gbk", true)) {
+            "GB18030"
+        } else {
+            declared
+        }
+        return runCatching { String(raw, charset(enc)) }.getOrDefault(String(raw, Charsets.UTF_8))
+    }
+
+    /** 从 HTML 头部的 <meta charset=..> / http-equiv 里猜编码，猜不到按 UTF-8 */
+    private fun detectCharset(raw: ByteArray): String {
+        val head = runCatching { String(raw, Charsets.ISO_8859_1) }.getOrDefault("").take(2048)
+        val v = Regex("""charset=["']?([\w-]+)""", RegexOption.IGNORE_CASE)
+            .find(head)?.groupValues?.get(1)?.lowercase().orEmpty()
+        return when {
+            v.startsWith("gb") -> "GB18030"
+            v == "big5" -> "Big5"
+            v.isNotBlank() -> v
+            else -> "UTF-8"
+        }
+    }
 
     /**
      * 按 legado searchUrl 格式抓页面：
      * 纯地址替换 {{key}} 后 GET；`地址,{"method":"POST","body":"..."}` 按 POST 抓。
      */
-    private fun fetchPage(template: String, keyword: String): String? {
+    /** 相对地址 → 绝对地址（书源里 41% 的 searchUrl 是相对路径，采集阶段必须补全才能请求） */
+    private fun absUrl(u: String, base: String): String {
+        val s = u.trim()
+        if (s.startsWith("http://") || s.startsWith("https://")) return s
+        if (s.startsWith("//")) return "https:$s"
+        if (base.isBlank()) return s
+        val b = base.trimEnd('/')
+        return if (s.startsWith("/")) {
+            (Regex("^(https?://[^/]+)").find(b)?.groupValues?.get(1) ?: b) + s
+        } else {
+            "$b/$s"
+        }
+    }
+
+    private fun fetchPage(template: String, keyword: String, baseUrl: String = ""): String? {
         val comma = template.indexOf(",{\"")
-        if (comma < 0) return fetch(fillKey(template, keyword))
-        val url = template.substring(0, comma).trim()
+        if (comma < 0) return fetch(absUrl(fillKey(template, keyword), baseUrl))
+        val url = absUrl(template.substring(0, comma).trim(), baseUrl)
         val option = runCatching {
             JsonParser.parseString(template.substring(comma + 1)).asJsonObject
         }.getOrNull() ?: return fetch(fillKey(url, keyword))
-        if (!option.str("method").equals("post", true)) return fetch(fillKey(url, keyword))
+        // 书源自带的自定义请求头（社区书源里 113 站配了 headers 选项）
+        val headers = option.getAsJsonObject("headers")?.entrySet()
+            ?.mapNotNull { (k, v) -> runCatching { k to v.asString }.getOrNull() }
+            ?.toMap().orEmpty()
+        val finalUrl = fillKey(url, keyword)
+        // webView：搜索结果由 JS 渲染时必须用浏览器内核取（社区书源里 145 站配了这个选项）
+        if (option.bool("webView") == true) {
+            return fetchByWebView(finalUrl, headers) ?: fetch(finalUrl, headers = headers)
+        }
+        if (!option.str("method").equals("post", true)) return fetch(finalUrl, headers = headers)
         val body = fillKey(option.str("body") ?: "", keyword)
         val charset = option.str("charset")?.takeIf { it.isNotBlank() } ?: "UTF-8"
-        return postBy(postClient, url, body, charset)
-            ?: postBy(globalClient, url, body, charset)?.also {
+        return postBy(postClient, url, body, charset, headers)
+            ?: postBy(globalClient, url, body, charset, headers)?.also {
                 AppLog.put("[AI书源] 搜索 POST 直连失败，已通过全局网络栈降级成功：$url")
             }
     }
 
-    private fun postBy(c: OkHttpClient, url: String, body: String, charset: String): String? = runCatching {
+    private fun postBy(
+        c: OkHttpClient,
+        url: String,
+        body: String,
+        charset: String,
+        headers: Map<String, String> = emptyMap()
+    ): String? = runCatching {
         val builder = Request.Builder()
             .url(url)
             .header("User-Agent", MOBILE_UA)
@@ -815,6 +988,7 @@ object AiBookSourceGenerator {
                 "${u.scheme}://${u.host}/"
             }.getOrDefault(""))
             .header("Content-Type", "application/x-www-form-urlencoded; charset=$charset")
+        headers.forEach { (k, v) -> builder.header(k, v) }
         CookieStore.getCookie(url).takeIf { it.isNotBlank() }?.let {
             builder.header("Cookie", it)
         }
@@ -826,7 +1000,8 @@ object AiBookSourceGenerator {
                 AppLog.put("[AI书源] 搜索 POST 失败 HTTP ${response.code}：$url")
                 return@use null
             }
-            response.body.string().takeIf { it.isNotBlank() }
+            val raw = response.body?.bytes() ?: return@use null
+            decodeHtml(raw, response).takeIf { it.isNotBlank() }
         }
     }.onFailure { AppLog.put("[AI书源] 搜索 POST 异常：${it.message}", it) }.getOrNull()
 
@@ -901,8 +1076,8 @@ object AiBookSourceGenerator {
         var best: Pair<String, String>? = null
         var bestCount = 1
         for (tpl in deriveSearchUrls(homeHtml, homeUrl).take(4)) {
-            val html = fetchPage(tpl, keyword) ?: continue
-            val n = countBookLinks(html, fillKey(tpl.substringBefore(",{\""), keyword))
+            val html = fetchPage(tpl, keyword, homeUrl) ?: continue
+            val n = countBookLinks(html, absUrl(fillKey(tpl.substringBefore(",{\""), keyword), homeUrl))
             if (n > bestCount) {
                 bestCount = n
                 best = tpl to html
@@ -1031,29 +1206,6 @@ object AiBookSourceGenerator {
      * 书源只能拿到第一页的章节。这里用纯代码找出「下一页」并给出可直接用的规则。
      * 返回 Pair(给 AI 的说明, 可直接写入 ruleToc.nextTocUrl 的规则)。
      */
-    private fun tocPager(html: String, baseUrl: String): Pair<String, String>? {
-        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return null
-        val words = listOf("下一页", "下页", "后页")
-        val hit = doc.select("a[href]").firstOrNull { a -> words.any { a.text().trim() == it } }
-            ?: doc.select("a[href]").firstOrNull { a -> words.any { a.text().trim().contains(it) } }
-            ?: return null
-        val href = hit.attr("abs:href")
-        if (!href.startsWith("http")) return null
-        val word = words.first { hit.text().trim().contains(it) }
-        val rule = "text.$word@href"
-        val parent = hit.parent()
-        val boxCls = parent?.className().orEmpty().trim().split(Regex("\\s+")).firstOrNull()
-        val text = buildString {
-            append("【目录分页】这个目录是分页的：当前页只列出一部分章节，")
-            append("「").append(hit.text().trim()).append("」指向下一页 ").append(href).append("。\n")
-            append("ruleToc.nextTocUrl 必须填，否则书源只能拿到第一页的章节；可直接写：").append(rule)
-            if (!boxCls.isNullOrBlank()) append("（也可写 class.").append(boxCls).append("@tag.a@href）")
-            append("。\n分页导航 HTML：")
-            append((parent?.outerHtml() ?: hit.outerHtml()).replace(Regex("\\s+"), " ").trim().take(400))
-        }
-        return text to rule
-    }
-
     /**
      * 按容器与链接结构直接拼出 chapterList 选择器，作为给 AI 的确定性建议。
      * 链接外层还有一层 p/li 时用两级写法（legado 常见形态）。
@@ -1565,7 +1717,12 @@ object AiBookSourceGenerator {
             }
         }
         if ("搜索" in failed) {
-            bestSearchCandidate(homeHtml, seed, keyword)?.let { (tpl, _) ->
+            // 优先用「多地址 && 组合」：legado 会依次尝试，容错比单一地址高
+            // （社区书源里 26 站这么写）；拿不到多个候选才退回单一最优地址
+            val multi = deriveSearchUrls(homeHtml, seed).take(2)
+                .joinToString("&&").takeIf { it.isNotBlank() }
+            val fallback = multi ?: bestSearchCandidate(homeHtml, seed, keyword)?.first
+            fallback?.let { tpl ->
                 if (source.searchUrl != tpl) {
                     source.searchUrl = tpl
                     changed = true
@@ -1579,7 +1736,8 @@ object AiBookSourceGenerator {
     private fun fixSource(
         source: BookSource,
         report: List<VerifyItem>,
-        pages: List<Page>
+        pages: List<Page>,
+        meta: Map<String, String>
     ): BookSource? {
         val failed = report.filter { !it.ok }
         val current = runCatching { GSON.toJson(source) }.getOrDefault("")
@@ -1588,9 +1746,9 @@ object AiBookSourceGenerator {
             sb.append("【").append(f.step).append("】").append(f.message).append('\n')
             val page = when (f.step) {
                 "搜索" -> pages.firstOrNull { it.role.startsWith("搜索") }
-                "详情" -> pages.firstOrNull { it.role.startsWith("详情") }
+                "详情" -> pages.firstOrNull { it.role.contains("详情") }
                 "目录" -> pages.firstOrNull { it.role.startsWith("目录") }
-                    ?: pages.firstOrNull { it.role.startsWith("详情") }
+                    ?: pages.firstOrNull { it.role.contains("详情") }
                 "正文" -> pages.firstOrNull { it.role.startsWith("正文") }
                     ?: pages.firstOrNull { it.role.startsWith("目录") }
                 "发现" -> pages.firstOrNull { it.role.startsWith("分类列表页") }
@@ -1603,10 +1761,28 @@ object AiBookSourceGenerator {
         }
         val user = FIX_PROMPT
             .replace("{fails}", sb.toString())
-            .replace("{source}", current) + PATTERN_LIBRARY
+            .replace("{source}", current)
+            .replace("{hints}", buildHints(meta)) + PATTERN_LIBRARY
         val raw = chat(user, 8000) ?: return null
         val json = extractJson(raw) ?: return null
         return GSON.fromJsonObject<BookSource>(json).getOrNull()
+    }
+
+    /**
+     * 把纯代码已经算出的结论（目录入口候选 / 翻页形态 / JSON 章节列表 / 章节区块）汇总给 AI。
+     * 修正阶段同样要给——否则第一次生成没听提示、验证失败后，AI 还是看不到这些白算出来的结果。
+     */
+    private fun buildHints(meta: Map<String, String>): String {
+        val wanted = listOf(
+            "目录入口", "目录分页", "章节列表候选", "章节区块", "目录选择",
+            "目录地址推导", "目录地址正则推导"
+        )
+        val lines = ArrayList<String>()
+        for ((k, v) in meta) {
+            if (v.isBlank()) continue
+            if (wanted.any { k.contains(it) }) lines.add("- $k：$v")
+        }
+        return lines.joinToString("\n").ifBlank { "（本次没有额外的纯代码结论）" }
     }
 
     /**
@@ -1748,9 +1924,9 @@ object AiBookSourceGenerator {
     /** 用 Jsoup 粗测一个 chapterList 选择器在页面上的表现 */
     private fun scoreChapterSel(html: String, sel: String?): TocCand? {
         if (sel.isNullOrBlank()) return null
-        val css = legadoToCss(sel) ?: return null
         val doc = runCatching { Jsoup.parse(html) }.getOrNull() ?: return null
-        val els = runCatching { doc.select(css) }.getOrNull() ?: return null
+        // 用 selectForScore：支持 !排除 / .N索引 / XPath，否则这些形态无法参与竞速
+        val els = selectForScore(doc, sel) ?: return null
         val texts = chapterTextsOf(els)
         if (texts.isEmpty()) return null
         val nums = texts.mapNotNull { chapterNo(it) }
@@ -1880,16 +2056,619 @@ object AiBookSourceGenerator {
         // 无法粗测的非空规则（JS/JSON/XPath）原样保留，避免误伤
         if (!cur.isNullOrBlank() && curScore == null) return
         val best = pickBestChapterList(page.html, cands) ?: return
-        if (best.sel == cur) return
-        if (curScore != null) {
-            // 原规则可用：候选必须不更少、且连续段严格更长，才有资格替换
-            if (best.count < curScore.count || best.run <= curScore.run) return
-        } else {
-            // 原规则取不到：候选自己要像个完整目录
-            if (best.count < 8 || best.run < 3) return
+
+        // 决定采用哪条：候选必须明显更优才替换，否则沿用 AI 原规则（不能把原本能用的改坏）
+        val chosen: String
+        val chosenScore: TocCand
+        when {
+            cur.isNullOrBlank() -> {
+                if (best.count < 8 || best.run < 3) return
+                chosen = best.sel
+                chosenScore = best
+            }
+            best.sel == cur -> {
+                chosen = cur
+                chosenScore = curScore!!
+            }
+            best.count >= curScore!!.count && best.run > curScore.run -> {
+                chosen = best.sel
+                chosenScore = best
+            }
+            else -> {
+                chosen = cur
+                chosenScore = curScore
+            }
         }
-        toc.chapterList = best.sel
-        onProgress("目录优选：${best.sel} 胜出（连续 ${best.run} 章 / 共 ${best.count} 条）")
+
+        // 「排除前 N 条」优化：完整目录前常混着「最新章节」（连续段起点 > 0），
+        // 这是社区书源里跳过最新章节的标准手段，比整体换容器更精准。
+        // 关键：无论最终用的是 AI 规则还是候选都要试——否则绝大多数场景根本轮不到它。
+        var finalSel = chosen
+        if (chosenScore.start > 0 && chosenScore.start <= 12) {
+            withExcludePrefix(chosen, chosenScore.start)?.let { trimmed ->
+                val t = scoreChapterSel(page.html, trimmed)
+                if (t != null && t.count > 0 &&
+                    (t.run > chosenScore.run ||
+                        (t.run == chosenScore.run && t.start < chosenScore.start))
+                ) {
+                    finalSel = trimmed
+                    onProgress("目录优选：排除前 ${chosenScore.start} 条 → $trimmed（连续 ${t.run} 章）")
+                }
+            }
+        }
+        if (finalSel != cur) {
+            toc.chapterList = finalSel
+            if (finalSel == chosen) {
+                onProgress("目录优选：$chosen 胜出（连续 ${chosenScore.run} 章 / 共 ${chosenScore.count} 条）")
+            }
+        }
+    }
+
+    // ==================== 搜索结果全形态兜底 ====================
+    // 目录侧有一整套纯代码候选竞速，搜索侧此前完全没有——AI 的 bookList 写错就只能等 AI 修正。
+    // 这里补上同一套机制：容器候选 + 竞速 + 「排除前 N 条」，同样遵守「不能改坏」的门槛。
+
+    /** 搜索候选：选择器 / 条目数 / 其中能取到详情页链接的条数 */
+    private data class SearchCand(val sel: String, val count: Int, val withUrl: Int)
+
+    /**
+     * 像「书籍详情页」的链接判定。
+     * 比 countBookLinks 宽松：原判定要求路径含 2 位以上数字，会把 /book/abc123/、
+     * /novel/xiyouji/ 这类非数字 ID 的站点误杀成「搜索不可用」。
+     */
+    private fun looksLikeBookUrl(u: String): Boolean {
+        if (!u.startsWith("http")) return false
+        if (Regex(
+                "\\.(css|js|json|jpg|jpeg|png|gif|webp|svg|ico|txt|zip|apk|mp3|mp4)(\\?|$)",
+                RegexOption.IGNORE_CASE
+            ).containsMatchIn(u)
+        ) return false
+        val path = runCatching { java.net.URI(u).path }.getOrNull() ?: return false
+        val seg = path.trim('/').split('/').filter { it.isNotBlank() }
+        if (seg.isEmpty()) return false // 首页本身不算书籍页
+        val bad = listOf(
+            "login", "register", "search", "rank", "top", "bookcase", "user",
+            "about", "contact", "help", "index", "default", "tag", "author"
+        )
+        if (seg.any { it.lowercase() in bad } && !Regex("\\d{2,}").containsMatchIn(path)) return false
+        return true
+    }
+
+    /** 元素里指向书籍详情页的链接数 */
+    private fun bookLinksOf(el: Element): Int {
+        var n = 0
+        if (el.tagName() == "a" && looksLikeBookUrl(el.attr("abs:href"))) n++
+        for (a in el.select("a[href]")) {
+            if (looksLikeBookUrl(a.attr("abs:href"))) n++
+        }
+        return n
+    }
+
+    /** 给容器找一个「全局条目数不膨胀」的 legado 选择器（按书籍链接计数，与目录侧同理） */
+    private fun candidateCssByLinks(el: Element, doc: org.jsoup.nodes.Document): String? {
+        val local = bookLinksOf(el)
+        if (local <= 0) return null
+        val variants = ArrayList<String>()
+        if (el.id().isNotBlank()) variants.add("id." + el.id())
+        val cls = el.classNames().filter { it.matches(Regex("[A-Za-z_][\\w-]*")) }
+        if (cls.isNotEmpty()) {
+            variants.add("class." + cls.joinToString("."))
+            variants.add("class." + cls.first())
+            variants.add("tag.${el.tagName()}.${cls.first()}")
+        }
+        variants.add("tag." + el.tagName())
+        var tight: Pair<String, Int>? = null
+        for (v in variants) {
+            val css = legadoToCss(v) ?: continue
+            val got = runCatching { doc.select(css) }.getOrNull() ?: continue
+            var n = 0
+            for (g in got) n += bookLinksOf(g)
+            if (n < local) continue
+            if (n == local) return v
+            val t = tight
+            if (t == null || n < t.second) tight = v to n
+        }
+        return tight?.first
+    }
+
+    /** JSON 搜索结果候选：书籍数组的 JSONPath 及各字段 */
+    private data class JsonBookCand(
+        val list: String,
+        val name: String?,
+        val author: String?,
+        val url: String?,
+        val cover: String?
+    )
+
+    /**
+     * JSON 搜索接口（API 型站点，社区书源里 458 站在用）：找出「对象数组且同时含书名与链接字段」
+     * 的路径，直接给出 bookList / name / author / bookUrl / coverUrl 的 JSONPath。
+     */
+    private fun jsonBookCandidates(html: String): JsonBookCand? {
+        val t = html.trim()
+        if (!t.startsWith("{") && !t.startsWith("[")) return null
+        val root = runCatching { JsonParser.parseString(t) }.getOrNull() ?: return null
+        val nameKeys = listOf("name", "title", "bookname", "book_name", "novelname")
+        val authorKeys = listOf("author", "authorname", "author_name", "writer")
+        val urlKeys = listOf("url", "link", "id", "bookid", "book_id", "novelid")
+        val coverKeys = listOf("cover", "coverurl", "cover_url", "pic", "img", "image")
+        var found: JsonBookCand? = null
+        fun walk(el: JsonElement, path: String, depth: Int) {
+            if (depth > 6 || found != null) return
+            when {
+                el.isJsonObject -> el.asJsonObject.entrySet().forEach { (k, v) ->
+                    walk(v, if (path.isEmpty()) k else "$path.$k", depth + 1)
+                }
+                el.isJsonArray -> {
+                    val arr = el.asJsonArray
+                    if (arr.size() >= 2 && arr.all { it.isJsonObject }) {
+                        val keys = arr[0].asJsonObject.keySet()
+                        fun pick(cands: List<String>) =
+                            keys.firstOrNull { it.lowercase() in cands }
+                        val nk = pick(nameKeys)
+                        val uk = pick(urlKeys)
+                        if (nk != null && uk != null) {
+                            val base = if (path.isEmpty()) "\$" else "\$.$path"
+                            found = JsonBookCand(
+                                "$base[*]",
+                                "$base[*].$nk",
+                                pick(authorKeys)?.let { "$base[*].$it" },
+                                "$base[*].$uk",
+                                pick(coverKeys)?.let { "$base[*].$it" }
+                            )
+                            return
+                        }
+                    }
+                    if (arr.size() > 0) walk(arr[0], path, depth + 1)
+                }
+            }
+        }
+        walk(root, "", 0)
+        return found
+    }
+
+    /** 纯代码推导搜索结果列表候选：找「含最多书籍详情链接」的容器 */
+    private fun autoSearchCandidates(html: String, baseUrl: String): List<String> {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return emptyList()
+        val links = doc.select("a[href]").filter { looksLikeBookUrl(it.attr("abs:href")) }
+        if (links.size < 2) return emptyList()
+        val els = LinkedHashSet<Element>()
+        for (a in links) {
+            var p: Element? = a.parent()
+            var d = 0
+            while (p != null && d < 4) {
+                els.add(p)
+                p = p.parent()
+                d++
+            }
+        }
+        val cands = ArrayList<SearchCand>()
+        for (el in els) {
+            val n = bookLinksOf(el)
+            if (n < 2) continue
+            if (isNotTocBlock(el)) continue // 排行榜/推荐位同样不是搜索结果
+            val css = candidateCssByLinks(el, doc) ?: continue
+            cands.add(SearchCand("$css@tag.a", n, n))
+        }
+        return cands.sortedWith(
+            compareByDescending<SearchCand> { it.withUrl }.thenByDescending { it.count }
+        ).map { it.sel }.distinct().take(6)
+    }
+
+    private fun scoreSearchSel(html: String, baseUrl: String, sel: String?): SearchCand? {
+        if (sel.isNullOrBlank()) return null
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return null
+        val els = selectForScore(doc, sel) ?: return null
+        if (els.isEmpty()) return null
+        var withUrl = 0
+        for (e in els) if (bookLinksOf(e) > 0) withUrl++
+        return SearchCand(sel, els.size, withUrl)
+    }
+
+    private fun pickBestSearchList(html: String, baseUrl: String, cands: List<String>): SearchCand? {
+        var best: SearchCand? = null
+        for (c in cands) {
+            val s = scoreSearchSel(html, baseUrl, c) ?: continue
+            val b = best
+            if (b == null || s.withUrl > b.withUrl || (s.withUrl == b.withUrl && s.count > b.count)) {
+                best = s
+            }
+        }
+        return best
+    }
+
+    /**
+     * 搜索结果容器竞速：AI 给的 bookList 与纯代码候选一起在真实搜索页上比，
+     * 取「能取到最多书籍详情链接」的那个。门槛同目录侧：候选必须严格更优才替换。
+     */
+    private fun refineSearchRules(source: BookSource, pages: List<Page>, onProgress: (String) -> Unit) {
+        val search = source.getSearchRule()
+        val cur = search.bookList
+        val page = pages.firstOrNull { it.role.startsWith("搜索") && it.html.isNotBlank() } ?: return
+        // JSON 搜索接口：AI 没写 bookList 时，直接用纯代码算出的 JSONPath（API 型站点常见）
+        if (cur.isNullOrBlank()) {
+            jsonBookCandidates(page.html)?.let { c ->
+                search.bookList = c.list
+                search.name = c.name
+                search.author = c.author
+                search.bookUrl = c.url
+                search.coverUrl = c.cover
+                onProgress("搜索优选：JSON 接口，采用 ${c.list}")
+                return
+            }
+        }
+        val cands = ArrayList<String>()
+        if (!cur.isNullOrBlank()) cands.add(cur)
+        cands.addAll(autoSearchCandidates(page.html, page.url))
+        if (cands.size <= 1) return
+        val curScore = scoreSearchSel(page.html, page.url, cur)
+        // 无法粗测的非空规则（JS/JSON）原样保留，避免误伤
+        if (!cur.isNullOrBlank() && curScore == null) return
+        val best = pickBestSearchList(page.html, page.url, cands) ?: return
+        when {
+            cur.isNullOrBlank() -> {
+                if (best.withUrl < 2) return
+                search.bookList = best.sel
+                onProgress("搜索优选：${best.sel}（${best.withUrl} 条书链接）")
+            }
+            best.sel == cur -> Unit
+            best.withUrl > (curScore?.withUrl ?: 0) -> {
+                search.bookList = best.sel
+                onProgress("搜索优选：${best.sel} 胜出（${best.withUrl} 条书链接 / 共 ${best.count} 条）")
+            }
+        }
+        // 「排除前 N 条」优化：搜索结果常把表头/广告行混进列表
+        // （社区书源里 14% 的 bookList 带 ! 排除，但 AI 几乎不会主动写）
+        val adopted = search.bookList
+        if (!adopted.isNullOrBlank() && !adopted.contains('!')) {
+            val doc = runCatching { Jsoup.parse(page.html, page.url) }.getOrNull() ?: return
+            val els = selectForScore(doc, adopted) ?: return
+            var lead = 0
+            for (e in els) {
+                if (bookLinksOf(e) > 0) break
+                lead++
+            }
+            if (lead > 0 && lead <= 5) {
+                val trimmed = adopted + "!" + (0 until lead).joinToString(":")
+                val t = scoreSearchSel(page.html, page.url, trimmed)
+                val now = scoreSearchSel(page.html, page.url, adopted)
+                if (t != null && (now == null || t.withUrl > now.withUrl)) {
+                    search.bookList = trimmed
+                    onProgress("搜索优选：排除前 $lead 条 → $trimmed")
+                }
+            }
+        }
+    }
+
+    // ==================== 目录解析全形态兜底 ====================
+    // 形态清单来自 5641 个社区书源的统计（含长尾）：只要书源里出现过的写法，这里都能生成对应兜底。
+    // 原则：原逻辑优先——只在 AI 规则取不到或明显不完整时才用兜底覆盖，且覆盖后必须能重验。
+
+    /** 从验证报告里取出目录环节的章节数（用于比较兜底前后谁取到的章节更多） */
+    private fun chapterCountOf(report: List<VerifyItem>): Int {
+        val msg = report.firstOrNull { it.step == "目录" }?.message.orEmpty()
+        return Regex("共\\s*(\\d+)\\s*章").find(msg)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    }
+
+    /**
+     * 最后手段：目录实测 0 章时，不再顾忌 AI 原规则，直接用纯代码候选顶上。
+     * 目录页找不到就用详情页（很多站目录与详情同页），取「连续段 ≥3」的候选。
+     */
+    private fun lastResortToc(source: BookSource, pages: List<Page>): Boolean {
+        val page = pages.firstOrNull { it.role == "目录页" && it.html.isNotBlank() }
+            ?: pages.firstOrNull { it.role.contains("详情") && it.html.isNotBlank() }
+            ?: return false
+        val cands = autoChapterCandidates(page.html, page.url)
+        if (cands.isEmpty()) return false
+        val best = pickBestChapterList(page.html, cands) ?: return false
+        if (best.count < 3 || best.run < 3) return false
+        source.getTocRule().chapterList = best.sel
+        return true
+    }
+
+    /** 翻页候选：规则 + 说明 + 优先级（大者优先） */
+    private data class PagerCand(val rule: String, val desc: String, val score: Int)
+
+    /** 目录入口候选：规则 + 说明 */
+    private data class EntryCand(val rule: String, val desc: String)
+
+    private val PAGER_WORDS = listOf("下一页", "下页", "后页", "下一頁", "後頁", "末页", "尾页")
+
+    private val TOC_ENTRY_WORDS = listOf(
+        "章节目录", "查看完整目录", "查看全部章节", "全部章节列表", "查看目录",
+        "完整目录", "章节列表", "进入目录", "全部章节", "更多目录", "查看全部", "目录"
+    )
+
+    /** 简易 XPath → CSS（仅供粗测评分用，复杂 XPath 直接放弃） */
+    private fun xpathToCss(xp: String): String? {
+        var s = xp.trim()
+        for (suf in listOf("/@href", "/@src", "/@title", "/text()")) {
+            if (s.endsWith(suf)) s = s.removeSuffix(suf)
+        }
+        if (!s.startsWith("//")) return null
+        if (s.contains("::") || s.contains("contains(") || s.contains("following-sibling")) return null
+        val parts = s.removePrefix("//").split("/").filter { it.isNotBlank() && it != "." }
+        if (parts.isEmpty()) return null
+        val css = ArrayList<String>()
+        for (p in parts) {
+            val m = Regex("^(\\*|[A-Za-z][\\w-]*)?((?:\\[[^\\]]+\\])*)$").find(p) ?: return null
+            val tag = m.groupValues[1]
+            val preds = m.groupValues[2]
+            if (preds.contains("[")) {
+                val fixed = Regex("\\[@([\\w-]+)=(['\"]?)([^'\"\\]]*)\\2\\]").replace(preds) { r ->
+                    "[${r.groupValues[1]}=\"${r.groupValues[3]}\"]"
+                }
+                if (fixed.contains("@")) return null
+                css.add((if (tag.isEmpty() || tag == "*") "" else tag) + fixed)
+            } else {
+                css.add(if (tag.isEmpty() || tag == "*") "" else tag)
+            }
+        }
+        val joined = css.filter { it.isNotBlank() }.joinToString(" ")
+        return joined.ifBlank { null }
+    }
+
+    /**
+     * 把含 legado 修饰（!排除 / .N索引 / XPath）的选择器落到 Jsoup 上：先转 CSS 再按索引过滤。
+     * legadoToCss 不认这些修饰，直接拼接会选不到元素，导致含 `!` 的规则无法参与竞速评分。
+     */
+    private fun selectForScore(doc: org.jsoup.nodes.Document, sel: String): List<Element>? {
+        val first = sel.split("||").firstOrNull()?.trim().orEmpty()
+        if (first.isBlank()) return null
+        val parts = first.split("@").map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return null
+        val plain = parts.joinToString("@") {
+            it.replace(Regex("![\\d:-]+$"), "").replace(Regex("\\.-?\\d+$"), "")
+        }
+        val css = (if (first.startsWith("//")) xpathToCss(plain) else legadoToCss(plain))
+            ?: return null
+        var els: List<Element> = runCatching { doc.select(css) }.getOrNull() ?: return null
+        val last = parts.last()
+        // .N 索引：legado 里表示取第 N 个同源容器（负数为倒数）
+        Regex("\\.(-?\\d+)$").find(last)?.let { m ->
+            val n = m.groupValues[1].toIntOrNull() ?: return@let
+            val i = if (n < 0) els.size + n else n
+            els = if (i in els.indices) listOf(els[i]) else emptyList()
+        }
+        // ! 排除：!0:1:2 去掉前几条，!-1 去掉最后一条
+        Regex("!([\\d:-]+)$").find(last)?.let { m ->
+            val excl = m.groupValues[1].split(":").mapNotNull { it.trim().toIntOrNull() }
+            if (excl.isNotEmpty()) {
+                val size = els.size
+                els = els.filterIndexed { i, _ ->
+                    excl.none { e -> (if (e < 0) size + e else e) == i }
+                }
+            }
+        }
+        return els
+    }
+
+    /** 生成「排除前 N 条」写法（跳过最新章节区块）：容器@条目!0:1:…:N-1 */
+    private fun withExcludePrefix(sel: String, n: Int): String? {
+        if (n <= 0 || n > 20) return null
+        if (sel.contains('!')) return null
+        return sel + "!" + (0 until n).joinToString(":")
+    }
+
+    /**
+     * 目录翻页全形态探测（覆盖书源里出现过的所有翻页写法）：
+     * ① 文本翻页 text.下一页@href（含翻页容器 class.X@tag.a@href）
+     * ② 下拉选页 option@value / class.X@option!0@value
+     * ③ 数字页码容器 class.X@tag.a@href（含末页负索引 .-1）
+     * ④ JS 按总页数拼页（从页码链接推断地址模式与总页数）
+     */
+    private fun detectTocPagers(html: String, baseUrl: String): List<PagerCand> {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return emptyList()
+        val out = LinkedHashMap<String, PagerCand>()
+        fun add(rule: String, desc: String, score: Int) {
+            val r = rule.trim()
+            if (r.isNotBlank() && !out.containsKey(r)) out[r] = PagerCand(r, desc, score)
+        }
+
+        // ① 文本翻页
+        val hit = doc.select("a[href]").firstOrNull { a -> PAGER_WORDS.any { a.text().trim() == it } }
+            ?: doc.select("a[href]").firstOrNull { a -> PAGER_WORDS.any { a.text().trim().contains(it) } }
+        if (hit != null) {
+            val w = PAGER_WORDS.first { hit.text().trim().contains(it) }
+            add("text.$w@href", "文本翻页「${hit.text().trim()}」", 100)
+            val pcls = hit.parent()?.className()?.trim()?.split(Regex("\\s+"))?.firstOrNull()
+            if (!pcls.isNullOrBlank()) add("class.$pcls@tag.a@href", "翻页容器 class.$pcls", 92)
+        }
+
+        // ② 下拉选页（select + option，社区书源里 189 站在用）
+        val selBox = doc.select("select").firstOrNull { it.select("option[value]").size >= 3 }
+        if (selBox != null) {
+            val firstText = selBox.select("option").firstOrNull()?.text()?.trim().orEmpty()
+            // 第一项是「请选择/第 1 页」这类占位时用 !0 排除
+            val excl = if (firstText.isBlank() || firstText.contains("选择") || firstText.contains("请")) "!0" else ""
+            val head = when {
+                selBox.id().isNotBlank() -> "id.${selBox.id()}"
+                selBox.className().isNotBlank() ->
+                    "class." + selBox.className().trim().split(Regex("\\s+")).first()
+                else -> ""
+            }
+            add(
+                if (head.isBlank()) "option$excl@value" else "$head@option$excl@value",
+                "下拉选页（${selBox.select("option").size} 项）", 96
+            )
+        }
+
+        // ③ 数字页码容器（class/id 含 page|paginate|pagelist）
+        val box = doc.select("div,ul,ol,span,td,p,center").firstOrNull { el ->
+            val key = (el.className() + " " + el.id()).lowercase()
+            (key.contains("page") || key.contains("paginate") || key.contains("pagelist")) &&
+                el.select("a[href]").size >= 3
+        }
+        if (box != null) {
+            val head = when {
+                box.id().isNotBlank() -> "id.${box.id()}"
+                box.className().isNotBlank() ->
+                    "class." + box.className().trim().split(Regex("\\s+")).first()
+                else -> "tag.${box.tagName()}"
+            }
+            add("$head@tag.a@href", "数字页码容器 $head", 88)
+            val hasLast = box.select("a[href]").any { a ->
+                val t = a.text().trim()
+                t == "末页" || t == "尾页" || t == "最后一页"
+            }
+            if (hasLast) add("$head@tag.a.-1@href", "末页负索引 $head", 84)
+        }
+
+        // ④ JS 按总页数拼页
+        buildPagerJs(doc)?.let { (rule, desc) -> add(rule, desc, 60) }
+
+        return out.values.sortedByDescending { it.score }
+    }
+
+    /**
+     * JS 按总页数拼页：从数字页码链接推断「公共前缀 + 变化数字 + 公共后缀」与总页数，
+     * 生成 legado 可执行的 <js>（直接列出后续各页地址，不依赖当前页码）。
+     */
+    private fun buildPagerJs(doc: org.jsoup.nodes.Document): Pair<String, String>? {
+        val numLinks = doc.select("a[href]").filter { a ->
+            val t = a.text().trim()
+            t.isNotEmpty() && t.length <= 4 && t.all { it.isDigit() } &&
+                a.attr("abs:href").startsWith("http")
+        }
+        if (numLinks.size < 2) return null
+        val a = numLinks[0].attr("abs:href")
+        val b = numLinks[1].attr("abs:href")
+        var p = 0
+        while (p < a.length && p < b.length && a[p] == b[p]) p++
+        var s = 0
+        while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] == b[b.length - 1 - s]) s++
+        val midA = a.substring(p, a.length - s)
+        val midB = b.substring(p, b.length - s)
+        if (midA.isEmpty() || !midA.all { it.isDigit() } || !midB.all { it.isDigit() }) return null
+        val n1 = midA.toIntOrNull() ?: return null
+        val n2 = midB.toIntOrNull() ?: return null
+        val step = n2 - n1
+        if (step <= 0) return null
+        val total = numLinks.mapNotNull { it.text().trim().toIntOrNull() }.maxOrNull() ?: return null
+        if (total <= n1) return null
+        val pre = a.substring(0, p).replace("\"", "")
+        val suf = a.substring(a.length - s).replace("\"", "")
+        val js = "<js>\nvar pre=\"$pre\";var suf=\"$suf\";var step=$step;var total=$total;\n" +
+            "var list=[];\nfor(var i=1+step;i<=total;i+=step){list.push({k:String(i),v:pre+i+suf});}\n" +
+            "list\n</js>"
+        return js to "JS 按总页数拼页（共 $total 页，步长 $step）"
+    }
+
+    /** 取最优翻页规则：主形态 + 一条互补形态用 || 并列（社区书源常见写法）；JS 拼页只作最后兜底 */
+    private fun bestPagerRule(cands: List<PagerCand>): String? {
+        if (cands.isEmpty()) return null
+        val js = cands.firstOrNull { it.rule.contains("<js>") }
+        val plain = cands.filter { !it.rule.contains("<js>") }
+        if (plain.isEmpty()) return js?.rule
+        val top = plain.first()
+        val alt = plain.drop(1).firstOrNull {
+            it.rule.substringBefore("@").substringBefore("!") !=
+                top.rule.substringBefore("@").substringBefore("!")
+        }
+        val main = if (alt != null && alt.score >= 80) top.rule + "||" + alt.rule else top.rule
+        return if (js != null) main + "||" + js.rule else main
+    }
+
+    /**
+     * 详情页 → 目录页 的入口全形态探测：
+     * ① 链接文字 ② meta 属性 og:novel:read_url ③ 属性选择器 ④ XPath 按文字定位
+     */
+    private fun detectTocEntries(detailHtml: String, baseUrl: String): List<EntryCand> {
+        val out = ArrayList<EntryCand>()
+        val doc = runCatching { Jsoup.parse(detailHtml, baseUrl) }.getOrNull() ?: return out
+        // ① 链接文字（按命中顺序给，越具体的词越靠前）
+        for (w in TOC_ENTRY_WORDS) {
+            val a = doc.select("a[href]").firstOrNull { it.text().trim().contains(w) } ?: continue
+            out.add(EntryCand("text.$w@href", "入口文字「${a.text().trim()}」"))
+        }
+        // ② meta 直接给出目录地址（正规站常用）
+        val metaUrl = doc.select("meta[property=\"og:novel:read_url\"]").attr("content")
+            .ifBlank { doc.select("meta[name=\"og:novel:read_url\"]").attr("content") }
+        if (metaUrl.isNotBlank()) {
+            out.add(EntryCand("[property=og:novel:read_url]@content", "meta 里直接给了目录地址 $metaUrl"))
+        }
+        // ③ 入口链接没有 class/id 但有固定属性时，用属性选择器
+        doc.select("a[href]").firstOrNull { a ->
+            TOC_ENTRY_WORDS.any { a.text().trim().contains(it) } &&
+                a.className().isBlank() && a.id().isBlank()
+        }?.let { a ->
+            val st = a.attr("style")
+            if (st.isNotBlank()) out.add(EntryCand("[style=\"$st\"]@href", "入口链接的 style 属性"))
+        }
+        // ④ XPath 按文字定位（无 class/id 可用时的最后手段）
+        out.add(EntryCand("//a[contains(text(),'目录')]/@href", "XPath 按文字定位目录入口"))
+        return out
+    }
+
+    /**
+     * 把 AI 常写错的非法写法纠正成 legado 语法（社区书源里没有这些错误写法）：
+     * :eq(n)→.n、:has()/:contains()/… 伪类剔除、逗号分隔多选择器→||
+     */
+    private fun normalizeRule(raw: String?): String? {
+        val s0 = raw?.trim() ?: return null
+        if (s0.isBlank()) return s0
+        var s = s0
+        s = Regex(":eq\\((\\d+)\\)").replace(s) { "." + it.groupValues[1] }
+        s = Regex(
+            ":(has|contains|containsOwn|nth-child|nth-of-type|not|first-child|last-child|gt|lt)\\([^()]*\\)"
+        ).replace(s, "")
+        // 逗号多选择器 → ||（跳过 ,{"webView":true} 这类 JSON 选项里的逗号）
+        s = Regex("\\s*,\\s*(?=[.#a-zA-Z\\[])").replace(s, "||")
+        return s.trim()
+    }
+
+    /** 对目录与搜索相关的所有规则做一次语法规范化（只纠语法，不改语义） */
+    private fun normalizeSourceRules(source: BookSource) {
+        val info = source.getBookInfoRule()
+        val toc = source.getTocRule()
+        val search = source.getSearchRule()
+        info.tocUrl = normalizeRule(info.tocUrl)
+        toc.chapterList = normalizeRule(toc.chapterList)
+        toc.chapterName = normalizeRule(toc.chapterName)
+        toc.chapterUrl = normalizeRule(toc.chapterUrl)
+        toc.nextTocUrl = normalizeRule(toc.nextTocUrl)
+        // 搜索侧的 bookList 同样会被 AI 写成逗号多选择器 / :eq() / 伪类，一并纠正
+        search.bookList = normalizeRule(search.bookList)
+        search.name = normalizeRule(search.name)
+        search.author = normalizeRule(search.author)
+        search.bookUrl = normalizeRule(search.bookUrl)
+        search.coverUrl = normalizeRule(search.coverUrl)
+        search.intro = normalizeRule(search.intro)
+        search.kind = normalizeRule(search.kind)
+        search.lastChapter = normalizeRule(search.lastChapter)
+    }
+
+    /**
+     * JSON 目录页的章节列表候选（API 型站点）：找出「对象数组且同时含名称与链接字段」的路径。
+     * 生成 $..key[*] 这类 JSONPath 章节列表规则。
+     */
+    private fun jsonChapterCandidates(html: String): List<String> {
+        val t = html.trim()
+        if (!t.startsWith("{") && !t.startsWith("[")) return emptyList()
+        val root = runCatching { JsonParser.parseString(t) }.getOrNull() ?: return emptyList()
+        val found = LinkedHashSet<String>()
+        val nameKeys = listOf("name", "title", "chaptername", "chaptertitle", "chapter_name")
+        val urlKeys = listOf("url", "link", "href", "id", "chapterid", "chapter_id")
+        fun walk(el: JsonElement, path: String, depth: Int) {
+            if (depth > 6 || found.size >= 3) return
+            when {
+                el.isJsonObject -> el.asJsonObject.entrySet().forEach { (k, v) ->
+                    walk(v, if (path.isEmpty()) k else "$path.$k", depth + 1)
+                }
+                el.isJsonArray -> {
+                    val arr = el.asJsonArray
+                    if (arr.size() >= 3 && arr.all { it.isJsonObject }) {
+                        val keys = arr[0].asJsonObject.keySet().map { it.lowercase() }
+                        if (keys.any { it in nameKeys } && keys.any { it in urlKeys }) {
+                            found.add(if (path.isEmpty()) "\$.[*]" else "\$.$path[*]")
+                        }
+                    }
+                    if (arr.size() > 0) walk(arr[0], path, depth + 1)
+                }
+            }
+        }
+        walk(root, "", 0)
+        return found.toList()
     }
 
     // ==================== 阶段三：四链路实测 ====================
@@ -1929,7 +2708,7 @@ object AiBookSourceGenerator {
         runCatching {
             val probe = book ?: Book(
                 name = "验证测试",
-                bookUrl = pages.firstOrNull { it.role.startsWith("详情") }?.url
+                bookUrl = pages.firstOrNull { it.role.contains("详情") }?.url
                     ?: pages.firstOrNull { it.role.startsWith("搜索") }?.url
                     ?: source.bookSourceUrl,
                 origin = source.bookSourceUrl
@@ -2390,6 +3169,9 @@ object AiBookSourceGenerator {
 
         【验证失败环节】
         {fails}
+
+        【纯代码已经算出的可用写法（修正时优先直接采用，不要另造选择器）】
+        {hints}
 
         【当前书源 JSON】
         {source}
