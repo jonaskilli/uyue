@@ -906,8 +906,9 @@ internal fun VideoPlayerPage(
                             },
                             onSeek = { dx ->
                                 accumDx += dx
-                                // 整屏宽度约等于视频总时长，1.2 倍让短距离拖动也能明显推进
-                                val span = (accumDx / size.width) * duration.coerceAtLeast(0) * 1.2f
+                                // 整屏宽度约等于视频总时长的一半（0.6 = 原灵敏度 1.2 的一半），
+                                // 短距离拖动过于灵敏，降为原先的一半跨度
+                                val span = (accumDx / size.width) * duration.coerceAtLeast(0) * 0.6f
                                 dragTarget = (dragBase + span).toLong()
                                     .coerceIn(0, duration.coerceAtLeast(0))
                                 seekTo(dragTarget)
