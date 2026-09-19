@@ -109,6 +109,8 @@ class App : Application() {
             }
             //初始化封面
             BookCover.toString()
+            // 恢复上次退出时丢失的视频下载记录（已完成的成品 + 下了一半的 .part）
+            runCatching { io.legado.app.help.video.VideoDownloader.restoreIfNeeded() }
             //清除过期数据
             appDb.cacheDao.clearDeadline(System.currentTimeMillis())
             if (getPrefBoolean(PreferKey.autoClearExpired, true)) {

@@ -116,6 +116,7 @@ import androidx.media3.ui.PlayerView
 import com.bumptech.glide.Glide
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.constant.AppLog
+import io.legado.app.help.video.VideoCache
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -602,6 +603,10 @@ private fun buildMediaItem(uri: Uri): MediaItem {
  * 否则本地视频（file://、content://，含 SAF 文档树）也会被当成 HTTP 请求读取而失败，
  * 表现为「无法播放该视频 / Source error」。必须用 [DefaultDataSource.Factory] 包装一层，
  * 它会按 URI scheme 自动路由到 FileDataSource / ContentDataSource / HttpDataSource。
+ *
+ * 缓存同样只包在 http 分支外（[VideoCache.wrap]），因此本地文件不会被复制进缓存，
+ * 而在线播放产生的缓冲会落进 [VideoCache]，与 [VideoDownloader] 共用同一份——
+ * 边看边存时已看过的分片直接命中，不再重复下载。
  */
 private fun buildMediaSourceFactory(
     context: android.content.Context,
@@ -612,7 +617,7 @@ private fun buildMediaSourceFactory(
     if (headers.isNotEmpty()) {
         httpFactory.setDefaultRequestProperties(headers)
     }
-    val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
+    val dataSourceFactory = DefaultDataSource.Factory(context, VideoCache.wrap(httpFactory))
     return DefaultMediaSourceFactory(dataSourceFactory)
 }
 

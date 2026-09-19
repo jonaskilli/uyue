@@ -87,15 +87,134 @@ object SourceVideoPlayerSession {
     private var feed: VideoFeedStore.Feed? = null
     /** 正在解析的集，避免同一集被重复发起 */
     private val resolving = Collections.synchronizedSet(mutableSetOf<Int>())
+    /** 边看边存：当前正在播放的集，切集时用来先收尾上一集 */
+    @Volatile
+    private var activeWatchIndex = -1
     /** 节流用：上一次写库的集与进度，避免每 5 秒都打一次数据库 */
     private var savedIndex = -1
     private var savedPositionMs = -1L
+
+    init {
+        // 某一集下载完成 → 把它的播放地址换成本地文件，后续播放不再联网
+        VideoDownloader.addCompletionListener { task -> onDownloadCompleted(task) }
+        // 恢复上次退出 APP 时丢失的下载记录（已完成的成品 + 下了一半的 .part）
+        VideoDownloader.restoreIfNeeded()
+    }
+
+    private fun onDownloadCompleted(task: VideoDownloader.Task) {
+        val b = book ?: return
+        if (task.book.bookUrl != b.bookUrl) return
+        val index = chapters.indexOfFirst { it.url == task.chapter.url }
+            .takeIf { it >= 0 } ?: task.index
+        // 正在播的那一集不换：换 uri 会重建播放器打断播放，等切走时再换
+        refreshLocalUri(index, includeCurrent = false)
+    }
+
+    /**
+     * 已下载完的集改用本地文件播放（免网络重新缓冲）。
+     *
+     * @param includeCurrent false 时跳过正在播放的那一集：替换 uri 会让播放器重建，
+     * 正在看的时候不能打断，等切到别集时（[onEpisodeActivated]）再换。
+     */
+    private fun refreshLocalUri(index: Int, includeCurrent: Boolean) {
+        if (index !in chapters.indices) return
+        val b = book ?: return
+        val file = VideoDownloader.findLocalFile(b.name, index, chapters[index].title) ?: return
+        val localUri = Uri.fromFile(file).toString()
+        _uiState.update { s ->
+            if (index !in s.episodes.indices) return@update s
+            if (!includeCurrent && index == s.currentIndex) return@update s
+            val old = s.episodes[index]
+            if (old.uri.toString() == localUri) return@update s
+            val merged = s.episodes.toMutableList()
+            merged[index] = old.copy(uri = Uri.parse(localUri), size = file.length())
+            s.copy(episodes = merged)
+        }
+    }
+
+    /** 把所有已下载完的集刷新为本地地址（重新进入页面时兜底一次） */
+    private fun refreshLocalUris() {
+        for (i in _uiState.value.episodes.indices) refreshLocalUri(i, includeCurrent = false)
+    }
+
+    /**
+     * 播放过程中**周期性**调用：把已经缓冲进缓存的分片搬进 .part（零额外流量）。
+     *
+     * 只在切集/退出时各试一次是不够的——刚切到一集的瞬间缓存里往往还没有分片，
+     * 收集会立刻空手而归，之后播放期间再没人触发它，进度条就一直停在"等待中"。
+     * 由界面每 20 秒调一次，播放多久就收多久。
+     */
+    fun collectCurrentEpisode() {
+        val index = activeWatchIndex
+        if (index < 0) return
+        if (!VideoDownloader.isWatchSaveEnabled()) return
+        watchTask(index)?.let { (task, knownUrl) ->
+            VideoDownloader.watchStart(task, knownUrl)
+        }
+    }
+
+    /**
+     * 退出播放器：把正在播的这一集收尾（补齐缺失片段后合并落盘）。
+     * 不切集直接退出时也要存下，否则这集只留下一半的 .part 缓存。
+     */
+    fun finalizeCurrentEpisode() {
+        val index = activeWatchIndex
+        if (index < 0) return
+        // 不再播放：解除让路，剩下的缺口全速补齐
+        VideoDownloader.setPlaybackActive(false)
+        watchTask(index)?.let { (task, knownUrl) ->
+            VideoDownloader.watchFinalize(task, knownUrl)
+        }
+    }
+
+    /** 构造边看边存任务；knownUrl 用已解析出的直链，省一次正文规则请求 */
+    private fun watchTask(index: Int): Pair<VideoDownloader.Task, String?>? {
+        val b = book ?: return null
+        val src = source ?: return null
+        val chapter = chapters.getOrNull(index) ?: return null
+        val knownUrl = _uiState.value.episodes.getOrNull(index)?.uri?.toString()
+            ?.takeIf { it.startsWith("http") }
+        return VideoDownloader.Task(b, src, index, chapter) to knownUrl
+    }
+
+    /**
+     * 当前播放的集发生变化（进入 / 切集 / 点选集）——**边看边存的唯一触发点**。
+     *
+     * 必须放在会话层而不是某个界面里：之前只在首页面板触发，全屏播完一集什么都没存下。
+     *
+     * 1. 上一集：先收尾（补齐缺失片段后合并保存到 Download/保存视频/），走优先队列，
+     *    排在刚入队的当前集之前——播完的那集先落盘，不会被新集压在后面；
+     * 2. 当前集：已经下完的直接用本地文件播，不再联网；否则入队边看边存。
+     */
+    fun onEpisodeActivated(index: Int) {
+        val s = _uiState.value
+        if (index !in s.episodes.indices) return
+        val prev = activeWatchIndex
+        activeWatchIndex = index
+        if (prev >= 0 && prev != index) {
+            // 切走的上一集：它已不是当前集，可以安全换成刚下好的本地文件
+            refreshLocalUri(prev, includeCurrent = true)
+            watchTask(prev)?.let { (task, knownUrl) ->
+                VideoDownloader.watchFinalize(task, knownUrl)
+            }
+        }
+        // 当前集：已下载完就播本地文件，"已经下过就不重新缓存"
+        refreshLocalUri(index, includeCurrent = true)
+        // 播放器还在播：后台下载进入让路模式（只收集缓存 + 低并发节流）
+        VideoDownloader.setPlaybackActive(true)
+        watchTask(index)?.let { (task, knownUrl) ->
+            VideoDownloader.watchStart(task, knownUrl)
+        }
+    }
 
     fun load(bookUrl: String, startIndex: Int) {
         // 同一本书且剧集已就绪（大屏↔首页切换）：只同步索引，
         // 复用已解析的直链与播放器交接，不重复解析、不重新加载
         if (book?.bookUrl == bookUrl && _uiState.value.episodes.isNotEmpty()) {
             val idx = startIndex.coerceIn(0, chapters.lastIndex)
+            // 复用旧剧集列表：期间可能又有几集下载完了，这里补一次本地地址，
+            // 否则明明本地有 mp4，播放时还在走那条 http 直链重新缓冲
+            refreshLocalUris()
             savedIndex = idx
             savedPositionMs = book?.durChapterPos?.toLong() ?: 0L
             _uiState.update {
@@ -154,6 +273,8 @@ object SourceVideoPlayerSession {
         this@SourceVideoPlayerSession.source = source
         this@SourceVideoPlayerSession.chapters = chapters
         resolving.clear()
+        // 换了视频：上一部剧的"当前集"不能带过来当收尾对象
+        activeWatchIndex = -1
         // 白名单书源本来就不该被拦截：它的播放页自带选集/清晰度/倍速，
         // 直接交给书源自己拉起，与视频主页的处理保持一致
         if (VideoConfig.isWhitelisted(source.bookSourceUrl)) {
@@ -243,6 +364,16 @@ object SourceVideoPlayerSession {
     fun resolveEpisode(index: Int) {
         val state = _uiState.value
         if (index !in state.episodes.indices) return
+        // 已下载的集：直接播本地文件，连正文规则都不必再跑一次
+        val local = book?.let { b ->
+            chapters.getOrNull(index)?.let { c ->
+                VideoDownloader.findLocalFile(b.name, index, c.title)
+            }
+        }
+        if (local != null) {
+            refreshLocalUri(index, includeCurrent = true)
+            return
+        }
         if (state.episodes[index].uri != Uri.EMPTY) return
         if (!resolving.add(index)) return
         scope.launch {
@@ -329,9 +460,10 @@ object SourceVideoPlayerSession {
 
     /** 首页选集方块点击：切到指定集（未解析的先解析），并保证后续列表已加载 */
     fun selectEpisode(index: Int) {
-        val state = _uiState.value
-        if (index !in state.episodes.indices) return
-        if (state.episodes[index].uri == Uri.EMPTY) resolveEpisode(index)
+        if (index !in _uiState.value.episodes.indices) return
+        // 已下载完的集直接播本地文件：先换成 file:// 再切，避免先用 http 起播又重建一次
+        refreshLocalUri(index, includeCurrent = true)
+        if (_uiState.value.episodes[index].uri == Uri.EMPTY) resolveEpisode(index)
         _uiState.update {
             it.copy(currentIndex = index, startIndex = index, startPositionMs = 0)
         }
