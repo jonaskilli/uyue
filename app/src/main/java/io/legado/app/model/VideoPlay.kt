@@ -33,6 +33,9 @@ import io.legado.app.help.gsyVideo.ExoVideoManager
 import io.legado.app.help.gsyVideo.ExoVideoManager.Companion.FULLSCREEN_ID
 import io.legado.app.help.gsyVideo.FloatingPlayer
 import io.legado.app.help.gsyVideo.VideoPlayer
+import io.legado.app.help.source.SourceVerificationHelp
+import io.legado.app.help.video.VideoConfig
+import io.legado.app.help.video.VideoSourcePlayer
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.rss.Rss
 import io.legado.app.model.webBook.WebBook
@@ -229,41 +232,77 @@ object VideoPlay : CoroutineScope by MainScope(){
             appCtx.toastOnUi("未找到章节")
             return
         }
-        WebBook.getContent(this, source as BookSource, book, chapter)
-            .onSuccess(IO) { content ->
-                val content = content.trim()
-                val mUrl = if (content.isEmpty()) {
-                    throw ContentEmptyException("正文为空")
-                } else if (content.startsWith("<")) { //当作mpd文本
-                    val name = MD5Utils.md5Encode(content) + ".mpd"
-                    val file = FileUtils.createFileIfNotExist(videoTempFile,name)
-                    file.writeText(content)
-                    Uri.fromFile(file).toString()
-                } else {
-                    content
+        val bookSource = source as BookSource
+        if (VideoConfig.isWhitelisted(bookSource.bookSourceUrl)) {
+            // 白名单源跳过解析，由书源自带播放器（内置浏览器）接管
+            isLoading = false
+            Coroutine.async(VideoPlay) {
+                runCatching {
+                    VideoSourcePlayer.play(book, bookSource, chapter)
+                }.onFailure {
+                    AppLog.put("书源自带播放器启动失败\n$it", it, true)
                 }
-                videoUrl = mUrl
-                val analyzeUrl = AnalyzeUrl(
-                    mUrl,
-                    source = source,
-                    ruleData = book,
-                    chapter = chapter
-                )
-                when (val danmaku = chapter.getDanmaku()) {
-                    is String -> danmakuStr = danmaku
-                    is File -> danmakuFile = danmaku
+            }
+            return
+        }
+        Coroutine.async(VideoPlay) {
+            // 一次正文规则内判定播放方案：
+            // 直链 → GSY 播放；网页播放器 → 全屏视频模式浏览器只开这一个；都不是 → 原解析链路
+            val resolve = VideoSourcePlayer.resolveChapter(book, bookSource, chapter)
+            when {
+                resolve.directUrl != null -> resolve.directUrl
+                resolve.webPlayerUrl != null -> {
+                    withContext(Main) {
+                        SourceVerificationHelp.startBrowser(
+                            source = bookSource,
+                            url = resolve.webPlayerUrl,
+                            title = chapter.title,
+                            videoMode = true
+                        )
+                    }
+                    null // 已交给书源网页播放器，GSY 不再处理
                 }
-                val playUrl = analyzeUrl.url
-                withContext(Main) {
-                    player.mapHeadData = analyzeUrl.headerMap
-                    player.setUp(playUrl, false, File(appCtx.externalCache, "exoplayer"), chapter.title)
-                    if (autoPlay) {
-                        player.startPlayLogic()
+                else -> {
+                    val content = WebBook.getContentAwait(bookSource, book, chapter).trim()
+                    if (content.isEmpty()) {
+                        throw ContentEmptyException("正文为空")
+                    } else if (content.startsWith("<")) { //当作mpd文本
+                        val name = MD5Utils.md5Encode(content) + ".mpd"
+                        val file = FileUtils.createFileIfNotExist(videoTempFile,name)
+                        file.writeText(content)
+                        Uri.fromFile(file).toString()
+                    } else {
+                        content
                     }
                 }
-            }.onError {
-                AppLog.put("获取资源链接出错\n$it", it, true)
             }
+        }.onSuccess(IO) { mUrl ->
+            if (mUrl == null) {
+                isLoading = false
+                return@onSuccess
+            }
+            videoUrl = mUrl
+            val analyzeUrl = AnalyzeUrl(
+                mUrl,
+                source = source,
+                ruleData = book,
+                chapter = chapter
+            )
+            when (val danmaku = chapter.getDanmaku()) {
+                is String -> danmakuStr = danmaku
+                is File -> danmakuFile = danmaku
+            }
+            val playUrl = analyzeUrl.url
+            withContext(Main) {
+                player.mapHeadData = analyzeUrl.headerMap
+                player.setUp(playUrl, false, File(appCtx.externalCache, "exoplayer"), chapter.title)
+                if (autoPlay) {
+                    player.startPlayLogic()
+                }
+            }
+        }.onError {
+            AppLog.put("获取资源链接出错\n$it", it, true)
+        }
         isLoading = false
     }
 

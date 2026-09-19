@@ -91,6 +91,90 @@ interface BookSourceDao {
     @Query("select * from book_sources_part where hasLoginUrl = 1 order by customOrder asc")
     fun flowLogin(): Flow<List<BookSourcePart>>
 
+    /**
+     * 视频书源，判定条件（满足其一即可，无需手动改类型）：
+     * 1. 书源类型被显式设为视频（bookSourceType = 4）
+     * 2. 分组名含视频类关键词（视频/影视/电影/剧集/电视/短剧/video 等）
+     * 3. 正文规则里直接写了 m3u8/mp4（强特征）
+     *
+     * 现有生态里的视频书源几乎都是 type = 0 的普通书源，
+     * 只按类型过滤会导致用户导入后视频主页一直是空的，
+     * 因此这里加分组与规则特征兜底，让"导入即可见"尽量成立。
+     * 规则里只调 startBrowser 打开网页播放器的源无法自动识别，
+     * 仍需在书源管理里批量「标记为视频源」。
+     */
+    @Query(
+        """select * from book_sources
+        where enabled = 1
+        and (bookSourceType = 4
+            or bookSourceGroup like '%视频%'
+            or bookSourceGroup like '%影视%'
+            or bookSourceGroup like '%电影%'
+            or bookSourceGroup like '%剧集%'
+            or bookSourceGroup like '%电视%'
+            or bookSourceGroup like '%动漫%'
+            or bookSourceGroup like '%短剧%'
+            or bookSourceGroup like '%video%'
+            or bookSourceGroup like '%movie%'
+            or ruleContent like '%.m3u8%'
+            or ruleContent like '%.mp4%')
+        order by customOrder asc"""
+    )
+    fun flowVideoSources(): Flow<List<BookSource>>
+
+    /**
+     * 视频书源（part 投影，供发现页列表使用），判定条件与 [flowVideoSources] 完全一致。
+     */
+    @Query(
+        """select bp.* from book_sources b join book_sources_part bp on b.bookSourceUrl = bp.bookSourceUrl
+        where b.enabled = 1
+        and (b.bookSourceType = 4
+            or b.bookSourceGroup like '%视频%'
+            or b.bookSourceGroup like '%影视%'
+            or b.bookSourceGroup like '%电影%'
+            or b.bookSourceGroup like '%剧集%'
+            or b.bookSourceGroup like '%电视%'
+            or b.bookSourceGroup like '%动漫%'
+            or b.bookSourceGroup like '%短剧%'
+            or b.bookSourceGroup like '%video%'
+            or b.bookSourceGroup like '%movie%'
+            or b.ruleContent like '%.m3u8%'
+            or b.ruleContent like '%.mp4%')
+        order by bp.customOrder asc"""
+    )
+    fun flowVideoSourcesPart(): Flow<List<BookSourcePart>>
+
+    @Query(
+        """select bp.* from book_sources b join book_sources_part bp on b.bookSourceUrl = bp.bookSourceUrl
+        where b.enabled = 1
+        and (b.bookSourceType = 4
+            or b.bookSourceGroup like '%视频%'
+            or b.bookSourceGroup like '%影视%'
+            or b.bookSourceGroup like '%电影%'
+            or b.bookSourceGroup like '%剧集%'
+            or b.bookSourceGroup like '%电视%'
+            or b.bookSourceGroup like '%动漫%'
+            or b.bookSourceGroup like '%短剧%'
+            or b.bookSourceGroup like '%video%'
+            or b.bookSourceGroup like '%movie%'
+            or b.ruleContent like '%.m3u8%'
+            or b.ruleContent like '%.mp4%')
+        and (bp.bookSourceGroup like '%' || :key || '%'
+            or bp.bookSourceName like '%' || :key || '%')
+        order by bp.customOrder asc"""
+    )
+    fun flowVideoSourcesPart(key: String): Flow<List<BookSourcePart>>
+
+    @Query("update book_sources set bookSourceType = :type where bookSourceUrl = :bookSourceUrl")
+    fun upSourceType(bookSourceUrl: String, type: Int)
+
+    @Transaction
+    fun upSourceType(type: Int, bookSources: List<BookSourcePart>) {
+        for (bs in bookSources) {
+            upSourceType(bs.bookSourceUrl, type)
+        }
+    }
+
     @Query(
         """select * from book_sources_part 
         where bookSourceGroup is null or bookSourceGroup = '' or bookSourceGroup like '%未分组%'

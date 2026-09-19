@@ -23,6 +23,7 @@ import io.legado.app.help.http.StrResponse
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.help.source.SourceVerificationHelp
 import io.legado.app.help.source.getSourceType
+import io.legado.app.help.video.VideoSourcePlayer
 import io.legado.app.model.Debug
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.analyzeRule.QueryTTF
@@ -565,7 +566,18 @@ private fun saveResponseHeadersIfWebPage(
 
     fun startBrowser(url: String, title: String, html: String?) {
         rhinoContext.ensureActive()
-        SourceVerificationHelp.startBrowser(getSource(), url, title, html=html)
+        // 视频场景（正在等待书源拉起播放器）时以无顶栏全屏方式打开，
+        // 否则保持原有行为，不影响书源验证等其它用途
+        val videoMode = VideoSourcePlayer.isWatching()
+        // 记录书源是否自行拉起了播放器。这一步对两种模式都要做：
+        // 播放模式据此判断书源有没有拉起，解析模式则据此把地址取回来。
+        VideoSourcePlayer.onSourceBrowser(url)
+        // 解析模式：把地址交回给调用方（App 自己的播放器），不启动内置浏览器。
+        // 书源 JS 无感知，执行流程与原来完全一致。
+        if (VideoSourcePlayer.shouldIntercept()) return
+        SourceVerificationHelp.startBrowser(
+            getSource(), url, title, html = html, videoMode = videoMode
+        )
     }
 
     /**

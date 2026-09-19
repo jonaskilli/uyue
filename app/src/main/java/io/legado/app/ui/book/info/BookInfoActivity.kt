@@ -37,6 +37,7 @@ import io.legado.app.help.GlideImageGetter
 import io.legado.app.help.TextViewTagHandler
 import io.legado.app.help.book.AiAutoCover
 import io.legado.app.help.book.addType
+import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.book.getRemoteUrl
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isImage
@@ -75,7 +76,7 @@ import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.book.toc.TocActivityResult
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.login.SourceLoginActivity
-import io.legado.app.ui.video.VideoPlayerActivity
+import io.legado.app.ui.book.video.SourceVideoPlayerActivity
 import io.legado.app.ui.widget.dialog.PhotoDialog
 import io.legado.app.ui.widget.dialog.VariableDialog
 import io.legado.app.ui.widget.dialog.WaitDialog
@@ -878,16 +879,17 @@ class BookInfoActivity :
     }
 
     private fun startReadActivity(book: Book) {
+        // 视频书的 video 位会被 getBookInfoAwait 按书源声明类型重置，
+        // 导致"播放过的视频再点阅读却跳转阅读页"，路由前按书源口径校正
+        if (!book.isVideo) book.ensureVideoType()
         when {
             book.isAudio -> readBookResult.launch(
                 Intent(this, AudioPlayActivity::class.java)
                     .putExtra("bookUrl", book.bookUrl)
                     .putExtra("inBookshelf", viewModel.inBookshelf)
             )
-            book.isVideo -> readBookResult.launch(
-                Intent(this, VideoPlayerActivity::class.java)
-                    .putExtra("bookUrl", book.bookUrl)
-                    .putExtra("inBookshelf", viewModel.inBookshelf)
+            book.isVideo -> startActivity(
+                SourceVideoPlayerActivity.createIntent(this, book.bookUrl, book.durChapterIndex)
             )
 
             else -> readBookResult.launch(

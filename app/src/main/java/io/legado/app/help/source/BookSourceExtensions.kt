@@ -137,3 +137,34 @@ fun BookSource.getBookType(): Int {
         else -> BookType.text
     }
 }
+
+/**
+ * 书源分组里出现这些关键词即视为视频源。
+ *
+ * 必须与 BookSourceDao.flowVideoSources() 的 like 条件保持一致：
+ * 视频主页按它筛源，书籍路由按它判定，两处一旦失配就会出现
+ * "视频主页能播、继续阅读却开成小说阅读页"的错位。
+ */
+private val VIDEO_GROUP_KEYWORDS = arrayOf(
+    "视频", "影视", "电影", "剧集", "电视", "动漫", "短剧"
+)
+private val VIDEO_RULE_HINTS = arrayOf(".m3u8", ".mp4")
+
+/**
+ * 是否为视频源。
+ *
+ * 生态里的视频书源大多没把 bookSourceType 标成 4（DAO 里 flowVideoSources 的注释也这么说），
+ * 因此不能只看 [bookSourceType]，要叠加分组名与规则特征的模糊匹配，
+ * 与视频主页的选源口径对齐。
+ */
+fun BookSource.isVideoSource(): Boolean {
+    if (bookSourceType == BookSourceType.video) return true
+    val group = bookSourceGroup ?: ""
+    if (VIDEO_GROUP_KEYWORDS.any { group.contains(it) }) return true
+    if (group.contains("video", ignoreCase = true)) return true
+    if (group.contains("movie", ignoreCase = true)) return true
+    // ruleContent 是 ContentRule 对象，库里是 JSON 文本（DAO 的 like 就打在它上面），
+    // 这里同样序列化后再匹配，保证与 SQL 口径一致
+    val rule = ruleContent?.let { GSON.toJson(it) } ?: ""
+    return VIDEO_RULE_HINTS.any { rule.contains(it, ignoreCase = true) }
+}

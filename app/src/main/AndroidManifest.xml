@@ -166,6 +166,19 @@
             android:name="io.legado.app.ui.video.VideoPlayerActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
             android:launchMode="singleTask" />
+        <!-- 视频启动页：执行书源正文规则，由书源自行拉起播放器，播放开始后即结束 -->
+        <activity
+            android:name="io.legado.app.ui.book.video.VideoLaunchActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Activity.VideoLaunch" />
+        <!-- 在线剧集播放页（时光播放器）：自带选集面板、竖滑切集与首页压缩模式；拿不到直链时退回 VideoLaunchActivity 的路径 -->
+        <activity
+            android:name="io.legado.app.ui.book.video.SourceVideoPlayerActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|density|uiMode"
+            android:theme="@style/Base.AppTheme" />
         <!-- 授权界面 -->
         <activity
             android:name="io.legado.app.lib.permission.PermissionActivity"

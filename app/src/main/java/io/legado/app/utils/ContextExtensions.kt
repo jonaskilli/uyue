@@ -40,13 +40,14 @@ import io.legado.app.R
 import io.legado.app.constant.AppConst
 import io.legado.app.data.entities.Book
 import io.legado.app.help.IntentHelp
+import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isVideo
 import io.legado.app.help.config.AppConfig
 import io.legado.app.ui.book.audio.AudioPlayActivity
-import io.legado.app.ui.video.VideoPlayerActivity
+import io.legado.app.ui.book.video.SourceVideoPlayerActivity
 import io.legado.app.ui.book.manga.ReadMangaActivity
 import io.legado.app.ui.book.read.ReadBookActivity
 import splitties.systemservices.clipboardManager
@@ -67,8 +68,15 @@ fun Context.startActivityForBook(
     book: Book,
     configIntent: Intent.() -> Unit = {},
 ) {
+    // 视频书的 video 位常被详情页/目录解析按书源声明类型重置，
+    // 路由前按书源口径校正，避免播过的视频再点开却是小说阅读页
+    if (!book.isVideo) book.ensureVideoType()
+    if (book.isVideo) {
+        // 视频书：直接进时光播放器（剧集播放页），从上次看到的集继续
+        startActivity(SourceVideoPlayerActivity.createIntent(this, book.bookUrl, book.durChapterIndex))
+        return
+    }
     val cls = when {
-        book.isVideo -> VideoPlayerActivity::class.java
         book.isAudio -> AudioPlayActivity::class.java
         !book.isLocal && book.isImage && AppConfig.showMangaUi -> ReadMangaActivity::class.java
         else -> ReadBookActivity::class.java

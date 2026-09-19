@@ -45,6 +45,7 @@ import io.legado.app.utils.viewbindingdelegate.viewBinding
 import io.legado.app.utils.visible
 import android.webkit.JavascriptInterface
 import io.legado.app.constant.AppLog
+import io.legado.app.help.video.VideoTextLocalizeJs
 import io.legado.app.help.webView.WebJsExtensions
 import io.legado.app.help.webView.WebJsExtensions.Companion.basicJs
 import io.legado.app.help.webView.WebJsExtensions.Companion.nameBasic
@@ -74,6 +75,7 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
     private var isFullScreen = false
     private var isfullscreen = false
     private var needClearHistory = true
+    private var videoMode = false
     private val saveImage = registerForActivityResult(HandleFileContract()) {
         it.uri?.let { uri ->
             ACache.get().put(imagePathKey, uri.toString())
@@ -94,6 +96,13 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         }
         binding.titleBar.title = intent.getStringExtra("title") ?: getString(R.string.loading)
         binding.titleBar.subtitle = intent.getStringExtra("sourceName")
+        // 视频书源播放模式：无顶栏、沉浸式全屏，返回键直接关闭
+        videoMode = intent.getBooleanExtra("videoMode", false)
+        if (videoMode) {
+            isFullScreen = true
+            toggleSystemBar(false)
+            supportActionBar?.hide()
+        }
         viewModel.initData(intent) {
             val url = viewModel.baseUrl
             val headerMap = viewModel.headerMap
@@ -113,6 +122,11 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         }
         currentWebView.clearHistory()
         onBackPressedDispatcher.addCallback(this) {
+            // 视频播放页：按返回直接关闭，不走网页回退逻辑
+            if (videoMode) {
+                finish()
+                return@addCallback
+            }
             if (binding.customWebView.size > 0) { //网页全屏
                 customWebViewCallback?.onCustomViewHidden()
                 return@addCallback
@@ -439,6 +453,10 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
             val cookieManager = CookieManager.getInstance()
             url?.let {
                 CookieStore.setCookie(it, cookieManager.getCookie(it))
+            }
+            // 视频播放模式：注入书源播放器文案中文化脚本
+            if (videoMode) {
+                view?.evaluateJavascript(VideoTextLocalizeJs.SCRIPT, null)
             }
             view?.title?.let { title ->
                 if (title != url && title != view.url && title.isNotBlank()) {

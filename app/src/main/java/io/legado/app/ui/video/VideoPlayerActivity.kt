@@ -31,6 +31,7 @@ import io.legado.app.databinding.ActivityVideoPlayerBinding
 import io.legado.app.help.book.removeType
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.gsyVideo.VideoPlayer
+import io.legado.app.help.video.VideoDownloader
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.lib.theme.primaryTextColor
@@ -40,6 +41,7 @@ import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.model.SourceCallBack
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.book.toc.TocActivityResult
+import io.legado.app.ui.book.video.SourceVideoPlayerActivity
 import io.legado.app.ui.login.SourceLoginActivity
 import io.legado.app.ui.rss.favorites.RssFavoritesDialog
 import io.legado.app.ui.rss.source.edit.RssSourceEditActivity
@@ -148,6 +150,20 @@ class VideoPlayerActivity : VMBaseActivity<ActivityVideoPlayerBinding, VideoPlay
     private fun initView() {
         viewModel.upStarMenuData.observe(this) { upStarMenu() }
         binding.root.setBackgroundColor(backgroundColor)
+        // 放大播放：跳回全屏时光播放器，从当前集继续
+        binding.ivEnlarge.setOnClickListener {
+            val book = VideoPlay.book ?: return@setOnClickListener
+            val rawIndex = if (VideoPlay.volumes.isEmpty()) {
+                VideoPlay.chapterInVolumeIndex
+            } else {
+                (VideoPlay.durVolume?.index ?: 0) + VideoPlay.chapterInVolumeIndex + 1
+            }
+            VideoPlay.saveRead()
+            startActivity(SourceVideoPlayerActivity.createIntent(this, book.bookUrl, rawIndex))
+            finish()
+        }
+        // 下载选集：多选后拼成完整视频保存到 Download/保存视频/<视频名>/
+        binding.ivDownload.setOnClickListener { showDownloadDialog() }
         if (VideoPlay.book != null) {
             showBook(VideoPlay.book!!)
             if (VideoPlay.episodes.isNullOrEmpty()) {
@@ -166,6 +182,56 @@ class VideoPlayerActivity : VMBaseActivity<ActivityVideoPlayerBinding, VideoPlay
             binding.data.visibility = View.INVISIBLE
             binding.chaptersContainer.visibility = View.INVISIBLE
         }
+    }
+
+    /** 多选要下载的选集，加入下载队列（串行下载，m3u8 自动拼接成完整视频） */
+    private fun showDownloadDialog() {
+        val episodes = VideoPlay.episodes
+        if (episodes.isNullOrEmpty()) {
+            toastOnUi("没有可下载的选集")
+            return
+        }
+        val source = VideoPlay.source as? BookSource
+        val book = VideoPlay.book
+        if (source == null || book == null) {
+            toastOnUi("未找到书源信息")
+            return
+        }
+        if (!VideoDownloader.hasStoragePermission()) {
+            toastOnUi("请先授予「所有文件访问权限」，否则无法保存到下载目录")
+            VideoDownloader.openStoragePermissionSetting()
+            return
+        }
+        val offset = if (VideoPlay.volumes.isEmpty()) 0 else (VideoPlay.durVolume?.index ?: 0) + 1
+        val titles = episodes.mapIndexed { i, c -> "第${i + 1}集 ${c.title}" }.toTypedArray()
+        val checked = BooleanArray(episodes.size)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("选择要下载的选集")
+            .setMultiChoiceItems(titles, checked) { _, which, isChecked ->
+                checked[which] = isChecked
+            }
+            .setPositiveButton("开始下载") { _, _ ->
+                val tasks = episodes.mapIndexedNotNull { i, chapter ->
+                    if (checked[i]) {
+                        VideoDownloader.Task(
+                            book = book,
+                            source = source,
+                            index = offset + i,
+                            chapter = chapter,
+                        )
+                    } else {
+                        null
+                    }
+                }
+                if (tasks.isEmpty()) {
+                    toastOnUi("未选择任何选集")
+                } else {
+                    VideoDownloader.enqueue(tasks)
+                    toastOnUi("已加入下载队列 ${tasks.size} 集\n保存到 Download/保存视频/${book.name}")
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun showBook(book: Book) {
@@ -358,11 +424,21 @@ class VideoPlayerActivity : VMBaseActivity<ActivityVideoPlayerBinding, VideoPlay
                             toggleFullScreen()
                             return@post
                         }
-                        val height = (parentWidth * aspectRatio).toInt()
                         val displayMetrics = resources.displayMetrics
                         val screenHeight = displayMetrics.heightPixels
-                        //高度不超过一半屏幕
-                        layoutParams.height = if (height < screenHeight / 2) height else screenHeight / 2
+                        if (isPortraitVideo) {
+                            // 竖版视频：高度占满上半屏，宽度按比例收窄居中，左右留白
+                            val targetHeight = screenHeight / 2
+                            layoutParams.width =
+                                (targetHeight * videoWidth.toFloat() / videoHeight.toFloat()).toInt()
+                            layoutParams.height = targetHeight
+                        } else {
+                            // 横版视频：宽度铺满，高度按比例，不超过半屏
+                            val height = (parentWidth * aspectRatio).toInt()
+                            layoutParams.width = parentWidth
+                            layoutParams.height =
+                                if (height < screenHeight / 2) height else screenHeight / 2
+                        }
                         playerView.layoutParams = layoutParams
                     }
                 }

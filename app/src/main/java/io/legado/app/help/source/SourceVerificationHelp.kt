@@ -81,7 +81,8 @@ object SourceVerificationHelp {
         title: String,
         saveResult: Boolean? = false,
         refetchAfterSuccess: Boolean? = true,
-        html: String? = null
+        html: String? = null,
+        videoMode: Boolean = false
     ) {
         source ?: throw NoStackTraceException("startBrowser parameter source cannot be null")
         require(url.length < 64 * 1024) { "startBrowser parameter url too long" }
@@ -94,6 +95,7 @@ object SourceVerificationHelp {
             putExtra("sourceVerificationEnable", saveResult)
             putExtra("refetchAfterSuccess", refetchAfterSuccess)
             putExtra("html", html)
+            putExtra("videoMode", videoMode)
             IntentData.put(getVerificationResultKey(source), Thread.currentThread())
         }
     }

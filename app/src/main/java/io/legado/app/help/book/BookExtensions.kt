@@ -17,6 +17,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.RuleBigDataHelp
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.source.isVideoSource
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.utils.FileDoc
 import io.legado.app.utils.GSON
@@ -316,6 +317,27 @@ fun Book.getFolderNameNoCache(): String {
 
 fun Book.getBookSource(): BookSource? {
     return appDb.bookSourceDao.getBookSource(origin)
+}
+
+/**
+ * 校正视频书的 type，让它带上 video 位（需 IO 线程调用）。
+ *
+ * 视频主页靠分组名/规则特征（含 m3u8、mp4 等）识别视频源，而这些源的
+ * bookSourceType 基本仍是 0。于是 getBookInfoAwait 会按 bookSourceType
+ * 把书的 type 重置成纯文本，video 位丢失；此后书架与「继续阅读」
+ * 都会把它当小说，点进去开的是阅读页而不是播放器。
+ *
+ * 补位写在 prepareChapters 里是不够的——路由判断发生在那之前，
+ * 必须让库里的 type 在路由之前就是对的。这里按书源口径重新判定并落库，
+ * 既修当前这一次，也把历史脏数据一并纠过来。
+ */
+fun Book.ensureVideoType(): Book {
+    if (isVideo) return this
+    val source = getBookSource() ?: return this
+    if (!source.isVideoSource()) return this
+    addType(BookType.video)
+    appDb.bookDao.update(this)
+    return this
 }
 
 fun Book.isLocalModified(): Boolean {

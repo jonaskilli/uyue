@@ -520,6 +520,8 @@
     <string name="files_tree">Directory</string>
     <string name="intelligent_import">Intelligent import</string>
     <string name="discovery">Discovery</string>
+    <string name="video_empty">No video source detected\nYou can rename the source group to "Video/Movie/Short Drama", or mark it as a video source in source management</string>
+    <string name="video_get_url_fail">Failed to get playback link</string>
     <string name="switch_display_style">Switch display styles</string>
     <string name="import_per">Import local books requires storage permission</string>
     <string name="night_theme">Night Theme</string>

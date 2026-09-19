@@ -27,6 +27,7 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.data.entities.SearchKeyword
 import io.legado.app.databinding.ActivityBookSearchBinding
+import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.Selector
 import io.legado.app.lib.theme.accentColor
@@ -461,6 +462,12 @@ class SearchActivity : VMBaseActivity<ActivityBookSearchBinding, SearchViewModel
      * 显示书籍详情
      */
     override fun showBookInfo(name: String, author: String, bookUrl: String) {
+        // 搜索结果整体作为播放器的切换列表（动态供给：搜索新增结果自动进入切换范围）
+        VideoFeedStore.put(
+            { viewModel.searchBookLiveData.value?.map { it.bookUrl } ?: emptyList() },
+            bookUrl,
+            loadMore = null
+        )
         startActivity<BookInfoActivity> {
             putExtra("name", name)
             putExtra("author", author)

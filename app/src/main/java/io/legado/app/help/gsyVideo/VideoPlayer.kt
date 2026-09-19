@@ -8,6 +8,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.Window
 import android.widget.ImageView
@@ -131,6 +132,72 @@ class VideoPlayer: StandardGSYVideoPlayer {
         }
         super.touchSurfaceUp()
     }
+
+    /**********竖滑切集手势：上滑下一集、下滑上一集（仿竖滑短视频流）**********/
+    private var swipeStartX = 0f
+    private var swipeStartY = 0f
+    private var swipeStartAt = 0L
+    private var verticalSwiping = false
+    private val touchSlop by lazy { ViewConfiguration.get(context).scaledTouchSlop }
+
+    override fun onTouch(v: View, event: MotionEvent): Boolean {
+        val episodes = VideoPlay.episodes
+        // 无剧集、单集或已锁屏时不接管，保持 GSY 原有手势（亮度/音量/进度）
+        if (episodes.isNullOrEmpty() || episodes.size < 2 || mLockCurScreen) {
+            return super.onTouch(v, event)
+        }
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                swipeStartX = event.x
+                swipeStartY = event.y
+                swipeStartAt = android.os.SystemClock.elapsedRealtime()
+                verticalSwiping = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.x - swipeStartX
+                val dy = event.y - swipeStartY
+                if (!verticalSwiping &&
+                    Math.abs(dy) > touchSlop * 2 &&
+                    Math.abs(dy) > Math.abs(dx) * 2
+                ) {
+                    // 纵向意图明确，接管本次手势，GSY 不再处理亮度/音量/进度
+                    verticalSwiping = true
+                }
+                if (verticalSwiping) {
+                    val offset = if (dy < 0) 1 else -1
+                    val target = episodes.getOrNull(VideoPlay.chapterInVolumeIndex + offset)
+                    showOverlayTip(
+                        when {
+                            target != null -> "松开切换：${target.title}"
+                            offset > 0 -> "已经是最后一集"
+                            else -> "已经是第一集"
+                        }
+                    )
+                    // 接管期间不交给 GSY，避免触发点击/手势逻辑
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (verticalSwiping) {
+                    verticalSwiping = false
+                    showOverlayTip()
+                    if (event.actionMasked == MotionEvent.ACTION_UP) {
+                        val dy = event.y - swipeStartY
+                        val elapsed = (android.os.SystemClock.elapsedRealtime() - swipeStartAt).coerceAtLeast(1)
+                        val velocity = Math.abs(dy) / elapsed // px/ms
+                        val byDistance = Math.abs(dy) > height / 6f
+                        val byFling = velocity > 1.2f && Math.abs(dy) > touchSlop * 4
+                        if (byDistance || byFling) {
+                            VideoPlay.upDurIndex(if (dy < 0) 1 else -1, this)
+                        }
+                    }
+                    return true
+                }
+            }
+        }
+        return super.onTouch(v, event)
+    }
+
 
     private fun setVideoSpeed(speed: Float) {
         setSpeed(speed, true)
