@@ -25,8 +25,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -187,6 +192,8 @@ private fun HomePanel(
     val episodes = state.episodes
     val context = LocalContext.current
     var showDownload by remember { mutableStateOf(false) }
+    // 打开弹窗时：已有下载任务则直接进下载进度页，否则进选集勾选页
+    var downloadShowManage by remember { mutableStateOf(false) }
     var watchSave by remember { mutableStateOf(VideoDownloader.isWatchSaveEnabled()) }
     val currentIndex = state.currentIndex.coerceIn(0, (episodes.lastIndex).coerceAtLeast(0))
 
@@ -240,7 +247,10 @@ private fun HomePanel(
                     fontSize = 12.sp
                 )
             }
-            IconButton(onClick = { showDownload = true }) {
+            IconButton(onClick = {
+                downloadShowManage = VideoDownloader.states.value.isNotEmpty()
+                showDownload = true
+            }) {
                 Icon(
                     Icons.Filled.Download,
                     contentDescription = "下载选集",
@@ -281,38 +291,24 @@ private fun HomePanel(
     if (showDownload) {
         DownloadDialog(
             episodes = episodes,
-            onDismiss = { showDownload = false },
-            onConfirm = { checkedIndexes ->
-                showDownload = false
-                if (checkedIndexes.isEmpty()) {
-                    context.toastOnUi("未选择任何选集")
-                    return@DownloadDialog
-                }
-                val chapters = SourceVideoPlayerSession.getChapters()
-                val book = SourceVideoPlayerSession.getBook()
-                val source = SourceVideoPlayerSession.getSource()
-                if (chapters.size != episodes.size || book == null || source == null) {
-                    context.toastOnUi("剧集信息尚未就绪，请稍后再试")
-                    return@DownloadDialog
-                }
-                val tasks = checkedIndexes.mapNotNull { i ->
-                    chapters.getOrNull(i)?.let {
-                        VideoDownloader.Task(book, source, i, it)
-                    }
-                }
-                VideoDownloader.enqueue(tasks)
-                context.toastOnUi("已加入下载队列 ${tasks.size} 集\n保存到 Download/保存视频/${state.bookName}")
-            }
+            bookName = state.bookName,
+            showManageFirst = downloadShowManage,
+            onDismiss = { showDownload = false }
         )
     }
 }
 
+/** 下载弹窗：顶部双页签——选集勾选下载 / 实时下载进度管理 */
 @Composable
 private fun DownloadDialog(
     episodes: List<LocalVideo>,
+    bookName: String,
+    showManageFirst: Boolean,
     onDismiss: () -> Unit,
-    onConfirm: (List<Int>) -> Unit,
 ) {
+    val context = LocalContext.current
+    val dlStates by VideoDownloader.states.collectAsStateWithLifecycle()
+    var tab by remember { mutableStateOf(if (showManageFirst) 1 else 0) }
     // 必须用快照状态列表：普通 BooleanArray 的修改不会触发重组，勾选框不刷新
     val checked = remember(episodes) {
         mutableStateListOf(*Array(episodes.size) { false })
@@ -324,43 +320,213 @@ private fun DownloadDialog(
             color = Color(0xFF1C1C1E)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("选择要下载的选集", color = Color.White, fontSize = 16.sp)
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(top = 8.dp)
-                ) {
-                    listItemsIndexed(episodes) { i, ep ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
+                // 页签行
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { tab = 0 }) {
+                        Text(
+                            "选集下载",
+                            color = if (tab == 0) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.White.copy(alpha = 0.6f)
+                            }
+                        )
+                    }
+                    TextButton(onClick = { tab = 1 }) {
+                        Text(
+                            "下载进度（${dlStates.size}）",
+                            color = if (tab == 1) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.White.copy(alpha = 0.6f)
+                            }
+                        )
+                    }
+                }
+                when (tab) {
+                    0 -> {
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(top = 8.dp)
                         ) {
-                            Checkbox(
-                                checked = checked[i],
-                                onCheckedChange = { checked[i] = it }
-                            )
-                            Text(
-                                "第${i + 1}集 ${ep.name}",
-                                color = Color.White.copy(alpha = 0.9f),
-                                fontSize = 13.sp,
-                                maxLines = 1
-                            )
+                            listItemsIndexed(episodes) { i, ep ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Checkbox(
+                                        checked = checked[i],
+                                        onCheckedChange = { checked[i] = it }
+                                    )
+                                    Text(
+                                        "第${i + 1}集 ${ep.name}",
+                                        color = Color.White.copy(alpha = 0.9f),
+                                        fontSize = 13.sp,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(onClick = onDismiss) {
+                                Text("取消", color = Color.White)
+                            }
+                            TextButton(onClick = {
+                                val selected = checked.indices.filter { checked[it] }
+                                if (selected.isEmpty()) {
+                                    context.toastOnUi("未选择任何选集")
+                                    return@TextButton
+                                }
+                                val chapters = SourceVideoPlayerSession.getChapters()
+                                val book = SourceVideoPlayerSession.getBook()
+                                val source = SourceVideoPlayerSession.getSource()
+                                if (chapters.size != episodes.size || book == null || source == null) {
+                                    context.toastOnUi("剧集信息尚未就绪，请稍后再试")
+                                    return@TextButton
+                                }
+                                val tasks = selected.mapNotNull { i ->
+                                    chapters.getOrNull(i)?.let {
+                                        VideoDownloader.Task(book, source, i, it)
+                                    }
+                                }
+                                VideoDownloader.enqueue(tasks)
+                                context.toastOnUi(
+                                    "已加入下载队列 ${tasks.size} 集\n保存到 Download/保存视频/$bookName"
+                                )
+                                // 下载在后台进行，切到进度页可实时查看；关闭弹窗也不中断
+                                tab = 1
+                            }) {
+                                Text("开始下载", color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+
+                    else -> {
+                        if (dlStates.isEmpty()) {
+                            Box(
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "暂无下载任务",
+                                    color = Color.White.copy(alpha = 0.5f),
+                                    fontSize = 13.sp
+                                )
+                            }
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(top = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                items(dlStates.size) { i ->
+                                    DownloadStateItem(dlStates[i])
+                                }
+                            }
                         }
                     }
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("取消", color = Color.White)
-                    }
-                    TextButton(onClick = {
-                        onConfirm(checked.indices.filter { checked[it] })
-                    }) {
-                        Text("开始下载", color = MaterialTheme.colorScheme.primary)
-                    }
+            }
+        }
+    }
+}
+
+/** 下载进度条目：浅色轨道 + 深色进度条 + 百分比 + 暂停/继续 + 三点菜单（删除已缓存/已生成mp4） */
+@Composable
+private fun DownloadStateItem(st: VideoDownloader.TaskState) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val running = st.status == VideoDownloader.DlStatus.QUEUED ||
+        st.status == VideoDownloader.DlStatus.RUNNING
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                st.title,
+                color = Color.White.copy(alpha = 0.9f),
+                fontSize = 13.sp,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            // 浅色轨道 + 深色进度条
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color.White.copy(alpha = 0.15f))
+            ) {
+                if (st.progress > 0) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(st.progress / 100f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(
+                                if (st.status == VideoDownloader.DlStatus.COMPLETED) {
+                                    Color(0xFF34C759)
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
+                            )
+                    )
                 }
+            }
+        }
+        Spacer(modifier = Modifier.size(6.dp))
+        // 状态/百分比
+        Text(
+            when (st.status) {
+                VideoDownloader.DlStatus.QUEUED -> "等待中"
+                VideoDownloader.DlStatus.RUNNING -> "${st.progress.coerceAtLeast(0)}%"
+                VideoDownloader.DlStatus.PAUSED -> "已暂停 ${st.progress}%"
+                VideoDownloader.DlStatus.COMPLETED -> "完成"
+                VideoDownloader.DlStatus.FAILED -> "失败"
+            },
+            color = when (st.status) {
+                VideoDownloader.DlStatus.FAILED -> Color(0xFFFF6B6B)
+                VideoDownloader.DlStatus.COMPLETED -> Color(0xFF34C759)
+                else -> Color.White.copy(alpha = 0.6f)
+            },
+            fontSize = 11.sp
+        )
+        // 暂停 / 继续
+        IconButton(onClick = {
+            if (running) VideoDownloader.pause(st.key) else VideoDownloader.resume(st.key)
+        }) {
+            Icon(
+                if (running) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (running) "暂停" else "继续",
+                tint = Color.White
+            )
+        }
+        // 三点菜单
+        Box {
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = "更多操作",
+                    tint = Color.White
+                )
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("删除已缓存") },
+                    onClick = {
+                        VideoDownloader.deleteCache(st)
+                        menuOpen = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("删除已生成mp4") },
+                    onClick = {
+                        VideoDownloader.deleteMp4(st)
+                        menuOpen = false
+                    }
+                )
             }
         }
     }

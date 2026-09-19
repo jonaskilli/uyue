@@ -15,6 +15,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import splitties.init.appCtx
 import java.io.File
@@ -50,11 +52,65 @@ object VideoDownloader {
         val chapter: BookChapter,
     )
 
+    /** 下载条目状态 */
+    enum class DlStatus { QUEUED, RUNNING, PAUSED, COMPLETED, FAILED }
+
+    /**
+     * 单条下载的实时状态（供界面实时展示进度条/暂停续传）。
+     * key 与 [watchKey] 一致：手动下载与边看边存同一选集共用一条状态。
+     */
+    data class TaskState(
+        val key: String,
+        val task: Task,
+        val title: String,
+        val progress: Int, // 0-99 下载中，100 已完成
+        val status: DlStatus,
+    )
+
+    /** 暂停用异常：从下载循环安全退出，已写入部分保留供续传 */
+    private class PausedException : Exception()
+
     private data class WatchItem(val task: Task, val knownUrl: String?)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val channel = Channel<Task>(Channel.UNLIMITED)
     private val watchChannel = Channel<WatchItem>(Channel.UNLIMITED)
+    /** 手动下载队列：串行执行，暂停的任务跳过、留在队列里 */
+    private val manualQueue = ArrayDeque<Task>()
+    private var workerBusy = false
+    /** 暂停中的下载 key（watchKey） */
+    private val pausedKeys: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private val statesMap = LinkedHashMap<String, TaskState>()
+    private val _states = MutableStateFlow<List<TaskState>>(emptyList())
+
+    /** 实时下载状态列表（界面收集展示，退出界面后仍在后台更新） */
+    val states: StateFlow<List<TaskState>> get() = _states
+
+    private fun publishStates() {
+        synchronized(statesMap) { _states.value = statesMap.values.toList() }
+    }
+
+    private fun ensureState(task: Task) {
+        val key = watchKey(task)
+        synchronized(statesMap) {
+            if (!statesMap.containsKey(key)) {
+                statesMap[key] = TaskState(key, task, titleOf(task), 0, DlStatus.QUEUED)
+            }
+        }
+        publishStates()
+    }
+
+    private fun updateState(key: String, transform: (TaskState) -> TaskState) {
+        synchronized(statesMap) {
+            statesMap[key]?.let { statesMap[key] = transform(it) }
+        }
+        publishStates()
+    }
+
+    private fun removeState(key: String) {
+        synchronized(statesMap) { statesMap.remove(key) }
+        publishStates()
+    }
     /** 同一来源的请求头，避免每次分段请求都重新构建 */
     private var cachedHeaders: Pair<String, Map<String, String>>? = null
     /** 正在写入的临时文件路径（下载队列与边看边存互斥同一选集） */
@@ -66,27 +122,98 @@ object VideoDownloader {
     }
 
     init {
-        scope.launch {
-            for (task in channel) {
-                runCatching { download(task) }
-            }
-        }
         // 边看边存 worker：串行补齐缺失片段，完成后合并为 .mp4
         scope.launch {
             for (w in watchChannel) {
-                runCatching { downloadCore(w.task, dirOf(w.task), titleOf(w.task), w.knownUrl) }
-                    .onFailure {
-                        if (it !is kotlinx.coroutines.CancellationException) {
-                            AppLog.put("边看边存补齐失败：${w.task.chapter.title}", it)
-                        }
+                runCatching {
+                    downloadCore(w.task, dirOf(w.task), titleOf(w.task), w.knownUrl, watchKey(w.task))
+                }.onFailure {
+                    when (it) {
+                        is kotlinx.coroutines.CancellationException -> {}
+                        is PausedException ->
+                            updateState(watchKey(w.task)) { s -> s.copy(status = DlStatus.PAUSED) }
+                        else -> AppLog.put("边看边存补齐失败：${w.task.chapter.title}", it)
                     }
+                }
                 synchronized(watchQueued) { watchQueued.remove(watchKey(w.task)) }
             }
         }
     }
 
+    /**
+     * 手动下载：登记状态后入队，串行执行。
+     * 已有完整 mp4 的直接标记完成，不再重复下载。
+     */
     fun enqueue(tasks: List<Task>) {
-        tasks.forEach { channel.trySend(it) }
+        tasks.forEach { task ->
+            val key = watchKey(task)
+            if (File(dirOf(task), "${titleOf(task)}.mp4").exists()) {
+                synchronized(statesMap) {
+                    statesMap[key] = TaskState(key, task, titleOf(task), 100, DlStatus.COMPLETED)
+                }
+                return@forEach
+            }
+            ensureState(task)
+            pausedKeys.remove(key)
+            synchronized(manualQueue) { manualQueue.addLast(task) }
+        }
+        publishStates()
+        pump()
+    }
+
+    /** 串行 worker：取下一条未暂停的任务执行 */
+    private fun pump() {
+        val next: Task
+        synchronized(manualQueue) {
+            if (workerBusy) return
+            val idx = manualQueue.indexOfFirst { watchKey(it) !in pausedKeys }
+            if (idx < 0) return
+            next = manualQueue.removeAt(idx)
+            workerBusy = true
+        }
+        updateState(watchKey(next)) { it.copy(status = DlStatus.RUNNING) }
+        scope.launch {
+            runCatching { download(next) }
+            synchronized(manualQueue) { workerBusy = false }
+            pump()
+        }
+    }
+
+    /** 暂停：循环在下一个检查点安全中止，已写入部分保留用于续传 */
+    fun pause(key: String) {
+        pausedKeys.add(key)
+        updateState(key) { s ->
+            if (s.status == DlStatus.QUEUED || s.status == DlStatus.RUNNING) {
+                s.copy(status = DlStatus.PAUSED)
+            } else s
+        }
+    }
+
+    /** 继续：清除暂停标记，未完成的重新入队续传 */
+    fun resume(key: String) {
+        val task = synchronized(statesMap) { statesMap[key]?.task } ?: return
+        pausedKeys.remove(key)
+        updateState(key) { s ->
+            if (s.status == DlStatus.PAUSED) s.copy(status = DlStatus.QUEUED) else s
+        }
+        synchronized(manualQueue) {
+            if (manualQueue.none { watchKey(it) == key }) manualQueue.addLast(task)
+        }
+        pump()
+    }
+
+    /** 删除已缓存（.part/.idx 临时文件），条目保留，再次下载时从头开始 */
+    fun deleteCache(state: TaskState) {
+        val dir = dirOf(state.task)
+        File(dir, "${state.title}.mp4.part").delete()
+        File(dir, "${state.title}.mp4.idx").delete()
+        updateState(state.key) { it.copy(progress = 0) }
+    }
+
+    /** 删除已生成的 mp4 成品，并从下载列表移除该条目 */
+    fun deleteMp4(state: TaskState) {
+        File(dirOf(state.task), "${state.title}.mp4").delete()
+        removeState(state.key)
     }
 
     fun hasStoragePermission(): Boolean =
@@ -115,6 +242,7 @@ object VideoDownloader {
         synchronized(watchQueued) {
             if (!watchQueued.add(key)) return
         }
+        ensureState(task)
         watchChannel.trySend(WatchItem(task, knownUrl))
     }
 
@@ -154,23 +282,44 @@ object VideoDownloader {
         "${dirOf(task).absolutePath}/${titleOf(task)}"
 
     private suspend fun download(task: Task) {
+        val key = watchKey(task)
         val title = titleOf(task)
+        ensureState(task)
         appCtx.toastOnUi("开始下载：${task.chapter.title}")
-        runCatching { downloadCore(task, dirOf(task), title, knownUrl = null) }
+        runCatching {
+            downloadCore(task, dirOf(task), title, knownUrl = null, key = key) { p ->
+                updateState(key) { it.copy(progress = p) }
+            }
+        }
             .onSuccess {
                 AppLog.put("下载完成：${it.absolutePath}")
+                updateState(key) { it.copy(progress = 100, status = DlStatus.COMPLETED) }
                 appCtx.toastOnUi("下载完成：$title")
             }
             .onFailure { e ->
-                AppLog.put("下载失败：${task.chapter.title}", e)
-                appCtx.toastOnUi("下载失败：${task.chapter.title}\n${e.localizedMessage}")
+                when (e) {
+                    is PausedException ->
+                        updateState(key) { it.copy(status = DlStatus.PAUSED) }
+                    else -> {
+                        AppLog.put("下载失败：${task.chapter.title}", e)
+                        updateState(key) { it.copy(status = DlStatus.FAILED) }
+                        appCtx.toastOnUi("下载失败：${task.chapter.title}\n${e.localizedMessage}")
+                    }
+                }
             }
     }
 
     /**
      * 下载核心：解析直链 → （m3u8 分段拼接 / 直链流式，均支持断点续传）→ 合并为 <标题>.mp4。
      */
-    private suspend fun downloadCore(task: Task, dir: File, title: String, knownUrl: String?): File {
+    private suspend fun downloadCore(
+        task: Task,
+        dir: File,
+        title: String,
+        knownUrl: String?,
+        key: String,
+        onProgress: (Int) -> Unit = {},
+    ): File {
         val out = File(dir, "$title.mp4")
         if (out.exists() && out.length() > 0) return out // 已有完整缓存
 
@@ -190,9 +339,9 @@ object VideoDownloader {
         }
         try {
             if (url.contains(".m3u8", true) || url.contains("/m3u8/", true)) {
-                downloadHls(url, headers, tmp, resume = true)
+                downloadHls(url, headers, tmp, resume = true, key = key, onProgress = onProgress)
             } else {
-                downloadDirect(url, headers, tmp, resume = true)
+                downloadDirect(url, headers, tmp, resume = true, key = key, onProgress = onProgress)
             }
             if (out.exists()) out.delete()
             if (!tmp.renameTo(out)) {
@@ -213,8 +362,20 @@ object VideoDownloader {
         return headers
     }
 
-    /** 单文件直链下载（Range 断点续传） */
-    private fun downloadDirect(url: String, headers: Map<String, String>, out: File, resume: Boolean) {
+    /** 暂停检查点：已暂停则抛 [PausedException] 退出下载循环 */
+    private fun checkPaused(key: String) {
+        if (key in pausedKeys) throw PausedException()
+    }
+
+    /** 单文件直链下载（Range 断点续传；检查点响应暂停，实时回报百分比进度） */
+    private fun downloadDirect(
+        url: String,
+        headers: Map<String, String>,
+        out: File,
+        resume: Boolean,
+        key: String,
+        onProgress: (Int) -> Unit,
+    ) {
         val existing = if (resume) out.takeIf { it.exists() && it.length() > 0 } else null
         val request = okhttp3.Request.Builder().url(url).apply {
             headers.forEach { (k, v) -> header(k, v) }
@@ -225,14 +386,40 @@ object VideoDownloader {
             // 206 = 从断点继续追加；200 = 服务器不支持断点，重头写
             val append = existing != null && resp.code == 206
             if (existing != null && !append) out.delete()
-            resp.body?.byteStream()?.use { input ->
-                FileOutputStream(out, append).use { output -> input.copyTo(output) }
-            } ?: throw IllegalStateException("空响应")
+            val input = resp.body?.byteStream() ?: throw IllegalStateException("空响应")
+            input.use { ins ->
+                FileOutputStream(out, append).use { output ->
+                    var downloaded = if (append) existing?.length() ?: 0L else 0L
+                    val total = downloaded + (resp.body?.contentLength()?.takeIf { it > 0 } ?: 0L)
+                    var lastPct = -1
+                    val buf = ByteArray(64 * 1024)
+                    var read: Int
+                    while (ins.read(buf).also { read = it } > 0) {
+                        checkPaused(key)
+                        output.write(buf, 0, read)
+                        downloaded += read
+                        if (total > 0) {
+                            val pct = (downloaded * 100 / total).toInt().coerceIn(0, 99)
+                            if (pct != lastPct) {
+                                lastPct = pct
+                                onProgress(pct)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    /** m3u8 分段下载并顺序拼接（.idx 记录指纹与每段字节数，支持从缺失片段续传） */
-    private fun downloadHls(playlistUrl: String, headers: Map<String, String>, out: File, resume: Boolean) {
+    /** m3u8 分段下载并顺序拼接（.idx 记录指纹与每段字节数，支持从缺失片段续传；每段回报进度、可暂停） */
+    private fun downloadHls(
+        playlistUrl: String,
+        headers: Map<String, String>,
+        out: File,
+        resume: Boolean,
+        key: String,
+        onProgress: (Int) -> Unit,
+    ) {
         val playlist = fetchText(playlistUrl, headers)
         var keyUri: String? = null
         var ivHex: String? = null
@@ -313,15 +500,16 @@ object VideoDownloader {
                 }
                 segments.forEachIndexed { index, (segUrl, segIv, segKeyUri) ->
                     if (index < startIndex) return@forEachIndexed
-                    val (body, key) = if (segKeyUri != null) {
+                    checkPaused(key)
+                    val (body, segKey) = if (segKeyUri != null) {
                         val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, segKeyUri)
                         val k = keyCache.getOrPut(keyUrl) { fetchBytes(keyUrl, headers) }
                         fetchBytes(segUrl, headers) to k
                     } else {
                         fetchBytes(segUrl, headers) to null
                     }
-                    if (key != null) {
-                        output.write(decryptAes128(body, key, segIv, mediaSequence + index))
+                    if (segKey != null) {
+                        output.write(decryptAes128(body, segKey, segIv, mediaSequence + index))
                     } else {
                         output.write(body)
                     }
@@ -330,6 +518,7 @@ object VideoDownloader {
                     if ((index + 1) % 20 == 0) {
                         AppLog.putDebug("下载进度 ${index + 1}/${segments.size} 段")
                     }
+                    onProgress(((index + 1) * 100 / segments.size).coerceIn(0, 99))
                 }
             }
         }
