@@ -119,7 +119,11 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
 
                     state.error != null || state.fallbackFailed != null -> ErrorDialog(
                         message = state.error ?: state.fallbackFailed.orEmpty(),
-                        onDismiss = { finish() }
+                        onDismiss = {
+                            // 关闭错误框时同步清掉会话里的错误，防止残留到下一个视频
+                            SourceVideoPlayerSession.clearError()
+                            finish()
+                        }
                     )
 
                     state.episodes.isNotEmpty() -> key(state.bookUrl) {

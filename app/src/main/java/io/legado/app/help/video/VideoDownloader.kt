@@ -24,6 +24,9 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.util.concurrent.Semaphore
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -420,7 +423,29 @@ object VideoDownloader {
         key: String,
         onProgress: (Int) -> Unit,
     ) {
-        val playlist = fetchText(playlistUrl, headers)
+        var playlist = fetchText(playlistUrl, headers)
+        // 主清单(#EXT-X-STREAM-INF)：取码率最高的二级媒体清单，递归解析
+        if (playlist.contains("#EXT-X-STREAM-INF")) {
+            val lines = playlist.lines()
+            var bestUrl: String? = null
+            var bestBw = -1L
+            var i = 0
+            while (i < lines.size) {
+                val l = lines[i].trim()
+                if (l.startsWith("#EXT-X-STREAM-INF")) {
+                    val bw = Regex("BANDWIDTH=(\\d+)").find(l)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                    val next = lines.getOrNull(i + 1)?.trim()
+                    if (!next.isNullOrBlank() && !next.startsWith("#") && bw >= bestBw) {
+                        bestBw = bw
+                        bestUrl = next
+                    }
+                }
+                i++
+            }
+            checkNotNull(bestUrl) { "主清单中没有媒体清单" }
+            val mediaUrl = NetworkUtils.getAbsoluteURL(playlistUrl, bestUrl)
+            return downloadHls(mediaUrl, headers, out, resume, key, onProgress)
+        }
         var keyUri: String? = null
         var ivHex: String? = null
         var mediaSequence = 0L
@@ -498,28 +523,62 @@ object VideoDownloader {
                     } ?: idxOut.write("0\n".toByteArray())
                     idxOut.flush()
                 }
-                segments.forEachIndexed { index, (segUrl, segIv, segKeyUri) ->
-                    if (index < startIndex) return@forEachIndexed
-                    checkPaused(key)
-                    val (body, segKey) = if (segKeyUri != null) {
-                        val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, segKeyUri)
-                        val k = keyCache.getOrPut(keyUrl) { fetchBytes(keyUrl, headers) }
-                        fetchBytes(segUrl, headers) to k
-                    } else {
-                        fetchBytes(segUrl, headers) to null
-                    }
-                    if (segKey != null) {
-                        output.write(decryptAes128(body, segKey, segIv, mediaSequence + index))
-                    } else {
-                        output.write(body)
-                    }
-                    idxOut.write("${body.size}\n".toByteArray())
-                    idxOut.flush()
-                    if ((index + 1) % 20 == 0) {
-                        AppLog.putDebug("下载进度 ${index + 1}/${segments.size} 段")
-                    }
-                    onProgress(((index + 1) * 100 / segments.size).coerceIn(0, 99))
+                // —— 并行下载：10 个分片同时抓取，按序号落盘（断点续传逻辑不变）——
+                val workerCount = 10
+                val nextIndex = AtomicInteger(startIndex)
+                val buffer = HashMap<Int, ByteArray>()
+                val bufLock = Object()
+                val errorRef = AtomicReference<Exception?>(null)
+                val inFlight = Semaphore(workerCount)
+                val workers = (0 until workerCount).map {
+                    Thread {
+                        try {
+                            while (errorRef.get() == null) {
+                                val index = nextIndex.getAndIncrement()
+                                if (index >= segments.size) return@Thread
+                                inFlight.acquire()
+                                try {
+                                    checkPaused(key)
+                                    val (segUrl, segIv, segKeyUri) = segments[index]
+                                    val plain: ByteArray = if (segKeyUri != null) {
+                                        val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, segKeyUri)
+                                        val k = synchronized(keyCache) {
+                                            keyCache.getOrPut(keyUrl) { fetchBytes(keyUrl, headers) }
+                                        }
+                                        decryptAes128(fetchBytes(segUrl, headers), k, segIv, mediaSequence + index)
+                                    } else {
+                                        fetchBytes(segUrl, headers)
+                                    }
+                                    synchronized(bufLock) { buffer[index] = plain }
+                                } finally {
+                                    inFlight.release()
+                                }
+                            }
+                        } catch (e: Exception) {
+                            errorRef.compareAndSet(null, e)
+                        }
+                    }.apply { start() }
                 }
+                try {
+                    for (index in startIndex until segments.size) {
+                        var chunk: ByteArray? = null
+                        while (chunk == null) {
+                            errorRef.get()?.let { throw it }
+                            synchronized(bufLock) { chunk = buffer.remove(index) }
+                            if (chunk == null) Thread.sleep(10)
+                        }
+                        output.write(chunk)
+                        idxOut.write("${chunk!!.size}\n".toByteArray())
+                        if ((index + 1) % 20 == 0) {
+                            idxOut.flush()
+                            AppLog.putDebug("下载进度 ${index + 1}/${segments.size} 段")
+                        }
+                        onProgress(((index + 1) * 100 / segments.size).coerceIn(0, 99))
+                    }
+                } finally {
+                    workers.forEach { it.join(10_000) }
+                }
+                errorRef.get()?.let { throw it }
             }
         }
         // 全部片段补齐：idx 完成使命，由调用方把 .part 合并为 .mp4

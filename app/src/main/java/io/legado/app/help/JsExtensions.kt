@@ -593,6 +593,9 @@ private fun saveResponseHeadersIfWebPage(
 
     fun startBrowserAwait(url: String, title: String, refetchAfterSuccess: Boolean, html: String?): StrResponse {
         rhinoContext.ensureActive()
+        // 视频解析窗口期内：记录书源拉起的播放器地址并拦截，不真开浏览器
+        VideoSourcePlayer.onSourceBrowser(url)
+        if (VideoSourcePlayer.shouldIntercept()) return StrResponse(url, "")
         val pair = SourceVerificationHelp.getVerificationResult(
             getSource(), url, title, true, refetchAfterSuccess, html
         )

@@ -102,6 +102,7 @@ object SourceVideoPlayerSession {
                 it.copy(
                     loading = false,
                     error = null,
+                    fallbackFailed = null,
                     currentIndex = idx,
                     startIndex = idx,
                     startPositionMs = book?.durChapterPos?.toLong()?.coerceAtLeast(0) ?: 0L,
@@ -109,8 +110,16 @@ object SourceVideoPlayerSession {
             }
             return
         }
+        // 必须清掉上一部视频遗留的所有错误状态，否则失败一次后
+        // 每个新视频都会直接弹出同样的旧错误
         _uiState.update {
-            it.copy(loading = true, error = null, fallbackIndex = null, fallbackLaunched = false)
+            it.copy(
+                loading = true,
+                error = null,
+                fallbackIndex = null,
+                fallbackLaunched = false,
+                fallbackFailed = null,
+            )
         }
         scope.launch {
             runCatching { loadInternal(bookUrl, startIndex) }
@@ -297,6 +306,11 @@ object SourceVideoPlayerSession {
     fun getBook(): Book? = book
     fun getSource(): BookSource? = source
     fun getChapters(): List<BookChapter> = chapters
+
+    /** 清空会话中的错误状态（错误框关闭时调用，避免旧错误污染后续视频） */
+    fun clearError() {
+        _uiState.update { it.copy(error = null, fallbackFailed = null) }
+    }
 
     /** 加入书架：清除 notShelf 标记（看过的视频默认不上书架，仅此入口手动添加） */
     fun addToShelf() {

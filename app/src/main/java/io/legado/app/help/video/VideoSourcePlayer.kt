@@ -182,7 +182,7 @@ object VideoSourcePlayer {
      * 打开，确保请求头、UA、cookie 与书源一致。
      */
     suspend fun play(book: Book, source: BookSource, chapter: BookChapter): Boolean {
-        begin(interceptBrowser = false)
+        begin(interceptBrowser = true)
         val content = try {
             WebBook.getContentAwait(source, book, chapter, needSave = false)
         } catch (e: Exception) {
@@ -190,11 +190,21 @@ object VideoSourcePlayer {
             end()
             throw e
         }
-        // 书源若在正文规则里调了 startBrowser，此处即为 true，播放器已经打开
-        if (end() != null) return true
-
-        val url = content.trim()
-        if (url.startsWith("http", ignoreCase = true)) {
+        // 书源若在正文规则里调了 startBrowser/startBrowserAwait，此处即为拉起的地址
+        var launched = end()
+        if (launched == null && !content.trim().startsWith("http", ignoreCase = true)) {
+            // 兼容"首次执行只做初始化、刷新后才拉起播放器"的源（如返回"请刷新查看内容"）
+            begin(interceptBrowser = true)
+            try {
+                WebBook.getContentAwait(source, book, chapter, needSave = false)
+                launched = end()
+            } catch (e: Exception) {
+                end()
+                throw e
+            }
+        }
+        val url = launched ?: content.trim().takeIf { it.startsWith("http", ignoreCase = true) }
+        if (url != null) {
             SourceVerificationHelp.startBrowser(
                 source = source,
                 url = url,
@@ -204,7 +214,7 @@ object VideoSourcePlayer {
             return true
         }
         throw IllegalStateException(
-            "书源未拉起播放器，也没有返回播放地址。\n\n正文返回：\n${url.take(200)}"
+            "书源未拉起播放器，也没有返回播放地址。\n\n正文返回：\n${content.take(200)}"
         )
     }
 
@@ -221,31 +231,53 @@ object VideoSourcePlayer {
     )
 
     /**
-     * 解析某一集的播放方案，不拉起任何界面。
-     *
-     * 只执行一次正文规则（拦截窗口期内），根据书源行为给出结果：
-     * - 书源 startBrowser 了直链，或正文里写了直链 → [ChapterResolve.directUrl]
-     * - 书源 startBrowser 了网页播放器 → [ChapterResolve.webPlayerUrl]
-     * - 都没有 → 两者皆 null，调用方走原解析链路（mpd 文本/正文求值）
+     * 执行一次正文规则并回收拦截结果。
+     * @return (正文文本, 书源拉起的播放器地址)
      */
-    suspend fun resolveChapter(
+    private suspend fun runRule(
         book: Book,
         source: BookSource,
         chapter: BookChapter,
-    ): ChapterResolve = resolveLock.withLock {
+    ): Pair<String, String?> {
         begin(interceptBrowser = true)
         val content = try {
             WebBook.getContentAwait(source, book, chapter, needSave = false)
         } catch (e: Exception) {
             end()
             AppLog.putDebug("解析播放地址失败：${e.localizedMessage}")
-            return@withLock ChapterResolve(null, null)
+            return "" to null
         }
-        val intercepted = end()
+        return content to end()
+    }
+
+    /**
+     * 解析某一集的播放方案，不拉起任何界面。
+     *
+     * 执行正文规则（拦截窗口期内），根据书源行为给出结果：
+     * - 书源 startBrowser/startBrowserAwait 了直链，或正文里写了直链 → [ChapterResolve.directUrl]
+     * - 书源 startBrowser/startBrowserAwait 了网页播放器 → [ChapterResolve.webPlayerUrl]
+     * - 都没有 → 两者皆 null，调用方走原解析链路（mpd 文本/正文求值）
+     *
+     * 有些源第一次执行规则只做初始化（返回"请刷新查看内容"等占位文本），
+     * 刷新后才会拉起播放器——第一次什么都没拿到时自动补一次刷新。
+     */
+    suspend fun resolveChapter(
+        book: Book,
+        source: BookSource,
+        chapter: BookChapter,
+    ): ChapterResolve = resolveLock.withLock {
+        val (content, intercepted) = runRule(book, source, chapter)
         val direct = intercepted?.takeIf { isPlayableUrl(it) } ?: extractPlayableUrl(content)
+        val webPlayer = if (direct == null) intercepted else null
+        if (direct != null || webPlayer != null) {
+            return@withLock ChapterResolve(direct, webPlayer)
+        }
+        // 自动补一次"刷新"
+        val (content2, intercepted2) = runRule(book, source, chapter)
+        val direct2 = intercepted2?.takeIf { isPlayableUrl(it) } ?: extractPlayableUrl(content2)
         ChapterResolve(
-            directUrl = direct,
-            webPlayerUrl = if (direct == null) intercepted else null
+            directUrl = direct2,
+            webPlayerUrl = if (direct2 == null) intercepted2 else null
         )
     }
 
