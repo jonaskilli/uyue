@@ -37,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -312,7 +313,10 @@ private fun DownloadDialog(
     onDismiss: () -> Unit,
     onConfirm: (List<Int>) -> Unit,
 ) {
-    val checked = remember { BooleanArray(episodes.size) }
+    // 必须用快照状态列表：普通 BooleanArray 的修改不会触发重组，勾选框不刷新
+    val checked = remember(episodes) {
+        mutableStateListOf(*Array(episodes.size) { false })
+    }
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.7f),
