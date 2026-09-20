@@ -244,7 +244,13 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
             block.resume(null)
             return@suspendCoroutine
         }
+        val oldVersionCode = LocalConfig.versionCode
         LocalConfig.versionCode = appInfo.versionCode
+        if (oldVersionCode != 0L) {
+            // 升级：清掉上一个版本写进 WebView 的磁盘缓存与源站会话 cookie，
+            // 避免旧版缓存的 4xx / 过期会话在清空应用数据前一直复现
+            LocalConfig.needClearWebViewCache = true
+        }
         if (LocalConfig.isFirstOpenApp) {
             val help = String(assets.open("web/help/md/appHelp.md").readBytes())
             val dialog = TextDialog(getString(R.string.help), help, TextDialog.Mode.MD)

@@ -82,7 +82,9 @@ object SourceVerificationHelp {
         saveResult: Boolean? = false,
         refetchAfterSuccess: Boolean? = true,
         html: String? = null,
-        videoMode: Boolean = false
+        videoMode: Boolean = false,
+        /** 视频模式会话预热地址：先加载它把源站会话 cookie 种进全局 WebView CookieManager，再加载真正的播放页 */
+        preloadUrl: String? = null
     ) {
         source ?: throw NoStackTraceException("startBrowser parameter source cannot be null")
         require(url.length < 64 * 1024) { "startBrowser parameter url too long" }
@@ -96,6 +98,7 @@ object SourceVerificationHelp {
             putExtra("refetchAfterSuccess", refetchAfterSuccess)
             putExtra("html", html)
             putExtra("videoMode", videoMode)
+            putExtra("preloadUrl", preloadUrl)
             IntentData.put(getVerificationResultKey(source), Thread.currentThread())
         }
     }

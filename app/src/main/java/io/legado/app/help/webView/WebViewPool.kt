@@ -10,6 +10,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import io.legado.app.R
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.LocalConfig
 import io.legado.app.help.webView.WebJsExtensions.Companion.nameBasic
 import io.legado.app.help.webView.WebJsExtensions.Companion.nameCache
 import io.legado.app.help.webView.WebJsExtensions.Companion.nameJava
@@ -61,6 +62,15 @@ object WebViewPool {
         pooledWebView.let {
             it.isInUse = true
             inUsePool[it.id] = it
+        }
+        // 升级后首次取用 WebView：清一次磁盘缓存与旧 cookie（仅一次）。
+        // 解决旧版把源站 4xx / 过期会话写进 WebView 缓存、清空数据前一直复现的问题。
+        if (LocalConfig.needClearWebViewCache) {
+            runCatching {
+                pooledWebView.realWebView.clearCache(true)
+                android.webkit.CookieManager.getInstance().removeAllCookies(null)
+            }
+            LocalConfig.needClearWebViewCache = false
         }
         return pooledWebView
     }

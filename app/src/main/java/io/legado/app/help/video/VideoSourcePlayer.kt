@@ -220,7 +220,9 @@ object VideoSourcePlayer {
                 source = source,
                 url = url,
                 title = chapter.title,
-                videoMode = true
+                videoMode = true,
+                // 书架直开前先逛源站列表页（tocUrl）把会话 cookie 种上，避免缺会话被 4xx 拒
+                preloadUrl = book.tocUrl.takeIf { it.isNotBlank() }
             )
             return true
         }

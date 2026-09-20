@@ -37,6 +37,7 @@ import io.legado.app.utils.gone
 import io.legado.app.utils.invisible
 import io.legado.app.utils.keepScreenOn
 import io.legado.app.utils.longSnackbar
+import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.openUrl
 import io.legado.app.utils.sendToClip
 import io.legado.app.utils.startActivity
@@ -120,6 +121,11 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
     private var isfullscreen = false
     private var needClearHistory = true
     private var videoMode = false
+    /** 视频模式会话预热地址：先加载它把源站会话 cookie 种进全局 WebView CookieManager，再加载真正的播放页 */
+    private var preloadUrl: String? = null
+    private var awaitingPreload = false
+    private var realLoadUrl: String? = null
+    private var realHeaderMap: HashMap<String, String>? = null
     private val saveImage = registerForActivityResult(HandleFileContract()) {
         it.uri?.let { uri ->
             ACache.get().put(imagePathKey, uri.toString())
@@ -142,6 +148,7 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         binding.titleBar.subtitle = intent.getStringExtra("sourceName")
         // 视频书源播放模式：无顶栏、沉浸式全屏，返回键直接关闭
         videoMode = intent.getBooleanExtra("videoMode", false)
+        preloadUrl = intent.getStringExtra("preloadUrl")
         if (videoMode) {
             // 视频模式单实例：把仍存活的旧实例先销毁，避免叠加/残留后台
             if (currentVideoInstance != null && currentVideoInstance !== this) {
@@ -180,8 +187,24 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                 binding.customWebView.setOnTouchListener(videoSwipeListener)
             }
             val html = viewModel.html
+            realLoadUrl = url
+            realHeaderMap = headerMap
+            // 视频模式：若该 host 还没有会话 cookie（例如书架直开、没先在源里逛过），
+            // 先加载源站列表页把会话 cookie 种进全局 WebView CookieManager，再加载真正的播放页，
+            // 否则源站会因缺会话直接回 4xx。预热页与播放页必须同 host 才有意义。
+            val startUrl = if (videoMode
+                && preloadUrl != null
+                && preloadUrl != url
+                && NetworkUtils.getBaseUrl(preloadUrl) == NetworkUtils.getBaseUrl(url)
+                && !hasWebViewCookie(url)
+            ) {
+                awaitingPreload = true
+                preloadUrl!!
+            } else {
+                url
+            }
             if (html.isNullOrEmpty()) {
-                currentWebView.loadUrl(url, headerMap)
+                currentWebView.loadUrl(startUrl, headerMap)
             } else {
                 if (viewModel.localHtml) {
                     viewModel.source?.let {
@@ -321,6 +344,14 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         currentWebView.settings.apply {
             useWideViewPort = true
             loadWithOverviewMode = true
+            // 视频模式：禁用 WebView 缓存。否则源站偶发的 4xx（防盗链/限频/token 失效）
+            // 会被 Chromium 写进缓存并回放，表现为"网页无法加载 net::ERR_HTTP_RESPONSE_CODE_FAILURE"，
+            // 且清空应用数据前一直复现。禁用后每次都重新联网，也保证直播始终拉到最新播放列表。
+            cacheMode = if (videoMode) {
+                android.webkit.WebSettings.LOAD_NO_CACHE
+            } else {
+                android.webkit.WebSettings.LOAD_DEFAULT
+            }
             headerMap[AppConst.UA_NAME]?.let {
                 userAgentString = it
             }
@@ -527,6 +558,16 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
             url?.let {
                 CookieStore.setCookie(it, cookieManager.getCookie(it))
             }
+            // 视频播放模式：会话预热页加载完成，立即加载真正的播放页。
+            // 此刻全局 WebView CookieManager 已带上源站会话，播放页及其 .m3u8 子资源即可通过鉴权。
+            if (videoMode && awaitingPreload) {
+                awaitingPreload = false
+                val real = realLoadUrl
+                if (real != null) {
+                    currentWebView.loadUrl(real, realHeaderMap ?: HashMap())
+                    return
+                }
+            }
             // 视频播放模式：注入书源播放器文案中文化脚本
             if (videoMode) {
                 view?.evaluateJavascript(VideoTextLocalizeJs.SCRIPT, null)
@@ -610,6 +651,12 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         SourceVideoPlayerSession.saveProgress(index, 0L)
         SourceVideoPlayerSession.playWithSourcePlayer(index)
         finish()
+    }
+
+    /** 全局 WebView CookieManager 里该地址所属 host 是否已有 cookie（用于判断是否需要先预热会话） */
+    private fun hasWebViewCookie(url: String): Boolean {
+        val base = NetworkUtils.getBaseUrl(url) ?: return false
+        return !android.webkit.CookieManager.getInstance().getCookie(base).isNullOrBlank()
     }
 
     private fun switchEpisode(delta: Int) {

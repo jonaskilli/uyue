@@ -77,6 +77,17 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
             edit { putLong(versionCodeKey, value) }
         }
 
+    /**
+     * 升级置位：下次取用 WebView 时清一次磁盘缓存与旧 cookie。
+     * 旧版（修复前）会把源站偶发 4xx / 过期会话写进 WebView 磁盘缓存与
+     * android.webkit.CookieManager，清空应用数据前一直复现；升级后清掉即可。
+     */
+    var needClearWebViewCache: Boolean
+        get() = getBoolean("needClearWebViewCache", false)
+        set(value) {
+            edit { putBoolean("needClearWebViewCache", value) }
+        }
+
     val isFirstOpenApp: Boolean
         get() {
             val value = getBoolean("firstOpen", true)

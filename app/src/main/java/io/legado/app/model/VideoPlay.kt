@@ -257,7 +257,9 @@ object VideoPlay : CoroutineScope by MainScope(){
                             source = bookSource,
                             url = resolve.webPlayerUrl,
                             title = chapter.title,
-                            videoMode = true
+                            videoMode = true,
+                            // 书架直开前先逛源站列表页（tocUrl）把会话 cookie 种上，避免缺会话被 4xx 拒
+                            preloadUrl = book?.tocUrl?.takeIf { it.isNotBlank() }
                         )
                     }
                     null // 已交给书源网页播放器，GSY 不再处理
