@@ -79,6 +79,16 @@
             android:textColor="@color/primaryText"
             android:textSize="12sp" />
 
+        <TextView
+            android:id="@+id/tv_source"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:lines="1"
+            android:scrollbars="none"
+            android:textColor="@color/primaryText"
+            android:textSize="12sp" />
+
         <io.legado.app.ui.widget.LabelsBar
             android:id="@+id/ll_kind"
             android:layout_width="match_parent"

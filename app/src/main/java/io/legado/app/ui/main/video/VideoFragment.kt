@@ -97,6 +97,8 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
     private var searchMode = false
     /** 参与搜索的视频源（用于筛选按钮） */
     private var searchSources: List<BookSourcePart> = emptyList()
+    /** 全部视频源（库里读，用来给结果里的源补名字） */
+    private var allVideoSources: List<BookSourcePart> = emptyList()
     /** 未过滤的搜索结果 */
     private var allResults: List<SearchBook> = emptyList()
     /** 当前选中的源；null = 全部 */
@@ -153,13 +155,13 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         binding.tvEmptyMsg.text = getString(R.string.searching)
         selectedSourceUrl = null
         allResults = emptyList()
-        // 参与搜索的源（要读库，放后台）
+        // 参与搜索的源（要读库，放后台）——先取全量视频源，名字用来补结果里的源
         lifecycleScope.launch(IO) {
             val sources = appDb.bookSourceDao.getVideoSourceParts()
             withContext(Dispatchers.Main) {
                 if (!searchMode) return@withContext
-                searchSources = sources
-                upSourceChips()
+                allVideoSources = sources
+                rebuildSourceChips()
             }
         }
     }
@@ -171,10 +173,29 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         binding.chipScroll.isGone = true
         binding.chipContainer.removeAllViews()
         searchSources = emptyList()
+        allVideoSources = emptyList()
         allResults = emptyList()
         selectedSourceUrl = null
         binding.rvFind.adapter = adapter
         upVideoData()
+    }
+
+    /**
+     * 顶部源标签：全部 + 实际返回了结果的视频源。
+     * 直接从搜索结果里收集出现过的源（origins），名字优先取视频源列表的 bookSourceName，
+     * 取不到再退用结果自带的 originName——标签只反映"搜出来的源"，可逐个切换。
+     */
+    private fun rebuildSourceChips() {
+        val nameMap = allVideoSources.associate { it.bookSourceUrl to it.bookSourceName }
+        val sources = allResults.flatMap { book ->
+            book.origins.map { url ->
+                url to (nameMap[url]?.takeIf { n -> n.isNotBlank() }
+                    ?: book.originName.takeIf { n -> n.isNotBlank() } ?: url)
+            }
+        }.distinctBy { it.first }
+            .map { (url, name) -> BookSourcePart(bookSourceUrl = url, bookSourceName = name) }
+        searchSources = sources
+        upSourceChips()
     }
 
     /** 筛选按钮行：全部 + 每个参与搜索的视频源 */
@@ -232,13 +253,13 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         } else {
             binding.tvEmptyMsg.isGone = true
         }
-        upSourceChips()
     }
 
     private fun initSearchObserve() {
         viewModel.searchBooksLiveData.observe(viewLifecycleOwner) { list ->
             if (!searchMode) return@observe
             allResults = list
+            rebuildSourceChips()
             applyFilter()
         }
         viewModel.isSearchingLiveData.observe(viewLifecycleOwner) { searching ->

@@ -85,6 +85,7 @@ class SearchAdapter(context: Context, val callBack: CallBack) :
             tvAuthor.text = context.getString(R.string.author_show, searchBook.author)
             ivInBookshelf.isVisible = callBack.isInBookshelf(searchBook)
             bvOriginCount.setBadgeCount(searchBook.origins.size)
+            upSource(binding, searchBook)
             upLasted(binding, searchBook.latestChapterTitle)
             tvIntroduce.text = searchBook.trimIntro(context)
             upKind(binding, searchBook.getKindList())
@@ -99,7 +100,10 @@ class SearchAdapter(context: Context, val callBack: CallBack) :
         binding.run {
             bundle.keySet().forEach {
                 when (it) {
-                    "origins" -> bvOriginCount.setBadgeCount(searchBook.origins.size)
+                    "origins" -> {
+                bvOriginCount.setBadgeCount(searchBook.origins.size)
+                upSource(binding, searchBook)
+            }
                     "last" -> upLasted(binding, searchBook.latestChapterTitle)
                     "intro" -> tvIntroduce.text = searchBook.trimIntro(context)
                     "kind" -> upKind(binding, searchBook.getKindList())
@@ -122,6 +126,16 @@ class SearchAdapter(context: Context, val callBack: CallBack) :
                     context.getString(R.string.lasted_show, latestChapterTitle)
                 tvLasted.visible()
             }
+        }
+    }
+
+    /** 显示来源书源名（视频搜索结果也能直接看出是哪个源返回的） */
+    private fun upSource(binding: ItemSearchBinding, searchBook: SearchBook) = binding.run {
+        if (searchBook.originName.isBlank()) {
+            tvSource.gone()
+        } else {
+            tvSource.text = context.getString(R.string.source_show, searchBook.originName)
+            tvSource.visible()
         }
     }
 
