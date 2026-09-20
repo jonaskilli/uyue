@@ -15,6 +15,17 @@ import splitties.init.appCtx
 @Suppress("unused")
 data class SearchScope(private var scope: String) {
 
+    companion object {
+        /**
+         * 「所有视频源」范围标记。
+         * 不含 "::" 与 ","，所以不会和单源 / 分组这两种解析方式冲突。
+         * 视频源是按条件筛出来的一批源，不是一个分组，只能这样表达。
+         */
+        const val VIDEO_SCOPE = "@video@"
+
+        fun video(): SearchScope = SearchScope(VIDEO_SCOPE)
+    }
+
     constructor(groups: List<String>) : this(groups.joinToString(","))
 
     constructor(source: BookSource) : this(
@@ -59,6 +70,9 @@ data class SearchScope(private var scope: String) {
 
     val display: String
         get() {
+            if (scope == VIDEO_SCOPE) {
+                return appCtx.getString(R.string.video)
+            }
             if (scope.contains("::")) {
                 return scope.substringBefore("::")
             }
@@ -107,6 +121,11 @@ data class SearchScope(private var scope: String) {
      */
     fun getBookSourceParts(): List<BookSourcePart> {
         val list = hashSetOf<BookSourcePart>()
+        // 视频源范围：直接取判定的视频源。这里不能走下面的"取不到就退回全部源"兜底，
+        // 否则视频源一个都没有时会变成全库搜索
+        if (scope == VIDEO_SCOPE) {
+            return appDb.bookSourceDao.getVideoSourceParts()
+        }
         if (scope.isEmpty()) {
             list.addAll(appDb.bookSourceDao.allEnabledPart)
         } else {

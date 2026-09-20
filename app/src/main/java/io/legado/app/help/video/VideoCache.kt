@@ -39,6 +39,9 @@ object VideoCache {
      */
     private const val MAX_BYTES = 1024L * 1024 * 1024
 
+    /** [readBytes] 的单次上限：超过就直接报错，避免把大文件读进内存 */
+    private const val MAX_READ_BYTES = 16 * 1024 * 1024
+
     @Volatile
     private var cache: SimpleCache? = null
     private val lock = Any()
@@ -109,7 +112,12 @@ object VideoCache {
         return Source(ds, length)
     }
 
-    /** 读取全部字节：命中缓存即零流量，未命中则联网（[write] 为真时顺带写入缓存）。 */
+    /**
+     * 读取全部字节：命中缓存即零流量，未命中则联网（[write] 为真时顺带写入缓存）。
+     *
+     * **只适合密钥这类小数据**。整体读进内存没有上限，曾因拿它读视频分片而在
+     * 256MB 堆的机器上 OOM（分片几 MB 起步、并发一叠就爆）。大块数据一律走 [open] 流式处理。
+     */
     fun readBytes(url: String, headers: Map<String, String>, write: Boolean = true): ByteArray {
         val s = open(url, headers, write = write)
         return try {
@@ -118,6 +126,11 @@ object VideoCache {
             while (true) {
                 val read = s.source.read(buf, 0, buf.size)
                 if (read == C.RESULT_END_OF_INPUT) break
+                if (out.size() + read > MAX_READ_BYTES) {
+                    throw IllegalStateException(
+                        "单次读取超过 ${MAX_READ_BYTES / 1024 / 1024}MB，请用流式读取"
+                    )
+                }
                 out.write(buf, 0, read)
             }
             out.toByteArray()

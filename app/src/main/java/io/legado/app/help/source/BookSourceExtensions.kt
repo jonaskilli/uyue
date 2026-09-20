@@ -139,32 +139,48 @@ fun BookSource.getBookType(): Int {
 }
 
 /**
- * 书源分组里出现这些关键词即视为视频源。
+ * 分组或书源名里出现这些关键词即视为视频源。
  *
- * 必须与 BookSourceDao.flowVideoSources() 的 like 条件保持一致：
+ * **必须与 BookSourceDao.flowVideoSources() 系列的 like 条件逐条保持一致**：
  * 视频主页按它筛源，书籍路由按它判定，两处一旦失配就会出现
- * "视频主页能播、继续阅读却开成小说阅读页"的错位。
+ * "视频主页能播、继续阅读却开成小说阅读页"的错位。改这里就要改那里。
+ *
+ * 分组是用户最能直接控制的口径：某个源因为规则写法特殊没被自动认出来时，
+ * 在书源管理里把分组改成含「视频」即可强制收纳进视频源。
  */
-private val VIDEO_GROUP_KEYWORDS = arrayOf(
-    "视频", "影视", "电影", "剧集", "电视", "动漫", "短剧"
+val VIDEO_GROUP_KEYWORDS = arrayOf(
+    "视频", "視頻", "影视", "电影", "劇集", "剧集", "电视", "动漫", "短剧"
 )
-private val VIDEO_RULE_HINTS = arrayOf(".m3u8", ".mp4")
+
+/**
+ * 规则特征：只写关键字、不写点号。
+ *
+ * 早先匹配的是 `.m3u8` / `.mp4`，可不少源的规则里是 `m3u8?xxx`、`.m3u8` 被拆在
+ * 字符串拼接里、或写的是 `contains("m3u8")` 这类判断，带点匹配就漏了。
+ * 规则里出现 m3u8/mp4 基本只可能是视频，放宽不会误伤小说源。
+ */
+private val VIDEO_RULE_HINTS = arrayOf("m3u8", "mp4")
 
 /**
  * 是否为视频源。
  *
- * 生态里的视频书源大多没把 bookSourceType 标成 4（DAO 里 flowVideoSources 的注释也这么说），
- * 因此不能只看 [bookSourceType]，要叠加分组名与规则特征的模糊匹配，
- * 与视频主页的选源口径对齐。
+ * 生态里的视频书源大多没把 bookSourceType 标成 4，因此不能只看 [bookSourceType]，
+ * 要依次叠加：分组 → 书源名 → 规则特征，与视频主页的选源口径对齐。
  */
 fun BookSource.isVideoSource(): Boolean {
     if (bookSourceType == BookSourceType.video) return true
+    // 分组优先（用户在书源管理里改一下就能强制收纳），分组为空时再看书源名兜底
     val group = bookSourceGroup ?: ""
-    if (VIDEO_GROUP_KEYWORDS.any { group.contains(it) }) return true
-    if (group.contains("video", ignoreCase = true)) return true
-    if (group.contains("movie", ignoreCase = true)) return true
+    if (group.isVideoGroupName()) return true
+    if (bookSourceName.isVideoGroupName()) return true
     // ruleContent 是 ContentRule 对象，库里是 JSON 文本（DAO 的 like 就打在它上面），
     // 这里同样序列化后再匹配，保证与 SQL 口径一致
     val rule = ruleContent?.let { GSON.toJson(it) } ?: ""
     return VIDEO_RULE_HINTS.any { rule.contains(it, ignoreCase = true) }
 }
+
+/** 分组或书源名是否命中视频关键词（书源管理里批量标记时复用同一口径） */
+fun String.isVideoGroupName(): Boolean =
+    VIDEO_GROUP_KEYWORDS.any { contains(it) } ||
+        contains("video", ignoreCase = true) ||
+        contains("movie", ignoreCase = true)

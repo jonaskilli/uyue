@@ -27,6 +27,7 @@
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="${app_name}"
+        android:largeHeap="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
@@ -173,6 +174,12 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@style/Activity.VideoLaunch" />
+        <!-- 下载管理页：不打开具体视频也能查看/管理所有已下载与下载中的视频 -->
+        <activity
+            android:name="io.legado.app.ui.book.video.VideoDownloadActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:label="@string/download_manage"
+            android:theme="@style/Base.AppTheme" />
         <!-- 在线剧集播放页（时光播放器）：自带选集面板、竖滑切集与首页压缩模式；拿不到直链时退回 VideoLaunchActivity 的路径 -->
         <activity
             android:name="io.legado.app.ui.book.video.SourceVideoPlayerActivity"

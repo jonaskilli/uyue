@@ -1488,4 +1488,8 @@
     <string name="invalid_file_path">文件路径无效</string>
     <string name="is_system_tts_no_export">无法导出系统tts</string>
     <string name="preview_voice">试听</string>
+    <string name="download_manage">下载管理</string>
+    <string name="search_video_name">搜索视频名</string>
+    <string name="searching">搜索中…</string>
+    <string name="search_video_empty">没有找到相关视频</string>
 </resources>

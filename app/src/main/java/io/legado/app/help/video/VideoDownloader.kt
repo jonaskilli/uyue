@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import splitties.init.appCtx
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.security.MessageDigest
@@ -31,6 +32,7 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
+import javax.crypto.CipherOutputStream
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -949,7 +951,8 @@ object VideoDownloader {
         // 播放中：压低并发并分片节流，给正在播的那一路让出带宽。
         // 收集是纯本地读、不联网，不该节流——否则几百片 × 200ms 会白白拖很久
         val throttle = playbackActive && !collectOnly
-        val workerCount = if (collectOnly || throttle) 2 else 10
+        // 并发太高会让临时分片文件同时在磁盘上堆一堆，6 路已经能跑满带宽
+        val workerCount = if (collectOnly || throttle) 2 else 6
 
         val keyCache = HashMap<String, ByteArray>()
         FileOutputStream(out, resumeOk).use { output ->
@@ -958,15 +961,17 @@ object VideoDownloader {
                     idxOut.write("$md5\n".toByteArray())
                     initSegment?.let { init ->
                         val initUrl = NetworkUtils.getAbsoluteURL(playlistUrl, init)
-                        val bytes = fetchBytes(initUrl, headers, write = false)
-                        output.write(bytes)
-                        idxOut.write("${bytes.size}\n".toByteArray())
+                        // 同样是流式写，不在内存里攒整块
+                        val n = copyToOutput(initUrl, headers, output)
+                        idxOut.write("$n\n".toByteArray())
                     } ?: idxOut.write("0\n".toByteArray())
                     idxOut.flush()
                 }
-                // —— 并行下载：按序号落盘（断点续传逻辑不变）——
+                // —— 并行下载：每个分片先落自己的临时文件，再按序拼进 .part ——
+                // 之前是把整个分片读成 ByteArray 排队，大分片（几 MB 到几十 MB）乘上并发
+                // 会直接撑爆堆（vivo 256MB 堆上实测 OOM）。改成临时文件后内存只占缓冲区。
                 val nextIndex = AtomicInteger(startIndex)
-                val buffer = HashMap<Int, ByteArray>()
+                val ready = HashMap<Int, Long>() // 分片序号 -> 解密后长度
                 val bufLock = Object()
                 val errorRef = AtomicReference<Exception?>(null)
                 val inFlight = Semaphore(workerCount)
@@ -979,22 +984,20 @@ object VideoDownloader {
                                 inFlight.acquire()
                                 try {
                                     checkPaused(key)
-                                    val (segUrl, segIv, segKeyUri) = segments[index]
-                                    // write=false：播放器已经在写缓存了，下载侧只读不再写，
-                                    // 免得两边抢 SimpleCache 的锁
-                                    val plain: ByteArray = if (segKeyUri != null) {
-                                        val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, segKeyUri)
-                                        val k = synchronized(keyCache) {
-                                            keyCache.getOrPut(keyUrl) { fetchBytes(keyUrl, headers, write = false) }
-                                        }
-                                        decryptAes128(
-                                            fetchBytes(segUrl, headers, write = false),
-                                            k, segIv, mediaSequence + index
-                                        )
-                                    } else {
-                                        fetchBytes(segUrl, headers, write = false)
+                                    val segFile = segFileOf(out, index)
+                                    fetchSegmentToFile(
+                                        segments[index],
+                                        playlistUrl,
+                                        headers,
+                                        mediaSequence + index,
+                                        keyCache,
+                                        segFile,
+                                    )
+                                    synchronized(bufLock) {
+                                        // 以落盘后的长度为准（解密会去掉 padding，和密文长度不同）
+                                        ready[index] = segFile.length()
+                                        bufLock.notifyAll()
                                     }
-                                    synchronized(bufLock) { buffer[index] = plain }
                                     if (throttle) Thread.sleep(THROTTLE_SLEEP_MS)
                                 } finally {
                                     inFlight.release()
@@ -1007,14 +1010,25 @@ object VideoDownloader {
                 }
                 try {
                     for (index in startIndex until endIndex) {
-                        var chunk: ByteArray? = null
-                        while (chunk == null) {
+                        var len: Long? = null
+                        while (len == null) {
                             errorRef.get()?.let { throw it }
-                            synchronized(bufLock) { chunk = buffer.remove(index) }
-                            if (chunk == null) Thread.sleep(10)
+                            synchronized(bufLock) {
+                                len = ready.remove(index)
+                                if (len == null) bufLock.wait(200)
+                            }
                         }
-                        output.write(chunk)
-                        idxOut.write("${chunk!!.size}\n".toByteArray())
+                        val segFile = segFileOf(out, index)
+                        segFile.inputStream().use { ins ->
+                            val buf = ByteArray(64 * 1024)
+                            while (true) {
+                                val r = ins.read(buf)
+                                if (r <= 0) break
+                                output.write(buf, 0, r)
+                            }
+                        }
+                        segFile.delete()
+                        idxOut.write("${len!!}\n".toByteArray())
                         if ((index + 1) % 20 == 0) {
                             idxOut.flush()
                             AppLog.putDebug("下载进度 ${index + 1}/${segments.size} 段")
@@ -1023,6 +1037,10 @@ object VideoDownloader {
                     }
                 } finally {
                     workers.forEach { it.join(10_000) }
+                    // 中断/异常时清掉没拼进去的临时分片，别在下载目录里留垃圾
+                    for (index in startIndex until endIndex) {
+                        segFileOf(out, index).delete()
+                    }
                 }
                 errorRef.get()?.let { throw it }
             }
@@ -1032,22 +1050,85 @@ object VideoDownloader {
         return segments.size to endIndex
     }
 
-    /** AES-128-CBC 解密；未指定 IV 时按 HLS 规范用分片序号（大端 16 字节） */
-    private fun decryptAes128(
-        data: ByteArray,
-        key: ByteArray,
-        ivHex: String?,
+    /**
+     * 把一个分片**流式**落到临时文件：命中缓存读缓存，否则联网（不写缓存）。
+     * 全程只用固定大小的缓冲区，不在内存里攒整个分片——大分片 OOM 就是这么来的。
+     * 加密分片用 [CipherOutputStream] 边读边解密，同样不占内存。
+     */
+    private fun fetchSegmentToFile(
+        segment: Triple<String, String?, String?>,
+        playlistUrl: String,
+        headers: Map<String, String>,
         sequence: Long,
-    ): ByteArray {
+        keyCache: HashMap<String, ByteArray>,
+        segFile: File,
+    ) {
+        val (segUrl, segIv, segKeyUri) = segment
+        // write=false：播放器已经在写缓存了，下载侧只读不写，免得两边抢 SimpleCache 的锁
+        val source = VideoCache.open(segUrl, headers, write = false)
+        val cipher = if (segKeyUri != null) {
+            val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, segKeyUri)
+            val k = synchronized(keyCache) {
+                keyCache.getOrPut(keyUrl) { fetchBytes(keyUrl, headers, write = false) }
+            }
+            aesCipher(k, segIv, sequence)
+        } else {
+            null
+        }
+        try {
+            FileOutputStream(segFile).use { fos ->
+                val sink: OutputStream = cipher?.let { CipherOutputStream(fos, it) } ?: fos
+                sink.use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = source.source.read(buf, 0, buf.size)
+                        if (read == C.RESULT_END_OF_INPUT) break
+                        out.write(buf, 0, read)
+                    }
+                }
+            }
+        } finally {
+            runCatching { source.source.close() }
+        }
+    }
+
+    /** 分片临时文件：<集名>.mp4.part.seg<序号> */
+    private fun segFileOf(out: File, index: Int): File =
+        File(out.parentFile, "${out.name}.seg$index")
+
+    /** 把一个地址流式写入 [out]，返回写入字节数（初始化段用，一样不占内存） */
+    private fun copyToOutput(
+        url: String,
+        headers: Map<String, String>,
+        out: OutputStream,
+    ): Long {
+        val source = VideoCache.open(url, headers, write = false)
+        return try {
+            var total = 0L
+            val buf = ByteArray(32 * 1024)
+            while (true) {
+                val read = source.source.read(buf, 0, buf.size)
+                if (read == C.RESULT_END_OF_INPUT) break
+                out.write(buf, 0, read)
+                total += read
+            }
+            total
+        } finally {
+            runCatching { source.source.close() }
+        }
+    }
+
+    /** AES-128-CBC 解密器；未指定 IV 时按 HLS 规范用分片序号（大端 16 字节） */
+    private fun aesCipher(key: ByteArray, ivHex: String?, sequence: Long): Cipher {
         val iv = if (ivHex != null) {
             val hex = ivHex.removePrefix("0x").removePrefix("0X")
             hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         } else {
             ByteBuffer.allocate(16).putLong(sequence).array()
         }
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        return cipher.doFinal(data)
+        return Cipher.getInstance("AES/CBC/PKCS5Padding").apply {
+            init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        }
     }
 
     private fun parseAttribute(line: String, name: String): String? {

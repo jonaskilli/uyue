@@ -84,7 +84,10 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
     @Composable
     override fun Content() {
         val state by SourceVideoPlayerSession.uiState.collectAsStateWithLifecycle()
-        var homeMode by remember { mutableStateOf(false) }
+        // homeMode：搜索结果进来时直接落在"播放器在上 + 选集在下"的首页形态，方便先挑集
+        var homeMode by remember {
+            mutableStateOf(intent.getBooleanExtra("homeMode", false))
+        }
 
         LaunchedEffect(intent.getStringExtra("bookUrl")) {
             SourceVideoPlayerSession.load(
@@ -212,10 +215,12 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             context: Context,
             bookUrl: String,
             startIndex: Int = 0,
+            homeMode: Boolean = false,
         ): Intent = Intent(context, SourceVideoPlayerActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             putExtra("bookUrl", bookUrl)
             putExtra("startIndex", startIndex)
+            putExtra("homeMode", homeMode)
         }
     }
 }
@@ -326,18 +331,22 @@ private fun HomePanel(
 }
 
 /**
- * 下载弹窗。
+ * 下载管理界面。
  *
  * - 顶部是**当前视频名**，点开可切换到「已缓存视频列表」：每部视频都能勾选、可全选、
  *   可批量删除（连目录带记录一起删），选中某部就把下面的列表切到它；
  * - 下面是双页签：选集勾选下载（仅当前视频，别的视频要新增下载得先进它的播放页）
  *   / 下载进度（每条带复选框，可全选后批量删除）。
+ *
+ * @param standalone true = 作为独立页面铺满整屏（视频发现页右上角入口进来的那种），
+ *   没有"当前视频"这一概念，默认停在视频列表上；false = 播放页里的弹窗。
  */
 @Composable
-private fun DownloadDialog(
+internal fun DownloadDialog(
     episodes: List<LocalVideo>,
     bookName: String,
     showManageFirst: Boolean,
+    standalone: Boolean = false,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -345,8 +354,8 @@ private fun DownloadDialog(
     val groups by VideoDownloader.videoGroups.collectAsStateWithLifecycle()
     // null = 当前正在播的这一部；非空 = 切换过去的那部视频的保存目录名
     var selectedDir by remember { mutableStateOf<String?>(null) }
-    var selectorOpen by remember { mutableStateOf(false) }
-    var tab by remember { mutableStateOf(if (showManageFirst) 1 else 0) }
+    var selectorOpen by remember { mutableStateOf(standalone) }
+    var tab by remember { mutableStateOf(if (showManageFirst || standalone) 1 else 0) }
     var menuOpen by remember { mutableStateOf(false) }
     // 必须用快照状态列表：普通 BooleanArray 的修改不会触发重组，勾选框不刷新
     val checked = remember(episodes) {
@@ -358,15 +367,16 @@ private fun DownloadDialog(
 
     LaunchedEffect(Unit) { VideoDownloader.refreshVideoGroups() }
 
-    val currentBook = SourceVideoPlayerSession.getBook()
-    val isCurrentVideo = selectedDir == null
+    val currentBook = if (standalone) null else SourceVideoPlayerSession.getBook()
+    val isCurrentVideo = !standalone && selectedDir == null
+    // 独立页面且还没选视频时没有"当前目录"，列表为空，靠视频列表去挑一部
     val currentDir = selectedDir
         ?: currentBook?.let { VideoDownloader.dirNameOf(it) }
-        ?: bookName.replace(Regex("[\\\\/:*?\"<>|]"), "").ifBlank { "未命名" }
-    val currentName = if (isCurrentVideo) {
-        bookName.ifBlank { currentDir }
-    } else {
-        groups.firstOrNull { it.dirName == selectedDir }?.name ?: selectedDir.orEmpty()
+        ?: if (standalone) "" else bookName.replace(Regex("[\\\\/:*?\"<>|]"), "").ifBlank { "未命名" }
+    val currentName = when {
+        standalone && selectedDir == null -> "全部视频"
+        isCurrentVideo -> bookName.ifBlank { currentDir }
+        else -> groups.firstOrNull { it.dirName == selectedDir }?.name ?: selectedDir.orEmpty()
     }
     // 只显示当前所选视频的条目
     val shownStates = dlStates.filter { it.dirName == currentDir }
@@ -376,13 +386,9 @@ private fun DownloadDialog(
         if (selectedDir != null) tab = 1
     }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.88f),
-            shape = RoundedCornerShape(16.dp),
-            color = Color(0xFF1C1C1E)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
+    // 弹窗与独立页面共用同一份内容，只是外壳不同
+    val body: @Composable () -> Unit = {
+        Column(modifier = Modifier.padding(16.dp)) {
                 // 顶部：视频名 + 切换指示 + 三点菜单
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -404,9 +410,15 @@ private fun DownloadDialog(
                     if (!isCurrentVideo) {
                         TextButton(onClick = {
                             selectedDir = null
+                            // 独立页面里没有"当前视频"，回到未选中状态即视频列表
+                            if (standalone) selectorOpen = true
                             tab = 1
                         }) {
-                            Text("回到当前", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                            Text(
+                                if (standalone) "全部视频" else "回到当前",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 12.sp
+                            )
                         }
                     }
                     Spacer(modifier = Modifier.weight(1f))
@@ -739,6 +751,20 @@ private fun DownloadDialog(
                 }
                 }
             }
+    }
+    if (standalone) {
+        // 独立页面：铺满整屏
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color(0xFF101010)
+        ) { body() }
+    } else {
+        Dialog(onDismissRequest = onDismiss) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.88f),
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1C1C1E)
+            ) { body() }
         }
     }
 }

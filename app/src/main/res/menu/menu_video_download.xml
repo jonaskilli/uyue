@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <!-- 视频发现页右上角：不打开具体视频也能看下载列表 -->
+    <item
+        android:id="@+id/menu_download"
+        android:icon="@drawable/ic_download"
+        android:title="@string/download_manage"
+        app:showAsAction="ifRoom" />
+</menu>

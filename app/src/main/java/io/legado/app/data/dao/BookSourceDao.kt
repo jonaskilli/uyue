@@ -94,30 +94,45 @@ interface BookSourceDao {
     /**
      * 视频书源，判定条件（满足其一即可，无需手动改类型）：
      * 1. 书源类型被显式设为视频（bookSourceType = 4）
-     * 2. 分组名含视频类关键词（视频/影视/电影/剧集/电视/短剧/video 等）
-     * 3. 正文规则里直接写了 m3u8/mp4（强特征）
+     * 2. **分组名**含视频类关键词（视频/影视/电影/剧集/电视/动漫/短剧/video/movie）
+     * 3. **书源名**含同样的关键词（分组为空时靠它兜底，很多源只把类型写在名字里）
+     * 4. 正文规则里出现 m3u8/mp4（强特征，不再要求带点号）
      *
-     * 现有生态里的视频书源几乎都是 type = 0 的普通书源，
-     * 只按类型过滤会导致用户导入后视频主页一直是空的，
-     * 因此这里加分组与规则特征兜底，让"导入即可见"尽量成立。
-     * 规则里只调 startBrowser 打开网页播放器的源无法自动识别，
-     * 仍需在书源管理里批量「标记为视频源」。
+     * 现有生态里的视频书源几乎都是 type = 0 的普通书源，只按类型过滤会让视频主页一直空着。
+     * 分组是用户最能直接控制的口径：某个源因为规则写法特殊没被自动认出来时，
+     * 在书源管理里把分组改成含「视频」两个字即可强制收纳。
+     *
+     * 条件必须与 [io.legado.app.help.source.BookSourceExtensions.isVideoSource] 逐条一致
+     * （关键词见 VIDEO_GROUP_KEYWORDS），否则会出现"主页能播、继续阅读却开成小说页"的错位。
      */
     @Query(
         """select * from book_sources
         where enabled = 1
         and (bookSourceType = 4
             or bookSourceGroup like '%视频%'
+            or bookSourceGroup like '%視頻%'
             or bookSourceGroup like '%影视%'
             or bookSourceGroup like '%电影%'
             or bookSourceGroup like '%剧集%'
+            or bookSourceGroup like '%劇集%'
             or bookSourceGroup like '%电视%'
             or bookSourceGroup like '%动漫%'
             or bookSourceGroup like '%短剧%'
             or bookSourceGroup like '%video%'
             or bookSourceGroup like '%movie%'
-            or ruleContent like '%.m3u8%'
-            or ruleContent like '%.mp4%')
+            or bookSourceName like '%视频%'
+            or bookSourceName like '%視頻%'
+            or bookSourceName like '%影视%'
+            or bookSourceName like '%电影%'
+            or bookSourceName like '%剧集%'
+            or bookSourceName like '%劇集%'
+            or bookSourceName like '%电视%'
+            or bookSourceName like '%动漫%'
+            or bookSourceName like '%短剧%'
+            or bookSourceName like '%video%'
+            or bookSourceName like '%movie%'
+            or ruleContent like '%m3u8%'
+            or ruleContent like '%mp4%')
         order by customOrder asc"""
     )
     fun flowVideoSources(): Flow<List<BookSource>>
@@ -130,35 +145,98 @@ interface BookSourceDao {
         where b.enabled = 1
         and (b.bookSourceType = 4
             or b.bookSourceGroup like '%视频%'
+            or b.bookSourceGroup like '%視頻%'
             or b.bookSourceGroup like '%影视%'
             or b.bookSourceGroup like '%电影%'
             or b.bookSourceGroup like '%剧集%'
+            or b.bookSourceGroup like '%劇集%'
             or b.bookSourceGroup like '%电视%'
             or b.bookSourceGroup like '%动漫%'
             or b.bookSourceGroup like '%短剧%'
             or b.bookSourceGroup like '%video%'
             or b.bookSourceGroup like '%movie%'
-            or b.ruleContent like '%.m3u8%'
-            or b.ruleContent like '%.mp4%')
+            or b.bookSourceName like '%视频%'
+            or b.bookSourceName like '%視頻%'
+            or b.bookSourceName like '%影视%'
+            or b.bookSourceName like '%电影%'
+            or b.bookSourceName like '%剧集%'
+            or b.bookSourceName like '%劇集%'
+            or b.bookSourceName like '%电视%'
+            or b.bookSourceName like '%动漫%'
+            or b.bookSourceName like '%短剧%'
+            or b.bookSourceName like '%video%'
+            or b.bookSourceName like '%movie%'
+            or b.ruleContent like '%m3u8%'
+            or b.ruleContent like '%mp4%')
         order by bp.customOrder asc"""
     )
     fun flowVideoSourcesPart(): Flow<List<BookSourcePart>>
+
+    /**
+     * 视频书源（同步版，供搜索范围 SearchScope 的「视频源」取源）。
+     * 判定条件与 [flowVideoSourcesPart] 完全一致——part 视图里没有 ruleContent，
+     * 所以仍然 join 主表，条件也照抄一份（Room 不支持 SQL 片段复用）。
+     */
+    @Query(
+        """select bp.* from book_sources b join book_sources_part bp on b.bookSourceUrl = bp.bookSourceUrl
+        where b.enabled = 1
+        and (b.bookSourceType = 4
+            or b.bookSourceGroup like '%视频%'
+            or b.bookSourceGroup like '%視頻%'
+            or b.bookSourceGroup like '%影视%'
+            or b.bookSourceGroup like '%电影%'
+            or b.bookSourceGroup like '%剧集%'
+            or b.bookSourceGroup like '%劇集%'
+            or b.bookSourceGroup like '%电视%'
+            or b.bookSourceGroup like '%动漫%'
+            or b.bookSourceGroup like '%短剧%'
+            or b.bookSourceGroup like '%video%'
+            or b.bookSourceGroup like '%movie%'
+            or b.bookSourceName like '%视频%'
+            or b.bookSourceName like '%視頻%'
+            or b.bookSourceName like '%影视%'
+            or b.bookSourceName like '%电影%'
+            or b.bookSourceName like '%剧集%'
+            or b.bookSourceName like '%劇集%'
+            or b.bookSourceName like '%电视%'
+            or b.bookSourceName like '%动漫%'
+            or b.bookSourceName like '%短剧%'
+            or b.bookSourceName like '%video%'
+            or b.bookSourceName like '%movie%'
+            or b.ruleContent like '%m3u8%'
+            or b.ruleContent like '%mp4%')
+        order by bp.customOrder asc"""
+    )
+    fun getVideoSourceParts(): List<BookSourcePart>
 
     @Query(
         """select bp.* from book_sources b join book_sources_part bp on b.bookSourceUrl = bp.bookSourceUrl
         where b.enabled = 1
         and (b.bookSourceType = 4
             or b.bookSourceGroup like '%视频%'
+            or b.bookSourceGroup like '%視頻%'
             or b.bookSourceGroup like '%影视%'
             or b.bookSourceGroup like '%电影%'
             or b.bookSourceGroup like '%剧集%'
+            or b.bookSourceGroup like '%劇集%'
             or b.bookSourceGroup like '%电视%'
             or b.bookSourceGroup like '%动漫%'
             or b.bookSourceGroup like '%短剧%'
             or b.bookSourceGroup like '%video%'
             or b.bookSourceGroup like '%movie%'
-            or b.ruleContent like '%.m3u8%'
-            or b.ruleContent like '%.mp4%')
+            or b.bookSourceName like '%视频%'
+            or b.bookSourceName like '%視頻%'
+            or b.bookSourceName like '%影视%'
+            or b.bookSourceName like '%电影%'
+            or b.bookSourceName like '%剧集%'
+            or b.bookSourceName like '%劇集%'
+            or b.bookSourceName like '%电视%'
+            or b.bookSourceName like '%动漫%'
+            or b.bookSourceName like '%短剧%'
+            or b.bookSourceName like '%video%'
+            or b.bookSourceName like '%movie%'
+            or b.ruleContent like '%m3u8%'
+            or b.ruleContent like '%mp4%')
         and (bp.bookSourceGroup like '%' || :key || '%'
             or bp.bookSourceName like '%' || :key || '%')
         order by bp.customOrder asc"""
