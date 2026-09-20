@@ -34,8 +34,10 @@ import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.lib.theme.primaryTextColor
+import io.legado.app.utils.ColorUtils
 import io.legado.app.ui.book.explore.ExploreShowActivity
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.search.SearchScope
@@ -217,7 +219,13 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
 
     private fun addChip(text: String, selected: Boolean, onClick: () -> Unit) {
         val label = if (text.length > 10) text.take(10) + "…" else text
-        val tv = TextView(requireContext()).apply {
+        val ctx = requireContext()
+        // 未选中态底色/文字色跟随「芯片真实背景」明暗：
+        // 浅底(如浅色主题)用半透明黑底+黑字，深底用半透明白底+白字，避免浅底白字看不清。
+        val surfaceLight = ColorUtils.isColorLight(ctx.backgroundColor)
+        val normalBg = if (surfaceLight) Color.parseColor("#1F000000") else Color.parseColor("#26FFFFFF")
+        val normalText = if (surfaceLight) Color.BLACK else Color.WHITE
+        val tv = TextView(ctx).apply {
             this.text = label
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             val padH = (12 * resources.displayMetrics.density).toInt()
@@ -225,10 +233,9 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
             setPadding(padH, padV, padH, padV)
             background = GradientDrawable().apply {
                 cornerRadius = 14 * resources.displayMetrics.density
-                // 选中用主题色，未选中用半透明白底——跟随主题，不写死颜色
-                setColor(if (selected) primaryColor else Color.parseColor("#33FFFFFF"))
+                setColor(if (selected) primaryColor else normalBg)
             }
-            setTextColor(if (selected) Color.WHITE else primaryTextColor)
+            setTextColor(if (selected) Color.WHITE else normalText)
             setOnClickListener { onClick() }
         }
         val lp = LinearLayout.LayoutParams(
@@ -398,10 +405,14 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
                     }?.also { appDb.bookDao.insert(it) }
                         ?: throw IllegalStateException("没有找到该视频")
                 }
-                // 搜索结果整体交给播放器，右侧竖滑可以在结果之间切
-                val urls = searchAdapter.getItems().map { it.bookUrl }
+                // 搜索结果整体交给播放器，右侧 30% 竖滑可在结果之间切。
+                // 用未过滤的全部结果(allResults)做动态供给：源标签只过滤“展示”，
+                // 切换列表始终是“整个搜索结果”；且后续源陆续返回的新结果会自动进入可切换范围。
                 withContext(Dispatchers.Main) {
-                    VideoFeedStore.put({ urls }, book.bookUrl)
+                    VideoFeedStore.put(
+                        provider = { allResults.map { it.bookUrl } },
+                        currentBookUrl = book.bookUrl,
+                    )
                     startActivity(
                         SourceVideoPlayerActivity.createIntent(
                             requireContext(),
