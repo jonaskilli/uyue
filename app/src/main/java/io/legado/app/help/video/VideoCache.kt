@@ -1,10 +1,13 @@
 package io.legado.app.help.video
 
+import android.annotation.SuppressLint
+import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -13,6 +16,7 @@ import io.legado.app.constant.AppLog
 import splitties.init.appCtx
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 
 /**
  * 播放与下载**共用**的视频缓存（[SimpleCache]）。
@@ -70,13 +74,72 @@ object VideoCache {
         val c = runCatching { get() }.onFailure {
             AppLog.put("视频缓存初始化失败，本次不缓存", it)
         }.getOrNull() ?: return upstream
-        val factory = CacheDataSource.Factory()
+        val cached = CacheDataSource.Factory()
             .setCache(c)
             .setUpstreamDataSourceFactory(upstream)
             // 缓存内容出错时不硬啃缓存，回源重新取
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-        if (!write) factory.setCacheWriteDataSinkFactory(null)
-        return factory
+        if (!write) cached.setCacheWriteDataSinkFactory(null)
+        // 播放列表（.m3u8 / .mpd）不进缓存、始终拉最新：
+        // 直播 HLS 的播放列表是滑动窗口，ExoPlayer 会反复用同一 URL 重新拉取以追上最新切片，
+        // 一旦被缓存就返回首份旧列表，CDN 回收旧切片后请求 404，表现为"播了一段就报错"。
+        // 媒体切片（.ts/.m4s/.mp4 等）仍走缓存，点播的边看边存不受影响。
+        return DataSource.Factory { PlaylistAwareDataSource(upstream, cached) }
+    }
+
+    /**
+     * 按请求地址分流的 DataSource：播放列表走原始 http，其余走缓存。
+     *
+     * 同一 [DataSource.Factory.createDataSource] 只产出一份实例，真正的下游在 [open]
+     * 拿到 [DataSpec.uri] 后才按后缀决定——直播/点播的播放列表与切片都共用这一个工厂，
+     * 必须延迟到请求粒度才能区分。
+     */
+    @SuppressLint("UnsafeOptInUsageError")
+    private class PlaylistAwareDataSource(
+        private val raw: DataSource.Factory,
+        private val cached: DataSource.Factory,
+    ) : DataSource {
+
+        private var delegate: DataSource? = null
+        // 在 open() 之前就可能被挂上传输监听，先存着，open 时转交给真正的 delegate
+        private val listeners = mutableListOf<TransferListener>()
+
+        override fun addTransferListener(transferListener: TransferListener) {
+            listeners.add(transferListener)
+            delegate?.addTransferListener(transferListener)
+        }
+
+        @Throws(IOException::class)
+        override fun open(dataSpec: DataSpec): Long {
+            val ds = (if (isPlaylist(dataSpec.uri.toString())) raw else cached)
+                .createDataSource()
+            for (listener in listeners) ds.addTransferListener(listener)
+            delegate = ds
+            return ds.open(dataSpec)
+        }
+
+        @Throws(IOException::class)
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+            delegate!!.read(buffer, offset, length)
+
+        @Throws(IOException::class)
+        override fun close() {
+            delegate?.close()
+            delegate = null
+        }
+
+        override fun getUri(): Uri? = delegate?.uri
+
+        override fun getResponseHeaders(): Map<String, List<String>> =
+            delegate?.responseHeaders ?: emptyMap()
+    }
+
+    /** 播放列表不能缓存：直播 HLS/DASH 的列表是滑动窗口，旧列表会让切片过期 404 */
+    private fun isPlaylist(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains(".m3u8") ||
+            lower.contains("/m3u8/") ||
+            lower.substringBefore('?').endsWith(".mpd")
     }
 
     private fun httpFactory(headers: Map<String, String>): HttpDataSource.Factory =

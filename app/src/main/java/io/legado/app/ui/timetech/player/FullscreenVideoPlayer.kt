@@ -738,6 +738,16 @@ internal fun VideoPlayerPage(
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
+                // 直播落后窗口：网络/码率跟不上时播放位置掉出直播滑动窗口（旧切片已被回收），
+                // ExoPlayer 抛 BehindLiveWindowException，表现为"播一小段就报错"。
+                // 拉回直播边缘并重新 prepare 即可续上，点播不会出现该错误码，无需担心误触发。
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                    // 直播下 seekToDefaultPosition 即定位到直播边缘
+                    player.seekToDefaultPosition()
+                    player.prepare()
+                    player.playWhenReady = true
+                    return
+                }
                 errorText = error.message ?: "播放失败"
                 AppLog.put("视频播放失败：${video.name}", error)
             }
