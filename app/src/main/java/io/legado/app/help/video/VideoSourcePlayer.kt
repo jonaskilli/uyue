@@ -1,11 +1,14 @@
 package io.legado.app.help.video
 
 import io.legado.app.constant.AppLog
+import io.legado.app.constant.BookType
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
+import io.legado.app.help.book.addType
 import io.legado.app.help.book.ensureVideoType
+import io.legado.app.help.book.isNotShelf
 import io.legado.app.help.source.SourceVerificationHelp
 import io.legado.app.model.webBook.WebBook
 import kotlinx.coroutines.sync.Mutex
@@ -133,6 +136,9 @@ object VideoSourcePlayer {
      * 抽出来是为了让选集 UI 与播放共用同一份目录，不必各拉一次。
      */
     suspend fun prepareChapters(book: Book, source: BookSource): List<BookChapter> {
+        // 保住 notShelf：下面的 getBookInfoAwait / getChapterListAwait 会 removeAllBookType 清掉该位，
+        // 若不补回，原本"不自动上书架"的视频书会被当成普通书入库（表现为自动入架）。
+        val wasNotShelf = book.isNotShelf
         if (book.tocUrl.isEmpty()) {
             runCatching { WebBook.getBookInfoAwait(source, book) }
                 .onFailure {
@@ -146,6 +152,10 @@ object VideoSourcePlayer {
         if (list.isEmpty()) {
             val oldBook = book.copy()
             val newList = WebBook.getChapterListAwait(source, book).getOrThrow()
+            // getBookInfoAwait / getChapterListAwait 会按书源声明的类型重置 type，
+            // 清掉 video / notShelf 位。必须在落库前补回，否则看过的视频会被当成普通书入库（自动入架）。
+            book.ensureVideoType()
+            if (wasNotShelf) book.addType(BookType.notShelf)
             if (oldBook.bookUrl == book.bookUrl) {
                 appDb.bookDao.update(book)
             } else {
@@ -154,11 +164,12 @@ object VideoSourcePlayer {
             appDb.bookChapterDao.delByBook(book.bookUrl)
             appDb.bookChapterDao.insert(*newList.toTypedArray())
             list = appDb.bookChapterDao.getChapterList(book.bookUrl)
+        } else {
+            // 章节已存在：上方的 getBookInfoAwait 可能已清掉 type/notShelf，统一补回并落库
+            book.ensureVideoType()
+            if (wasNotShelf) book.addType(BookType.notShelf)
+            appDb.bookDao.update(book)
         }
-        // getBookInfoAwait / getChapterListAwait 会按书源声明的类型重置 type。
-        // 视频源大多没把 bookSourceType 标成 4，重置后 video 位就没了。
-        // 这里按书源口径补回来并落库，保证后续按视频书路由。
-        book.ensureVideoType()
         return list
     }
 

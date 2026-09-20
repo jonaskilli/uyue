@@ -87,6 +87,9 @@ object SourceVideoPlayerSession {
     private var feed: VideoFeedStore.Feed? = null
     /** 正在解析的集，避免同一集被重复发起 */
     private val resolving = Collections.synchronizedSet(mutableSetOf<Int>())
+    /** 预取（下一集）正在解析的集，与 [resolving] 分开：
+     *  否则预取会占用"正在解析"名额，导致用户滑到那一集时真实解析被 `resolving.add` 拦掉、兜底播放永远不触发 */
+    private val prefetching = Collections.synchronizedSet(mutableSetOf<Int>())
     /** 边看边存：当前正在播放的集，切集时用来先收尾上一集 */
     @Volatile
     private var activeWatchIndex = -1
@@ -208,19 +211,30 @@ object SourceVideoPlayerSession {
     }
 
     fun load(bookUrl: String, startIndex: Int) {
-        // 同一本书且剧集已就绪（大屏↔首页切换）：只同步索引，
-        // 复用已解析的直链与播放器交接，不重复解析、不重新加载
+        // 同一本书且剧集已就绪（退出后再打开）：同步索引并重置解析结果。
+        // 关键点：重新进入必须把上次的直链/网页地址清空、重新解析，
+        // 否则带时效的 token 失效、网络波动等造成的"播放错误"会被记住，
+        // 表现成"退出重开还是报错，只能重启 APP 才恢复"。
         if (book?.bookUrl == bookUrl && _uiState.value.episodes.isNotEmpty()) {
             val idx = startIndex.coerceIn(0, chapters.lastIndex)
-            // 复用旧剧集列表：期间可能又有几集下载完了，这里补一次本地地址，
-            // 否则明明本地有 mp4，播放时还在走那条 http 直链重新缓冲
+            // 把每集已解析的地址清空（已下载到本地的集保留本地地址），让它们重新解析
+            val resetEpisodes = _uiState.value.episodes.map { ep ->
+                if (ep.uri.toString().startsWith("file:")) ep else ep.copy(uri = Uri.EMPTY)
+            }
+            _uiState.update { s -> s.copy(episodes = resetEpisodes) }
+            // 期间可能又有几集下载完了，补一次本地地址
             refreshLocalUris()
+            // 清掉上一轮可能残留的"解析中"标记，否则会被误判为正在解析而跳过重新解析
+            resolving.clear()
+            prefetching.clear()
             savedIndex = idx
             savedPositionMs = book?.durChapterPos?.toLong() ?: 0L
             _uiState.update {
                 it.copy(
                     loading = false,
                     error = null,
+                    fallbackIndex = null,
+                    fallbackLaunched = false,
                     fallbackFailed = null,
                     currentIndex = idx,
                     startIndex = idx,
@@ -360,8 +374,14 @@ object SourceVideoPlayerSession {
         }
     }
 
-    /** 解析某一集的地址。已就绪、正在解析或越界的集会直接跳过。 */
-    fun resolveEpisode(index: Int) {
+    /**
+     * 解析某一集的地址。已就绪、正在解析或越界的集会直接跳过。
+     *
+     * @param prefetch true 表示来自"预取下一集"：只解析、缓存直链，**绝不**触发内置播放器兜底。
+     *   内置播放器类源拿不到直链，预取若直接弹窗就会出现"还没滑到就先弹出下一集"的串台现象；
+     *   真正要播这一集（用户滑到/点选）时，以 prefetch=false 再触发一次，才会回退内置播放器。
+     */
+    fun resolveEpisode(index: Int, prefetch: Boolean = false) {
         val state = _uiState.value
         if (index !in state.episodes.indices) return
         // 已下载的集：直接播本地文件，连正文规则都不必再跑一次
@@ -375,7 +395,9 @@ object SourceVideoPlayerSession {
             return
         }
         if (state.episodes[index].uri != Uri.EMPTY) return
-        if (!resolving.add(index)) return
+        // 预取与真实解析用各自独立的集合，互不挡路
+        val guard = if (prefetch) prefetching else resolving
+        if (!guard.add(index)) return
         scope.launch {
             runCatching {
                 val book = book ?: return@runCatching null
@@ -386,10 +408,13 @@ object SourceVideoPlayerSession {
                     ?.let { return@runCatching Uri.fromFile(it).toString() }
                 VideoSourcePlayer.resolveChapterUrl(book, source, chapter)
             }.onSuccess { url ->
-                resolving.remove(index)
+                guard.remove(index)
                 // 本地文件与直链均可播；拿不到就交给书源自己处理（比如它给的是网页播放器）
                 if (url.isNullOrBlank() || (!url.startsWith("file:") && !VideoSourcePlayer.isPlayableUrl(url))) {
-                    _uiState.update { it.copy(fallbackIndex = index) }
+                    // 预取：只解析不播，避免还没滑到就弹出内置播放器
+                    if (!prefetch) {
+                        _uiState.update { it.copy(fallbackIndex = index) }
+                    }
                     return@onSuccess
                 }
                 _uiState.update { current ->
@@ -399,11 +424,14 @@ object SourceVideoPlayerSession {
                     current.copy(episodes = merged)
                 }
             }.onFailure { e ->
-                resolving.remove(index)
+                guard.remove(index)
                 // 取消不是失败：不要因为页面切走就把这一集判成"解析不出直链"弹出兜底播放器
                 if (e is CancellationException) return@onFailure
                 AppLog.put("解析第 ${index + 1} 集失败\n${e.localizedMessage}", e)
-                _uiState.update { s -> s.copy(fallbackIndex = index) }
+                // 预取失败不弹兜底，等用户真滑到这一集再重试
+                if (!prefetch) {
+                    _uiState.update { s -> s.copy(fallbackIndex = index) }
+                }
             }
         }
     }

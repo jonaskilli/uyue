@@ -66,6 +66,7 @@ import io.legado.app.ui.timetech.player.CoverBackdrop
 import io.legado.app.ui.timetech.player.EpisodeItem
 import io.legado.app.ui.timetech.player.FullscreenVideoPlayer
 import io.legado.app.ui.timetech.player.LocalVideo
+import io.legado.app.ui.browser.WebViewActivity
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.delay
 
@@ -83,6 +84,8 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
 
     @Composable
     override fun Content() {
+        // 打开时光播放器时清掉可能残留后台的内置浏览器视频实例，避免旧的叠在前面显示
+        LaunchedEffect(Unit) { WebViewActivity.finishVideoInstance() }
         val state by SourceVideoPlayerSession.uiState.collectAsStateWithLifecycle()
         // homeMode：搜索结果进来时直接落在"播放器在上 + 选集在下"的首页形态，方便先挑集
         var homeMode by remember {
@@ -180,7 +183,9 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             },
                             headers = state.headers,
                             seriesTitle = state.bookName,
-                            onResolveEpisode = SourceVideoPlayerSession::resolveEpisode,
+                            onResolveEpisode = { idx, prefetch ->
+                                SourceVideoPlayerSession.resolveEpisode(idx, prefetch)
+                            },
                             onProgressChange = SourceVideoPlayerSession::saveProgress,
                             onOpenHome = { homeMode = true },
                             onFeedSwitch = if (state.feedEnabled) {

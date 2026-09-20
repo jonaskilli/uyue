@@ -207,7 +207,8 @@ fun FullscreenVideoPlayer(
     // 某集地址尚未就绪（uri 为空）时回调，调用方补齐后重建列表即可自动起播。
     // 需要执行书源规则才能拿到地址的源（如蜜桃）不能一次性解析全部剧集，
     // 否则 N 集就是 N 次串行网络请求，只能滚到哪一集解析哪一集。
-    onResolveEpisode: ((index: Int) -> Unit)? = null,
+    // prefetch=true 表示"预取下一集"，调用方据此只解析、不弹内置播放器，真正滑到才播。
+    onResolveEpisode: ((index: Int, prefetch: Boolean) -> Unit)? = null,
     // 起始集内进度（毫秒），用于续播。会话内的 [positions] 优先于它，
     // 因为用户在本页内来回切集时应该回到自己刚才的位置，而不是进页时的位置。
     initialPositionMs: Long = 0L,
@@ -284,14 +285,14 @@ fun FullscreenVideoPlayer(
         if (videos.getOrNull(playOrder[currentPage])?.uri == Uri.EMPTY &&
             !SharedPlayer.has(bookUrl, playOrder[currentPage])
         ) {
-            onResolveEpisode.invoke(playOrder[currentPage])
+            onResolveEpisode.invoke(playOrder[currentPage], false)
         }
         // 预取的是**下一页**要播的那集，不是原始列表里的 current+1
         val next = playOrder.getOrNull(currentPage + 1) ?: return@LaunchedEffect
         if (videos.getOrNull(next)?.uri == Uri.EMPTY &&
             !SharedPlayer.has(bookUrl, next)
         ) {
-            onResolveEpisode.invoke(next)
+            onResolveEpisode.invoke(next, true)
         }
     }
 

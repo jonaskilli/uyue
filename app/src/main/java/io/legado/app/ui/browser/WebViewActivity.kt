@@ -57,11 +57,55 @@ import io.legado.app.help.webView.WebViewPool
 import io.legado.app.help.webView.WebViewPool.BLANK_HTML
 import io.legado.app.help.webView.WebViewPool.DATA_HTML
 import java.lang.ref.WeakReference
+import android.view.Gravity
+import android.view.MotionEvent
+import android.widget.FrameLayout
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.unit.dp
+import io.legado.app.ui.timetech.player.LocalVideo
+import io.legado.app.ui.book.video.SourceVideoPlayerSession
 
 class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
     companion object {
         // 是否输出日志
         var sessionShowWebLog = false
+
+        // 视频模式同一时刻只允许一个实例：新开时销毁旧的，避免多个内置播放器叠加、残留后台
+        private var currentVideoInstance: WebViewActivity? = null
+
+        /** 销毁当前存活的视频模式内置浏览器（打开时光播放器或新视频时调用） */
+        fun finishVideoInstance() {
+            currentVideoInstance?.let {
+                if (!it.isFinishing) it.finish()
+            }
+        }
     }
 
     private lateinit var pooledWebView: PooledWebView
@@ -99,14 +143,42 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         // 视频书源播放模式：无顶栏、沉浸式全屏，返回键直接关闭
         videoMode = intent.getBooleanExtra("videoMode", false)
         if (videoMode) {
+            // 视频模式单实例：把仍存活的旧实例先销毁，避免叠加/残留后台
+            if (currentVideoInstance != null && currentVideoInstance !== this) {
+                currentVideoInstance?.finish()
+            }
+            currentVideoInstance = this
             isFullScreen = true
             toggleSystemBar(false)
             supportActionBar?.hide()
+            // 内置浏览器型视频源：在播放界面叠加「加入书架」与「目录」图标，
+            // 行为与时光播放器（SourceVideoPlayerActivity）对齐——不自动存书架，由用户手动点。
+            if (SourceVideoPlayerSession.getBook() != null) {
+                val overlay = ComposeView(this)
+                overlay.layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { gravity = Gravity.TOP or Gravity.END }
+                binding.root.addView(overlay)
+                overlay.setContent {
+                    val state by SourceVideoPlayerSession.uiState.collectAsState()
+                    VideoModeActionOverlay(
+                        episodes = state.episodes,
+                        currentIndex = state.currentIndex,
+                        onAddShelf = { SourceVideoPlayerSession.addToShelf() },
+                        onPickEpisode = { index -> playEpisode(index) },
+                    )
+                }
+            }
         }
         viewModel.initData(intent) {
             val url = viewModel.baseUrl
             val headerMap = viewModel.headerMap
             initWebView(url, headerMap)
+            if (videoMode) {
+                currentWebView.setOnTouchListener(videoSwipeListener)
+                binding.customWebView.setOnTouchListener(videoSwipeListener)
+            }
             val html = viewModel.html
             if (html.isNullOrEmpty()) {
                 currentWebView.loadUrl(url, headerMap)
@@ -329,6 +401,7 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
     }
 
     override fun onDestroy() {
+        if (currentVideoInstance === this) currentVideoInstance = null
         WebViewPool.release(pooledWebView)
         super.onDestroy()
     }
@@ -503,7 +576,123 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         ) {
             handler?.proceed()
         }
-
     }
 
+    // 视频模式：在视频区域上下滑动切换上一集/下一集。
+    // WebView 的 HTML5 视频不走 FullscreenVideoPlayer 的 VerticalPager，故在此用触摸监听实现；
+    // 监听不消费事件（返回 false），网页自带的播放/暂停等控制仍可用。
+    private var swipeStartY = 0f
+    private var swipeHandled = false
+    private val videoSwipeThresholdPx get() = 60f * resources.displayMetrics.density
+    private val videoSwipeListener = View.OnTouchListener { _, event ->
+        if (!videoMode || SourceVideoPlayerSession.getBook() == null) return@OnTouchListener false
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                swipeStartY = event.y
+                swipeHandled = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!swipeHandled) {
+                    val dy = event.y - swipeStartY
+                    if (kotlin.math.abs(dy) > videoSwipeThresholdPx) {
+                        swipeHandled = true
+                        switchEpisode(if (dy < 0) 1 else -1)
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    private fun playEpisode(index: Int) {
+        SourceVideoPlayerSession.selectEpisode(index)
+        // 把当前集写回书籍，否则内置浏览器切集后退出再打开仍从固定那一集开始
+        SourceVideoPlayerSession.saveProgress(index, 0L)
+        SourceVideoPlayerSession.playWithSourcePlayer(index)
+        finish()
+    }
+
+    private fun switchEpisode(delta: Int) {
+        val state = SourceVideoPlayerSession.uiState.value
+        if (state.episodes.isEmpty()) return
+        val next = (state.currentIndex + delta).coerceIn(0, state.episodes.lastIndex)
+        if (next == state.currentIndex) return
+        playEpisode(next)
+    }
+
+    /**
+     * 内置浏览器视频模式下的悬浮操作层：右上角「加入书架」+「目录」两个图标，
+     * 对齐时光播放器（SourceVideoPlayerActivity）的能力。仅 videoMode 且会话已加载书籍时显示。
+     */
+    @Composable
+    private fun VideoModeActionOverlay(
+        episodes: List<LocalVideo>,
+        currentIndex: Int,
+        onAddShelf: () -> Unit,
+        onPickEpisode: (Int) -> Unit,
+    ) {
+        var showCatalog by remember { mutableStateOf(false) }
+        Column(
+            modifier = Modifier.padding(top = 10.dp, end = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalAlignment = Alignment.End,
+        ) {
+            IconButton(
+                onClick = onAddShelf,
+                modifier = Modifier
+                    .size(42.dp)
+                    .background(Color(0x66000000), CircleShape)
+            ) {
+                Icon(
+                    Icons.Filled.BookmarkAdd,
+                    contentDescription = "加入书架",
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            IconButton(
+                onClick = { showCatalog = true },
+                modifier = Modifier
+                    .size(42.dp)
+                    .background(Color(0x66000000), CircleShape)
+            ) {
+                Icon(
+                    Icons.Filled.List,
+                    contentDescription = "目录",
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+        if (showCatalog) {
+            AlertDialog(
+                onDismissRequest = { showCatalog = false },
+                confirmButton = {},
+                containerColor = Color(0xFF1E1E1E),
+                title = { Text("选择剧集", color = Color.White) },
+                text = {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp)
+                    ) {
+                        itemsIndexed(episodes) { index, ep ->
+                            val selected = index == currentIndex
+                            Text(
+                                text = ep.name,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        showCatalog = false
+                                        onPickEpisode(index)
+                                    }
+                                    .padding(vertical = 12.dp, horizontal = 8.dp),
+                                color = if (selected) Color(0xFF4FC3F7) else Color.White,
+                            )
+                        }
+                    }
+                }
+            )
+        }
+    }
 }
