@@ -15,6 +15,7 @@ import io.legado.app.utils.splitNotBlank
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
+import io.legado.app.help.source.isVideoSource
 import kotlinx.coroutines.flow.map
 
 @Dao
@@ -105,143 +106,11 @@ interface BookSourceDao {
      * 条件必须与 [io.legado.app.help.source.BookSourceExtensions.isVideoSource] 逐条一致
      * （关键词见 VIDEO_GROUP_KEYWORDS），否则会出现"主页能播、继续阅读却开成小说页"的错位。
      */
-    @Query(
-        """select * from book_sources
-        where enabled = 1
-        and (bookSourceType = 4
-            or bookSourceGroup like '%视频%'
-            or bookSourceGroup like '%視頻%'
-            or bookSourceGroup like '%影视%'
-            or bookSourceGroup like '%电影%'
-            or bookSourceGroup like '%剧集%'
-            or bookSourceGroup like '%劇集%'
-            or bookSourceGroup like '%电视%'
-            or bookSourceGroup like '%动漫%'
-            or bookSourceGroup like '%短剧%'
-            or bookSourceGroup like '%video%'
-            or bookSourceGroup like '%movie%'
-            or bookSourceName like '%视频%'
-            or bookSourceName like '%視頻%'
-            or bookSourceName like '%影视%'
-            or bookSourceName like '%电影%'
-            or bookSourceName like '%剧集%'
-            or bookSourceName like '%劇集%'
-            or bookSourceName like '%电视%'
-            or bookSourceName like '%动漫%'
-            or bookSourceName like '%短剧%'
-            or bookSourceName like '%video%'
-            or bookSourceName like '%movie%'
-            or ruleContent like '%m3u8%'
-            or ruleContent like '%mp4%')
-        order by customOrder asc"""
-    )
-    fun flowVideoSources(): Flow<List<BookSource>>
+    @Query("select * from book_sources where enabled = 1 order by customOrder asc")
+    fun flowEnabledBookSources(): Flow<List<BookSource>>
 
-    /**
-     * 视频书源（part 投影，供发现页列表使用），判定条件与 [flowVideoSources] 完全一致。
-     */
-    @Query(
-        """select bp.* from book_sources b join book_sources_part bp on b.bookSourceUrl = bp.bookSourceUrl
-        where b.enabled = 1
-        and (b.bookSourceType = 4
-            or b.bookSourceGroup like '%视频%'
-            or b.bookSourceGroup like '%視頻%'
-            or b.bookSourceGroup like '%影视%'
-            or b.bookSourceGroup like '%电影%'
-            or b.bookSourceGroup like '%剧集%'
-            or b.bookSourceGroup like '%劇集%'
-            or b.bookSourceGroup like '%电视%'
-            or b.bookSourceGroup like '%动漫%'
-            or b.bookSourceGroup like '%短剧%'
-            or b.bookSourceGroup like '%video%'
-            or b.bookSourceGroup like '%movie%'
-            or b.bookSourceName like '%视频%'
-            or b.bookSourceName like '%視頻%'
-            or b.bookSourceName like '%影视%'
-            or b.bookSourceName like '%电影%'
-            or b.bookSourceName like '%剧集%'
-            or b.bookSourceName like '%劇集%'
-            or b.bookSourceName like '%电视%'
-            or b.bookSourceName like '%动漫%'
-            or b.bookSourceName like '%短剧%'
-            or b.bookSourceName like '%video%'
-            or b.bookSourceName like '%movie%'
-            or b.ruleContent like '%m3u8%'
-            or b.ruleContent like '%mp4%')
-        order by bp.customOrder asc"""
-    )
-    fun flowVideoSourcesPart(): Flow<List<BookSourcePart>>
-
-    /**
-     * 视频书源（同步版，供搜索范围 SearchScope 的「视频源」取源）。
-     * 判定条件与 [flowVideoSourcesPart] 完全一致——part 视图里没有 ruleContent，
-     * 所以仍然 join 主表，条件也照抄一份（Room 不支持 SQL 片段复用）。
-     */
-    @Query(
-        """select bp.* from book_sources b join book_sources_part bp on b.bookSourceUrl = bp.bookSourceUrl
-        where b.enabled = 1
-        and (b.bookSourceType = 4
-            or b.bookSourceGroup like '%视频%'
-            or b.bookSourceGroup like '%視頻%'
-            or b.bookSourceGroup like '%影视%'
-            or b.bookSourceGroup like '%电影%'
-            or b.bookSourceGroup like '%剧集%'
-            or b.bookSourceGroup like '%劇集%'
-            or b.bookSourceGroup like '%电视%'
-            or b.bookSourceGroup like '%动漫%'
-            or b.bookSourceGroup like '%短剧%'
-            or b.bookSourceGroup like '%video%'
-            or b.bookSourceGroup like '%movie%'
-            or b.bookSourceName like '%视频%'
-            or b.bookSourceName like '%視頻%'
-            or b.bookSourceName like '%影视%'
-            or b.bookSourceName like '%电影%'
-            or b.bookSourceName like '%剧集%'
-            or b.bookSourceName like '%劇集%'
-            or b.bookSourceName like '%电视%'
-            or b.bookSourceName like '%动漫%'
-            or b.bookSourceName like '%短剧%'
-            or b.bookSourceName like '%video%'
-            or b.bookSourceName like '%movie%'
-            or b.ruleContent like '%m3u8%'
-            or b.ruleContent like '%mp4%')
-        order by bp.customOrder asc"""
-    )
-    fun getVideoSourceParts(): List<BookSourcePart>
-
-    @Query(
-        """select bp.* from book_sources b join book_sources_part bp on b.bookSourceUrl = bp.bookSourceUrl
-        where b.enabled = 1
-        and (b.bookSourceType = 4
-            or b.bookSourceGroup like '%视频%'
-            or b.bookSourceGroup like '%視頻%'
-            or b.bookSourceGroup like '%影视%'
-            or b.bookSourceGroup like '%电影%'
-            or b.bookSourceGroup like '%剧集%'
-            or b.bookSourceGroup like '%劇集%'
-            or b.bookSourceGroup like '%电视%'
-            or b.bookSourceGroup like '%动漫%'
-            or b.bookSourceGroup like '%短剧%'
-            or b.bookSourceGroup like '%video%'
-            or b.bookSourceGroup like '%movie%'
-            or b.bookSourceName like '%视频%'
-            or b.bookSourceName like '%視頻%'
-            or b.bookSourceName like '%影视%'
-            or b.bookSourceName like '%电影%'
-            or b.bookSourceName like '%剧集%'
-            or b.bookSourceName like '%劇集%'
-            or b.bookSourceName like '%电视%'
-            or b.bookSourceName like '%动漫%'
-            or b.bookSourceName like '%短剧%'
-            or b.bookSourceName like '%video%'
-            or b.bookSourceName like '%movie%'
-            or b.ruleContent like '%m3u8%'
-            or b.ruleContent like '%mp4%')
-        and (bp.bookSourceGroup like '%' || :key || '%'
-            or bp.bookSourceName like '%' || :key || '%')
-        order by bp.customOrder asc"""
-    )
-    fun flowVideoSourcesPart(key: String): Flow<List<BookSourcePart>>
+    @Query("select * from book_sources where enabled = 1 order by customOrder asc")
+    fun allEnabledBookSources(): List<BookSource>
 
     @Query("update book_sources set bookSourceType = :type where bookSourceUrl = :bookSourceUrl")
     fun upSourceType(bookSourceUrl: String, type: Int)
@@ -532,3 +401,48 @@ interface BookSourceDao {
         }.flowOn(IO)
     }
 }
+
+/**
+ * 视频书源判定（供视频主页/书籍路由），口径见 [io.legado.app.help.source.BookSourceExtensions.isVideoSource]
+ * （类型=4 ∥ 分组关键词 ∥ 书源名关键词 ∥ 规则含 m3u8/mp4）。
+ *
+ * 早期实现把判定写成一条含二十多个 `or ... like` 的 SQL，Room 的 SQLite 语法解析器（ANTLR）
+ * 会在此类超长布尔表达式上退化成指数级超慢解析，导致 KSP 编译阶段卡死、打不出 release APK。
+ * 现改为「简单 SQL 取全量启用源 + Kotlin 侧 isVideoSource 过滤」，口径完全一致且规避解析器悬崖。
+ */
+fun BookSourceDao.flowVideoSources(): Flow<List<BookSource>> =
+    flowEnabledBookSources().map { list -> list.filter { it.isVideoSource() } }
+
+fun BookSourceDao.flowVideoSourcesPart(): Flow<List<BookSourcePart>> =
+    flowEnabledBookSources().map { list ->
+        list.filter { it.isVideoSource() }.map { it.toBookSourcePart() }
+    }
+
+fun BookSourceDao.getVideoSourceParts(): List<BookSourcePart> =
+    allEnabledBookSources().filter { it.isVideoSource() }.map { it.toBookSourcePart() }
+
+fun BookSourceDao.flowVideoSourcesPart(key: String): Flow<List<BookSourcePart>> =
+    flowEnabledBookSources().map { list ->
+        list.filter { src ->
+            src.isVideoSource() && (
+                src.bookSourceGroup?.contains(key, ignoreCase = true) == true ||
+                src.bookSourceName.contains(key, ignoreCase = true)
+            )
+        }.map { it.toBookSourcePart() }
+    }
+
+private fun BookSource.toBookSourcePart(): BookSourcePart = BookSourcePart(
+    bookSourceUrl = bookSourceUrl,
+    bookSourceName = bookSourceName,
+    bookSourceGroup = bookSourceGroup,
+    customOrder = customOrder,
+    enabled = enabled,
+    enabledExplore = enabledExplore,
+    hasLoginUrl = !loginUrl.isNullOrBlank(),
+    lastUpdateTime = lastUpdateTime,
+    respondTime = respondTime,
+    weight = weight,
+    hasExploreUrl = !exploreUrl.isNullOrBlank(),
+    eventListener = eventListener,
+    bookSourceType = bookSourceType,
+)

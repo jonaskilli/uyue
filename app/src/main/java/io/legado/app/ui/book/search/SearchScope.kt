@@ -3,6 +3,7 @@ package io.legado.app.ui.book.search
 import androidx.lifecycle.MutableLiveData
 import io.legado.app.R
 import io.legado.app.data.appDb
+import io.legado.app.data.dao.getVideoSourceParts
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.help.config.AppConfig

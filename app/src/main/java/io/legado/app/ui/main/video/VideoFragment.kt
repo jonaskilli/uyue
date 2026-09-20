@@ -22,9 +22,12 @@ import io.legado.app.base.VMBaseFragment
 import io.legado.app.constant.AppLog
 import io.legado.app.data.AppDatabase
 import io.legado.app.data.appDb
+import io.legado.app.data.dao.flowVideoSourcesPart
+import io.legado.app.data.dao.getVideoSourceParts
 import io.legado.app.data.entities.BookSourcePart
-import io.legado.app.data.entities.BookType
+import io.legado.app.constant.BookType
 import io.legado.app.data.entities.SearchBook
+import kotlinx.coroutines.withContext
 import io.legado.app.databinding.FragmentVideoBinding
 import io.legado.app.help.book.addType
 import io.legado.app.help.book.ensureVideoType
