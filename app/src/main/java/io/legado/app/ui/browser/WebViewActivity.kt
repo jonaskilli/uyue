@@ -12,7 +12,6 @@ import android.view.MenuItem
 import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
-import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -58,6 +57,7 @@ import io.legado.app.utils.viewbindingdelegate.viewBinding
 import io.legado.app.utils.visible
 import android.webkit.JavascriptInterface
 import io.legado.app.constant.AppLog
+import io.legado.app.help.video.VideoSourcePlayer
 import io.legado.app.help.video.VideoTextLocalizeJs
 import io.legado.app.help.webView.WebJsExtensions
 import io.legado.app.help.webView.WebJsExtensions.Companion.basicJs
@@ -116,9 +116,6 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
 
         // 视频模式同一时刻只允许一个实例：新开时销毁旧的，避免多个内置播放器叠加、残留后台
         private var currentVideoInstance: WebViewActivity? = null
-
-        /** 重建页面时传递"剩余自动重建次数" */
-        const val EXTRA_AUTO_REBUILD = "autoRebuildLeft"
 
         /** 销毁当前存活的视频模式内置浏览器（打开时光播放器或新视频时调用） */
         fun finishVideoInstance() {
@@ -199,7 +196,7 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                         episodes = state.episodes,
                         currentIndex = state.currentIndex,
                         onAddShelf = { SourceVideoPlayerSession.addToShelf() },
-                        onPickEpisode = { index -> playEpisode(index) },
+                        onPickEpisode = { index -> playEpisodeInPlace(index) },
                         onClearCache = { clearCacheAndReload() },
                         fullscreen = fullScreenState,
                         onToggleFullScreen = { toggleFullScreen() },
@@ -370,46 +367,14 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
     private var webViewReleased = false
     /** 上次滑动切集/切视频的时间：连续快滑时丢掉过密的请求 */
     private var lastSwitchAt = 0L
-    /** 是否开启"检测到问题就自动重建"：由删除图标切换，第一次点开启、再点停止 */
-    private var autoRebuildEnabled = false
-    /** 本页是否已成功加载过：重建后据此判断"还是不是白屏" */
-    private var pageLoaded = false
 
     /**
      * 清除本页缓存并重开。
      *
      * 合成认证/登录态失效后，站点常把它缓存成 403 页面（openresty 那种
      * "403 Forbidden … Hit-status"），之后怎么刷新都是同一张错误页。
-     * 这里清掉 WebView 缓存与该站点的 cookie，让页面重新走一次认证。
+     * 这里清掉 WebView 缓存与该站点的 cookie，让页面重新走一次认证，然后重新加载。
      */
-    /**
-     * 废弃当前 WebView、换一个新实例并重新加载。
-     *
-     * 白屏的根因常常不是缓存，而是这个 WebView 实例本身废了（典型是渲染进程崩溃），
-     * 那时 clearCache / reload 都不会有任何效果——必须换实例。
-     * 坏实例走 discard 直接销毁且不回池，避免毒化整个池。
-     */
-    private fun recreateWebView() {
-        val url = realLoadUrl ?: viewModel.baseUrl
-        val headerMap = realHeaderMap ?: viewModel.headerMap
-        // 原地销毁旧实例、换一个新的并重新加载（最开始的那一版做法）
-        runCatching {
-            binding.webViewContainer.removeView(currentWebView)
-            // 坏实例直接销毁且不回池，避免毒化整个池
-            WebViewPool.discard(pooledWebView)
-            webViewReleased = true // 已丢弃，onDestroy 不要再释放一次
-        }
-        pooledWebView = WebViewPool.acquire(this)
-        currentWebView = pooledWebView.realWebView
-        binding.webViewContainer.addView(currentWebView)
-        initWebView(url, headerMap)
-        if (videoMode) {
-            currentWebView.setOnTouchListener(videoSwipeListener)
-            binding.customWebView.setOnTouchListener(videoSwipeListener)
-        }
-        currentWebView.loadUrl(url, headerMap)
-    }
-
     private fun clearCacheAndReload() {
         // 先放开全局定时器：若之前有 Activity 把进程留在"全局暂停"状态，
         // 所有 WebView 都不会加载，光清缓存没用，这一步能把白屏直接救回来
@@ -434,12 +399,9 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                 }
             }
         }
-        // 删除图标 = 自动重建模式开关：第一次点开启，再点停止。
-        // 开启后由"检测到问题"（渲染进程崩溃）触发重建，不再一上来就重建出一张空白页。
-        autoRebuildEnabled = !autoRebuildEnabled
-        toastOnUi(
-            if (autoRebuildEnabled) "已开启自动重建（再点一次停止）" else "已停止自动重建"
-        )
+        // 缓存与 cookie 都清掉后重新加载，让页面重新走一次认证
+        currentWebView.reload()
+        toastOnUi("已清除缓存并重开")
     }
 
 
@@ -675,21 +637,6 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
     inner class CustomWebViewClient : WebViewClient() {
 
         /**
-         * 渲染进程崩溃。**仅在删除图标开启"自动重建"后才重建**：
-         * 池化复用的 WebView 在不可见/被回收时也会收到该回调（并非真的崩了），
-         * 无条件重建会在正常播放时反复换实例、导致播不了。
-         */
-        override fun onRenderProcessGone(
-            view: WebView?,
-            detail: RenderProcessGoneDetail?,
-        ): Boolean {
-            if (!autoRebuildEnabled) return false
-            AppLog.put("[内置播放器] WebView 渲染进程崩溃，自动重建")
-            runOnUiThread { recreateWebView() }
-            return true
-        }
-
-        /**
          * 主文档返回 401/403：多半是认证过期后被缓存住了，自动清一次缓存重开。
          * 只自动重试一次，源本身失效时不再反复刷新。
          */
@@ -751,9 +698,6 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                     return
                 }
             }
-            // 真正的页面（非会话预热页）加载完成：标记为"不是白屏"，
-            // 重建序列据此判断还需不需要继续重建
-            pageLoaded = true
             // 视频播放模式：注入书源播放器文案中文化脚本
             if (videoMode) {
                 view?.evaluateJavascript(VideoTextLocalizeJs.SCRIPT, null)
@@ -874,7 +818,79 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                 toastOnUi("切换视频超时")
                 return@launch
             }
-            playEpisode(0, delta)
+            // 同样原地加载新视频的播放页，不新建 Activity
+            playEpisodeInPlace(0, delta)
+        }
+    }
+
+    /**
+     * 竖向翻页动画（原地切换用）：把网页容器滑出 → 加载新地址 → 再滑入。
+     * 方向 >0（下一个）：向上滑出、从下方滑入；<0 反之。
+     */
+    private fun animateSwitch(direction: Int, onSwitched: () -> Unit) {
+        if (direction == 0) {
+            onSwitched()
+            return
+        }
+        val container = binding.webViewContainer
+        val h = container.height.toFloat().takeIf { it > 0f }
+            ?: resources.displayMetrics.heightPixels.toFloat()
+        val outTo = if (direction > 0) -h else h
+        val inFrom = if (direction > 0) h else -h
+        runCatching {
+            container.animate()
+                .translationY(outTo)
+                .setDuration(150)
+                .withEndAction {
+                    onSwitched()
+                    container.translationY = inFrom
+                    container.animate().translationY(0f).setDuration(200).start()
+                }.start()
+        }.onFailure {
+            container.translationY = 0f
+            onSwitched()
+        }
+    }
+
+    /**
+     * 原地切换到某一集：**不 finish、不新建 Activity**，只在当前 WebView 里重新加载地址。
+     *
+     * 之前每切一次就新建一个 WebViewActivity（+ 一个 WebView），快速连切时旧页 onDestroy
+     * 还没执行、新页又立刻 acquire，瞬间同时存在多个重量级 WebView，内存暴涨把渲染进程
+     * 打死——这就是"连切约 8 次必崩"的原因。原地重载让 WebView 数量恒定为 1：
+     * 崩溃从根上消失，全屏状态也不用再靠偏好跨页面传递，也不会叠页。
+     */
+    private fun playEpisodeInPlace(index: Int, direction: Int = 0) {
+        val book = SourceVideoPlayerSession.getBook() ?: return
+        val source = SourceVideoPlayerSession.getSource() ?: return
+        val chapter = SourceVideoPlayerSession.getChapters().getOrNull(index) ?: return
+        SourceVideoPlayerSession.selectEpisode(index)
+        // 把当前集写回书籍，否则退出再打开仍从固定那一集开始
+        SourceVideoPlayerSession.saveProgress(index, 0L)
+        lifecycleScope.launch {
+            val resolve = runCatching {
+                VideoSourcePlayer.resolveChapter(book, source, chapter)
+            }.getOrNull()
+            // 内置播放器要的是"网页播放器地址"；只有直链时也可以直接打开
+            val url = resolve?.webPlayerUrl ?: resolve?.directUrl
+            if (url.isNullOrBlank()) {
+                // 原地解析不出地址：退回原来的新建页面方式，保证还能播
+                playEpisode(index, direction)
+                return@launch
+            }
+            val headerMap = HashMap(source.getHeaderMap(true))
+            // 会话预热：该 host 还没有 cookie 时先逛列表页，否则源站会因缺会话回 4xx
+            val base = NetworkUtils.getBaseUrl(url)
+            val preload = book.tocUrl.takeIf { it.isNotBlank() }
+            val needPreload = videoMode && preload != null && preload != url &&
+                base != null && NetworkUtils.getBaseUrl(preload) == base &&
+                !hasWebViewCookie(url)
+            animateSwitch(direction) {
+                realLoadUrl = url
+                realHeaderMap = headerMap
+                awaitingPreload = needPreload
+                currentWebView.loadUrl(if (needPreload) preload!! else url, headerMap)
+            }
         }
     }
 
@@ -916,7 +932,8 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         if (state.episodes.isEmpty()) return
         val next = (state.currentIndex + delta).coerceIn(0, state.episodes.lastIndex)
         if (next == state.currentIndex) return
-        playEpisode(next, delta)
+        // 原地重载：不新建 Activity，避免连切时 WebView 堆积把渲染进程打死
+        playEpisodeInPlace(next, delta)
     }
 
     /**

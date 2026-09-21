@@ -423,7 +423,13 @@ object SourceVideoPlayerSession {
             }.onSuccess { url ->
                 guard.remove(index)
                 // 本地文件与直链均可播；拿不到就交给书源自己处理（比如它给的是网页播放器）
-                if (url.isNullOrBlank() || (!url.startsWith("file:") && !VideoSourcePlayer.isPlayableUrl(url))) {
+                // 解析侧已经确认过：要么后缀就是可播的流，要么真实探测过 Content-Type/内容。
+                // 这里只校验它确实是个地址——再用 isPlayableUrl 过一遍会把
+                // "文件名藏在末尾参数里"的代理直链（如 ?url=xxx&f=1.m3u8）误判成网页播放器，
+                // 结果明明能直播却退回内置浏览器。
+                if (url.isNullOrBlank()
+                    || (!url.startsWith("file:") && !url.startsWith("http", ignoreCase = true))
+                ) {
                     // 预取：只解析不播，避免还没滑到就弹出内置播放器
                     if (!prefetch) {
                         _uiState.update { it.copy(fallbackIndex = index) }

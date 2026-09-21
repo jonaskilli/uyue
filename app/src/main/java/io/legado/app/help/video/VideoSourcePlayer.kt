@@ -9,6 +9,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.help.book.addType
 import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.book.isNotShelf
+import io.legado.app.help.http.CookieManager
 import io.legado.app.help.source.SourceVerificationHelp
 import io.legado.app.model.webBook.WebBook
 import kotlinx.coroutines.sync.Mutex
@@ -280,18 +281,42 @@ object VideoSourcePlayer {
         chapter: BookChapter,
     ): ChapterResolve = resolveLock.withLock {
         val (content, intercepted) = runRule(book, source, chapter)
-        val direct = intercepted?.takeIf { isPlayableUrl(it) } ?: extractPlayableUrl(content)
+        val direct = intercepted?.takeIf { isPlayableUrl(it) } ?: playableFromContent(content, source)
         val webPlayer = if (direct == null) intercepted else null
         if (direct != null || webPlayer != null) {
             return@withLock ChapterResolve(direct, webPlayer)
         }
         // 自动补一次"刷新"
         val (content2, intercepted2) = runRule(book, source, chapter)
-        val direct2 = intercepted2?.takeIf { isPlayableUrl(it) } ?: extractPlayableUrl(content2)
+        val direct2 = intercepted2?.takeIf { isPlayableUrl(it) }
+            ?: playableFromContent(content2, source)
         ChapterResolve(
             directUrl = direct2,
             webPlayerUrl = if (direct2 == null) intercepted2 else null
         )
+    }
+
+    /**
+     * 从正文文本里取可播放地址：后缀认得出就直接采信；认不出、但正文就是一个裸地址时，
+     * 用一次真实请求确认它到底是不是媒体。
+     *
+     * 视频源普遍把真实文件名藏在末尾参数里（如 `https://x/proxy?url=...&f=1.m3u8`），
+     * 这类地址本身就是 m3u8 清单，只看后缀会被误判成网页播放器，白白退回内置浏览器。
+     * 真的是网页时探测会返回 false，行为与之前一致（仍走内置浏览器）。
+     */
+    private suspend fun playableFromContent(content: String, source: BookSource): String? {
+        val url = extractPlayableUrl(content)
+        if (url != null) return url
+        val text = content.trim()
+        if (!text.startsWith("http", ignoreCase = true) || text.any { it.isWhitespace() }) {
+            return null
+        }
+        val headers = HashMap(source.getHeaderMap(true))
+        // 会话 cookie：缺了会被源站直接 4xx，探测结果自然也不准
+        if (source.enabledCookieJar == true) {
+            headers[CookieManager.cookieJarHeader] = "1"
+        }
+        return text.takeIf { VideoUrlSniffer.isMediaUrl(it, headers) }
     }
 
     /**

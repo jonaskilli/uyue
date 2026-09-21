@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Request
+import okio.Buffer
 import splitties.init.appCtx
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
@@ -195,6 +196,53 @@ object VideoUrlSniffer {
             }
         }
         return null
+    }
+
+    /**
+     * 单个地址的媒体性探测：地址后缀认不出（如 `/api/proxy?url=xxx&f=1.m3u8`），
+     * 但内容确实是 m3u8/mp4 时，用真实请求确认。
+     *
+     * 书源的正文规则常把真实文件名藏在末尾参数里，这种地址本身就是 m3u8 清单，
+     * 只看后缀会被当成网页播放器而白白退回内置浏览器；确认过再交给 ExoPlayer。
+     *
+     * 两道判断，缺一不可：
+     * 1. Content-Type（[isMediaType]）；
+     * 2. 内容开头：代理接口常把类型写成 octet-stream，但 m3u8 一定以 #EXTM3U 开头。
+     */
+    suspend fun isMediaUrl(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (url.isBlank() || !url.startsWith("http", true)) return@withContext false
+        runCatching {
+            if (isMediaType(contentTypeOf(url, headers))) return@runCatching true
+            // Content-Type 不可信时看内容开头：只取前 64 字节，不会真把整段视频拉下来
+            val head = headBytes(url, headers).trimStart()
+            head.startsWith("#EXTM3U") || head.startsWith("<mpd", true)
+        }.onFailure {
+            AppLog.putDebug("[视频探测] 失败：${it.localizedMessage}")
+        }.getOrDefault(false)
+    }
+
+    /** HEAD 探测：只按后缀认不出 `/api/stream/123` 这类接口，必须看 Content-Type */
+    private fun contentTypeOf(url: String, headers: Map<String, String>): String {
+        val builder = Request.Builder().url(url).head()
+        headers.forEach { (k, v) -> builder.header(k, v) }
+        okHttpClient.newCall(builder.build()).execute().use {
+            return it.header("Content-Type").orEmpty()
+        }
+    }
+
+    /** 取地址开头的若干字节：Range 只请求前 64 字节，服务端不认 Range 时也不会读完整段 */
+    private fun headBytes(url: String, headers: Map<String, String>, max: Long = 64): String {
+        val builder = Request.Builder().url(url).header("Range", "bytes=0-$max")
+        headers.forEach { (k, v) -> builder.header(k, v) }
+        okHttpClient.newCall(builder.build()).execute().use { resp ->
+            val body = resp.body ?: return ""
+            val buffer = Buffer()
+            body.source().use { it.read(buffer, max) }
+            return buffer.readUtf8()
+        }
     }
 
     private fun isMediaType(type: String): Boolean {
