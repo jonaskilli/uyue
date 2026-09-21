@@ -32,6 +32,7 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
+import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -226,9 +227,14 @@ object VideoDownloader {
             val title = titleOf(task)
             val dir = dirOf(task)
             val savedProgress = o.optInt("progress", 0).coerceIn(0, 99)
-            // 以磁盘实际文件为准：成品在 = 已完成；只有 .part = 中断，可续传
+            // 以磁盘实际文件为准：mp4 成品在 = 已完成；分片文件夹有分片也算已缓存（可播）；
+            // 只有 .part = 中断，可续传
             val state = when {
                 File(dir, "$title.mp4").exists() ->
+                    DlStatus.COMPLETED to 100
+                File(dir, title).isDirectory &&
+                    File(dir, title).listFiles().orEmpty()
+                        .any { it.name.startsWith("seg_") } ->
                     DlStatus.COMPLETED to 100
                 File(dir, "$title.mp4.part").exists() ->
                     DlStatus.PAUSED to savedProgress
@@ -447,15 +453,17 @@ object VideoDownloader {
         return keys.size
     }
 
-    /** 删除已缓存（.part/.idx 临时文件），条目保留，再次下载时从头开始 */
+    /** 删除已缓存（分片文件夹 + mp4 成品 + .part/.idx 临时文件），条目保留，再次下载时从头开始 */
     fun deleteCache(state: TaskState) {
         val dir = dirOf(state.task)
+        File(dir, state.title).deleteRecursively() // 分片缓存文件夹
+        File(dir, "${state.title}.mp4").delete()
         File(dir, "${state.title}.mp4.part").delete()
         File(dir, "${state.title}.mp4.idx").delete()
         updateState(state.key) { it.copy(progress = 0) }
     }
 
-    /** 删除已生成的 mp4 成品，并从下载列表移除该条目 */
+    /** 删除已生成的 mp4 成品，并从下载列表移除该条目（分片文件夹缓存保留） */
     fun deleteMp4(state: TaskState) {
         File(dirOf(state.task), "${state.title}.mp4").delete()
         removeState(state.key)
@@ -547,6 +555,7 @@ object VideoDownloader {
             File(dir, "${st.title}.mp4").delete()
             File(dir, "${st.title}.mp4.part").delete()
             File(dir, "${st.title}.mp4.idx").delete()
+            File(dir, st.title).deleteRecursively() // 分片缓存文件夹
             pausedKeys.remove(key)
             removeState(key)
             n++
@@ -655,7 +664,10 @@ object VideoDownloader {
         prefs.edit().putBoolean("watchSave", on).apply()
     }
 
-    /** 查找已完整下载的本地缓存（后缀统一 .mp4），命中则免网络直接播放 */
+    /**
+     * 查找本地可播文件：合并好的 <标题>.mp4 优先；否则只要分片文件夹里有一个分片，
+     * 就当成本地缓存，返回（按需生成的）local.m3u8——已下的走本地、没下的实时补。
+     */
     fun findLocalFile(bookName: String, index: Int, title: String): File? {
         val name = bookName.replace(AppPattern.fileNameRegex, "").ifBlank { "未命名" }
         val dir = File(
@@ -663,7 +675,17 @@ object VideoDownloader {
             "保存视频/$name"
         )
         val t = title.replace(AppPattern.fileNameRegex, "").ifBlank { "第${index + 1}集" }
-        return File(dir, "$t.mp4").takeIf { it.exists() && it.length() > 0 }
+        // 合并成品优先
+        val mp4 = File(dir, "$t.mp4")
+        if (mp4.exists() && mp4.length() > 0) return mp4
+        // 分片缓存文件夹：有分片即视为已缓存
+        val epFolder = epFolderOf(dir, t)
+        if (epFolder.isDirectory &&
+            epFolder.listFiles().orEmpty().any { it.name.startsWith("seg_") && it.name.endsWith(".ts") }
+        ) {
+            return buildLocalPlaylist(epFolder)
+        }
+        return null
     }
 
     private fun dirOf(task: Task): File = File(
@@ -727,10 +749,10 @@ object VideoDownloader {
         collectOnly: Boolean = false,
         onProgress: (Int) -> Unit = {},
     ): File? {
-        val out = File(dir, "$title.mp4")
-        if (out.exists() && out.length() > 0) {
-            notifyCompleted(task) // 已有完整缓存：通知会话改用本地播放，不再联网
-            return out
+        val mp4 = File(dir, "$title.mp4")
+        if (mp4.exists() && mp4.length() > 0) {
+            notifyCompleted(task) // 已有合并成品：通知会话改用本地播放，不再联网
+            return mp4
         }
 
         // 1. 直链：优先用已知的（播放中已在播的地址），否则现场解析
@@ -741,36 +763,37 @@ object VideoDownloader {
         }
         val headers = getHeaders(task.source)
         dir.mkdirs()
-        val tmp = File(dir, "$title.mp4.part")
+        val epFolder = epFolderOf(dir, title)
+        val isHls = url.contains(".m3u8", true) || url.contains("/m3u8/", true)
+        // 同一集正在被别的任务写入（收尾补齐中）：这一轮收集直接跳过，不算失败
         synchronized(activePaths) {
-            if (!activePaths.add(tmp.path)) {
-                // 收集是"有机会就收一点"的轻量动作，撞上正在补齐就这一轮算了，
-                // 下一轮（20 秒后）再来；手动/收尾下载才需要明确报错
+            if (!activePaths.add(epFolder.path)) {
                 if (collectOnly) throw BusyException()
                 throw IllegalStateException("该选集正在下载中")
             }
         }
         try {
-            val (total, written) = if (url.contains(".m3u8", true) || url.contains("/m3u8/", true)) {
-                downloadHls(url, headers, tmp, resume = true, key = key, collectOnly, onProgress)
+            if (isHls) {
+                // m3u8：分片原样落进 <标题>/ 文件夹（raw，加密则保持加密），不在此合并
+                val (total, written) = downloadHls(
+                    url, headers, epFolder, resume = true, key = key, collectOnly, onProgress
+                )
+                // 没取全（播放中只收集了缓存里的部分）就不算完成，缺口留给收尾补齐
+                if (total <= 0 || written < total) {
+                    AppLog.putDebug("已收集 $written/$total，剩余待补齐：${titleOf(task)}")
+                    return null
+                }
+                notifyCompleted(task) // 分片已全部落盘：播放走本地分片，无需合并
+                return epFolder
             } else {
-                downloadDirect(url, headers, tmp, key = key, collectOnly, onProgress)
+                // 单文件直链：直接存成 <标题>.mp4
+                val (total, written) = downloadDirect(url, headers, mp4, key = key, collectOnly, onProgress)
+                if (total <= 0 || written < total) return null
+                notifyCompleted(task)
+                return mp4
             }
-            // 没取全（播放中只收集了缓存里的部分）就不合并，缺口留给收尾补齐
-            if (total <= 0 || written < total) {
-                AppLog.putDebug("已收集 $written/$total，剩余待补齐：${titleOf(task)}")
-                return null
-            }
-            if (out.exists()) out.delete()
-            if (!tmp.renameTo(out)) {
-                tmp.copyTo(out, overwrite = true)
-                tmp.delete()
-            }
-            File(dir, "$title.mp4.idx").delete()
-            notifyCompleted(task) // mp4 已完整落盘：会话可把这一集切成本地播放
-            return out
         } finally {
-            synchronized(activePaths) { activePaths.remove(tmp.path) }
+            synchronized(activePaths) { activePaths.remove(epFolder.path) }
         }
     }
 
@@ -835,20 +858,26 @@ object VideoDownloader {
     }
 
     /**
-     * m3u8 分段下载并顺序拼接（.idx 记录指纹与每段字节数，支持从缺失片段续传；每段回报进度、可暂停）
+     * m3u8 分段下载到 <标题>/ 文件夹：每个分片原样落盘（加密则保持加密），
+     * 同时落一份原始 playlist.m3u8（绝对地址）+ key.bin/init.bin/meta.json，
+     * 供播放时拼 local.m3u8（已下的走本地、没下的走网络实时补齐）与手动合并成 MP4。
      *
-     * @param collectOnly 只收缓存里已有的分片，遇到第一个没缓存的就停。
-     * @return (分片总数, 已写入的分片数)
+     * 不在此合并：HLS 每个分片自带关键帧，分片文件夹本身就是其他播放器那类"可断点续看的缓存"，
+     * 播放器按原生 HLS 逐分片 seek，不再有"裸拼 TS 定位错关键帧定格 3 秒"的问题。
+     *
+     * @param collectOnly 只收缓存里已有的分片，缺口留给收尾补齐。
+     * @return (分片总数, 已落盘的分片数)
      */
     private fun downloadHls(
         playlistUrl: String,
         headers: Map<String, String>,
-        out: File,
+        epFolder: File,
         resume: Boolean,
         key: String,
         collectOnly: Boolean,
         onProgress: (Int) -> Unit,
     ): Pair<Int, Int> {
+        epFolder.mkdirs()
         var playlist = fetchText(playlistUrl, headers)
         // 主清单(#EXT-X-STREAM-INF)：取码率最高的二级媒体清单，递归解析
         if (playlist.contains("#EXT-X-STREAM-INF")) {
@@ -870,13 +899,13 @@ object VideoDownloader {
             }
             checkNotNull(bestUrl) { "主清单中没有媒体清单" }
             val mediaUrl = NetworkUtils.getAbsoluteURL(playlistUrl, bestUrl)
-            return downloadHls(mediaUrl, headers, out, resume, key, collectOnly, onProgress)
+            return downloadHls(mediaUrl, headers, epFolder, resume, key, collectOnly, onProgress)
         }
         var keyUri: String? = null
         var ivHex: String? = null
         var mediaSequence = 0L
         var initSegment: String? = null
-        val segments = ArrayList<Triple<String, String?, String?>>() // url to (iv, keyUri)
+        val segUrls = ArrayList<String>()
 
         playlist.lines().forEach { raw ->
             val line = raw.trim()
@@ -899,155 +928,107 @@ object VideoDownloader {
                 }
 
                 !line.startsWith("#") && line.isNotBlank() ->
-                    segments.add(
-                        Triple(
-                            NetworkUtils.getAbsoluteURL(playlistUrl, line),
-                            ivHex,
-                            keyUri
-                        )
-                    )
+                    segUrls.add(NetworkUtils.getAbsoluteURL(playlistUrl, line))
             }
         }
-        check(segments.isNotEmpty()) { "m3u8 中没有分片" }
-
-        val md5 = MessageDigest.getInstance("MD5")
-            .digest(playlistUrl.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        val idxFile = File(out.parentFile, out.nameWithoutExtension + ".idx")
-
-        // 断点续传：校验 idx 指纹与长度，截掉写了一半的尾巴，从缺失的片段继续
-        var resumeOk = false
-        var startIndex = 0
-        if (resume && idxFile.exists()) {
-            val lines = runCatching { idxFile.readLines() }.getOrDefault(emptyList())
-            val lens = lines.drop(1).mapNotNull { it.toLongOrNull() }
-            val expectInit = if (initSegment != null) 1 else 0
-            if (lines.firstOrNull() == md5 && lens.size >= expectInit && lens.sum() <= out.length()) {
-                resumeOk = true
-                startIndex = lens.size - expectInit
-                if (out.length() > lens.sum()) {
-                    RandomAccessFile(out, "rw").use { it.setLength(lens.sum()) }
+        check(segUrls.isNotEmpty()) { "m3u8 中没有分片" }
+        val total = segUrls.size
+        // 落一份"原始播放列表"（分片/密钥/初始化段都换成绝对地址），供播放时拼 local.m3u8
+        File(epFolder, "playlist.m3u8").writeText(
+            playlist.lines().joinToString("\n") { l ->
+                val t = l.trim()
+                when {
+                    t.startsWith("#EXT-X-KEY") && keyUri != null ->
+                        replaceUriAttr(t, NetworkUtils.getAbsoluteURL(playlistUrl, keyUri))
+                    t.startsWith("#EXT-X-MAP") && initSegment != null ->
+                        replaceUriAttr(t, NetworkUtils.getAbsoluteURL(playlistUrl, initSegment))
+                    !t.startsWith("#") && t.isNotBlank() ->
+                        NetworkUtils.getAbsoluteURL(playlistUrl, t)
+                    else -> l
                 }
             }
+        )
+        // 密钥 / 初始化段：存原始字节，离线播放与合并都要用
+        if (keyUri != null) {
+            val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, keyUri)
+            runCatching { File(epFolder, "key.bin").writeBytes(fetchBytes(keyUrl, headers, write = false)) }
         }
-        if (!resumeOk) {
-            out.delete()
-            idxFile.delete()
-            startIndex = 0
+        if (initSegment != null) {
+            val initUrl = NetworkUtils.getAbsoluteURL(playlistUrl, initSegment)
+            runCatching { File(epFolder, "init.bin").writeBytes(fetchBytes(initUrl, headers, write = false)) }
         }
+        org.json.JSONObject().apply {
+            put("seq", mediaSequence)
+            if (ivHex != null) put("iv", ivHex) else put("iv", org.json.JSONObject.NULL)
+            put("encrypted", keyUri != null)
+        }.let { File(epFolder, "meta.json").writeText(it.toString()) }
 
-        // 边播边存阶段：只收缓存里已经有的分片（播放缓冲留下的），零网络流量。
-        // 遇到第一个没缓存的就停，缺口留给收尾（watchFinalize）全速补齐。
-        var endIndex = segments.size
-        if (collectOnly) {
-            var i = startIndex
-            while (i < segments.size && VideoCache.isCached(segments[i].first)) i++
-            endIndex = i
+        // 断点续传：已存在的非空分片直接跳过（best-effort，避免重下几十 MB 的分片）
+        val need = (0 until total).filter {
+            !(segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0)
         }
-        if (endIndex <= startIndex) {
-            // 一个可收的都没有（刚开始播/缓存还没落盘）：保持现状，等收尾
-            return segments.size to startIndex
-        }
-        // 播放中：压低并发并分片节流，给正在播的那一路让出带宽。
-        // 收集是纯本地读、不联网，不该节流——否则几百片 × 200ms 会白白拖很久
+        if (need.isEmpty()) return total to total
+        // 边播边存收集阶段：只搬缓存里已有的分片，缺口留给收尾
+        val todo = if (collectOnly) need.filter { VideoCache.isCached(segUrls[it]) }
+        else need
+        if (todo.isEmpty()) return total to (total - need.size)
+
+        // 播放中：压低并发并分片节流，给正在播的那一路让出带宽
         val throttle = playbackActive && !collectOnly
-        // 并发太高会让临时分片文件同时在磁盘上堆一堆，6 路已经能跑满带宽
         val workerCount = if (collectOnly || throttle) 2 else 6
-
         val keyCache = HashMap<String, ByteArray>()
-        FileOutputStream(out, resumeOk).use { output ->
-            FileOutputStream(idxFile, resumeOk).use { idxOut ->
-                if (!resumeOk) {
-                    idxOut.write("$md5\n".toByteArray())
-                    initSegment?.let { init ->
-                        val initUrl = NetworkUtils.getAbsoluteURL(playlistUrl, init)
-                        // 同样是流式写，不在内存里攒整块
-                        val n = copyToOutput(initUrl, headers, output)
-                        idxOut.write("$n\n".toByteArray())
-                    } ?: idxOut.write("0\n".toByteArray())
-                    idxOut.flush()
-                }
-                // —— 并行下载：每个分片先落自己的临时文件，再按序拼进 .part ——
-                // 之前是把整个分片读成 ByteArray 排队，大分片（几 MB 到几十 MB）乘上并发
-                // 会直接撑爆堆（vivo 256MB 堆上实测 OOM）。改成临时文件后内存只占缓冲区。
-                val nextIndex = AtomicInteger(startIndex)
-                val ready = HashMap<Int, Long>() // 分片序号 -> 解密后长度
-                val bufLock = Object()
-                val errorRef = AtomicReference<Exception?>(null)
-                val inFlight = Semaphore(workerCount)
-                val workers = (0 until workerCount).map {
-                    Thread {
-                        try {
-                            while (errorRef.get() == null) {
-                                val index = nextIndex.getAndIncrement()
-                                if (index >= endIndex) return@Thread
-                                inFlight.acquire()
-                                try {
-                                    checkPaused(key)
-                                    val segFile = segFileOf(out, index)
-                                    fetchSegmentToFile(
-                                        segments[index],
-                                        playlistUrl,
-                                        headers,
-                                        mediaSequence + index,
-                                        keyCache,
-                                        segFile,
-                                    )
-                                    synchronized(bufLock) {
-                                        // 以落盘后的长度为准（解密会去掉 padding，和密文长度不同）
-                                        ready[index] = segFile.length()
-                                        bufLock.notifyAll()
-                                    }
-                                    if (throttle) Thread.sleep(THROTTLE_SLEEP_MS)
-                                } finally {
-                                    inFlight.release()
-                                }
-                            }
-                        } catch (e: Exception) {
-                            errorRef.compareAndSet(null, e)
-                        }
-                    }.apply { start() }
-                }
+        val nextIndex = AtomicInteger(0)
+        val writtenCount = AtomicInteger(0)
+        val errorRef = AtomicReference<Exception?>(null)
+        val inFlight = Semaphore(workerCount)
+        val workers = (0 until workerCount).map {
+            Thread {
                 try {
-                    for (index in startIndex until endIndex) {
-                        var len: Long? = null
-                        while (len == null) {
-                            errorRef.get()?.let { throw it }
-                            synchronized(bufLock) {
-                                len = ready.remove(index)
-                                if (len == null) bufLock.wait(200)
-                            }
+                    while (errorRef.get() == null) {
+                        val idx = nextIndex.getAndIncrement()
+                        if (idx >= todo.size) return@Thread
+                        val k = todo[idx]
+                        inFlight.acquire()
+                        try {
+                            checkPaused(key)
+                            fetchSegmentToFile(
+                                Triple(segUrls[k], ivHex, keyUri),
+                                playlistUrl, headers, mediaSequence + k,
+                                keyCache, segFile(epFolder, k), raw = true
+                            )
+                            writtenCount.incrementAndGet()
+                            if (throttle) Thread.sleep(THROTTLE_SLEEP_MS)
+                        } finally {
+                            inFlight.release()
                         }
-                        val segFile = segFileOf(out, index)
-                        segFile.inputStream().use { ins ->
-                            val buf = ByteArray(64 * 1024)
-                            while (true) {
-                                val r = ins.read(buf)
-                                if (r <= 0) break
-                                output.write(buf, 0, r)
-                            }
-                        }
-                        segFile.delete()
-                        idxOut.write("${len!!}\n".toByteArray())
-                        if ((index + 1) % 20 == 0) {
-                            idxOut.flush()
-                            AppLog.putDebug("下载进度 ${index + 1}/${segments.size} 段")
-                        }
-                        onProgress(((index + 1) * 100 / segments.size).coerceIn(0, 99))
                     }
-                } finally {
-                    workers.forEach { it.join(10_000) }
-                    // 中断/异常时清掉没拼进去的临时分片，别在下载目录里留垃圾
-                    for (index in startIndex until endIndex) {
-                        segFileOf(out, index).delete()
-                    }
+                } catch (e: Exception) {
+                    errorRef.compareAndSet(null, e)
                 }
-                errorRef.get()?.let { throw it }
+            }.apply { start() }
+        }
+        try {
+            // 必须等所有 worker 真正跑完：之前用 join(10_000) 超时，网络慢/分片多时会提前返回，
+            // 但 worker 线程还在后台写盘——表现就是"分片其实下完了，状态却停在等待中"。
+            workers.forEach { it.join() }
+        } finally {
+            // 中断/异常时清掉没下完的半截分片，别在文件夹里留坏文件
+            for (k in todo) {
+                val f = segFile(epFolder, k)
+                if (f.exists() && f.length() == 0L) f.delete()
             }
         }
-        // 全部片段补齐：idx 完成使命，由调用方把 .part 合并为 .mp4
-        if (endIndex >= segments.size) idxFile.delete()
-        return segments.size to endIndex
+        errorRef.get()?.let { throw it }
+        onProgress(100)
+        // 全部补齐：临时索引清掉（playlist/meta 保留供播放与合并）
+        if ((0 until total).all { segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0 }) {
+            File(epFolder, "index.idx").delete()
+        }
+        // 完成数以磁盘实际落盘为准（不依赖 writtenCount 计数），避免并发/超时造成的漏算
+        val written = (0 until total).count {
+            segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0
+        }
+        return total to written
     }
 
     /**
@@ -1062,11 +1043,13 @@ object VideoDownloader {
         sequence: Long,
         keyCache: HashMap<String, ByteArray>,
         segFile: File,
+        raw: Boolean = true,
     ) {
         val (segUrl, segIv, segKeyUri) = segment
         // write=false：播放器已经在写缓存了，下载侧只读不写，免得两边抢 SimpleCache 的锁
         val source = VideoCache.open(segUrl, headers, write = false)
-        val cipher = if (segKeyUri != null) {
+        // raw=true：原样落盘（加密分片保持加密，离线播放/合并时再由播放器或合并器解密）
+        val cipher = if (!raw && segKeyUri != null) {
             val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, segKeyUri)
             val k = synchronized(keyCache) {
                 keyCache.getOrPut(keyUrl) { fetchBytes(keyUrl, headers, write = false) }
@@ -1092,31 +1075,110 @@ object VideoDownloader {
         }
     }
 
-    /** 分片临时文件：<集名>.mp4.part.seg<序号> */
-    private fun segFileOf(out: File, index: Int): File =
-        File(out.parentFile, "${out.name}.seg$index")
+    /** 某一集的分片缓存目录：Download/保存视频/<dir>/<标题>/ */
+    private fun epFolderOf(dir: File, title: String): File = File(dir, title)
 
-    /** 把一个地址流式写入 [out]，返回写入字节数（初始化段用，一样不占内存） */
-    private fun copyToOutput(
-        url: String,
-        headers: Map<String, String>,
-        out: OutputStream,
-    ): Long {
-        val source = VideoCache.open(url, headers, write = false)
-        return try {
-            var total = 0L
-            val buf = ByteArray(32 * 1024)
-            while (true) {
-                val read = source.source.read(buf, 0, buf.size)
-                if (read == C.RESULT_END_OF_INPUT) break
-                out.write(buf, 0, read)
-                total += read
-            }
-            total
-        } finally {
-            runCatching { source.source.close() }
+    /** 第 k 个分片文件（按播放列表顺序，0 基），原始字节（加密则保持加密） */
+    private fun segFile(epFolder: File, index: Int): File =
+        File(epFolder, "seg_%06d.ts".format(index))
+
+    /**
+     * 把已缓存的分片文件夹合并成单个 MP4（多选后由 UI 触发）。
+     *
+     * 走和在线播放一致的"逐分片解密 + 顺序拼接"：读本地原始分片，用 [meta.json] 里的
+     * 序列号/IV 还原 AES 密钥，[CipherInputStream] 边读边解密，顺序写入 <标题>.mp4。
+     * 不重封装、不转码——这是验证过稳定的老办法，专门用来离线保存。
+     *
+     * 合并与播放互不干扰：合并在后台协程跑，原分片文件夹始终保留（合并失败也只是没产出 mp4）。
+     */
+    fun mergeToMp4(task: Task) {
+        scope.launch {
+            runCatching { mergeEpisode(task) }
+                .onFailure { AppLog.put("合并为 MP4 失败：${titleOf(task)}", it) }
         }
     }
+
+    private fun mergeEpisode(task: Task): File? {
+        val dir = dirOf(task)
+        val title = titleOf(task)
+        val epFolder = epFolderOf(dir, title)
+        if (!epFolder.isDirectory) return null
+        val mp4 = File(dir, "$title.mp4")
+        val segs = epFolder.listFiles().orEmpty()
+            .filter { it.name.startsWith("seg_") && it.name.endsWith(".ts") }
+            .sortedBy { it.name }
+        if (segs.isEmpty()) return null
+        val meta = runCatching { org.json.JSONObject(File(epFolder, "meta.json").readText()) }.getOrNull()
+        val seq = meta?.optLong("seq", 0L) ?: 0L
+        val iv = if (meta != null && meta.has("iv") && !meta.isNull("iv")) meta.getString("iv") else null
+        val keyFile = File(epFolder, "key.bin").takeIf { it.exists() }
+        val keyBytes = keyFile?.readBytes()
+        val initFile = File(epFolder, "init.bin").takeIf { it.exists() }
+        FileOutputStream(mp4).use { out ->
+            initFile?.inputStream()?.use { ins -> ins.copyTo(out) }
+            segs.forEachIndexed { k, seg ->
+                val cipher = if (keyBytes != null) aesCipher(keyBytes, iv, seq + k) else null
+                seg.inputStream().use { ins ->
+                    val decoded = cipher?.let { CipherInputStream(ins, it) } ?: ins
+                    decoded.use { din ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val r = din.read(buf)
+                            if (r <= 0) break
+                            out.write(buf, 0, r)
+                        }
+                    }
+                }
+            }
+        }
+        File(epFolder, "index.idx").delete()
+        notifyCompleted(task) // mp4 已生成：会话可切到本地 mp4 播放
+        return mp4
+    }
+
+    /**
+     * 生成播放用的 local.m3u8：已下载的分片指向本地文件（零网络），
+     * 未下载的保持原始 http(s) 地址由播放器实时补齐——这就是"分片文件夹里有一个分片就算缓存"。
+     * 加密流的密钥/初始化段也优先用本地副本。
+     */
+    private fun buildLocalPlaylist(epFolder: File): File {
+        val out = File(epFolder, "local.m3u8")
+        val playlist = runCatching { File(epFolder, "playlist.m3u8").readText() }.getOrNull()
+            ?: return File(epFolder, "playlist.m3u8")
+        val sb = StringBuilder()
+        var k = 0
+        playlist.lines().forEach { line ->
+            val l = line
+            when {
+                l.startsWith("#EXT-X-KEY") -> {
+                    val localKey = File(epFolder, "key.bin")
+                    if (localKey.exists()) sb.append(replaceUriAttr(l, Uri.fromFile(localKey).toString()))
+                        .append('\n')
+                    else sb.append(l).append('\n')
+                }
+                l.startsWith("#EXT-X-MAP") -> {
+                    val localInit = File(epFolder, "init.bin")
+                    if (localInit.exists()) sb.append(replaceUriAttr(l, Uri.fromFile(localInit).toString()))
+                        .append('\n')
+                    else sb.append(l).append('\n')
+                }
+                l.startsWith("#") -> sb.append(l).append('\n')
+                l.isBlank() -> Unit
+                else -> {
+                    val localSeg = segFile(epFolder, k)
+                    if (localSeg.exists()) sb.append(Uri.fromFile(localSeg).toString()).append('\n')
+                    else sb.append(l).append('\n')
+                    k++
+                }
+            }
+        }
+        out.writeText(sb.toString())
+        return out
+    }
+
+    /** 把 #EXT-X-KEY / #EXT-X-MAP 行的 URI="..." 替换成给定地址 */
+    private fun replaceUriAttr(line: String, uri: String): String =
+        line.replace(Regex("""URI="[^"]*""""), """URI="$uri"""")
 
     /** AES-128-CBC 解密器；未指定 IV 时按 HLS 规范用分片序号（大端 16 字节） */
     private fun aesCipher(key: ByteArray, ivHex: String?, sequence: Long): Cipher {

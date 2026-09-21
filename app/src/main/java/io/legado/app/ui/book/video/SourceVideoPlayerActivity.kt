@@ -386,6 +386,23 @@ internal fun DownloadDialog(
     // 只显示当前所选视频的条目
     val shownStates = dlStates.filter { it.dirName == currentDir }
 
+    // 已下载完的一集：点播放按钮直接播这一集。
+    // - 播放页里（当前这部剧）：切集并关掉弹窗，播放器瞬间换成本地文件；
+    // - 别的视频 / 独立页面：拉起播放页直接播这一集。
+    val onPlayEpisode: (VideoDownloader.TaskState) -> Unit = { st ->
+        val task = st.task
+        val curBook = SourceVideoPlayerSession.getBook()
+        if (!standalone && curBook != null && curBook.bookUrl == task.book.bookUrl) {
+            onDismiss()
+            SourceVideoPlayerSession.selectEpisode(task.index)
+        } else {
+            context.startActivity(
+                SourceVideoPlayerActivity.createIntent(context, task.book.bookUrl, task.index)
+            )
+            if (!standalone) onDismiss()
+        }
+    }
+
     // 切到别的视频后没有"选集下载"可勾（目录要联网拉），强制留在进度页
     LaunchedEffect(selectedDir) {
         if (selectedDir != null) tab = 1
@@ -477,6 +494,19 @@ internal fun DownloadDialog(
                                         itemChecked.clear()
                                     }
                                 )
+                                if (itemChecked.isNotEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text("合并为MP4") },
+                                        onClick = {
+                                            menuOpen = false
+                                            val tasks = shownStates
+                                                .filter { it.key in itemChecked }
+                                                .map { it.task }
+                                            tasks.forEach { VideoDownloader.mergeToMp4(it) }
+                                            context.toastOnUi("已加入合并队列：${tasks.size} 个")
+                                        }
+                                    )
+                                }
                             }
                             if (!selectorOpen && tab == 0) {
                                 DropdownMenuItem(
@@ -747,7 +777,8 @@ internal fun DownloadDialog(
                                         onCheckedChange = { on ->
                                             if (on) itemChecked.add(st.key)
                                             else itemChecked.remove(st.key)
-                                        }
+                                        },
+                                        onPlay = onPlayEpisode,
                                     )
                                 }
                             }
@@ -793,10 +824,12 @@ private fun DownloadStateItem(
     st: VideoDownloader.TaskState,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    onPlay: (VideoDownloader.TaskState) -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val running = st.status == VideoDownloader.DlStatus.QUEUED ||
         st.status == VideoDownloader.DlStatus.RUNNING
+    val completed = st.status == VideoDownloader.DlStatus.COMPLETED
     Row(verticalAlignment = Alignment.CenterVertically) {
         // 勾选后配合上方的"删除选中"做批量删除
         Checkbox(checked = checked, onCheckedChange = onCheckedChange)
@@ -852,14 +885,20 @@ private fun DownloadStateItem(
             },
             fontSize = 11.sp
         )
-        // 暂停 / 继续
+        // 暂停 / 继续 / 播放：已完成的一集该按钮变成"播放"，点一下直接播这一集
         IconButton(onClick = {
-            if (running) VideoDownloader.pause(st.key) else VideoDownloader.resume(st.key)
+            when {
+                completed -> onPlay(st)
+                running -> VideoDownloader.pause(st.key)
+                else -> VideoDownloader.resume(st.key)
+            }
         }) {
             Icon(
-                if (running) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (running) "暂停" else "继续",
-                tint = Color.White
+                if (completed) Icons.Filled.PlayArrow
+                else if (running) Icons.Filled.Pause
+                else Icons.Filled.PlayArrow,
+                contentDescription = if (completed) "播放" else if (running) "暂停" else "继续",
+                tint = if (completed) MaterialTheme.colorScheme.primary else Color.White
             )
         }
         // 三点菜单
