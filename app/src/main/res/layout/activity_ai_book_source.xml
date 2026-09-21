@@ -46,13 +46,12 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:hint="测试关键词（用来抓搜索结果页，可留空）">
+                android:hint="测试关键词（用来抓搜索结果页；留空则自动取站点热词）">
 
                 <io.legado.app.lib.theme.view.ThemeEditText
                     android:id="@+id/et_keyword"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="剑"
                     tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
             </io.legado.app.ui.widget.text.TextInputLayout>
 
@@ -175,6 +174,14 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:text="代码深度辅助（纯代码解析版与 AI 版双轨实测，择优采用）"
+                android:textSize="13sp" />
+
+            <io.legado.app.lib.theme.view.ThemeCheckBox
+                android:id="@+id/cb_video"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="视频源模式（影视 / 动漫 / 短剧：把「正文」理解为播放地址）"
                 android:textSize="13sp" />
 
             <LinearLayout

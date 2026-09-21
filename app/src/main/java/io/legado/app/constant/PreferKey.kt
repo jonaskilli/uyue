@@ -398,4 +398,6 @@ object PreferKey {
     const val roleChatContextLimit = "roleChatContextLimit"
     // 角色立绘使用的生图模板 id（0 = 跟随默认模板）
     const val aiPortraitTemplateId = "aiPortraitTemplateId"
+    // AI 生成书源：按网址记录的历史成功规则（整份 JSON）
+    const val aiSourceRuleHistory = "aiSourceRuleHistory"
 }

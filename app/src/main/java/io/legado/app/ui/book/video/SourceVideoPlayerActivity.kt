@@ -3,6 +3,9 @@ package io.legado.app.ui.book.video
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -44,15 +48,20 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -62,6 +71,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.legado.app.R
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.help.video.VideoDownloader
+import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.ui.timetech.player.CoverBackdrop
 import io.legado.app.ui.timetech.player.EpisodeItem
 import io.legado.app.ui.timetech.player.FullscreenVideoPlayer
@@ -69,6 +79,7 @@ import io.legado.app.ui.timetech.player.LocalVideo
 import io.legado.app.ui.browser.WebViewActivity
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 在线剧集播放页（时光播放器）。
@@ -137,6 +148,54 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             onDispose { VideoDownloader.setPlaybackActive(false) }
         }
 
+        // ===== 右侧 20% 竖滑切换视频：跟手位移 + 翻页 =====
+        // 位移单位统一用 dp，0 = 就位；负值=画面上移，正值=画面下移
+        var feedOffsetDp by remember { mutableFloatStateOf(0f) }
+        // 切换方向：+1 下一个 / -1 上一个，0 = 本次不是切视频。
+        // 放在 key(...) 之外，才能在播放器整组重建后仍记得该往哪个方向翻。
+        var feedSwitchDir by remember { mutableIntStateOf(0) }
+        val screenHeightDp = LocalConfiguration.current.screenHeightDp
+        val density = LocalDensity.current
+        val feedScope = rememberCoroutineScope()
+
+        /** 跟手：手指移动多少，画面就跟着移动多少（与上下滑切集的分页器观感一致） */
+        val onFeedDrag: (Float) -> Unit = { dyPx ->
+            feedOffsetDp = with(density) { dyPx.toDp().value }
+        }
+        /** 没到阈值就松手：回弹到原位 */
+        val onFeedCancel: () -> Unit = {
+            feedScope.launch {
+                animate(
+                    initialValue = feedOffsetDp,
+                    targetValue = 0f,
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                ) { value, _ -> feedOffsetDp = value }
+            }
+        }
+        // 新视频加载完成后 bookUrl 才更新，此刻从反方向整屏滑入，接上抬手时的那段位移
+        LaunchedEffect(state.bookUrl) {
+            val dir = feedSwitchDir
+            if (dir != 0) {
+                feedSwitchDir = 0
+                feedOffsetDp = dir * screenHeightDp.toFloat()
+                animate(
+                    initialValue = feedOffsetDp,
+                    targetValue = 0f,
+                    animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+                ) { value, _ -> feedOffsetDp = value }
+            }
+        }
+        // 切换失败（加载出错）时把画面滑回来，避免整块停在屏幕外看不见错误提示
+        LaunchedEffect(state.error, state.fallbackFailed) {
+            if ((state.error != null || state.fallbackFailed != null) && feedOffsetDp != 0f) {
+                animate(
+                    initialValue = feedOffsetDp,
+                    targetValue = 0f,
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                ) { value, _ -> feedOffsetDp = value }
+            }
+        }
+
         Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             // 播放器：全屏 = 占满；首页模式 = 压缩到顶部 240dp（实例不变）
             Box(
@@ -150,6 +209,8 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                         }
                     )
                     .background(Color.Black)
+                    // 切视频时的跟手位移与翻页（0 时不影响正常布局）
+                    .offset(y = feedOffsetDp.dp)
             ) {
                 when {
                     state.loading -> LoadingContent()
@@ -189,10 +250,27 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             onProgressChange = SourceVideoPlayerSession::saveProgress,
                             onOpenHome = { homeMode = true },
                             onFeedSwitch = if (state.feedEnabled) {
-                                { offset -> SourceVideoPlayerSession.feedSwitch(offset) }
+                                { offset ->
+                                    // 记住方向（新视频就绪后据此从反方向滑入），
+                                    // 再把当前这部沿手指方向整屏滑出，然后才去加载下一部
+                                    feedSwitchDir = offset
+                                    feedScope.launch {
+                                        animate(
+                                            initialValue = feedOffsetDp,
+                                            targetValue = -offset * screenHeightDp.toFloat(),
+                                            animationSpec = tween(
+                                                durationMillis = 200,
+                                                easing = FastOutSlowInEasing,
+                                            ),
+                                        ) { value, _ -> feedOffsetDp = value }
+                                    }
+                                    SourceVideoPlayerSession.feedSwitch(offset)
+                                }
                             } else {
                                 null
                             },
+                            onFeedDrag = if (state.feedEnabled) onFeedDrag else null,
+                            onFeedCancel = if (state.feedEnabled) onFeedCancel else null,
                             coverUrl = state.coverUrl,
                             bookUrl = state.bookUrl,
                             compactMode = homeMode,
@@ -384,7 +462,11 @@ internal fun DownloadDialog(
         else -> groups.firstOrNull { it.dirName == selectedDir }?.name ?: selectedDir.orEmpty()
     }
     // 只显示当前所选视频的条目
-    val shownStates = dlStates.filter { it.dirName == currentDir }
+    // 永远按目录里的集数顺序展示：先下第 3 集再下第 1 集时，第 1 集也要排在前面，
+    // 而不是按下单先后堆在后面（statesMap 是插入序，这里显式按集序号排一次）
+    val shownStates = dlStates
+        .filter { it.dirName == currentDir }
+        .sortedBy { it.task.index }
 
     // 已下载完的一集：点播放按钮直接播这一集。
     // - 播放页里（当前这部剧）：切集并关掉弹窗，播放器瞬间换成本地文件；
@@ -396,6 +478,14 @@ internal fun DownloadDialog(
             onDismiss()
             SourceVideoPlayerSession.selectEpisode(task.index)
         } else {
+            // 把「已下载的视频」列表交给播放器：进去后右侧 20% 竖滑即可在
+            // 这些已下载视频之间切换（与从发现页/搜索页进入时的列表切换同一套手势）。
+            // 起始集取该视频第一集已下载的集，避免切过去后从没下载的集开始播。
+            VideoFeedStore.put(
+                provider = { VideoDownloader.downloadedBookUrls() },
+                currentBookUrl = task.book.bookUrl,
+                startIndexOf = { url -> VideoDownloader.firstCompletedIndex(url) ?: 0 },
+            )
             context.startActivity(
                 SourceVideoPlayerActivity.createIntent(context, task.book.bookUrl, task.index)
             )

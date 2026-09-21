@@ -495,6 +495,23 @@ object VideoDownloader {
         "保存视频"
     )
 
+    /**
+     * 已下载视频的 bookUrl 列表，顺序与"已缓存视频"列表一致。
+     * 供播放器在这些已下载视频之间切换（右侧 30% 竖滑）时用；
+     * 只有目录、没有下载记录的（key 为 "dir:" 前缀）无法定位书籍，直接跳过。
+     */
+    fun downloadedBookUrls(): List<String> =
+        _videoGroups.value.mapNotNull { g -> g.key.takeUnless { it.startsWith("dir:") } }
+
+    /** 某部视频第一集已下载的集序号；一集都没下完则返回 null */
+    fun firstCompletedIndex(bookUrl: String): Int? =
+        synchronized(statesMap) {
+            statesMap.values
+                .filter { it.task.book.bookUrl == bookUrl && it.status == DlStatus.COMPLETED }
+                .minByOrNull { it.task.index }
+                ?.task?.index
+        }
+
     /** 某部视频的下载条目（按保存目录名过滤） */
     fun tasksOfDir(dirName: String): List<TaskState> =
         synchronized(statesMap) {

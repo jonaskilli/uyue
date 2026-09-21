@@ -2,6 +2,8 @@ package io.legado.app.ui.book.source
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.Menu
+import android.view.MenuItem
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.lifecycleScope
 import io.legado.app.R
@@ -15,6 +17,7 @@ import io.legado.app.databinding.ActivityAiBookSourceBinding
 import io.legado.app.help.book.removeType
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.model.AiBookSourceGenerator
+import io.legado.app.model.AiSourceHistory
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.utils.GSON
@@ -50,6 +53,45 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         binding.btnImport.setOnClickListener { importSelected() }
         binding.btnSave.setOnClickListener { saveSource() }
         binding.btnLogin.setOnClickListener { gotoLogin() }
+    }
+
+    /** 右上角菜单 */
+    override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.ai_book_source, menu)
+        return super.onCompatCreateOptionsMenu(menu)
+    }
+
+    override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            R.id.menu_clear_history -> clearHistory()
+        }
+        return super.onCompatOptionsItemSelected(item)
+    }
+
+    /**
+     * 清除所有网址的历史成功规则记录。
+     * 只清「生成时自动记录的成功项」，不影响已经保存到书源列表里的书源。
+     */
+    private fun clearHistory() {
+        val count = AiSourceHistory.urlCount()
+        if (count == 0) {
+            toastOnUi("当前还没有任何网址记录")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("清除网址记录")
+            .setMessage(
+                "将清除已记录的 $count 个网址的历史成功规则。\n" +
+                    "清除后，再生成同一网址时不会再用历史规则补齐。\n" +
+                    "（不影响已保存到书源列表的书源）"
+            )
+            .setPositiveButton("确定") { _, _ ->
+                AiSourceHistory.clearAll()
+                toastOnUi("已清除 $count 个网址的记录")
+                binding.tvProgress.text = "已清除全部网址记录（共 $count 个）"
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     /**
@@ -223,12 +265,15 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
             toastOnUi("单本模式需要填写书籍信息页网址")
             return
         }
+        // 留空则由程序自动取站点热词；一旦填了就以用户输入为准，
+        // 生成器侧不会再拿 AI 建议词覆盖它（见 AiBookSourceGenerator.generate）
         val keyword = binding.etKeyword.text?.toString()?.trim()
-            .takeIf { !it.isNullOrBlank() } ?: "剑"
+            .takeIf { !it.isNullOrBlank() }
         val loginUrl = binding.etLoginUrl.text?.toString()?.trim()
             .takeIf { !it.isNullOrBlank() }
         val includeExplore = binding.cbExplore.isChecked
         val codeAssist = binding.cbCodeAssist.isChecked
+        val videoMode = binding.cbVideo.isChecked
         val fixRounds = binding.etFixRounds.text?.toString()?.trim()
             ?.toIntOrNull()?.coerceIn(0, 8) ?: 2
 
@@ -244,7 +289,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
             val result = AiBookSourceGenerator.generate(
                 url, keyword, loginUrl, includeExplore, fixRounds,
                 bookInfoUrl, tocUrl, singleBook,
-                codeAssist = codeAssist
+                codeAssist = codeAssist, videoMode = videoMode
             ) { message ->
                 // 回调在 IO 线程，进度必须切回主线程更新 UI
                 runOnUiThread { binding.tvProgress.text = message }
@@ -259,6 +304,10 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                     if (res.fixRounds > 0) {
                         append("（AI 修正 ").append(res.fixRounds).append(" 轮）")
                     }
+                    if (res.patchedSteps.isNotEmpty()) {
+                        append("\n（已用该网址的历史记录补齐并通过：")
+                            .append(res.patchedSteps.joinToString("、")).append("）")
+                    }
                     append('\n')
                     append("五链路验证：\n")
                     res.verify.forEach { v ->
@@ -267,6 +316,10 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                     }
                     if (res.verify.any { !it.ok }) {
                         append("（存在失败环节的规则可能不可用，建议手动校验后再用）")
+                    }
+                    val okCount = res.verify.count { it.ok }
+                    if (!singleBook && okCount > 0) {
+                        append("\n已记录该网址的 $okCount 项成功规则，下次生成同一网址可直接补齐。")
                     }
                 }
                 binding.etResult.setText(runCatching { GSON.toJson(source) }.getOrDefault(""))

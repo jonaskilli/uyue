@@ -19,6 +19,11 @@ object VideoFeedStore {
         val bookUrl: String,
         val time: Long,
         val loadMore: (() -> Unit)? = null,
+        /**
+         * 切到某个视频时从第几集开始播，默认第 0 集。
+         * 「已下载视频」列表用它跳到该视频第一集已下载的集，避免切过去后从没下载的集开始播。
+         */
+        val startIndexOf: (String) -> Int = { 0 },
     ) {
         /** 当前时刻的完整列表（含分页新加载的部分） */
         fun urls(): List<String> = runCatching { provider() }.getOrDefault(emptyList())
@@ -32,10 +37,11 @@ object VideoFeedStore {
         provider: () -> List<String>,
         currentBookUrl: String,
         loadMore: (() -> Unit)? = null,
+        startIndexOf: (String) -> Int = { 0 },
     ) {
         val list = runCatching { provider() }.getOrDefault(emptyList())
         if (list.size < 2 || !list.contains(currentBookUrl)) return
-        feed = Feed(provider, currentBookUrl, System.currentTimeMillis(), loadMore)
+        feed = Feed(provider, currentBookUrl, System.currentTimeMillis(), loadMore, startIndexOf)
     }
 
     /** 播放器消费：命中当前书籍且未过期才返回，无论是否命中都清空 */

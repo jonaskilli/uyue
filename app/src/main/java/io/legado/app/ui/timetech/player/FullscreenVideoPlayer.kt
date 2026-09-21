@@ -217,8 +217,11 @@ fun FullscreenVideoPlayer(
     onProgressChange: ((index: Int, positionMs: Long) -> Unit)? = null,
     // 跳转经典播放页（首页形态：上方视频画面 + 下方选集方块）
     onOpenHome: () -> Unit = {},
-    // 搜索/发现入口提供的视频列表：右侧 30% 区域竖滑切换下一个/上一个（null 表示无列表）
+    // 搜索/发现入口提供的视频列表：右侧 20% 区域竖滑切换下一个/上一个（null 表示无列表）
+    // onFeedDrag：拖动过程中实时上报位移（跟手）；onFeedCancel：没过阈值时回弹
     onFeedSwitch: ((Int) -> Unit)? = null,
+    onFeedDrag: ((Float) -> Unit)? = null,
+    onFeedCancel: (() -> Unit)? = null,
     // 书籍封面：加载/解析时铺底显示，快速切换时可辨认视频
     coverUrl: String = "",
     // 当前书籍地址：无缝切换交接池的键之一
@@ -435,6 +438,8 @@ fun FullscreenVideoPlayer(
                 onLockPortraitChange = setLockedPortrait,
                 onOpenHome = onOpenHome,
                 onFeedSwitch = onFeedSwitch,
+                onFeedDrag = onFeedDrag,
+                onFeedCancel = onFeedCancel,
                 coverUrl = coverUrl,
                 bookUrl = bookUrl,
                 onAddShelf = onAddShelf,
@@ -525,6 +530,8 @@ private fun VideoPage(
     onLockPortraitChange: (Boolean) -> Unit,
     onOpenHome: () -> Unit = {},
     onFeedSwitch: ((Int) -> Unit)? = null,
+    onFeedDrag: ((Float) -> Unit)? = null,
+    onFeedCancel: (() -> Unit)? = null,
     coverUrl: String = "",
     bookUrl: String = "",
     onAddShelf: (() -> Unit)? = null,
@@ -557,6 +564,8 @@ private fun VideoPage(
         onLockPortraitChange = onLockPortraitChange,
         onOpenHome = onOpenHome,
         onFeedSwitch = onFeedSwitch,
+        onFeedDrag = onFeedDrag,
+        onFeedCancel = onFeedCancel,
         coverUrl = coverUrl,
         bookUrl = bookUrl,
         onAddShelf = onAddShelf,
@@ -680,6 +689,8 @@ internal fun VideoPlayerPage(
     onLockPortraitChange: (Boolean) -> Unit,
     onOpenHome: () -> Unit = {},
     onFeedSwitch: ((Int) -> Unit)? = null,
+    onFeedDrag: ((Float) -> Unit)? = null,
+    onFeedCancel: (() -> Unit)? = null,
     coverUrl: String = "",
     bookUrl: String = "",
     onAddShelf: (() -> Unit)? = null,
@@ -905,7 +916,7 @@ internal fun VideoPlayerPage(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(video.uri, onFeedSwitch) {
+                    .pointerInput(video.uri, onFeedSwitch, onFeedDrag, onFeedCancel) {
                         detectPlayerGestures(
                             onTap = { showControls = !showControls },
                             onDoubleTap = { x ->
@@ -931,6 +942,8 @@ internal fun VideoPlayerPage(
                             },
                             onSeekEnd = { dragging = false },
                             onFeedSwitch = onFeedSwitch,
+                            onFeedDrag = onFeedDrag,
+                            onFeedCancel = onFeedCancel,
                         )
                     }
             )
@@ -1537,6 +1550,8 @@ private suspend fun PointerInputScope.detectPlayerGestures(
     onSeek: (Float) -> Unit,
     onSeekEnd: () -> Unit,
     onFeedSwitch: ((Int) -> Unit)? = null,
+    onFeedDrag: ((Float) -> Unit)? = null,
+    onFeedCancel: (() -> Unit)? = null,
 ) {
     val slop = viewConfiguration.touchSlop
     val longPressTimeout = viewConfiguration.longPressTimeoutMillis
@@ -1550,10 +1565,13 @@ private suspend fun PointerInputScope.detectPlayerGestures(
         var verticalTaken = false
         var longPressFired = false
         var feedTaken = false
+        /** 跟手起点：越过 slop 那一刻的位移，避免刚起步画面就跳一下 */
+        var feedDragBase = 0f
         var accumDx = 0f
         var accumDy = 0f
-        // 右侧 30% 区域且存在列表：竖滑切换列表里的视频（不是切集），手势由本层消费
-        val feedMode = onFeedSwitch != null && down.position.x >= size.width * 0.7f
+        // 右侧 20% 区域且存在列表：竖滑切换列表里的视频（不是切集），手势由本层消费。
+        // 收窄到 20% 是为了减少误触：30% 时正常握持/调音量的落点常常落在区内。
+        val feedMode = onFeedSwitch != null && down.position.x >= size.width * 0.8f
 
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Main)
@@ -1569,12 +1587,17 @@ private suspend fun PointerInputScope.detectPlayerGestures(
                 } else if (abs(accumDy) > slop) {
                     // 纵向滑动：交给外层分页器切换视频
                     verticalTaken = true
-                    if (feedMode) feedTaken = true
+                    if (feedMode) {
+                        feedTaken = true
+                        feedDragBase = accumDy
+                    }
                 }
             }
             if (feedTaken) {
                 // 消费纵向位移，阻止外层分页器切集，改为切换列表视频
                 change.consume()
+                // 跟手：手指移动多少画面就跟着移动多少（与上下滑切集时分页器跟手一致）
+                onFeedDrag?.invoke(accumDy - feedDragBase)
             }
             if (seeking) {
                 onSeek(change.position.x - change.previousPosition.x)
@@ -1587,8 +1610,13 @@ private suspend fun PointerInputScope.detectPlayerGestures(
             }
         }
 
-        if (feedTaken && abs(accumDy) > slop * 6) {
-            onFeedSwitch?.invoke(if (accumDy < 0) 1 else -1)
+        if (feedTaken) {
+            if (abs(accumDy) > slop * 6) {
+                onFeedSwitch?.invoke(if (accumDy < 0) 1 else -1)
+            } else {
+                // 没过阈值：回弹到原位
+                onFeedCancel?.invoke()
+            }
         }
         if (longPressFired) onLongPressEnd()
         if (seeking) onSeekEnd()

@@ -35,7 +35,7 @@ data class SourceVideoPlayerUiState(
     val sourceOrigin: String = "",
     /** 当前正在播放的集（扁平章节序号），供首页/其它入口续播 */
     val currentIndex: Int = 0,
-    /** 搜索/发现入口的列表切换（右侧 30% 竖滑） */
+    /** 搜索/发现入口的列表切换（右侧 20% 竖滑） */
     val feedEnabled: Boolean = false,
     /** 书籍封面：加载/解析时铺底显示，便于快速切换时辨认视频 */
     val coverUrl: String = "",
@@ -517,7 +517,7 @@ object SourceVideoPlayerSession {
     }
 
     /**
-     * 右侧 30% 竖滑切换列表视频：+1 下一个 / -1 上一个。
+     * 右侧 20% 竖滑切换列表视频：+1 下一个 / -1 上一个。
      *
      * 列表是动态供给的：每次切换实时读取当前列表（含发现页/搜索页
      * 新分页加载出来的视频），可以一直滑到列表真正的末尾。
@@ -537,6 +537,6 @@ object SourceVideoPlayerSession {
             )
             return
         }
-        load(url, 0)
+        load(url, feed.startIndexOf(url))
     }
 }
