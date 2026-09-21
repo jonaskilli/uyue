@@ -16,6 +16,7 @@ import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.help.video.VideoSourcePlayer
 import io.legado.app.help.video.VideoUrlSniffer
 import io.legado.app.ui.timetech.player.LocalVideo
+import io.legado.app.ui.timetech.player.NextVideoPreload
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -25,8 +26,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 import splitties.init.appCtx
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 data class SourceVideoPlayerUiState(
     val loading: Boolean = true,
@@ -86,6 +89,10 @@ object SourceVideoPlayerSession {
     private var chapters: List<BookChapter> = emptyList()
     /** 搜索/发现入口带来的视频列表（动态供给：分页加载出来的也会进入切换范围） */
     private var feed: VideoFeedStore.Feed? = null
+    /** 预取到的下一部视频（避免同一部被反复解析） */
+    private var prefetchedNext: NextVideoPreload? = null
+    /** 预取到的首集地址：切过去后直接填进剧集列表，省一次正文规则请求 */
+    private val prefetchedUrls = ConcurrentHashMap<String, String>()
     /** 正在解析的集，避免同一集被重复发起 */
     private val resolving = Collections.synchronizedSet(mutableSetOf<Int>())
     /** 预取（下一集）正在解析的集，与 [resolving] 分开：
@@ -288,6 +295,8 @@ object SourceVideoPlayerSession {
         this@SourceVideoPlayerSession.source = source
         this@SourceVideoPlayerSession.chapters = chapters
         resolving.clear()
+        // 换了视频：上一轮预取的「下一个视频」作废（它现在就是当前视频）
+        prefetchedNext = null
         // 换了视频：上一部剧的"当前集"不能带过来当收尾对象
         activeWatchIndex = -1
         // 白名单书源本来就不该被拦截：它的播放页自带选集/清晰度/倍速，
@@ -316,6 +325,8 @@ object SourceVideoPlayerSession {
             val local = VideoDownloader.findLocalFile(book.name, i, chapter.title)
             val url = local?.let { Uri.fromFile(it).toString() }
                 ?: chapter.url.trim().takeIf { VideoSourcePlayer.isPlayableUrl(it) }
+                // 上一个视频播到最后一集时已经预取过这一部：直接采信，省一次正文规则请求
+                ?: prefetchedUrls["${book.bookUrl}#$i"]
             LocalVideo(
                 uri = url?.let { Uri.parse(it) } ?: Uri.EMPTY,
                 name = chapter.title,
@@ -453,6 +464,53 @@ object SourceVideoPlayerSession {
                 }
             }
         }
+    }
+
+    /**
+     * 预取「下一个视频」的首集：只解析、不切换会话、不拉起任何界面。
+     *
+     * 当前视频播到最后一集（整部只有一集时同样成立）时由播放器调用：
+     * 列表里还有下一个视频，就把那一部的目录与首集地址提前解析出来，
+     * 播放器据此提前缓冲一小段，右侧竖滑切过去直接接管，不再转圈。
+     * 顺带把该部剧的章节预热进库，真正切过去时 [load] 也不必再联网拉目录。
+     */
+    suspend fun prefetchNextVideo(): NextVideoPreload? = withContext(Dispatchers.IO) {
+        val nextUrl = nextVideoUrl() ?: return@withContext null
+        // 同一部只解析一次：播放器可能因为切集/重组多次来问，别重复联网
+        prefetchedNext?.let { if (it.bookUrl == nextUrl) return@withContext it }
+        runCatching {
+            val nextBook = appDb.bookDao.getBook(nextUrl)
+                ?: appDb.searchBookDao.getSearchBook(nextUrl)?.toBook()
+                ?: return@runCatching null
+            val nextSource = nextBook.getBookSource() ?: return@runCatching null
+            val chapters = VideoSourcePlayer.prepareChapters(nextBook, nextSource)
+            if (chapters.isEmpty()) return@runCatching null
+            val index = feed?.startIndexOf(nextUrl)?.coerceIn(0, chapters.lastIndex) ?: 0
+            val url = VideoSourcePlayer.resolveChapter(nextBook, nextSource, chapters[index])
+                .directUrl
+            if (url.isNullOrBlank()) return@runCatching null
+            // 这部之前看过：预缓冲时就定位到上次的进度，切过去接着看
+            val startPosition = if (nextBook.durChapterIndex == index) {
+                nextBook.durChapterPos.toLong().coerceAtLeast(0)
+            } else {
+                0L
+            }
+            val result = NextVideoPreload(nextUrl, index, url, startPosition)
+            prefetchedUrls["$nextUrl#$index"] = url
+            prefetchedNext = result
+            result
+        }.onFailure {
+            AppLog.put("预取下一个视频失败\n${it.localizedMessage}", it)
+        }.getOrNull()
+    }
+
+    /** 切换列表里当前视频的下一个（没有则 null） */
+    private fun nextVideoUrl(): String? {
+        val urls = feed?.urls() ?: return null
+        val currentUrl = book?.bookUrl ?: return null
+        val pos = urls.indexOf(currentUrl)
+        if (pos < 0) return null
+        return urls.getOrNull(pos + 1)
     }
 
     /**

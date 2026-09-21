@@ -209,6 +209,9 @@ fun FullscreenVideoPlayer(
     // 否则 N 集就是 N 次串行网络请求，只能滚到哪一集解析哪一集。
     // prefetch=true 表示"预取下一集"，调用方据此只解析、不弹内置播放器，真正滑到才播。
     onResolveEpisode: ((index: Int, prefetch: Boolean) -> Unit)? = null,
+    // 当前视频已经播到最后一集（整部只有一集也算）时，用它取「下一个视频」的首集地址。
+    // 返回 null 表示列表里没有下一个视频，不做预缓冲。
+    onPrefetchNextVideo: (suspend () -> NextVideoPreload?)? = null,
     // 起始集内进度（毫秒），用于续播。会话内的 [positions] 优先于它，
     // 因为用户在本页内来回切集时应该回到自己刚才的位置，而不是进页时的位置。
     initialPositionMs: Long = 0L,
@@ -371,15 +374,27 @@ fun FullscreenVideoPlayer(
     }
 
     // 预缓冲下一集：当前集正常播放约 2 秒后，为下一集建立不超过 ~10 秒的缓冲窗口，
-    // 上下滑/选集切换时直接接管已缓冲的播放器实例，不再出现"缓冲一会儿"
+    // 上下滑/选集切换时直接接管已缓冲的播放器实例，不再出现"缓冲一会儿"。
+    // 已经是最后一集（整部只有一集时同样成立）就改为预缓冲**下一个视频**的首集，
+    // 右侧竖滑切到下一个视频时也直接接管，不再从头加载。
     LaunchedEffect(pagerState.currentPage, videos, playOrder) {
         delay(2000)
         if (videos.isEmpty()) return@LaunchedEffect
-        val nextIndex = playOrder.getOrNull(pagerState.currentPage + 1) ?: return@LaunchedEffect
-        val nextVideo = videos.getOrNull(nextIndex) ?: return@LaunchedEffect
-        // 地址还没解析出来的集（懒解析），等解析完成重新组合后这里会再触发
-        if (nextVideo.uri == Uri.EMPTY) return@LaunchedEffect
-        PreloadCache.prepare(context, nextVideo.uri, headers)
+        val nextIndex = playOrder.getOrNull(pagerState.currentPage + 1)
+        if (nextIndex != null) {
+            val nextVideo = videos.getOrNull(nextIndex) ?: return@LaunchedEffect
+            // 地址还没解析出来的集（懒解析），等解析完成重新组合后这里会再触发
+            if (nextVideo.uri == Uri.EMPTY) return@LaunchedEffect
+            PreloadCache.prepare(context, nextVideo.uri, headers)
+            return@LaunchedEffect
+        }
+        // 最后一集：预缓冲列表里的下一个视频（没有下一个视频时回调返回 null）
+        val next = onPrefetchNextVideo?.invoke() ?: return@LaunchedEffect
+        if (next.uri.isBlank()) return@LaunchedEffect
+        PreloadCache.prepareNextVideo(
+            context, next.bookUrl, next.index, Uri.parse(next.uri), headers,
+            next.startPositionMs,
+        )
     }
     DisposableEffect(Unit) {
         onDispose { PreloadCache.releaseAll() }
@@ -719,7 +734,7 @@ internal fun VideoPlayerPage(
     val currentProgressChange = rememberUpdatedState(onProgressChange)
     val player = remember(video.uri, index, headers) {
         // 1) 无缝切换：接管大屏↔首页保留的实例（进度原样保留，不重新加载、不重新解析）
-        // 2) 预缓冲：接管下一集已缓冲的实例（从头缓冲的，需回到起始位置）
+        // 2) 预缓冲：接管下一集/下一部已缓冲的实例（从头缓冲的，需回到起始位置）
         // 3) 都没有：新建
         SharedPlayer.take(bookUrl, index, headers)
             ?: PreloadCache.take(video.uri, headers)?.also {
@@ -1791,6 +1806,14 @@ internal object SharedPlayer {
     }
 }
 
+/** 预取到的「下一个视频」首集：书籍地址 + 起始集序号 + 流地址 + 该集上次看到的位置 */
+data class NextVideoPreload(
+    val bookUrl: String,
+    val index: Int,
+    val uri: String,
+    val startPositionMs: Long = 0L,
+)
+
 /**
  * 下一集预缓冲。
  *
@@ -1823,6 +1846,40 @@ internal object PreloadCache {
             }
         cachedUri = uri
         cachedHeaders = headers
+    }
+
+    /**
+     * 预缓冲**下一个视频**的首集。
+     *
+     * 与预缓冲下一集不同：切换视频会重建整组播放组件（[PreloadCache] 的槽位随之释放），
+     * 所以这里不留在 [PreloadCache]，而是直接登记进 [SharedPlayer]——
+     * 它由「书籍 + 集序号」索引，能跨过这次重建存活，新的一页组合时按同一个键接管。
+     */
+    fun prepareNextVideo(
+        context: Context,
+        bookUrl: String,
+        index: Int,
+        uri: Uri,
+        headers: Map<String, String>,
+        startPositionMs: Long = 0L,
+    ) {
+        if (bookUrl.isBlank() || uri == Uri.EMPTY) return
+        if (SharedPlayer.has(bookUrl, index)) return
+        val player = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(buildMediaSourceFactory(context, headers))
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(10_000, 10_000, 2_000, 5_000)
+                    .build()
+            )
+            .build()
+            .apply {
+                setMediaItem(buildMediaItem(uri))
+                if (startPositionMs > 0) seekTo(startPositionMs)
+                prepare()
+                playWhenReady = false
+            }
+        SharedPlayer.keep(player, bookUrl, index, headers)
     }
 
     /** 播放页接管预缓冲的实例；书源头不匹配（极少见）时弃用重建 */

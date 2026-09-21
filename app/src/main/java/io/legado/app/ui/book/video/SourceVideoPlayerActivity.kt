@@ -247,6 +247,10 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             onResolveEpisode = { idx, prefetch ->
                                 SourceVideoPlayerSession.resolveEpisode(idx, prefetch)
                             },
+                            // 播到最后一集（整部只有一集也算）时预缓冲列表里的下一个视频
+                            onPrefetchNextVideo = {
+                                SourceVideoPlayerSession.prefetchNextVideo()
+                            },
                             onProgressChange = SourceVideoPlayerSession::saveProgress,
                             onOpenHome = { homeMode = true },
                             onFeedSwitch = if (state.feedEnabled) {
