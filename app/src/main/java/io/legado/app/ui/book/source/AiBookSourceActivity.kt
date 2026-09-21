@@ -228,6 +228,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         val loginUrl = binding.etLoginUrl.text?.toString()?.trim()
             .takeIf { !it.isNullOrBlank() }
         val includeExplore = binding.cbExplore.isChecked
+        val codeAssist = binding.cbCodeAssist.isChecked
         val fixRounds = binding.etFixRounds.text?.toString()?.trim()
             ?.toIntOrNull()?.coerceIn(0, 8) ?: 2
 
@@ -242,7 +243,8 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         generateJob = lifecycleScope.launch {
             val result = AiBookSourceGenerator.generate(
                 url, keyword, loginUrl, includeExplore, fixRounds,
-                bookInfoUrl, tocUrl, singleBook
+                bookInfoUrl, tocUrl, singleBook,
+                codeAssist = codeAssist
             ) { message ->
                 // 回调在 IO 线程，进度必须切回主线程更新 UI
                 runOnUiThread { binding.tvProgress.text = message }

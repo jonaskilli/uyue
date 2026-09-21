@@ -142,6 +142,7 @@ object AiBookSourceGenerator {
         manualBookInfo: String? = null,
         manualTocUrl: String? = null,
         singleBook: Boolean = false,
+        codeAssist: Boolean = false,
         onProgress: (String) -> Unit
     ): Result<GenResult> = withContext(Dispatchers.IO) {
         runCatching {
@@ -680,6 +681,36 @@ object AiBookSourceGenerator {
             val maxRounds = fixRounds.coerceIn(0, 8)
             var fixRound = 0
             var report = verifySource(source, testKeyword, pages, onProgress, singleBook)
+
+            // ===== 代码深度辅助：纯代码解析版 vs AI 识别版 双轨实测，择优采用 =====
+            // 仅在勾选「代码辅助」时启用：用纯代码解析另生成一份对照书源，
+            // 与 AI 版一起实跑五链路，通过更多者胜；平手优先代码版（更可控、不易幻觉）。
+            // 这样 AI 偶发幻觉（尤其 tocUrl、章节/正文容器）时，由代码解析版取胜。
+            if (codeAssist) {
+                onProgress("代码深度辅助：正在用「纯代码解析」生成对照书源…")
+                val codeSource = buildCodeBookSource(
+                    pages, seed, searchTemplate, meta, includeExplore, singleBook,
+                    loginUrl, detailUrlFinal, tocUrl
+                )
+                ensureMobileUa(codeSource)
+                normalizeSourceRules(codeSource)
+                refineTocRules(codeSource, pages, onProgress)
+                refineSearchRules(codeSource, pages, onProgress)
+                val codeReport = verifySource(codeSource, testKeyword, pages, onProgress, singleBook)
+                val aiOk = report.count { it.ok }
+                val codeOk = codeReport.count { it.ok }
+                onProgress("双轨实测：AI 版通过 $aiOk/5，代码解析版通过 $codeOk/5")
+                if (codeOk >= aiOk) {
+                    meta["双轨择优"] = "AI 版 $aiOk/5、代码解析版 $codeOk/5，采用代码解析版"
+                    onProgress("采用「纯代码解析版」（通过更多或持平且更可控）")
+                    source = codeSource
+                    report = codeReport
+                } else {
+                    meta["双轨择优"] = "AI 版 $aiOk/5、代码解析版 $codeOk/5，采用 AI 识别版"
+                    onProgress("采用「AI 识别版」")
+                }
+            }
+
             while (report.any { !it.ok } && fixRound < maxRounds) {
                 fixRound++
                 onProgress(
@@ -3176,4 +3207,213 @@ object AiBookSourceGenerator {
         【当前书源 JSON】
         {source}
     """.trimIndent()
+
+    // ==================== 代码深度辅助：纯代码解析对照书源 ====================
+    /** 详情/信息页自动选封面：优先 data-src / data-original，兜底 src */
+    private fun coverRuleFrom(html: String, baseUrl: String): String {
+        val doc = Jsoup.parse(html, baseUrl)
+        val img = doc.select("img").firstOrNull {
+            it.attr("abs:src").startsWith("http") ||
+                it.attr("abs:data-src").startsWith("http") ||
+                it.attr("abs:data-original").startsWith("http")
+        } ?: return ""
+        return when {
+            img.hasAttr("data-src") -> "tag.img@data-src"
+            img.hasAttr("data-original") -> "tag.img@data-original"
+            else -> "tag.img@src"
+        }
+    }
+
+    /**
+     * 纯代码解析版书源：能用代码解析的字段（搜索JSON / 封面 / 书名 / 目录 / 正文）直接填，
+     * 解析不出的留空——然后与 AI 版一起实测，哪个通过用哪个。
+     */
+    private fun buildCodeBookSource(
+        pages: List<Page>,
+        seed: String,
+        searchTemplate: String?,
+        meta: Map<String, String>,
+        includeExplore: Boolean,
+        singleBook: Boolean,
+        loginUrl: String?,
+        detailUrlFinal: String?,
+        tocUrl: String
+    ): BookSource {
+        val s = BookSource()
+        s.bookSourceUrl = seed
+        s.bookSourceName = meta["书名"]?.takeIf { it.isNotBlank() } ?: "代码解析书源"
+        s.bookSourceGroup = "AI生成"
+        s.loginUrl = loginUrl
+        // 搜索：JSON 接口直接给路径，否则用「含最多书籍链接」的容器
+        if (!singleBook) {
+            searchTemplate?.takeIf { it.isNotBlank() }?.let { s.searchUrl = it }
+            pages.firstOrNull { it.role.startsWith("搜索") }?.let { p ->
+                jsonBookCandidates(p.html)?.let { c ->
+                    s.getSearchRule().apply {
+                        bookList = c.list
+                        name = c.name
+                        author = c.author
+                        bookUrl = c.url
+                        coverUrl = c.cover
+                    }
+                } ?: autoSearchCandidates(p.html, p.url).firstOrNull()?.let { sel ->
+                    s.getSearchRule().apply {
+                        bookList = sel
+                        bookUrl = "$sel@href"
+                        name = "$sel@text"
+                    }
+                }
+            }
+        }
+        // 详情：封面 + 书名（作者不强求，详情验证只检查书名非空）
+        pages.firstOrNull { it.role.contains("详情") }?.let { p ->
+            val info = s.getBookInfoRule()
+            info.coverUrl = coverRuleFrom(p.html, p.url)
+            autoNameRule(p.html, p.url).takeIf { it.isNotBlank() }?.let { info.name = it }
+            // 目录地址：能用代码从详情页地址拼出就填，拼不出留空（交给后续实测/兜底）
+            if (detailUrlFinal != null && tocUrl.isNotBlank()) {
+                deriveTocUrlRuleStr(detailUrlFinal, tocUrl)?.let { info.tocUrl = it }
+            }
+        }
+        // 目录：JSON 目录给数组路径；否则用「含最多章节链接」的容器
+        pages.firstOrNull { it.role == "目录页" }?.let { p ->
+            jsonChapterCandidates(p.html).firstOrNull()?.let { jp ->
+                s.getTocRule().chapterList = jp
+            } ?: autoChapterCandidates(p.html, p.url).firstOrNull()?.let { sel ->
+                s.getTocRule().apply {
+                    chapterList = sel
+                    chapterName = "$sel@text"
+                    chapterUrl = "$sel@href"
+                }
+            }
+        }
+        // 正文：用纯代码选出正文文本最长的块
+        pages.firstOrNull { it.role == "正文页" }?.let { p ->
+            autoContentRule(p.html, p.url).takeIf { it.isNotBlank() }?.let {
+                s.getContentRule().content = it
+            }
+        }
+        return s
+    }
+
+    /** 详情页自动选书名：优先 h1，兜底 h2/h3（详情验证只要求书名非空） */
+    private fun autoNameRule(html: String, baseUrl: String): String {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return ""
+        doc.selectFirst("h1")?.let { if (it.text().isNotBlank()) return "tag.h1@text" }
+        doc.select("h2,h3").firstOrNull {
+            it.text().isNotBlank() && it.text().length in 2..40
+        }?.let { return "tag.${it.tagName().lowercase()}@text" }
+        return ""
+    }
+
+    /** 正文页自动选内容容器：取「含 <p>/<br> 且纯文本最长」的块，再用收紧选择器定位 */
+    private fun autoContentRule(html: String, baseUrl: String): String {
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return ""
+        var best: Element? = null
+        var bestLen = 0
+        for (el in doc.select("article, section, div, main")) {
+            if (el.select("p").isEmpty() && el.select("br").isEmpty()) continue
+            val len = el.text().replace(Regex("\\s"), "").length
+            if (len > bestLen) {
+                bestLen = len
+                best = el
+            }
+        }
+        if (best == null || bestLen < 150) return ""
+        val sel = contentCss(best, doc) ?: return ""
+        return "$sel@text"
+    }
+
+    /** 与 candidateCss 同构，但用「纯文本长度」代替「章节文本数」来判定选择器精确匹配 */
+    private fun contentCss(el: Element, doc: org.jsoup.nodes.Document): String? {
+        val local = el.text().replace(Regex("\\s"), "").length
+        val variants = ArrayList<String>()
+        if (el.id().isNotBlank()) variants.add("id." + el.id())
+        val cls = el.classNames().filter { it.matches(Regex("[A-Za-z_][\\w-]*")) }
+        if (cls.isNotEmpty()) {
+            variants.add("class." + cls.joinToString("."))
+            variants.add("class." + cls.first())
+            variants.add("tag.${el.tagName().lowercase()}.${cls.first()}")
+        }
+        variants.add("tag." + el.tagName())
+        var tight: Pair<String, Int>? = null
+        for (v in variants) {
+            val css = legadoToCss(v) ?: continue
+            val got = runCatching { doc.select(css) }.getOrNull() ?: continue
+            val n = got.sumOf { it.text().replace(Regex("\\s"), "").length }
+            if (n < local) continue
+            if (n == local) return v
+            val t = tight
+            if (t == null || n < t.second) tight = v to n
+        }
+        return tight?.first
+    }
+
+    /**
+     * 返回「详情页地址 → 目录页地址」的纯规则串（与 deriveTocUrlRule 同逻辑，
+     * 但只输出可直接写入 ruleBookInfo.tocUrl 的规则，不输出说明文本）。
+     * 返回 "" 表示目录即详情页本身（tocUrl 应留空），返回 null 表示无法推导。
+     */
+    private fun deriveTocUrlRuleStr(infoUrl: String, tocUrl: String): String? {
+        if (infoUrl.isBlank() || tocUrl.isBlank()) return null
+        // 目录页与详情页同址：没有独立目录页，tocUrl 留空
+        if (cleanUrl(infoUrl) == cleanUrl(tocUrl)) return ""
+        // 同域 + 按数字编号派生
+        if (hostOf(infoUrl) != null && hostOf(infoUrl) == hostOf(tocUrl)) {
+            val bookId = Regex("/(\\d+)\\.html").find(infoUrl)?.groupValues?.get(1)
+                ?: Regex("/(\\d+)/?$").find(infoUrl)?.groupValues?.get(1)
+            if (bookId != null) {
+                val start = tocUrl.indexOf(bookId)
+                if (start >= 0 && tocUrl.indexOf(bookId, start + 1) < 0) {
+                    val prefix = tocUrl.substring(0, start)
+                    val suffix = tocUrl.substring(start + bookId.length)
+                    if (prefix.isNotBlank()) {
+                        return "<js>var u=baseUrl.split(\"?\")[0];" +
+                            "var n=u.substring(u.lastIndexOf(\"/\")+1).split(\".\")[0];" +
+                            "\"$prefix\"+n+\"$suffix\"</js>"
+                    }
+                }
+            }
+        }
+        // 同目录换末段文件名
+        val i = cleanUrl(infoUrl)
+        val t = cleanUrl(tocUrl)
+        if (i.isNotBlank() && t.isNotBlank() && i != t) {
+            val iDir = i.substringBeforeLast('/', "")
+            val tDir = t.substringBeforeLast('/', "")
+            if (iDir.isNotBlank() && iDir == tDir) {
+                val file = t.substringAfterLast('/')
+                if (file.isNotBlank() && !file.contains('"')) {
+                    return "<js>${BASE_URL_JS}u.substring(0,u.lastIndexOf(\"/\")+1)+\"$file\"</js>"
+                }
+            }
+        }
+        // 仅页内锚点不同
+        val anchor = tocUrl.substringAfter('#', "").trim()
+        if (anchor.isNotBlank() && !anchor.contains('"') && urlKey(infoUrl) == urlKey(tocUrl)) {
+            return "<js>${BASE_URL_JS}u+\"#$anchor\"</js>"
+        }
+        // 详情页地址 + 固定后缀
+        val base = infoUrl.substringBefore('#').substringBefore('?').trimEnd('/')
+        if (base.isNotBlank() && t.startsWith(base, true)) {
+            val suffix = t.substring(base.length)
+            if (suffix.isNotBlank() && suffix != "/" && !suffix.contains('"')) {
+                return "<js>${BASE_URL_JS}u+\"$suffix\"</js>"
+            }
+        }
+        // 按书籍标识（数字/字母数字 slug）派生
+        val id = bookIdOf(infoUrl)
+        if (id != null) {
+            val start = tocUrl.indexOf(id)
+            if (start >= 0 && tocUrl.indexOf(id, start + 1) < 0) {
+                val prefix = tocUrl.substring(0, start)
+                val suffix = tocUrl.substring(start + id.length)
+                if (prefix.isNotBlank() && !prefix.contains('"') && !suffix.contains('"')) {
+                    return "<js>${BASE_URL_JS}var n=u.substring(u.lastIndexOf(\"/\")+1).split(\".\")[0];" +
+                        "\"$prefix\"+n+\"$suffix\"</js>"
+                }
+            }
+        }
+        return null
+    }
 }

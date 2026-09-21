@@ -169,6 +169,14 @@
                     tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
             </LinearLayout>
 
+            <io.legado.app.lib.theme.view.ThemeCheckBox
+                android:id="@+id/cb_code_assist"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="代码深度辅助（纯代码解析版与 AI 版双轨实测，择优采用）"
+                android:textSize="13sp" />
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
