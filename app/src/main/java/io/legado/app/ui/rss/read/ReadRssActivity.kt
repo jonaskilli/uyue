@@ -484,17 +484,19 @@ class ReadRssActivity : VMBaseActivity<ActivityRssReadBinding, ReadRssViewModel>
 
     override fun onPause() {
         super.onPause()
-        currentWebView.pauseTimers()
+        // 同 WebViewActivity：pauseTimers() 是全局的，一旦没配对 resume 会让整个进程的
+        // WebView 都停止加载（表现为到处白屏、只能重启 App）。这里只暂停当前这一个。
         currentWebView.onPause()
     }
 
     override fun onResume() {
         super.onResume()
-        currentWebView.resumeTimers()
+        runCatching { currentWebView.resumeTimers() }
         currentWebView.onResume()
     }
 
     override fun onDestroy() {
+        runCatching { currentWebView.resumeTimers() }
         WebViewPool.release(pooledWebView)
         super.onDestroy()
     }

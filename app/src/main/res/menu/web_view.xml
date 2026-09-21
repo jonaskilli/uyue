@@ -26,7 +26,13 @@
 
     <item
         android:id="@+id/menu_full_screen"
+        android:checkable="true"
         android:title="@string/full_screen"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_clear_cache"
+        android:title="清除本页缓存并重开"
         app:showAsAction="never" />
 
     <item

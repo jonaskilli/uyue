@@ -400,4 +400,6 @@ object PreferKey {
     const val aiPortraitTemplateId = "aiPortraitTemplateId"
     // AI 生成书源：按网址记录的历史成功规则（整份 JSON）
     const val aiSourceRuleHistory = "aiSourceRuleHistory"
+    // 内置浏览器/内置播放器是否全屏（勾选后一直生效，切换视频重建页面也能保持）
+    const val browserFullScreen = "browserFullScreen"
 }

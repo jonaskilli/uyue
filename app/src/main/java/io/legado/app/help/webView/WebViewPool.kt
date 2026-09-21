@@ -50,9 +50,16 @@ object WebViewPool {
     // 获取一个WebView
     @Synchronized
     fun acquire(context: Context): PooledWebView {
-        val pooledWebView = if (idlePool.isNotEmpty()) {
-            idlePool.pop().upContext(context) // 复用闲置实例
-        } else {
+        var reused: PooledWebView? = null
+        while (idlePool.isNotEmpty()) {
+            val pooled = idlePool.pop()
+            pooled.inIdlePool = false
+            // 兜底：已被销毁的实例直接丢弃，绝不交给调用方（否则页面永远空白）
+            if (pooled.destroyed) continue
+            reused = pooled.upContext(context)
+            break
+        }
+        val pooledWebView = reused ?: run {
             if (needInitialize) {
                 needInitialize = false
                 startCleanupTimer()
@@ -78,8 +85,14 @@ object WebViewPool {
     // 释放WebView回池
     @Synchronized
     fun release(pooledWebView: PooledWebView) {
+        if (pooledWebView.destroyed) return
         if (inUsePool.remove(pooledWebView.id) == null) {
-            pooledWebView.realWebView.destroy()
+            // 不在"在用"集合里 = 已经被释放过一次（重复释放）。
+            // 若它此刻正躺在闲置池里，绝不能销毁：否则池里会留下一个死实例，
+            // 之后每次 acquire 都拿到它 —— 页面永远空白、进度条卡死，只能重启 App 恢复。
+            if (!pooledWebView.inIdlePool) {
+                destroyPooled(pooledWebView)
+            }
             return
         }
         pooledWebView.upContext(MutableContextWrapper(appCtx))
@@ -88,11 +101,31 @@ object WebViewPool {
         pooledWebView.isInUse = false
         if (idlePool.size < CACHED_WEB_VIEW_MAX_NUM - inUsePool.size) {
             pooledWebView.lastUseTime = System.currentTimeMillis()
+            pooledWebView.inIdlePool = true
             idlePool.push(pooledWebView)
         } else {
             // 池子已满，直接销毁
-            pooledWebView.realWebView.destroy()
+            destroyPooled(pooledWebView)
         }
+    }
+
+    /**
+     * 丢弃：直接销毁且**不回池**。
+     * 实例已损坏（渲染进程崩溃、白屏）时必须用这个，否则坏实例会被后续 acquire 取到，
+     * 表现就是"换多少个页面都是白的、只能重启 App"。
+     */
+    @Synchronized
+    fun discard(pooledWebView: PooledWebView) {
+        inUsePool.remove(pooledWebView.id)
+        destroyPooled(pooledWebView)
+    }
+
+    /** 统一销毁入口：打上标记，避免同一实例被销毁两次或销毁后仍留在池里 */
+    private fun destroyPooled(pooled: PooledWebView) {
+        if (pooled.destroyed) return
+        pooled.destroyed = true
+        pooled.inIdlePool = false
+        runCatching { pooled.realWebView.destroy() }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -192,11 +225,8 @@ object WebViewPool {
                     }
                     toRemove.forEach { pooled ->
                         idlePool.remove(pooled)
-                        try {
-                            pooled.realWebView.destroy()
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
+                        pooled.inIdlePool = false
+                        destroyPooled(pooled)
                     }
                     if (idlePool.isEmpty()) {
                         shouldCancel = true

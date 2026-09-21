@@ -586,14 +586,30 @@ private fun inferMimeType(url: String): String? {
     // 本地文件交给 Extractor 嗅探：拼接产物可能是 ts/m4s 内容，不能被 .mp4 后缀误导
     if (url.startsWith("file:")) return null
     val lower = url.lowercase()
-    return when {
-        lower.contains(".m3u8") || lower.contains("/m3u8/") -> MimeTypes.APPLICATION_M3U8
-        lower.substringBefore('?').endsWith(".mpd") -> MimeTypes.APPLICATION_MPD
-        lower.substringBefore('?').endsWith(".mp4") -> MimeTypes.VIDEO_MP4
-        lower.substringBefore('?').endsWith(".m4v") -> MimeTypes.VIDEO_MP4
-        lower.substringBefore('?').endsWith(".webm") -> MimeTypes.VIDEO_WEBM
-        else -> null
+    val path = lower.substringBefore('?').substringBefore('#')
+    // 1) path 后缀：最可靠，直接采信
+    when {
+        path.endsWith(".m3u8") -> return MimeTypes.APPLICATION_M3U8
+        path.endsWith(".mpd") -> return MimeTypes.APPLICATION_MPD
+        path.endsWith(".mp4") || path.endsWith(".m4v") -> return MimeTypes.VIDEO_MP4
+        path.endsWith(".webm") -> return MimeTypes.VIDEO_WEBM
     }
+    // 2) 真实文件名藏在 query 里（书源常见 /api/m3u8/proxy?path=xxx.m3u8）：
+    //    只看 path 后缀会漏判，这里按整个 URL 再匹配一次。m3u8 优先——
+    //    形如 index.m3u8?url=xxx.mp4 的请求，主体是 m3u8 而不是 mp4
+    when {
+        lower.contains(".m3u8") -> return MimeTypes.APPLICATION_M3U8
+        lower.contains(".mpd") -> return MimeTypes.APPLICATION_MPD
+        lower.contains(".mp4") || lower.contains(".m4v") -> return MimeTypes.VIDEO_MP4
+        lower.contains(".webm") -> return MimeTypes.VIDEO_WEBM
+    }
+    // 3) 路径段里带 m3u8（如 /api/m3u8/decode/...）
+    if (lower.contains("/m3u8/")) return MimeTypes.APPLICATION_M3U8
+    // 4) authPath：书源的 HLS 解码/代理端点（如 /api/v1/play/authPath?...）。
+    //    必须与 VideoSourcePlayer.isPlayableUrl 同一口径，否则这类地址会被判成普通文件
+    //    交给 ProgressiveMediaSource，拿 m3u8 文本当媒体解析，必然 Source error
+    if (lower.contains("authpath")) return MimeTypes.APPLICATION_M3U8
+    return null
 }
 
 private fun buildMediaItem(uri: Uri): MediaItem {
@@ -944,6 +960,7 @@ internal fun VideoPlayerPage(
                             onFeedSwitch = onFeedSwitch,
                             onFeedDrag = onFeedDrag,
                             onFeedCancel = onFeedCancel,
+                            singleEpisode = total <= 1,
                         )
                     }
             )
@@ -1552,6 +1569,8 @@ private suspend fun PointerInputScope.detectPlayerGestures(
     onFeedSwitch: ((Int) -> Unit)? = null,
     onFeedDrag: ((Float) -> Unit)? = null,
     onFeedCancel: (() -> Unit)? = null,
+    /** 当前视频只有一集：没有"上下集"可切，任意区域竖滑都改成切换上一个/下一个视频 */
+    singleEpisode: Boolean = false,
 ) {
     val slop = viewConfiguration.touchSlop
     val longPressTimeout = viewConfiguration.longPressTimeoutMillis
@@ -1571,7 +1590,9 @@ private suspend fun PointerInputScope.detectPlayerGestures(
         var accumDy = 0f
         // 右侧 20% 区域且存在列表：竖滑切换列表里的视频（不是切集），手势由本层消费。
         // 收窄到 20% 是为了减少误触：30% 时正常握持/调音量的落点常常落在区内。
-        val feedMode = onFeedSwitch != null && down.position.x >= size.width * 0.8f
+        // 只有一集时没有上下集可切，分页器本来也不会动，此时放开到整屏都能切视频。
+        val feedMode = onFeedSwitch != null &&
+            (down.position.x >= size.width * 0.8f || singleEpisode)
 
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Main)

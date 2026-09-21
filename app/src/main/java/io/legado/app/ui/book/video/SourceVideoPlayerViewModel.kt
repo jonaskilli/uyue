@@ -14,6 +14,7 @@ import io.legado.app.help.video.VideoConfig
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.help.video.VideoSourcePlayer
+import io.legado.app.help.video.VideoUrlSniffer
 import io.legado.app.ui.timetech.player.LocalVideo
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.CancellationException
@@ -406,7 +407,19 @@ object SourceVideoPlayerSession {
                 // 先看本地缓存：命中则免网络直接返回本地文件
                 VideoDownloader.findLocalFile(book.name, index, chapter.title)
                     ?.let { return@runCatching Uri.fromFile(it).toString() }
-                VideoSourcePlayer.resolveChapterUrl(book, source, chapter)
+                val resolve = VideoSourcePlayer.resolveChapter(book, source, chapter)
+                var url = resolve.directUrl
+                // 网页播放器型源：地址要跑站点自己的 JS 才拿得到，ExoPlayer 直接播必然失败。
+                // 这里后台开一次真实浏览器把直链"钓"出来，成功后仍由 ExoPlayer 播放——
+                // 竖滑切集、倍速、选集这些交互全部保留；钓不到才退回内置浏览器。
+                // 预取不嗅探：避免还没滑到就先跑浏览器、还把下一集的地址算出来造成串台。
+                if (url.isNullOrBlank() && !resolve.webPlayerUrl.isNullOrBlank() && !prefetch) {
+                    url = VideoUrlSniffer.sniff(
+                        resolve.webPlayerUrl!!,
+                        source.getHeaderMap(true),
+                    )?.url
+                }
+                url
             }.onSuccess { url ->
                 guard.remove(index)
                 // 本地文件与直链均可播；拿不到就交给书源自己处理（比如它给的是网页播放器）
