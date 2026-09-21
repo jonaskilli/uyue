@@ -15,6 +15,9 @@ import io.legado.app.utils.splitNotBlank
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
+import io.legado.app.constant.BookSourceType
+import io.legado.app.help.source.hasVideoRuleHint
+import io.legado.app.help.source.isVideoGroupName
 import io.legado.app.help.source.isVideoSource
 import kotlinx.coroutines.flow.map
 
@@ -111,6 +114,27 @@ interface BookSourceDao {
 
     @Query("select * from book_sources where enabled = 1 order by customOrder asc")
     fun allEnabledBookSources(): List<BookSource>
+
+    /**
+     * 视频主页专用的**轻量行**：展示用的 14 列 + ruleContent 的原始 JSON 文本。
+     *
+     * 不要换成 `select * from book_sources`——那样会把规则、jsLib、header、发现规则等
+     * 大字段全部读进内存，几百个源时仅这一步就要 2~3 秒。
+     */
+    @Query(
+        """select bp.*, b.ruleContent as ruleContentJson
+        from book_sources_part bp join book_sources b on b.bookSourceUrl = bp.bookSourceUrl
+        where bp.enabled = 1 order by bp.customOrder asc"""
+    )
+    fun flowEnabledVideoRows(): Flow<List<VideoSourceRow>>
+
+    /** 同上，一次性取（搜索模式用） */
+    @Query(
+        """select bp.*, b.ruleContent as ruleContentJson
+        from book_sources_part bp join book_sources b on b.bookSourceUrl = bp.bookSourceUrl
+        where bp.enabled = 1 order by bp.customOrder asc"""
+    )
+    fun getEnabledVideoRows(): List<VideoSourceRow>
 
     @Query("update book_sources set bookSourceType = :type where bookSourceUrl = :bookSourceUrl")
     fun upSourceType(bookSourceUrl: String, type: Int)
@@ -408,28 +432,78 @@ interface BookSourceDao {
  *
  * 早期实现把判定写成一条含二十多个 `or ... like` 的 SQL，Room 的 SQLite 语法解析器（ANTLR）
  * 会在此类超长布尔表达式上退化成指数级超慢解析，导致 KSP 编译阶段卡死、打不出 release APK。
- * 现改为「简单 SQL 取全量启用源 + Kotlin 侧 isVideoSource 过滤」，口径完全一致且规避解析器悬崖。
+ * 现改为「取轻量行 + Kotlin 侧过滤」，只拿展示字段与 ruleContent 的 JSON 原文：
+ * 既不碰 ANTLR 的悬崖，也不用加载整条书源、更不用把 ContentRule 再 GSON 序列化一遍，
+ * 判定口径与之前完全一致。
  */
 fun BookSourceDao.flowVideoSources(): Flow<List<BookSource>> =
     flowEnabledBookSources().map { list -> list.filter { it.isVideoSource() } }
 
+/** 轻量判定：只看类型/分组/书源名 + 规则 JSON 原文里有没有 m3u8/mp4 */
+private fun VideoSourceRow.isVideo(): Boolean {
+    if (bookSourceType == BookSourceType.video) return true
+    val group = bookSourceGroup ?: ""
+    if (group.isVideoGroupName()) return true
+    if (bookSourceName.isVideoGroupName()) return true
+    return (ruleContentJson ?: "").hasVideoRuleHint()
+}
+
 fun BookSourceDao.flowVideoSourcesPart(): Flow<List<BookSourcePart>> =
-    flowEnabledBookSources().map { list ->
-        list.filter { it.isVideoSource() }.map { it.toBookSourcePart() }
-    }
+    flowEnabledVideoRows().map { list ->
+        list.filter { it.isVideo() }.map { it.toBookSourcePart() }
+    }.flowOn(IO)
 
 fun BookSourceDao.getVideoSourceParts(): List<BookSourcePart> =
-    allEnabledBookSources().filter { it.isVideoSource() }.map { it.toBookSourcePart() }
+    getEnabledVideoRows().filter { it.isVideo() }.map { it.toBookSourcePart() }
 
 fun BookSourceDao.flowVideoSourcesPart(key: String): Flow<List<BookSourcePart>> =
-    flowEnabledBookSources().map { list ->
+    flowEnabledVideoRows().map { list ->
         list.filter { src ->
-            src.isVideoSource() && (
+            src.isVideo() && (
                 src.bookSourceGroup?.contains(key, ignoreCase = true) == true ||
-                src.bookSourceName.contains(key, ignoreCase = true)
-            )
+                    src.bookSourceName.contains(key, ignoreCase = true)
+                )
         }.map { it.toBookSourcePart() }
-    }
+    }.flowOn(IO)
+
+/**
+ * 视频主页筛选用的轻量行：展示字段 + [ruleContentJson]。
+ *
+ * [ruleContentJson] 直接取 `book_sources.ruleContent` 的**原始 JSON 文本**，不经过
+ * Room 的类型转换器，因此不会为每个源解析一次 ContentRule，判定时只需在这段文本上找关键字。
+ */
+data class VideoSourceRow(
+    var bookSourceUrl: String = "",
+    var bookSourceName: String = "",
+    var bookSourceGroup: String? = null,
+    var customOrder: Int = 0,
+    var enabled: Boolean = true,
+    var enabledExplore: Boolean = true,
+    var hasLoginUrl: Boolean = false,
+    var lastUpdateTime: Long = 0,
+    var respondTime: Long = 180000L,
+    var weight: Int = 0,
+    var hasExploreUrl: Boolean = false,
+    var eventListener: Boolean = false,
+    var bookSourceType: Int = 0,
+    var ruleContentJson: String? = null,
+)
+
+private fun VideoSourceRow.toBookSourcePart(): BookSourcePart = BookSourcePart(
+    bookSourceUrl = bookSourceUrl,
+    bookSourceName = bookSourceName,
+    bookSourceGroup = bookSourceGroup,
+    customOrder = customOrder,
+    enabled = enabled,
+    enabledExplore = enabledExplore,
+    hasLoginUrl = hasLoginUrl,
+    lastUpdateTime = lastUpdateTime,
+    respondTime = respondTime,
+    weight = weight,
+    hasExploreUrl = hasExploreUrl,
+    eventListener = eventListener,
+    bookSourceType = bookSourceType,
+)
 
 private fun BookSource.toBookSourcePart(): BookSourcePart = BookSourcePart(
     bookSourceUrl = bookSourceUrl,

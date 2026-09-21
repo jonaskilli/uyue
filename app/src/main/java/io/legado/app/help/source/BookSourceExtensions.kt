@@ -176,8 +176,17 @@ fun BookSource.isVideoSource(): Boolean {
     // ruleContent 是 ContentRule 对象，库里是 JSON 文本（DAO 的 like 就打在它上面），
     // 这里同样序列化后再匹配，保证与 SQL 口径一致
     val rule = ruleContent?.let { GSON.toJson(it) } ?: ""
-    return VIDEO_RULE_HINTS.any { rule.contains(it, ignoreCase = true) }
+    return rule.hasVideoRuleHint()
 }
+
+/**
+ * 规则文本（库里 ruleContent 的 JSON 原文）是否含视频特征。
+ *
+ * 视频主页用的是 [io.legado.app.data.dao.VideoSourceRow]，它直接拿到 JSON 原文，
+ * 不必先把 ContentRule 序列化一遍——省掉每个源一次 GSON 往返。
+ */
+fun String.hasVideoRuleHint(): Boolean =
+    VIDEO_RULE_HINTS.any { contains(it, ignoreCase = true) }
 
 /** 分组或书源名是否命中视频关键词（书源管理里批量标记时复用同一口径） */
 fun String.isVideoGroupName(): Boolean =
