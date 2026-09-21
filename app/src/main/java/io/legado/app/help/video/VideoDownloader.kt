@@ -979,6 +979,7 @@ object VideoDownloader {
         val keyCache = HashMap<String, ByteArray>()
         val nextIndex = AtomicInteger(0)
         val writtenCount = AtomicInteger(0)
+        val lastPct = AtomicInteger(-1) // 进度按百分比变化节流，避免频繁刷新状态
         val errorRef = AtomicReference<Exception?>(null)
         val inFlight = Semaphore(workerCount)
         val workers = (0 until workerCount).map {
@@ -996,7 +997,10 @@ object VideoDownloader {
                                 playlistUrl, headers, mediaSequence + k,
                                 keyCache, segFile(epFolder, k), raw = true
                             )
-                            writtenCount.incrementAndGet()
+                            val done = writtenCount.incrementAndGet()
+                            // 每落盘一个分片就回报一次进度（含断点续传已存在的），按百分比变化节流
+                            val pct = ((done + total - need.size) * 100 / total).coerceIn(0, 99)
+                            if (pct != lastPct.getAndSet(pct)) onProgress(pct)
                             if (throttle) Thread.sleep(THROTTLE_SLEEP_MS)
                         } finally {
                             inFlight.release()
