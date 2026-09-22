@@ -3368,6 +3368,45 @@ object AiBookSourceGenerator {
           （入口链接没有 class/id、或压根找不到入口链接）时才改用「目录地址推导」里的拼接写法。
           绝不允许用页面上不存在的选择器编造 tocUrl，也不允许写死某一本书的地址
         · 采集确认里的「目录地址推导」已按本站实际网址算好这条写法，直接采用
+
+        十二、视频站（短剧 / 影视 / 动漫）抓包解析套路——先判断页面属于哪一种形态再写规则
+        · 形态 A：整部剧的 m3u8 清单直接写在页面 <script> 里（多为逗号分隔的一串地址），
+          页面上压根没有真正的选集列表（选集区块常是 javascript:history.back() 这类假链接）。
+          这时**不要**写 chapterList 选择器，直接用 JS 把清单解析成 N 集直链：
+            chapterList: @js:(function(){var m=String(result).match(/https?:\/\/[^\"'\s,]+?\.m3u8/g);
+              if(!m)return [];var seen={},out=[],n=0;for(var i=0;i<m.length;i++){var u=m[i];
+              if(seen[u])continue;seen[u]=1;n++;out.push('第'+n+'集::'+u);}return out;})()
+            chapterName: @js:String(result).split('::')[0]
+            chapterUrl:  @js:String(result).split('::')[1]
+          好处：每集都是 m3u8 直链，目录一拉下来就能播，还能下载 / 边看边存 / 记忆进度。
+        · 形态 B：抖音式瀑布流（首页是 swiper，swiper-wrapper 为空，数据靠 JS 拉）。
+          ① 首页 HTML 里找 <script data-main="xxx.js">，下载这个 JS，在里面找接口
+             （形如 /api.php/api/video/videolist，参数一般只有 page）；
+          ② 若 JS 里出现两段 CryptoJS enc.Utf8.parse('...')，那就是 AES 的 key 与 iv（CBC/PKCS7），
+             响应通常是 {"data":"<base64 密文>"}，解密后才是真正的列表 JSON；
+          ③ exploreUrl 写法（POST 翻页，body 里带 {{page}}）：
+             首页瀑布流::https://x.com/api.php/api/video/videolist,
+             {"method":"POST","body":"page={{page}}","headers":{"Content-Type":"application/x-www-form-urlencoded"}}
+          ④ ruleExplore.bookList 用 @js 解密并输出 JSON 串（每条一个 JSON.stringify），
+             配套写 name:$.name、bookUrl:$.url、coverUrl:$.cover；
+             同一条 JS 里用「首字符是否为 {」判断，可以同时兼容 JSON 接口与 HTML 分类页。
+        · 形态 C：分类导航。分类名必须取导航链接里的文字（如 /list/?1.html 旁的「短剧」），绝不臆造；
+          站点没有 URL 分页（试过 ?page=2 是 404/301）就不要写 {{page}}，否则第二页是空的；
+          空分类（站点自己返回 0 条）也要照实保留，不要拿别的地址顶替。
+        · 形态 D：播放页。嵌入播放器至少有两种模板，**必须两种都取**，否则会有一半分类播不了：
+          ① xgplayer：<div id="mse" data-url="/media/m3u8?url=...">
+          ② 原生 video：<source src="/media/m3u8?url=..." type="application/x-mpegURL">
+          典型流程：详情页 JSON-LD 的 embedUrl → /embed/{token} 页面 → 取上面的地址 → 拼上站点域名
+          （embedUrl 的域名常与站点不同，要换成站点域名再请求）。
+          代理型地址形如 /media/m3u8?url=...%3Fv%3D3&exp=...&token=...、或 ?url=xxx&f=1.m3u8，
+          它**确实是 m3u8 流**（Content-Type 为 application/vnd.apple.mpegurl），可以直接交给播放器。
+        · 形态 E：封面不在 <img src>，而在 div 的 style 里：background-image: url('https://...jpg')。
+          这时 tag.img@src / @data-src 都取不到，必须用 JS 抠：
+            coverUrl: @js:(function(){var m=String(result).match(/url\(['"]?(https?:\/\/[^'"),]+)/);return m?m[1]:''})()
+        · 其它经验：
+          详情页封面取不到时，退回 og:image 或 JSON-LD 的 thumbnailUrl；
+          分类页与搜索页常常是同一套卡片（class.drama-card、class.video-item 等），规则可复用；
+          封面常被 AES 加密（不是 JPEG 头），用 coverDecodeJs 解密（先判断 JPEG 魔数再决定解不解密）。
     """.trimIndent()
 
     private val CHECK_CATEGORY = """
@@ -3815,6 +3854,66 @@ object AiBookSourceGenerator {
         return seen.takeIf { it.isNotEmpty() }?.joinToString("\n")
     }
 
+    // ---------- 视频站形态识别（抓包页面 → 直接算出规则） ----------
+
+    private val CSS_BG_URL_RE =
+        Regex("background-image\\s*:\\s*url\\((['\"]?)([^'\")]+)")
+    private val M3U8_URL_RE = Regex("https?://[^\"'\\s,]+?\\.m3u8")
+    private val DATA_MAIN_JS_RE = Regex("data-main=\"([^\"]+\\.js)")
+    private val SOURCE_SRC_RE = Regex("<source[^>]+src=")
+    private val EMBED_URL_RE = Regex("\"embedUrl\"\\s*:\\s*\"([^\"]+)\"")
+
+    /** 封面是 CSS 背景图（background-image: url(...)）：img 的 src/data-src 都取不到 */
+    private fun isCssBackgroundCover(html: String): Boolean =
+        html.contains("background-image") && CSS_BG_URL_RE.containsMatchIn(html)
+
+    private val CSS_COVER_RULE =
+        "@js:(function(){var m=String(result).match(/url\\(['\"]?(https?:\\/\\/[^'\"),]+)/);" +
+            "return m?m[1]:''})()"
+
+    /** 整部剧的 m3u8 清单藏在页面 script 里（逗号分隔），直接解析成 N 集直链 */
+    private fun m3u8ListInScript(html: String): List<String> =
+        M3U8_URL_RE.findAll(html).map { it.value }.distinct().toList()
+
+    /** @return (chapterList, chapterName, chapterUrl) */
+    private fun m3u8ListTocRule(): Triple<String, String, String> = Triple(
+        "@js:\n(function(){var m=String(result).match(/https?:\\/\\/[^\\\"\\\\s,]+?\\.m3u8/g);" +
+            "if(!m)return [];var seen={},out=[],n=0;" +
+            "for(var i=0;i<m.length;i++){var u=m[i];if(seen[u])continue;seen[u]=1;n++;" +
+            "out.push('第'+n+'集::'+u);}return out;})()",
+        "@js:String(result).split('::')[0]",
+        "@js:String(result).split('::')[1]"
+    )
+
+    /**
+     * 播放页规则：详情页 JSON-LD 的 embedUrl → 嵌入页 → 取流地址。
+     * 站点至少有两种嵌入模板（xgplayer 的 data-url、原生 video 的 <source src>），两种都要认，
+     * 否则只会有一半分类能播。
+     */
+    private val EMBED_PLAY_RULE =
+        "@js:\n(function(){\n" +
+            "  var d=String(result);\n" +
+            "  var m=d.match(/\\\"embedUrl\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"/);\n" +
+            "  var h0=String(baseUrl).match(/^https?:\\/\\/[^\\/]+/);\n" +
+            "  var src=m?m[1]:'';\n" +
+            "  var h;\n" +
+            "  if(src){ if(h0) src=src.replace(/^https?:\\/\\/[^\\/]+/,h0[0]); h=java.ajax(src); } else { h=d; }\n" +
+            "  var u=h.match(/data-url=\\\"([^\\\"]+)\\\"/) || h.match(/<source[^>]+src=\\\"([^\\\"]+)\\\"/);\n" +
+            "  if(!u)return '';\n" +
+            "  var url=u[1];\n" +
+            "  return /^https?:/.test(url)?url:((h0?h0[0]:'')+url);\n" +
+            "})()"
+
+    /** 播放页是否属于「嵌入页取流」形态（embedUrl / data-url / source src 任一命中） */
+    private fun isEmbedPlayPage(html: String): Boolean =
+        EMBED_URL_RE.containsMatchIn(html) ||
+            html.contains("data-url=") ||
+            SOURCE_SRC_RE.containsMatchIn(html)
+
+    /** 首页是 JS 瀑布流时，给出「该去哪个 JS 里找接口」的线索 */
+    private fun waterfallMainJs(homeHtml: String): String? =
+        DATA_MAIN_JS_RE.find(homeHtml)?.groupValues?.getOrNull(1)
+
     // ---------- 视频源生成主流程 ----------
 
     private fun buildCodeVideoSource(
@@ -3870,19 +3969,40 @@ object AiBookSourceGenerator {
                 deriveTocUrlRuleStr(detailUrlFinal, tocUrl)?.let { info.tocUrl = it }
             }
         }
-        // 选集（目录页）：纯代码选「剧集最完整」的容器
-        pages.firstOrNull { it.role == "目录页" }?.let { p ->
-            autoEpisodeCandidates(p.html, p.url).firstOrNull()?.let { sel ->
-                s.getTocRule().apply {
-                    chapterList = sel
-                    chapterName = "$sel@text"
-                    chapterUrl = "$sel@href"
+        // 选集（目录页）：整部剧的 m3u8 清单写在页面里时优先用它生成 N 集直链，
+        // 否则纯代码选「剧集最完整」的容器
+        val tocPage = pages.firstOrNull { it.role == "目录页" }
+            ?: pages.firstOrNull { it.role.contains("详情") }
+        val m3u8List = tocPage?.let { m3u8ListInScript(it.html) }.orEmpty()
+        if (m3u8List.size >= 3) {
+            val (list, name, url) = m3u8ListTocRule()
+            s.getTocRule().apply {
+                chapterList = list
+                chapterName = name
+                chapterUrl = url
+            }
+        } else {
+            tocPage?.let { p ->
+                autoEpisodeCandidates(p.html, p.url).firstOrNull()?.let { sel ->
+                    s.getTocRule().apply {
+                        chapterList = sel
+                        chapterName = "$sel@text"
+                        chapterUrl = "$sel@href"
+                    }
                 }
             }
         }
-        // 播放页：能直接抠直链就留空（sourceRegex 命中），否则网页播放器拉起
+        // 播放页：嵌入页取流优先，其次能直接抠直链就留空（sourceRegex 命中），最后网页播放器拉起
         pages.firstOrNull { it.role == "播放页" }?.let { p ->
-            playContentRule(p.html).takeIf { it.isNotBlank() }?.let { s.getContentRule().content = it }
+            s.getContentRule().content = when {
+                isEmbedPlayPage(p.html) -> EMBED_PLAY_RULE
+                else -> playContentRule(p.html)
+            }
+        }
+        // 封面是 CSS 背景图时，img@src / @data-src 取不到，改用 JS 抠 url(...)
+        if (pages.any { isCssBackgroundCover(it.html) } || isCssBackgroundCover(homeHtml)) {
+            if (s.getSearchRule().coverUrl.isNullOrBlank()) s.getSearchRule().coverUrl = CSS_COVER_RULE
+            if (s.getExploreRule().coverUrl.isNullOrBlank()) s.getExploreRule().coverUrl = CSS_COVER_RULE
         }
         return s
     }
@@ -3918,7 +4038,30 @@ object AiBookSourceGenerator {
                     "（chapterList 写 $sel，chapterName=$sel@text，chapterUrl=$sel@href）"
             }
         }
+        waterfallMainJs(homeHtml)?.let { js ->
+            hints["首页瀑布流(代码解析)"] = "首页是 JS 瀑布流（swiper 为空壳），主脚本：$js。" +
+                "请下载该 JS 找接口（形如 /api.php/api/video/videolist，参数 page）与加密常量" +
+                "（CryptoJS enc.Utf8.parse('...') 两段即 AES 的 key/iv），" +
+                "exploreUrl 写成 POST+body 翻页，ruleExplore.bookList 用 @js 解密后输出 JSON 串"
+        }
+        if (isCssBackgroundCover(homeHtml) || isCssBackgroundCover(searchHtml)) {
+            hints["封面(代码解析)"] = "列表封面在 div 的 style:background-image 里（不是 img 的 src/data-src），" +
+                "coverUrl 必须写：$CSS_COVER_RULE"
+        }
+        if (!episodeHtml.isNullOrBlank()) {
+            val list = m3u8ListInScript(episodeHtml)
+            if (list.size >= 3) {
+                hints["剧集直链(代码解析)"] = "页面 script 里直接带着 ${list.size} 条 m3u8 清单" +
+                    "（首条 ${list.first().take(60)}），没有真正的选集列表，" +
+                    "ruleToc 应改用 JS 把清单解析成 N 集直链，不要写选择器"
+            }
+        }
         if (!playHtml.isNullOrBlank()) {
+            if (isEmbedPlayPage(playHtml)) {
+                hints["播放地址(代码解析)"] = "播放页是「详情页 embedUrl → 嵌入页 → 流地址」形态，" +
+                    "且嵌入页至少有两种模板（xgplayer 的 data-url、原生 video 的 <source src>），" +
+                    "content 必须两种都取：$EMBED_PLAY_RULE"
+            }
             extractPlayableUrl(playHtml)?.let { u ->
                 hints["播放地址(代码提取)"] = "播放页纯代码已提取到可播放直链：" +
                     "${u.take(80)}，ruleContent.content 可留空（由 sourceRegex 命中）"
