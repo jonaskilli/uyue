@@ -1594,6 +1594,23 @@ private suspend fun PointerInputScope.detectPlayerGestures(
 
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
+        // 顶部/底部 10% 设为禁区：下拉状态栏、上滑多任务菜单属于系统手势，
+        // 落点在这些区域时不拦截，否则极易误触发上/下滑切换视频或切集。
+        // 横向快进/快退同样不在此区域起手，一并放行给系统。
+        if (down.position.y < size.height * 0.1f || down.position.y > size.height * 0.9f) {
+            // 顶/底 10% 设为禁区：吃掉整段手势。这样既不会触发应用内操作
+            // （上/下滑切视频、左/右滑快进），也阻断外层 VerticalPager 的切页。
+            // 系统手势（下拉状态栏、上滑多任务菜单）由系统基于原始输入流独立识别，
+            // 与应用层是否消费该触摸无关，因此不会被误吞。
+            down.consume()
+            var ev = awaitPointerEvent(PointerEventPass.Main)
+            ev.changes.forEach { it.consume() }
+            while (ev.changes.any { it.pressed }) {
+                ev = awaitPointerEvent(PointerEventPass.Main)
+                ev.changes.forEach { it.consume() }
+            }
+            return@awaitEachGesture
+        }
         val downTime = System.currentTimeMillis()
         var seeking = false
         var verticalTaken = false
