@@ -559,8 +559,16 @@ object SourceVideoPlayerSession {
                 val chapters = VideoSourcePlayer.prepareChapters(nextBook, nextSource)
                 if (chapters.isEmpty()) return@runCatching null
                 val index = feed?.startIndexOf(nextUrl)?.coerceIn(0, chapters.lastIndex) ?: 0
-                val url = VideoSourcePlayer.resolveChapter(nextBook, nextSource, chapters[index])
-                    .directUrl
+                val resolve = VideoSourcePlayer.resolveChapter(nextBook, nextSource, chapters[index])
+                var url = resolve.directUrl
+                // 下一部若是网页播放器型/加密源：直链为空但 webPlayerUrl 存在时，
+                // 预取阶段就提前嗅探出真直链，竖滑切过去直接接管、不再现场跑浏览器。
+                if (url.isNullOrBlank() && !resolve.webPlayerUrl.isNullOrBlank()) {
+                    url = VideoUrlSniffer.sniff(
+                        resolve.webPlayerUrl!!,
+                        nextSource.getHeaderMap(true),
+                    )?.url
+                }
                 if (url.isNullOrBlank()) return@runCatching null
                 // 这部之前看过：预缓冲时就定位到上次的进度，切过去接着看
                 val startPosition = if (nextBook.durChapterIndex == index) {
