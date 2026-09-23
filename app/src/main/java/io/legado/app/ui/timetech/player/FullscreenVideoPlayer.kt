@@ -126,6 +126,8 @@ import io.legado.app.help.video.VideoCache
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
+import java.text.SimpleDateFormat
+import java.util.Date
 import kotlin.math.abs
 
 /** 循环模式：列表循环 → 随机播放 → 单个循环 → 回到列表循环 */
@@ -215,9 +217,11 @@ fun FullscreenVideoPlayer(
     // 否则 N 集就是 N 次串行网络请求，只能滚到哪一集解析哪一集。
     // prefetch=true 表示"预取下一集"，调用方据此只解析、不弹内置播放器，真正滑到才播。
     onResolveEpisode: ((index: Int, prefetch: Boolean) -> Unit)? = null,
-    // 列表切换模式（发现页/搜索竖滑）预取「下一个视频」首集地址的回调。
-    // 当前集起播 2 秒后即调用（不必等播到最后一集），返回 null 表示列表里没有下一个视频。
-    onPrefetchNextVideo: (suspend () -> NextVideoPreload?)? = null,
+    // 列表切换模式（发现页/搜索竖滑）取用「下一个视频」首集预取结果的回调。
+    // 当前集起播 2 秒后即调用（不必等播到最后一集）。
+    // **非挂起**：只返回已就绪的结果，没就绪返回 null 并自行在后台继续解析/嗅探——
+    // 加密源的嗅探要开 WebView 跑 20 秒以上，绝不能阻塞在这里（会被重组取消）。
+    onPrefetchNextVideo: (() -> NextVideoPreload?)? = null,
     // 起始集内进度（毫秒），用于续播。会话内的 [positions] 优先于它，
     // 因为用户在本页内来回切集时应该回到自己刚才的位置，而不是进页时的位置。
     initialPositionMs: Long = 0L,
@@ -408,14 +412,22 @@ fun FullscreenVideoPlayer(
     LaunchedEffect(pagerState.currentPage, videos, playOrder) {
         delay(2000)
         if (videos.isEmpty()) return@LaunchedEffect
-        // 并发预取下一个视频（不阻塞下一集的预缓冲）
-        if (onPrefetchNextVideo != null) launch {
-            val next = onPrefetchNextVideo?.invoke() ?: return@launch
-            if (next.uri.isBlank()) return@launch
-            PreloadCache.prepareNextVideo(
-                context, next.bookUrl, next.index, Uri.parse(next.uri), headers,
-                next.startPositionMs,
-            )
+        // 取用「下一个视频」的预取结果。
+        // 注意这里**不能 await 联网预取**：加密源要走 WebView 嗅探，最长 20 秒以上，
+        // 而本 effect 的 key 含 videos，剧集列表一更新就重启，
+        // 挂在里面的协程会被取消（且是取消异常、不写日志，静默失败）。
+        // 所以 onPrefetchNextVideo 只做"有结果就给我，没有就自己后台去取"，
+        // 真正耗时的解析/嗅探由会话层独立承担，不受这里重组影响。
+        if (onPrefetchNextVideo != null) {
+            val next = onPrefetchNextVideo?.invoke()
+            if (next != null && next.uri.isNotBlank()) {
+                PreloadCache.prepareNextVideo(
+                    context, next.bookUrl, next.index, Uri.parse(next.uri),
+                    // 预取结果自带的请求头（含嗅探出的 Referer）优先
+                    next.headers.takeIf { it.isNotEmpty() } ?: headers,
+                    next.startPositionMs,
+                )
+            }
         }
         val nextIndex = playOrder.getOrNull(pagerState.currentPage + 1) ?: return@LaunchedEffect
         val nextVideo = videos.getOrNull(nextIndex) ?: return@LaunchedEffect
@@ -1248,6 +1260,28 @@ internal fun VideoPlayerPage(
     }
 }
 
+/**
+ * 控制栏右上角显示的**系统当前时间**（HH:mm）。
+ *
+ * 注意它只在控制条可见时才会被组合（外层 AnimatedVisibility 之内），
+ * 收起控制条后这个刷新循环随之结束，不会在后台一直空转。
+ * 显示只精确到分钟，所以对齐到下一个整分钟再刷新，不做无意义的每秒重组。
+ */
+@Composable
+private fun rememberClockText(): String {
+    var text by remember { mutableStateOf(clockText()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            text = clockText()
+            delay(60_000L - System.currentTimeMillis() % 60_000L + 1_000L)
+        }
+    }
+    return text
+}
+
+private fun clockText(): String =
+    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+
 @Composable
 private fun PlayerControls(
     title: String,
@@ -1300,17 +1334,30 @@ private fun PlayerControls(
                 .safeTop()
                 .padding(vertical = 4.dp)
         ) {
-            // 视频名称独占一行置于控制条最上方，避免原先与按钮挤在同一行导致名字被截断显示不全
-            Text(
-                title,
-                color = Color.White,
-                fontSize = 15.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+            // 视频名称独占一行置于控制条最上方，避免原先与按钮挤在同一行导致名字被截断显示不全。
+            // 同一行右端显示系统当前时间（与下方进度条的"播放进度"是两回事）
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp)
-            )
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    title,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    rememberClockText(),
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -1922,16 +1969,38 @@ internal object SharedPlayer {
     private val entries = ArrayList<Entry>()
     /** 显式交接槽：点「首页/放大」按钮的瞬间同步放入，另一侧组合时取走，无时序竞争 */
     private var pendingEntry: Entry? = null
+    /**
+     * 「下一个视频」的预缓冲实例：**独占槽位，不参与 [entries] 的 LRU 淘汰**。
+     *
+     * 之前它跟大屏↔首页交接池共用 entries（上限 2、淘汰最早），而它总是最早入队的那个：
+     * 每切一集就有一次页面销毁入库，两三次就把预缓冲挤掉并 release。
+     * 且它自带请求头（源 header + 嗅探出的 Referer），与书源 header 必然不同，
+     * 若按 [take] 的 headers 相等去匹配，会永远取不到、却因为 [has] 命中而不再重建
+     * ——变成一个"永久占位但取不出来"的僵尸槽位。
+     * 所以单独放这里：按 key 取用，带自己的请求头，且不会被别的实例挤掉。
+     */
+    private var nextVideo: Entry? = null
 
     /** 交接键：书籍 + 集序号（与解析出的 URL 无关） */
     fun key(bookUrl: String, chapterIndex: Int) = "$bookUrl#$chapterIndex"
 
-    fun has(bookUrl: String, chapterIndex: Int): Boolean =
-        entries.any { it.key == key(bookUrl, chapterIndex) } ||
-            pendingEntry?.key == key(bookUrl, chapterIndex)
+    fun has(bookUrl: String, chapterIndex: Int): Boolean {
+        val k = key(bookUrl, chapterIndex)
+        return entries.any { it.key == k } ||
+            pendingEntry?.key == k ||
+            nextVideo?.key == k
+    }
 
     fun take(bookUrl: String, chapterIndex: Int, headers: Map<String, String>): ExoPlayer? {
         val k = key(bookUrl, chapterIndex)
+        // 下一个视频的预缓冲优先接管：它自带请求头（含嗅探出的 Referer），
+        // 不与书源 header 比较——比了必然不等，等于白预缓冲一场。
+        nextVideo?.let { nv ->
+            if (nv.key == k) {
+                nextVideo = null
+                return nv.player
+            }
+        }
         // 先取显式交接的实例
         pendingEntry?.let { pe ->
             pendingEntry = null
@@ -1940,17 +2009,29 @@ internal object SharedPlayer {
         }
         val i = entries.indexOfFirst { it.key == k && it.headers == headers }
         if (i < 0) {
-            // 键命中但书源头不一致的残留，直接清掉
+            // 键命中但书源头不一致的残留：清掉时要 release，否则每切一次视频漏一个 ExoPlayer
+            entries.filter { it.key == k }.forEach { it.player.release() }
             entries.removeAll { it.key == k }
             return null
         }
         return entries.removeAt(i).player
     }
 
+    /** 下一部预缓冲是否已就位且请求头一致（避免同一目标被反复重建） */
+    fun hasNextVideo(
+        bookUrl: String,
+        chapterIndex: Int,
+        headers: Map<String, String>,
+    ): Boolean {
+        val nv = nextVideo ?: return false
+        return nv.key == key(bookUrl, chapterIndex) && nv.headers == headers
+    }
+
     /** 显式交接：点「首页/放大」按钮时同步调用，播放器带着进度与缓冲原样移交 */
     fun handOver(player: ExoPlayer, bookUrl: String, chapterIndex: Int, headers: Map<String, String>) {
         if (entries.any { it.player === player } || pendingEntry?.player === player) return
         val k = key(bookUrl, chapterIndex)
+        entries.filter { it.key == k }.forEach { it.player.release() }
         entries.removeAll { it.key == k }
         pendingEntry?.player?.release()
         player.pause()
@@ -1960,8 +2041,13 @@ internal object SharedPlayer {
 
     /** 播放页退出时存入（自动暂停）；已显式交接的实例不会重复存入 */
     fun keep(player: ExoPlayer, bookUrl: String, chapterIndex: Int, headers: Map<String, String>) {
-        if (entries.any { it.player === player } || pendingEntry?.player === player) return
+        if (entries.any { it.player === player } || pendingEntry?.player === player
+            || nextVideo?.player === player
+        ) return
         val k = key(bookUrl, chapterIndex)
+        // 同键的旧实例要先 release 再移除：直接 removeAll 会让它再也无人引用却没被释放，
+        // 每切一次集就漏一个 ExoPlayer（内存与解码资源都回不来）
+        entries.filter { it.key == k }.forEach { it.player.release() }
         entries.removeAll { it.key == k }
         player.pause()
         player.playWhenReady = false
@@ -1969,6 +2055,30 @@ internal object SharedPlayer {
         while (entries.size > 2) {
             entries.removeAt(0).player.release()
         }
+    }
+
+    /**
+     * 登记「下一个视频」的预缓冲实例（独占槽位，不参与上面的 LRU）。
+     * 换目标就释放旧的：用户可能先往下预缓冲了 B，又往上切回 A，B 的那份不该一直占着解码资源。
+     */
+    fun keepNextVideo(
+        player: ExoPlayer,
+        bookUrl: String,
+        chapterIndex: Int,
+        headers: Map<String, String>,
+    ) {
+        nextVideo?.let { old ->
+            if (old.player !== player) old.player.release()
+        }
+        player.pause()
+        player.playWhenReady = false
+        nextVideo = Entry(player, key(bookUrl, chapterIndex), headers)
+    }
+
+    /** 放弃这份预缓冲（退出播放器 / 切换列表时调用），避免留下无主的 ExoPlayer */
+    fun releaseNextVideo() {
+        nextVideo?.player?.release()
+        nextVideo = null
     }
 }
 
@@ -1978,6 +2088,14 @@ data class NextVideoPreload(
     val index: Int,
     val uri: String,
     val startPositionMs: Long = 0L,
+    /**
+     * 这个地址实际要带的请求头：书源 header + 嗅探到的 Referer。
+     *
+     * 加密/防盗链源的直链是嗅探出来的，站点往往校验 Referer；而书源配置的 header 里
+     * 并没有它（它只存在于嗅探到的那一次请求里）。预缓冲若不带上，缓冲能建起来、
+     * 切过去却 403。所以这里一并带出，取用时直接用它，而不是再拿书源 header 去比对。
+     */
+    val headers: Map<String, String> = emptyMap(),
 )
 
 /**
@@ -2018,8 +2136,12 @@ internal object PreloadCache {
      * 预缓冲**下一个视频**的首集。
      *
      * 与预缓冲下一集不同：切换视频会重建整组播放组件（[PreloadCache] 的槽位随之释放），
-     * 所以这里不留在 [PreloadCache]，而是直接登记进 [SharedPlayer]——
-     * 它由「书籍 + 集序号」索引，能跨过这次重建存活，新的一页组合时按同一个键接管。
+     * 所以这里不留在 [PreloadCache]，而是登记进 [SharedPlayer] 的**独占槽位**
+     * （[SharedPlayer.keepNextVideo]）——它由「书籍 + 集序号」索引，能跨过这次重建存活，
+     * 且不会被大屏↔首页交接池的 LRU 挤掉，新的一页组合时按同一个键接管。
+     *
+     * [headers] 用预取结果自带的请求头（书源 header + 嗅探出的 Referer），
+     * 而不是当前视频的书源 header：加密源钓出来的直链常校验 Referer，少了必然 403。
      */
     fun prepareNextVideo(
         context: Context,
@@ -2030,7 +2152,7 @@ internal object PreloadCache {
         startPositionMs: Long = 0L,
     ) {
         if (bookUrl.isBlank() || uri == Uri.EMPTY) return
-        if (SharedPlayer.has(bookUrl, index)) return
+        if (SharedPlayer.hasNextVideo(bookUrl, index, headers)) return
         val player = ExoPlayer.Builder(context)
             .setMediaSourceFactory(buildMediaSourceFactory(context, headers))
             .setLoadControl(
@@ -2045,7 +2167,7 @@ internal object PreloadCache {
                 prepare()
                 playWhenReady = false
             }
-        SharedPlayer.keep(player, bookUrl, index, headers)
+        SharedPlayer.keepNextVideo(player, bookUrl, index, headers)
     }
 
     /** 播放页接管预缓冲的实例；书源头不匹配（极少见）时弃用重建 */
