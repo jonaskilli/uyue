@@ -163,6 +163,13 @@ object VideoSourcePlayer {
                 appDb.bookDao.replace(oldBook, book)
             }
             appDb.bookChapterDao.delByBook(book.bookUrl)
+            // chapters.bookUrl 外键引用 books.bookUrl：书不在书库时，上面的 update/replace
+            // 都是静默的（update 影响 0 行不报错），紧接着的 insert 才会炸
+            // FOREIGN KEY constraint failed（未入库的搜索结果直接拉目录就会踩到）。
+            // 这里统一兜底补一次，免得每个调用点都得自己记着"先入库"。
+            if (appDb.bookDao.getBook(book.bookUrl) == null) {
+                appDb.bookDao.insert(book)
+            }
             appDb.bookChapterDao.insert(*newList.toTypedArray())
             list = appDb.bookChapterDao.getChapterList(book.bookUrl)
         } else {

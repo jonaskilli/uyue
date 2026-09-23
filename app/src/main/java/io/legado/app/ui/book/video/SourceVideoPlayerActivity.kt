@@ -431,10 +431,9 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             onResolveEpisode = { idx, prefetch ->
                                 SourceVideoPlayerSession.resolveEpisode(idx, prefetch)
                             },
-                            // 播到最后一集（整部只有一集也算）时预缓冲列表里的下一个视频
-                            onPrefetchNextVideo = {
-                                SourceVideoPlayerSession.prefetchNextVideo()
-                            },
+                            // 取用「下一个视频」的预取结果（含加密源的提前嗅探）。
+                            // 非挂起：没就绪就返回 null，由会话层在后台继续解析/嗅探，下一轮再来取。
+                            onPrefetchNextVideo = SourceVideoPlayerSession::peekNextVideo,
                             onProgressChange = SourceVideoPlayerSession::saveProgress,
                             onOpenHome = { homeMode = true },
                             onFeedSwitch = if (state.feedEnabled) {

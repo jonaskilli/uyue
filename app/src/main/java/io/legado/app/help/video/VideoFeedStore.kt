@@ -24,9 +24,21 @@ object VideoFeedStore {
          * 「已下载视频」列表用它跳到该视频第一集已下载的集，避免切过去后从没下载的集开始播。
          */
         val startIndexOf: (String) -> Int = { 0 },
+        /**
+         * put 时刻的列表快照。
+         *
+         * provider 是"实时求值"的，好处是分页新加载的视频能自动进入切换范围；
+         * 但播放页一开（ExoPlayer + 嗅探用的 WebView 都很吃内存），后台的发现页/搜索页
+         * 很容易被系统回收，provider 随之返回空列表——于是"下一个视频"永远算不出来，
+         * 预缓存静默失效。这里留一份快照兜底：provider 空了就退回它。
+         */
+        val snapshot: List<String> = emptyList(),
     ) {
         /** 当前时刻的完整列表（含分页新加载的部分） */
-        fun urls(): List<String> = runCatching { provider() }.getOrDefault(emptyList())
+        fun urls(): List<String> {
+            val list = runCatching { provider() }.getOrDefault(emptyList())
+            return if (list.isEmpty()) snapshot else list
+        }
     }
 
     @Volatile
@@ -41,7 +53,7 @@ object VideoFeedStore {
     ) {
         val list = runCatching { provider() }.getOrDefault(emptyList())
         if (list.size < 2 || !list.contains(currentBookUrl)) return
-        feed = Feed(provider, currentBookUrl, System.currentTimeMillis(), loadMore, startIndexOf)
+        feed = Feed(provider, currentBookUrl, System.currentTimeMillis(), loadMore, startIndexOf, list)
     }
 
     /** 播放器消费：命中当前书籍且未过期才返回，无论是否命中都清空 */
