@@ -2,6 +2,13 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
+    <!-- 观看历史：记录最近看过的视频（最多100条），位于下载按钮左侧 -->
+    <item
+        android:id="@+id/menu_video_history"
+        android:icon="@drawable/ic_history"
+        android:title="@string/watch_history"
+        app:showAsAction="ifRoom" />
+
     <!-- 视频发现页右上角：不打开具体视频也能看下载列表 -->
     <item
         android:id="@+id/menu_download"

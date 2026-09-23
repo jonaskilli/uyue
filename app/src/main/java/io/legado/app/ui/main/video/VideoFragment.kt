@@ -48,6 +48,7 @@ import io.legado.app.ui.book.video.VideoDownloadActivity
 import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.main.explore.ExploreAdapter
 import io.legado.app.ui.main.explore.ExploreDiffItemCallBack
+import io.legado.app.ui.main.video.VideoHistoryActivity
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.flowWithLifecycleAndDatabaseChange
 import io.legado.app.utils.setEdgeEffectColor
@@ -326,6 +327,7 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         super.onCompatOptionsItemSelected(item)
         when (item.itemId) {
             R.id.menu_download -> startActivity<VideoDownloadActivity>()
+            R.id.menu_video_history -> startActivity<VideoHistoryActivity>()
         }
     }
 

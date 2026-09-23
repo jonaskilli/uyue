@@ -180,6 +180,12 @@
             android:enableOnBackInvokedCallback="true"
             android:label="@string/download_manage"
             android:theme="@style/Base.AppTheme" />
+        <!-- 观看历史：记录最近看过的视频，最多 100 条 -->
+        <activity
+            android:name="io.legado.app.ui.main.video.VideoHistoryActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:label="@string/watch_history"
+            android:theme="@style/Base.AppTheme" />
         <!-- 在线剧集播放页（时光播放器）：自带选集面板、竖滑切集与首页压缩模式；拿不到直链时退回 VideoLaunchActivity 的路径 -->
         <activity
             android:name="io.legado.app.ui.book.video.SourceVideoPlayerActivity"

@@ -95,6 +95,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -500,9 +501,16 @@ fun FullscreenVideoPlayer(
     if (showEpisodes) {
         EpisodePickerSheet(
             videos = videos,
-            // 选集面板按原始集序展示，高亮当前实际所在的那一集
+            // 选集面板按当前播放顺序（playOrder）展示，点击「倒序」后列表会整体反转
+            order = playOrder,
             currentIndex = playOrder[pagerState.currentPage],
             onDismiss = { showEpisodes = false },
+            // 倒序：反转本视频所有集的播放顺序（再次点击可还原）
+            onReverse = {
+                val page = pagerState.currentPage
+                val anchor = playOrder.getOrNull(page) ?: page
+                playOrder = reverseKeepingPosition(playOrder, anchor, page)
+            },
             onPick = { index ->
                 showEpisodes = false
                 val page = playOrder.indexOf(index)
@@ -533,6 +541,29 @@ private fun shuffledKeepingPosition(size: Int, anchor: Int, atPage: Int): List<I
     return List(size) { i ->
         if (i == atPage) anchor else others[if (i < atPage) i else i - 1]
     }
+}
+
+/**
+ * 反转播放顺序，并把 [anchor]（当前正在看的集）固定在第 [atPage] 页，
+ * 反转后画面不跳。与 [shuffledKeepingPosition] 同理。
+ *
+ * 用于选集面板的「倒序」按钮：一键把本视频全部集的播放顺序整体反转，
+ * 方便修正顺序错乱的剧集。再次点击会再反转一次（还原）。
+ */
+private fun reverseKeepingPosition(
+    order: List<Int>,
+    anchor: Int,
+    atPage: Int,
+): List<Int> {
+    if (order.size <= 1) return order.toList()
+    val reversed = order.reversed().toMutableList()
+    val curPos = reversed.indexOf(anchor)
+    if (curPos != atPage && curPos >= 0) {
+        val tmp = reversed[atPage]
+        reversed[atPage] = anchor
+        reversed[curPos] = tmp
+    }
+    return reversed
 }
 
 @Composable
@@ -1248,8 +1279,19 @@ private fun PlayerControls(
                 .align(Alignment.TopCenter)
                 .background(Color.Black.copy(alpha = 0.45f))
                 .safeTop()
-                .padding(top = 4.dp)
+                .padding(vertical = 4.dp)
         ) {
+            // 视频名称独占一行置于控制条最上方，避免原先与按钮挤在同一行导致名字被截断显示不全
+            Text(
+                title,
+                color = Color.White,
+                fontSize = 15.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp)
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -1261,13 +1303,6 @@ private fun PlayerControls(
                         tint = Color.White
                     )
                 }
-                Text(
-                    title,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f)
-                )
                 if (showEpisodeButton) {
                     TextButton(onClick = onOpenEpisodes) {
                         // 显示当前播放到第几集；点击查看所有集
@@ -1327,27 +1362,25 @@ private fun PlayerControls(
                         }
                     )
                 }
-                // 锁定 + 其正下方的加入书架图标
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = onLock) {
+                // 锁定：与加入书架横向排列，和其余按钮同处一行（标题上移后已腾出空间）
+                IconButton(onClick = onLock) {
+                    Icon(
+                        Icons.Filled.LockOpen,
+                        contentDescription = "锁定",
+                        tint = Color.White
+                    )
+                }
+                if (onAddShelf != null) {
+                    IconButton(
+                        onClick = { onAddShelf?.invoke() },
+                        modifier = Modifier.size(40.dp)
+                    ) {
                         Icon(
-                            Icons.Filled.LockOpen,
-                            contentDescription = "锁定",
-                            tint = Color.White
+                            Icons.Filled.BookmarkAdd,
+                            contentDescription = "加入书架",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
                         )
-                    }
-                    if (onAddShelf != null) {
-                        IconButton(
-                            onClick = { onAddShelf?.invoke() },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.BookmarkAdd,
-                                contentDescription = "加入书架",
-                                tint = Color.White,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
                     }
                 }
             }
@@ -1530,13 +1563,16 @@ private fun SeekPreview(
 @Composable
 private fun EpisodePickerSheet(
     videos: List<LocalVideo>,
+    order: List<Int>,
     currentIndex: Int,
     onDismiss: () -> Unit,
+    onReverse: () -> Unit,
     onPick: (Int) -> Unit,
 ) {
     val gridState = rememberLazyGridState()
-    LaunchedEffect(currentIndex) {
-        if (currentIndex > 0) gridState.scrollToItem(currentIndex)
+    LaunchedEffect(order, currentIndex) {
+        val pos = order.indexOf(currentIndex)
+        if (pos >= 0) gridState.scrollToItem(pos)
     }
     Dialog(
         onDismissRequest = onDismiss,
@@ -1550,12 +1586,23 @@ private fun EpisodePickerSheet(
             color = Color(0xFF1C1C1E)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    "选集（共 ${videos.size} 集）",
-                    color = Color.White,
-                    fontSize = 16.sp,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "选集（共 ${videos.size} 集）",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    // 倒序：一键反转本视频全部集的播放顺序，便于修正顺序错乱的剧集
+                    TextButton(onClick = onReverse) {
+                        Text("倒序", color = Color.White, fontSize = 14.sp)
+                    }
+                }
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 86.dp),
                     state = gridState,
@@ -1563,16 +1610,17 @@ private fun EpisodePickerSheet(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    itemsIndexed(videos) { index, video ->
+                    itemsIndexed(order) { position, origIndex ->
+                        val video = videos[origIndex]
                         EpisodeItem(
                             label = if (video.name.length <= 7) {
                                 video.name
                             } else {
-                                "第${index + 1}集"
+                                "第${position + 1}集"
                             },
-                            selected = index == currentIndex,
+                            selected = origIndex == currentIndex,
                             ready = video.uri != Uri.EMPTY,
-                            onClick = { onPick(index) }
+                            onClick = { onPick(origIndex) }
                         )
                     }
                 }
