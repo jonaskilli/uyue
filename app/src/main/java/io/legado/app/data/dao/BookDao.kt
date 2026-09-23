@@ -176,6 +176,8 @@ interface BookDao {
     @Query("update books set `group` = `group` - :group where `group` & :group > 0")
     fun removeGroup(group: Long)
 
-    @Query("delete from books where type & ${BookType.notShelf} > 0")
+    // 启动清理只删「非视频且未上架」的书（文本搜索残留等）；
+    // 视频书即使是 notShelf 也要保留，否则「观看历史」里未加书架的视频重启后全部消失。
+    @Query("delete from books where type & ${BookType.notShelf} > 0 and type & ${BookType.video} = 0")
     fun deleteNotShelfBook()
 }

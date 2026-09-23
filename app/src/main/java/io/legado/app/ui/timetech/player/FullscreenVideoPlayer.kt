@@ -82,6 +82,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.MutableState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -242,6 +243,14 @@ fun FullscreenVideoPlayer(
     compactMode: Boolean = false,
     // 加入书架（null 则不显示按钮）
     onAddShelf: (() -> Unit)? = null,
+    // 播放顺序（显示顺序）：由外层 Activity 持有并传给「选集面板」与「主页下方目录」共用，
+    // 点「倒序」/切循环模式时整条顺序一起变，主页目录也跟着反。分页第 page 页播 videos[playOrder[page]]。
+    playOrderState: MutableState<List<Int>>,
+    // 播放顺序是否为「倒序」（持久化标记）：true 时整条剧集列表反转，
+    // 与小说「反转目录」同效，下次打开该视频自动沿用。
+    reverseOrder: Boolean = false,
+    // 点「倒序」后回调，把新的倒序状态持久化（true=已反转 / false=已还原）
+    onReversePersist: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -273,22 +282,26 @@ fun FullscreenVideoPlayer(
     // 随机播放必须重排整条序列，而不是只在「自动跳下一个」时掷一次骰子——那样
     // 手动上滑翻页依旧是列表里的下一个，一半的行为还是顺序的。重排之后，
     // 自动（播完）与手动（上滑）都只是「翻到下一页」，天然同一条路径。
-    var playOrder by remember(videos.size) {
-        mutableStateOf(videos.indices.toList())
-    }
+    // 该状态由外层 Activity 持有（见 playOrderState 参数）并与「主页下方目录」共享，
+    // 因此点「倒序」时选集面板与主页目录会一起反转。
+    var playOrder by playOrderState
 
-    // 切换循环模式时重建顺序，并把当前正在看的那一集钉在原页码上，
-    // 保证「切模式」这个动作本身不会让画面跳到别的视频。
-    LaunchedEffect(loopMode, videos.size) {
+    // 切换循环模式 / 倒序标记时重建顺序，并把当前正在看的那一集钉在原页码上，
+    // 保证「切模式」「开/关倒序」这些动作本身不会让画面跳到别的视频。
+    LaunchedEffect(loopMode, videos.size, reverseOrder) {
         val page = pagerState.settledPage
         val anchor = playOrder.getOrNull(page) ?: page
         if (loopMode == LoopMode.SHUFFLE && videos.size > 1) {
             playOrder = shuffledKeepingPosition(videos.size, anchor = anchor, atPage = page)
         } else {
-            playOrder = videos.indices.toList()
-            // 恢复自然序后「第 anchor 集」的页码就是 anchor，滚过去保持同一集
-            if (pagerState.settledPage != anchor) {
-                pagerState.scrollToPage(anchor)
+            // 倒序：把整条播放顺序反转（与小说「反转目录」同效，已持久化，下次打开沿用）
+            val base = if (reverseOrder) videos.indices.reversed().toList()
+            else videos.indices.toList()
+            playOrder = base
+            // 把当前正在看的那一集（anchor）钉在它新顺序里的页码上，画面不跳
+            val targetPage = base.indexOf(anchor)
+            if (targetPage >= 0 && pagerState.settledPage != targetPage) {
+                pagerState.scrollToPage(targetPage)
             }
         }
     }
@@ -311,8 +324,10 @@ fun FullscreenVideoPlayer(
         }
     }
 
-    // 选集方块/外部跳集：startIndex 变化时把分页滚到对应集
-    LaunchedEffect(initialIndex, videos.size, playOrder) {
+    // 选集方块/外部跳集：startIndex 变化时把分页滚到对应集。
+    // 注意：不要以 playOrder 作为依赖——否则每次点「倒序」都会重新触发本效应、
+    // 把分页滚回 initialIndex 所在页，造成画面乱跳。
+    LaunchedEffect(initialIndex, videos.size) {
         val target = initialIndex.coerceIn(0, videos.lastIndex)
         val page = playOrder.indexOf(target).coerceAtLeast(0)
         if (pagerState.currentPage != page) pagerState.scrollToPage(page)
@@ -505,11 +520,20 @@ fun FullscreenVideoPlayer(
             order = playOrder,
             currentIndex = playOrder[pagerState.currentPage],
             onDismiss = { showEpisodes = false },
-            // 倒序：反转本视频所有集的播放顺序（再次点击可还原）
+            // 倒序：整体反转本视频所有集的播放顺序（再次点击可还原）。
+            // 反转后把分页直接滚到「当前正在看的这集」在新顺序里的位置，画面不跳，
+            // 但上下滑/选集列表都已是干净的逆向顺序。
             onReverse = {
                 val page = pagerState.currentPage
                 val anchor = playOrder.getOrNull(page) ?: page
-                playOrder = reverseKeepingPosition(playOrder, anchor, page)
+                val newOrder = playOrder.reversed()
+                playOrder = newOrder
+                val newPage = newOrder.indexOf(anchor)
+                if (newPage >= 0 && newPage != page) {
+                    scope.launch { pagerState.scrollToPage(newPage) }
+                }
+                // 把新的倒序状态持久化：true=已反转 / false=已还原，下次打开该视频沿用
+                onReversePersist(newOrder == videos.indices.reversed().toList())
             },
             onPick = { index ->
                 showEpisodes = false
@@ -541,29 +565,6 @@ private fun shuffledKeepingPosition(size: Int, anchor: Int, atPage: Int): List<I
     return List(size) { i ->
         if (i == atPage) anchor else others[if (i < atPage) i else i - 1]
     }
-}
-
-/**
- * 反转播放顺序，并把 [anchor]（当前正在看的集）固定在第 [atPage] 页，
- * 反转后画面不跳。与 [shuffledKeepingPosition] 同理。
- *
- * 用于选集面板的「倒序」按钮：一键把本视频全部集的播放顺序整体反转，
- * 方便修正顺序错乱的剧集。再次点击会再反转一次（还原）。
- */
-private fun reverseKeepingPosition(
-    order: List<Int>,
-    anchor: Int,
-    atPage: Int,
-): List<Int> {
-    if (order.size <= 1) return order.toList()
-    val reversed = order.reversed().toMutableList()
-    val curPos = reversed.indexOf(anchor)
-    if (curPos != atPage && curPos >= 0) {
-        val tmp = reversed[atPage]
-        reversed[atPage] = anchor
-        reversed[curPos] = tmp
-    }
-    return reversed
 }
 
 @Composable
@@ -1691,21 +1692,31 @@ private suspend fun PointerInputScope.detectPlayerGestures(
 
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
-        // 顶部/底部 10% 设为禁区：下拉状态栏、上滑多任务菜单属于系统手势，
-        // 落点在这些区域时不拦截，否则极易误触发上/下滑切换视频或切集。
-        // 横向快进/快退同样不在此区域起手，一并放行给系统。
+        // 顶部/底部 10%「禁拖不禁点」：落点在这里本就不拦截按下，避免误触发应用内
+        // 上/下滑切集、左/右滑快进，也不让外层 VerticalPager 切页；系统手势
+        // （下拉通知、上滑多任务）由系统基于原始输入流独立识别，与应用层无关。
+        // 关键修正：手指一旦移动超过 slop 才判定为拖拽并整段吃掉；
+        // 纯「点一下」要放行给 onTap，否则进度条/播放暂停等控制条正好压在这块
+        // 区域，隐藏时永远点不出来（这正是之前的问题）。
         if (down.position.y < size.height * 0.1f || down.position.y > size.height * 0.9f) {
-            // 顶/底 10% 设为禁区：吃掉整段手势。这样既不会触发应用内操作
-            // （上/下滑切视频、左/右滑快进），也阻断外层 VerticalPager 的切页。
-            // 系统手势（下拉状态栏、上滑多任务菜单）由系统基于原始输入流独立识别，
-            // 与应用层是否消费该触摸无关，因此不会被误吞。
+            val startX = down.position.x
+            val startY = down.position.y
             down.consume()
+            var dragConsumed = false
             var ev = awaitPointerEvent(PointerEventPass.Main)
-            ev.changes.forEach { it.consume() }
-            while (ev.changes.any { it.pressed }) {
-                ev = awaitPointerEvent(PointerEventPass.Main)
+            while (true) {
+                if (!dragConsumed && ev.changes.any {
+                        abs(it.position.x - startX) + abs(it.position.y - startY) > slop
+                    }
+                ) {
+                    dragConsumed = true
+                }
                 ev.changes.forEach { it.consume() }
+                if (!ev.changes.any { it.pressed }) break
+                ev = awaitPointerEvent(PointerEventPass.Main)
             }
+            // 纯点按（没拖动）放行给 onTap，让隐藏的控制条能弹出来
+            if (!dragConsumed) onTap()
             return@awaitEachGesture
         }
         val downTime = System.currentTimeMillis()

@@ -111,6 +111,15 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             mutableStateOf(intent.getBooleanExtra("homeMode", false))
         }
 
+        // 播放顺序（显示顺序）：videos 的下标序列，分页第 page 页播 videos[playOrder[page]]。
+        // 提升到 Activity 层，让「选集面板」与「主页下方目录」共用同一份顺序，
+        // 点「倒序」/切循环模式时两者一起反转（随机播放同理）。按 bookUrl + 集数重置，
+        // 切到另一个视频时回到自然序。
+        val playOrderState = remember(state.bookUrl, state.episodes.size) {
+            mutableStateOf(state.episodes.indices.toList())
+        }
+        var playOrder by playOrderState
+
         LaunchedEffect(intent.getStringExtra("bookUrl")) {
             SourceVideoPlayerSession.load(
                 bookUrl = intent.getStringExtra("bookUrl").orEmpty(),
@@ -345,6 +354,11 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             bookUrl = state.bookUrl,
                             coverDrawable = coverDrawable,
                             compactMode = homeMode,
+                            playOrderState = playOrderState,
+                            reverseOrder = state.reverseOrder,
+                            onReversePersist = { reversed ->
+                                SourceVideoPlayerSession.setReverseOrder(state.bookUrl, reversed)
+                            },
                             onAddShelf = { SourceVideoPlayerSession.addToShelf() },
                         )
                     }
@@ -356,6 +370,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             if (homeMode && state.episodes.isNotEmpty()) {
                 HomePanel(
                     state = state,
+                    playOrder = playOrder,
                     onExpand = { homeMode = false },
                 )
             }
@@ -396,6 +411,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
 @Composable
 private fun HomePanel(
     state: SourceVideoPlayerUiState,
+    playOrder: List<Int>,
     onExpand: () -> Unit,
 ) {
     val episodes = state.episodes
@@ -466,7 +482,8 @@ private fun HomePanel(
             }
         }
 
-        // 选集方块网格
+        // 选集方块网格：按 playOrder（显示顺序，倒序/随机后整体反转）排列，
+        // 但标签「第 N 集」、高亮、跳转都用原始下标，因此顺序变了编号与播放进度不变。
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = 86.dp),
             modifier = Modifier
@@ -476,12 +493,13 @@ private fun HomePanel(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            itemsIndexed(episodes) { i, ep ->
+            itemsIndexed(playOrder) { _, origIndex ->
+                val ep = episodes.getOrNull(origIndex) ?: return@itemsIndexed
                 EpisodeItem(
-                    label = if (ep.name.length <= 7) ep.name else "第${i + 1}集",
-                    selected = i == currentIndex,
+                    label = if (ep.name.length <= 7) ep.name else "第${origIndex + 1}集",
+                    selected = origIndex == currentIndex,
                     ready = ep.uri != Uri.EMPTY,
-                    onClick = { SourceVideoPlayerSession.selectEpisode(i) }
+                    onClick = { SourceVideoPlayerSession.selectEpisode(origIndex) }
                 )
             }
         }

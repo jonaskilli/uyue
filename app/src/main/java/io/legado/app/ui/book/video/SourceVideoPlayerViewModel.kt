@@ -1,5 +1,6 @@
 package io.legado.app.ui.book.video
 
+import android.content.Context
 import android.net.Uri
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.BookType
@@ -41,6 +42,8 @@ data class SourceVideoPlayerUiState(
     val currentIndex: Int = 0,
     /** 搜索/发现入口的列表切换（右侧 20% 竖滑） */
     val feedEnabled: Boolean = false,
+    /** 该视频的剧集列表是否为「倒序」播放（持久化标记，与小说「反转目录」同效） */
+    val reverseOrder: Boolean = false,
     /** 书籍封面：加载/解析时铺底显示，便于快速切换时辨认视频 */
     val coverUrl: String = "",
     /** 封面所属书源 origin：用于与列表一致的图片缓存 key，避免封面重新联网拉取导致黑屏 */
@@ -93,6 +96,18 @@ object SourceVideoPlayerSession {
     private var feed: VideoFeedStore.Feed? = null
     /** 预取到的下一部视频（避免同一部被反复解析） */
     private var prefetchedNext: NextVideoPreload? = null
+    /** 每部视频「是否倒序」的持久化标记，按 bookUrl 存，重启后沿用（与小说反转目录同效） */
+    private val reversePrefs by lazy {
+        appCtx.getSharedPreferences("video_reverse_order", Context.MODE_PRIVATE)
+    }
+
+    fun isReverseOrder(bookUrl: String): Boolean = reversePrefs.getBoolean(bookUrl, false)
+
+    /** 点「倒序」后调用：把新的倒序状态持久化，并同步进 uiState 供界面初始化沿用 */
+    fun setReverseOrder(bookUrl: String, reversed: Boolean) {
+        reversePrefs.edit().putBoolean(bookUrl, reversed).apply()
+        _uiState.update { it.copy(reverseOrder = reversed) }
+    }
     /** 预取到的首集地址：切过去后直接填进剧集列表，省一次正文规则请求 */
     private val prefetchedUrls = ConcurrentHashMap<String, String>()
     /** 正在解析的集，避免同一集被重复发起 */
@@ -323,6 +338,7 @@ object SourceVideoPlayerSession {
                     sourceOrigin = source.bookSourceUrl,
                     currentIndex = startIndex.coerceIn(0, chapters.lastIndex),
                     feedEnabled = feedEnabled,
+                    reverseOrder = isReverseOrder(book.bookUrl),
                     coverUrl = book.coverUrl ?: "",
                     coverOrigin = book.origin,
                     fallbackIndex = startIndex.coerceIn(0, chapters.lastIndex),
@@ -358,6 +374,7 @@ object SourceVideoPlayerSession {
                 sourceOrigin = source.bookSourceUrl,
                 currentIndex = index,
                 feedEnabled = feedEnabled,
+                reverseOrder = isReverseOrder(book.bookUrl),
                 coverUrl = book.coverUrl ?: "",
                 coverOrigin = book.origin,
                 episodes = episodes,
