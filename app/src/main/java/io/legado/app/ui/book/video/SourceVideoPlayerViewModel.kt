@@ -386,9 +386,15 @@ object SourceVideoPlayerSession {
         if (index == savedIndex && kotlin.math.abs(pos - savedPositionMs) < 3000L) return
         savedIndex = index
         savedPositionMs = pos
-        val book = book ?: return
+        // 捕获调用时刻所属的书：切视频后全局 book 会被换成下一部，
+        // 上一个播放器延迟一帧的销毁上报若仍带着旧集序号进来，必须丢弃，
+        // 否则会把上一部的进度写进下一部的记录（串台），或索引越界被直接丢。
+        val saveBookUrl = book?.bookUrl ?: return
         scope.launch {
-            val record = appDb.bookDao.getBook(book.bookUrl) ?: return@launch
+            // 期间已切换到别的视频（全局 book 已换）→ 这条上报属于上一视频，不应写进新书
+            val cur = book ?: return@launch
+            if (cur.bookUrl != saveBookUrl) return@launch
+            val record = appDb.bookDao.getBook(saveBookUrl) ?: return@launch
             if (record.durChapterIndex == index
                 && record.durChapterPos == pos.toInt()
                 && chapters.getOrNull(index)?.title == record.durChapterTitle
@@ -396,6 +402,28 @@ object SourceVideoPlayerSession {
             record.durChapterIndex = index
             record.durChapterPos = pos.toInt()
             record.durChapterTitle = chapters[index].title
+            record.durChapterTime = System.currentTimeMillis()
+            appDb.bookDao.update(record)
+        }
+    }
+
+    /**
+     * 切走/退出前，趁全局状态还是当前视频，把进度立刻落库（绕过 3 秒节流）。
+     * 否则 [feedSwitch]→[load] 会把全局 book 换成下一部，上一视频的进度就写不进自己的记录，
+     * 表现为「切回来从头播 / 从别的视频的时间点播」。
+     */
+    fun flushCurrentProgress() {
+        val idx = _uiState.value.currentIndex
+        val pos = savedPositionMs.coerceAtLeast(0)
+        val book = book ?: return
+        val saveBookUrl = book.bookUrl
+        val curChapters = chapters
+        if (idx !in curChapters.indices) return
+        scope.launch {
+            val record = appDb.bookDao.getBook(saveBookUrl) ?: return@launch
+            record.durChapterIndex = idx
+            record.durChapterPos = pos.toInt()
+            record.durChapterTitle = curChapters[idx].title
             record.durChapterTime = System.currentTimeMillis()
             appDb.bookDao.update(record)
         }
@@ -644,6 +672,9 @@ object SourceVideoPlayerSession {
     }
 
     fun feedSwitch(offset: Int): Boolean {
+        // 切走前先把当前视频进度落库（此时全局状态还是当前视频，写入正确；
+        // 否则 load(下一部) 换掉全局 book 后，上一路的销毁上报会被丢/串台）
+        flushCurrentProgress()
         val url = resolveFeedTarget(offset) ?: run {
             appCtx.toastOnUi(
                 if (offset > 0) "已经是列表最后一个" else "已经是列表第一个"

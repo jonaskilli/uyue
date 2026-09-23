@@ -1002,7 +1002,17 @@ internal fun VideoPlayerPage(
                                 seekTo(dragTarget)
                             },
                             onSeekEnd = { dragging = false },
-                            onFeedSwitch = onFeedSwitch,
+                            onFeedSwitch = { offset ->
+                                // 切走前用播放器手头的精确位置先落库（此时全局状态还是当前视频，写入正确；
+                                // 否则 feedSwitch→load 换掉全局 book 后，上一视频的销毁上报会被丢/串台）。
+                                // 播完的记成 0，避免回来 seekTo 片尾立刻 STATE_ENDED 触发自动翻页。
+                                currentProgressChange.value?.invoke(
+                                    index,
+                                    if (player.playbackState == Player.STATE_ENDED) 0L
+                                    else player.currentPosition.coerceAtLeast(0)
+                                )
+                                onFeedSwitch?.invoke(offset)
+                            },
                             onFeedDrag = onFeedDrag,
                             onFeedCancel = onFeedCancel,
                             // 整部只有一集时两个方向都没有集可切

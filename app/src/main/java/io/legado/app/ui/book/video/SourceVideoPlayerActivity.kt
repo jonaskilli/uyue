@@ -282,6 +282,8 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                                 } else {
                                     // 退出前把正在播的这集收尾落盘（不切集直接退出也存下）
                                     SourceVideoPlayerSession.finalizeCurrentEpisode()
+                                    // 退出前先把当前视频的播放进度落库（趁全局状态还是当前视频）
+                                    SourceVideoPlayerSession.flushCurrentProgress()
                                     // 退出播放器即清空切换列表，
                                     // 避免下次从其它分类打开同一视频时沿用旧分类的列表
                                     SourceVideoPlayerSession.clearFeed()
