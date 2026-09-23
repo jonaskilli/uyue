@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import splitties.init.appCtx
 import java.util.Collections
@@ -96,6 +98,8 @@ object SourceVideoPlayerSession {
     private var feed: VideoFeedStore.Feed? = null
     /** 预取到的下一部视频（避免同一部被反复解析） */
     private var prefetchedNext: NextVideoPreload? = null
+    /** 预取「下一个视频」的互斥锁：会话层与播放器层可能同时来要，只解析一次 */
+    private val prefetchMutex = Mutex()
     /** 每部视频「是否倒序」的持久化标记，按 bookUrl 存，重启后沿用（与小说反转目录同效） */
     private val reversePrefs by lazy {
         appCtx.getSharedPreferences("video_reverse_order", Context.MODE_PRIVATE)
@@ -385,6 +389,10 @@ object SourceVideoPlayerSession {
         }
         // 进入/切换到当前视频时，立即保证后续列表已加载（当前页加载下一页）
         ensureMore()
+        // 立即后台预取列表里的下一个视频（目录 + 首集直链）：
+        // 切视频最耗时的是「拉目录→跑正文规则解析直链」，把它提前到现在做，
+        // 不必等用户滑走才开始，播放器随后据此预缓冲，切过去直接接管
+        prefetchNextVideo()
     }
 
     /**
@@ -529,7 +537,8 @@ object SourceVideoPlayerSession {
     /**
      * 预取「下一个视频」的首集：只解析、不切换会话、不拉起任何界面。
      *
-     * 当前视频播到最后一集（整部只有一集时同样成立）时由播放器调用：
+     * 两个触发点：[loadInternal] 切到当前视频时立即后台调用（主路径），
+     * 以及播放器起播 2 秒后的预缓冲轮询（兜底，命中缓存不重复解析）。
      * 列表里还有下一个视频，就把那一部的目录与首集地址提前解析出来，
      * 播放器据此提前缓冲一小段，右侧竖滑切过去直接接管，不再转圈。
      * 顺带把该部剧的章节预热进库，真正切过去时 [load] 也不必再联网拉目录。
@@ -538,30 +547,35 @@ object SourceVideoPlayerSession {
         val nextUrl = nextVideoUrl() ?: return@withContext null
         // 同一部只解析一次：播放器可能因为切集/重组多次来问，别重复联网
         prefetchedNext?.let { if (it.bookUrl == nextUrl) return@withContext it }
-        runCatching {
-            val nextBook = appDb.bookDao.getBook(nextUrl)
-                ?: appDb.searchBookDao.getSearchBook(nextUrl)?.toBook()
-                ?: return@runCatching null
-            val nextSource = nextBook.getBookSource() ?: return@runCatching null
-            val chapters = VideoSourcePlayer.prepareChapters(nextBook, nextSource)
-            if (chapters.isEmpty()) return@runCatching null
-            val index = feed?.startIndexOf(nextUrl)?.coerceIn(0, chapters.lastIndex) ?: 0
-            val url = VideoSourcePlayer.resolveChapter(nextBook, nextSource, chapters[index])
-                .directUrl
-            if (url.isNullOrBlank()) return@runCatching null
-            // 这部之前看过：预缓冲时就定位到上次的进度，切过去接着看
-            val startPosition = if (nextBook.durChapterIndex == index) {
-                nextBook.durChapterPos.toLong().coerceAtLeast(0)
-            } else {
-                0L
-            }
-            val result = NextVideoPreload(nextUrl, index, url, startPosition)
-            prefetchedUrls["$nextUrl#$index"] = url
-            prefetchedNext = result
-            result
-        }.onFailure {
-            AppLog.put("预取下一个视频失败\n${it.localizedMessage}", it)
-        }.getOrNull()
+        // 会话层（load 完成时）与播放器层（起播 2 秒后）可能同时来要：
+        // 加锁串行化，拿到锁后再查一次缓存，保证整条「拉目录→解析直链」只跑一遍
+        prefetchMutex.withLock {
+            prefetchedNext?.let { if (it.bookUrl == nextUrl) return@withContext it }
+            runCatching {
+                val nextBook = appDb.bookDao.getBook(nextUrl)
+                    ?: appDb.searchBookDao.getSearchBook(nextUrl)?.toBook()
+                    ?: return@runCatching null
+                val nextSource = nextBook.getBookSource() ?: return@runCatching null
+                val chapters = VideoSourcePlayer.prepareChapters(nextBook, nextSource)
+                if (chapters.isEmpty()) return@runCatching null
+                val index = feed?.startIndexOf(nextUrl)?.coerceIn(0, chapters.lastIndex) ?: 0
+                val url = VideoSourcePlayer.resolveChapter(nextBook, nextSource, chapters[index])
+                    .directUrl
+                if (url.isNullOrBlank()) return@runCatching null
+                // 这部之前看过：预缓冲时就定位到上次的进度，切过去接着看
+                val startPosition = if (nextBook.durChapterIndex == index) {
+                    nextBook.durChapterPos.toLong().coerceAtLeast(0)
+                } else {
+                    0L
+                }
+                val result = NextVideoPreload(nextUrl, index, url, startPosition)
+                prefetchedUrls["$nextUrl#$index"] = url
+                prefetchedNext = result
+                result
+            }.onFailure {
+                AppLog.put("预取下一个视频失败\n${it.localizedMessage}", it)
+            }.getOrNull()
+        }
     }
 
     /** 切换列表里当前视频的下一个（没有则 null） */

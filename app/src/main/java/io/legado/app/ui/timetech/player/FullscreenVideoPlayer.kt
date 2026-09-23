@@ -215,8 +215,8 @@ fun FullscreenVideoPlayer(
     // 否则 N 集就是 N 次串行网络请求，只能滚到哪一集解析哪一集。
     // prefetch=true 表示"预取下一集"，调用方据此只解析、不弹内置播放器，真正滑到才播。
     onResolveEpisode: ((index: Int, prefetch: Boolean) -> Unit)? = null,
-    // 当前视频已经播到最后一集（整部只有一集也算）时，用它取「下一个视频」的首集地址。
-    // 返回 null 表示列表里没有下一个视频，不做预缓冲。
+    // 列表切换模式（发现页/搜索竖滑）预取「下一个视频」首集地址的回调。
+    // 当前集起播 2 秒后即调用（不必等播到最后一集），返回 null 表示列表里没有下一个视频。
     onPrefetchNextVideo: (suspend () -> NextVideoPreload?)? = null,
     // 起始集内进度（毫秒），用于续播。会话内的 [positions] 优先于它，
     // 因为用户在本页内来回切集时应该回到自己刚才的位置，而不是进页时的位置。
@@ -402,26 +402,26 @@ fun FullscreenVideoPlayer(
 
     // 预缓冲下一集：当前集正常播放约 2 秒后，为下一集建立不超过 ~10 秒的缓冲窗口，
     // 上下滑/选集切换时直接接管已缓冲的播放器实例，不再出现"缓冲一会儿"。
-    // 已经是最后一集（整部只有一集时同样成立）就改为预缓冲**下一个视频**的首集，
-    // 右侧竖滑切到下一个视频时也直接接管，不再从头加载。
+    // 列表切换模式（发现页/搜索竖滑，onPrefetchNextVideo != null）下同时预缓冲**下一个视频**
+    // 的首集：用户在任意一集都可能竖滑切到下一部，等到最后一集才预取根本来不及——
+    // 下一集留在 PreloadCache、下一个视频登记进 SharedPlayer，两者互不挤占。
     LaunchedEffect(pagerState.currentPage, videos, playOrder) {
         delay(2000)
         if (videos.isEmpty()) return@LaunchedEffect
-        val nextIndex = playOrder.getOrNull(pagerState.currentPage + 1)
-        if (nextIndex != null) {
-            val nextVideo = videos.getOrNull(nextIndex) ?: return@LaunchedEffect
-            // 地址还没解析出来的集（懒解析），等解析完成重新组合后这里会再触发
-            if (nextVideo.uri == Uri.EMPTY) return@LaunchedEffect
-            PreloadCache.prepare(context, nextVideo.uri, headers)
-            return@LaunchedEffect
+        // 并发预取下一个视频（不阻塞下一集的预缓冲）
+        if (onPrefetchNextVideo != null) launch {
+            val next = onPrefetchNextVideo?.invoke() ?: return@launch
+            if (next.uri.isBlank()) return@launch
+            PreloadCache.prepareNextVideo(
+                context, next.bookUrl, next.index, Uri.parse(next.uri), headers,
+                next.startPositionMs,
+            )
         }
-        // 最后一集：预缓冲列表里的下一个视频（没有下一个视频时回调返回 null）
-        val next = onPrefetchNextVideo?.invoke() ?: return@LaunchedEffect
-        if (next.uri.isBlank()) return@LaunchedEffect
-        PreloadCache.prepareNextVideo(
-            context, next.bookUrl, next.index, Uri.parse(next.uri), headers,
-            next.startPositionMs,
-        )
+        val nextIndex = playOrder.getOrNull(pagerState.currentPage + 1) ?: return@LaunchedEffect
+        val nextVideo = videos.getOrNull(nextIndex) ?: return@LaunchedEffect
+        // 地址还没解析出来的集（懒解析），等解析完成重新组合后这里会再触发
+        if (nextVideo.uri == Uri.EMPTY) return@LaunchedEffect
+        PreloadCache.prepare(context, nextVideo.uri, headers)
     }
     DisposableEffect(Unit) {
         onDispose { PreloadCache.releaseAll() }
