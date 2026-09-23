@@ -21,7 +21,7 @@ interface BookDao {
     fun flowByGroup(groupId: Long): Flow<List<Book>> {
         return when (groupId) {
             BookGroup.IdRoot -> flowRoot()
-            BookGroup.IdAll -> flowAll()
+            BookGroup.IdAll -> flowAllExcludeVideo()
             BookGroup.IdLocal -> flowLocal()
             BookGroup.IdAudio -> flowAudio()
             BookGroup.IdNetNone -> flowNetNoGroup()
@@ -46,6 +46,10 @@ interface BookDao {
 
     @Query("SELECT * FROM books order by durChapterTime desc")
     fun flowAll(): Flow<List<Book>>
+
+    // “全部”分组专用：排除视频类型，视频仅在“视频”分组显示
+    @Query("SELECT * FROM books WHERE type & ${BookType.video} = 0 order by durChapterTime desc")
+    fun flowAllExcludeVideo(): Flow<List<Book>>
 
     @Query("SELECT * FROM books WHERE type & ${BookType.audio} > 0")
     fun flowAudio(): Flow<List<Book>>
