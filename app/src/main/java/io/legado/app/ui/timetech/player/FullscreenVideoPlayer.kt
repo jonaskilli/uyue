@@ -251,6 +251,9 @@ fun FullscreenVideoPlayer(
     reverseOrder: Boolean = false,
     // 点「倒序」后回调，把新的倒序状态持久化（true=已反转 / false=已还原）
     onReversePersist: (Boolean) -> Unit = {},
+    // 当前正在播放的播放器实例（由 VideoPlayerPage 在成为当前页时上报），
+    // 供 Activity 层的 MediaSession / 通知栏控制真正的播放器。
+    activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -484,6 +487,7 @@ fun FullscreenVideoPlayer(
                 bookUrl = bookUrl,
                 coverDrawable = coverDrawable,
                 onAddShelf = onAddShelf,
+                activePlayer = activePlayer,
                 // 首/末集：该方向没有集可切，竖滑改为切列表里的上一个/下一个视频
                 noPrevEpisode = page == 0 || videos.size <= 1,
                 noNextEpisode = page == videos.lastIndex || videos.size <= 1,
@@ -598,6 +602,8 @@ private fun VideoPage(
     // 预加载好的封面 drawable：同步铺到播放器内部封面，避免解析↔缓冲交界那 1 帧黑屏
     coverDrawable: Drawable? = null,
     onAddShelf: (() -> Unit)? = null,
+    // 当前正在播放的播放器实例，透传给 VideoPlayerPage 上报给 Activity
+    activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
     // 播放顺序上前一集/后一集是否存在。为 false 时该方向的竖滑改为切换列表视频
     noPrevEpisode: Boolean = false,
     noNextEpisode: Boolean = false,
@@ -636,6 +642,7 @@ private fun VideoPage(
         bookUrl = bookUrl,
         coverDrawable = coverDrawable,
         onAddShelf = onAddShelf,
+        activePlayer = activePlayer,
         noPrevEpisode = noPrevEpisode,
         noNextEpisode = noNextEpisode,
     )
@@ -785,6 +792,8 @@ internal fun VideoPlayerPage(
     // 预加载好的封面 drawable：同步铺到内部封面，避免解析↔缓冲交界那 1 帧黑屏
     coverDrawable: Drawable? = null,
     onAddShelf: (() -> Unit)? = null,
+    // 当前正在播放的播放器实例（由本页在成为当前页 active 时上报给 Activity）
+    activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
 ) {
     val context = LocalContext.current
     // 播放器的监听在整个页面存活期间只注册一次，用 updatedState 保证它读到的是最新的回调，
@@ -904,6 +913,15 @@ internal fun VideoPlayerPage(
             delay(5000)
             val pos = player.currentPosition
             if (pos > 0) currentProgressChange.value?.invoke(index, pos)
+        }
+    }
+
+    // 上报「当前正在播放的播放器」给 Activity 层（MediaSession/通知栏）。
+    // 仅当前页(active)才注册；切走或销毁时若仍是本页实例才清掉，避免把新页播放器误清。
+    DisposableEffect(active, player) {
+        if (active) activePlayer.value = player
+        onDispose {
+            if (activePlayer.value === player) activePlayer.value = null
         }
     }
 

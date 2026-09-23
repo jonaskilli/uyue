@@ -86,6 +86,20 @@ import com.bumptech.glide.request.transition.Transition
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.glide.ImageLoader
 import io.legado.app.help.glide.OkHttpModelLoader
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import android.widget.RemoteViews
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.media3.common.Player
+import io.legado.app.constant.AppConst
+import io.legado.app.constant.NotificationId
+import io.legado.app.utils.activityPendingIntent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -106,6 +120,119 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         // 打开时光播放器时清掉可能残留后台的内置浏览器视频实例，避免旧的叠在前面显示
         LaunchedEffect(Unit) { WebViewActivity.finishVideoInstance() }
         val state by SourceVideoPlayerSession.uiState.collectAsStateWithLifecycle()
+        // ===== 通知栏 / 锁屏媒体控制（轻量，不做后台播放）=====
+        // 单个 MediaSession 代表「当前正在播的那一集」，由 VideoPlayerPage 在成为当前页时
+        // 上报它的 Player 实例；通知的播放/暂停按钮经一个动态广播转发到 MediaSession 的
+        // transportControls，从而控制真正的播放器。Activity 销毁即取消通知、释放会话。
+        val activePlayer = remember { mutableStateOf<Player?>(null) }
+        val mediaSession = remember {
+            MediaSessionCompat(this, "sourceVideoPlayer").apply {
+                setFlags(
+                    MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                            MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+                )
+                setCallback(object : MediaSessionCompat.Callback() {
+                    override fun onPlay() {
+                        activePlayer.value?.play()
+                    }
+
+                    override fun onPause() {
+                        activePlayer.value?.pause()
+                    }
+
+                    override fun onSeekTo(pos: Long) {
+                        activePlayer.value?.seekTo(pos)
+                    }
+
+                    override fun onStop() {
+                        activePlayer.value?.pause()
+                    }
+                })
+                isActive = true
+            }
+        }
+        // 通知栏播放/暂停按钮：动态广播转发给 MediaSession（不复用朗读的 MediaButtonReceiver）
+        val toggleReceiver = remember {
+            object : BroadcastReceiver() {
+                override fun onReceive(c: Context?, intent: Intent?) {
+                    val ctrl = mediaSession.controller.transportControls
+                    if (activePlayer.value?.isPlaying == true) ctrl.pause() else ctrl.play()
+                }
+            }
+        }
+        DisposableEffect(Unit) {
+            ContextCompat.registerReceiver(
+                this@SourceVideoPlayerActivity,
+                toggleReceiver,
+                IntentFilter(ACTION_TOGGLE_VIDEO_PLAYBACK),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            onDispose {
+                this@SourceVideoPlayerActivity.unregisterReceiver(toggleReceiver)
+                mediaSession.isActive = false
+                mediaSession.release()
+                NotificationManagerCompat.from(this@SourceVideoPlayerActivity)
+                    .cancel(NotificationId.SourceVideoPlayer)
+            }
+        }
+        LaunchedEffect(Unit) {
+            var lastPlaying = false
+            var lastTitle = ""
+            while (true) {
+                delay(1000)
+                val player = activePlayer.value
+                val ui = SourceVideoPlayerSession.uiState.value
+                val episode = ui.episodes.getOrNull(ui.currentIndex)?.name ?: ""
+                val title = if (ui.bookName.isBlank()) episode else ui.bookName
+                val playing = player?.isPlaying == true
+                val pos = player?.currentPosition?.coerceAtLeast(0) ?: 0L
+                val dur = player?.duration?.takeIf { it > 0 } ?: 0L
+                // 锁屏 / 媒体会话状态（驱动锁屏进度与播放/暂停按钮）
+                mediaSession.setPlaybackState(
+                    PlaybackStateCompat.Builder()
+                        .setActions(
+                            PlaybackStateCompat.ACTION_PLAY or
+                                    PlaybackStateCompat.ACTION_PAUSE or
+                                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                                    PlaybackStateCompat.ACTION_SEEK_TO or
+                                    PlaybackStateCompat.ACTION_STOP
+                        )
+                        .setState(
+                            if (playing) PlaybackStateCompat.STATE_PLAYING
+                            else PlaybackStateCompat.STATE_PAUSED,
+                            pos, 1f
+                        )
+                        .build()
+                )
+                mediaSession.setMetadata(
+                    MediaMetadataCompat.Builder()
+                        .putString(
+                            MediaMetadataCompat.METADATA_KEY_TITLE,
+                            title.ifBlank { getString(R.string.video) }
+                        )
+                        .putString(
+                            MediaMetadataCompat.METADATA_KEY_ARTIST,
+                            episode.ifBlank { getString(R.string.video) }
+                        )
+                        .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, dur)
+                        .build()
+                )
+                // 仅播放状态或标题变化时重发通知，避免无谓刷新
+                if (playing != lastPlaying || title != lastTitle) {
+                    lastPlaying = playing
+                    lastTitle = title
+                    NotificationManagerCompat.from(this@SourceVideoPlayerActivity).notify(
+                        NotificationId.SourceVideoPlayer,
+                        buildVideoNotification(
+                            playing = playing,
+                            title = title,
+                            subtitle = episode,
+                            sessionToken = mediaSession.sessionToken
+                        ).build()
+                    )
+                }
+            }
+        }
         // homeMode：搜索结果进来时直接落在"播放器在上 + 选集在下"的首页形态，方便先挑集
         var homeMode by remember {
             mutableStateOf(intent.getBooleanExtra("homeMode", false))
@@ -360,6 +487,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                                 SourceVideoPlayerSession.setReverseOrder(state.bookUrl, reversed)
                             },
                             onAddShelf = { SourceVideoPlayerSession.addToShelf() },
+                            activePlayer = activePlayer,
                         )
                     }
 
@@ -391,7 +519,67 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         }
     }
 
+    /**
+     * 构建视频播放的媒体通知。
+     *
+     * 用自定义 RemoteViews 把布局收成两行：左侧剧名+当前集名两行文字，右侧一个与
+     * 这两行等高的方形播放/暂停按钮（点按经动态广播转发到 MediaSession 控制真正的播放器），
+     * 避免默认 MediaStyle 把按钮单独排成第三行、以及之前 setSubText 多出来的一行。
+     * 仍保留 MediaStyle 以继续支持锁屏媒体控制。
+     */
+    private fun buildVideoNotification(
+        playing: Boolean,
+        title: String,
+        subtitle: String,
+        sessionToken: MediaSessionCompat.Token,
+    ): NotificationCompat.Builder {
+        val toggleIntent = Intent(ACTION_TOGGLE_VIDEO_PLAYBACK).setPackage(packageName)
+        val togglePi = PendingIntent.getBroadcast(
+            this,
+            0,
+            toggleIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val contentPi = activityPendingIntent<SourceVideoPlayerActivity>("activity")
+
+        val views = RemoteViews(packageName, R.layout.notification_video).apply {
+            setTextViewText(R.id.tv_title, title.ifBlank { getString(R.string.video) })
+            setTextViewText(R.id.tv_subtitle, subtitle)
+            setImageViewResource(
+                R.id.btn_toggle,
+                if (playing) R.drawable.ic_pause_24dp else R.drawable.ic_play_24dp
+            )
+            setOnClickPendingIntent(R.id.btn_toggle, togglePi)
+        }
+
+        return NotificationCompat.Builder(this, AppConst.channelIdReadAloud)
+            .setSmallIcon(R.drawable.ic_volume_up)
+            .setContentTitle(title.ifBlank { getString(R.string.video) })
+            .setContentText(subtitle)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setContentIntent(contentPi)
+            .setCustomContentView(views)
+            .setCustomBigContentView(views)
+            .addAction(
+                if (playing) R.drawable.ic_pause_24dp else R.drawable.ic_play_24dp,
+                getString(if (playing) R.string.pause else R.string.resume),
+                togglePi
+            )
+            .setStyle(
+                androidx.media.app.NotificationCompat.MediaStyle()
+                    .setMediaSession(sessionToken)
+                    .setShowActionsInCompactView(0)
+            )
+    }
+
     companion object {
+
+        /** 通知栏播放/暂停按钮广播 action（仅本应用内部动态接收） */
+        const val ACTION_TOGGLE_VIDEO_PLAYBACK = "io.legado.app.action.TOGGLE_VIDEO_PLAYBACK"
 
         fun createIntent(
             context: Context,
