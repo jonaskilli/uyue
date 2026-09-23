@@ -2201,9 +2201,16 @@ private class ShardCounter : TransferListener {
     override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) = Unit
 }
 
-/** 这个请求下载的是媒体分片而不是播放列表 */
+/**
+ * 这个请求下载的是媒体分片而不是播放列表。
+ *
+ * 必须先排除 m3u8/mpd：不少源的播放列表地址本身就带 /m3u8/ 路径段
+ * （如 https://x/m3u8/index.m3u8），不排掉的话 master + media 两级列表会先吃掉
+ * 分片配额，真正的数据分片反而下不了几个。
+ */
 private fun isMediaShard(url: String): Boolean {
     val path = url.substringBefore('?').lowercase()
+    if (path.endsWith(".m3u8") || path.endsWith(".mpd")) return false
     return path.endsWith(".ts") || path.endsWith(".m4s") || path.endsWith(".mp4")
         || path.endsWith(".m4v") || path.endsWith(".webm") || path.contains("/m3u8/")
 }
@@ -2227,9 +2234,12 @@ private class ShardLimitLoadControl(
 ) : DefaultLoadControl() {
 
     override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean {
-        // 分片数：m3u8 的最小下载单位，比按时长估算精确
-        if (counter.count >= maxShards) return false
-        // 时长：DefaultLoadControl 默认要 50 秒，对预缓冲太贪，按传入值收紧
+        // 分片闸门**只在预缓冲阶段**生效（playWhenReady == false）。
+        // 分片计数只增不减，若接管开始播放后还继续拦，shouldContinueLoading 就永远
+        // 返回 false，播放器不再继续加载——切过去只能播完那点预缓冲，每次都转圈。
+        if (!parameters.playWhenReady && counter.count >= maxShards) return false
+        // 时长闸门始终生效：它按当前 bufferedDurationUs 动态判断，缓冲被播放消耗后
+        // 会自然放行，不会像分片计数那样卡死。接管后也靠它把默认 50 秒收回到 10/30 秒。
         if (parameters.bufferedDurationUs >= bufferMs * 1_000L) return false
         return super.shouldContinueLoading(parameters)
     }
