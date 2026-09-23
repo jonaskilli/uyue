@@ -2115,15 +2115,26 @@ data class NextVideoPreload(
 private const val PRELOAD_BUFFER_MS_MOBILE = 10_000
 /** WiFi 下「下一个视频」的预缓冲时长（毫秒）：不按流量计费，多缓冲一段换切过去更稳 */
 private const val PRELOAD_BUFFER_MS_WIFI = 30_000
-/** 开跑预缓冲前，要求当前这一集自己已经攒下的缓冲量（毫秒） */
-private const val PRELOAD_SELF_AHEAD_MS = 5_000L
+/**
+ * 开跑预缓冲前，要求当前这一集自己已经攒下的缓冲量（毫秒）。
+ *
+ * 取 3 秒而不是更长：这点缓冲足够起播，起播后播放器自己会继续往后缓存，
+ * 不需要等当前集攒满一大段才轮到预缓冲下一部——否则"刚打开就划走"的场景
+ * 永远等不到下一部的缓冲，而那种场景恰恰最需要它。
+ */
+private const val PRELOAD_SELF_AHEAD_MS = 3_000L
 
 /**
- * 预缓冲前先等当前这一路站稳。
+ * 预缓冲前先等当前这一路站稳。三条轨任一满足即放行：
  *
- * 预缓冲的意义是「切过去秒开」，代价是和正在播的这一路抢带宽：
- * 它自己还在转圈时不许开跑，否则两头都卡。
- * 超时也要放行——当前集真卡死时，不能连预缓冲一起拖住。
+ * - **已经起播**（[Player.isPlaying]）：最硬的一条证据，说明带宽够用、画面已出来，
+ *   起播后它自己会继续往后缓存，不必再替它攒。这条**不看时长也不看码率**，
+ *   所以可变码率、未知时长/直播这类"算不准 3 秒到底是多少数据"的流全靠它兜住。
+ * - **前方已攒够 [PRELOAD_SELF_AHEAD_MS]**：起播前用这条，避免刚开播就去抢带宽。
+ * - **超时兜底**：当前集真卡死（一直在 BUFFERING）时不能连预缓冲一起拖住。
+ *
+ * 预缓冲的意义是「切过去秒开」，代价是和正在播的这一路抢带宽，
+ * 所以条件是"站稳"而不是"越多越好"——攒够了就该让位给下一部。
  */
 private suspend fun awaitSelfBuffered(
     activePlayer: MutableState<Player?>,
@@ -2134,7 +2145,8 @@ private suspend fun awaitSelfBuffered(
         val p = activePlayer.value
         if (p != null
             && p.playbackState == Player.STATE_READY
-            && p.bufferedPosition - p.currentPosition >= PRELOAD_SELF_AHEAD_MS
+            && (p.isPlaying
+                || p.bufferedPosition - p.currentPosition >= PRELOAD_SELF_AHEAD_MS)
         ) return
         delay(500)
     }
