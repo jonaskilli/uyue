@@ -123,6 +123,7 @@ import io.legado.app.help.glide.OkHttpModelLoader
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.constant.AppLog
 import io.legado.app.help.video.VideoCache
+import io.legado.app.utils.isWifiConnect
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -410,7 +411,9 @@ fun FullscreenVideoPlayer(
     // 的首集：用户在任意一集都可能竖滑切到下一部，等到最后一集才预取根本来不及——
     // 下一集留在 PreloadCache、下一个视频登记进 SharedPlayer，两者互不挤占。
     LaunchedEffect(pagerState.currentPage, videos, playOrder) {
-        delay(2000)
+        // 先让当前这一集自己站稳，再动预缓冲：它还在转圈时去抢带宽，两头都卡。
+        // 原来是死等 2 秒——当前集卡顿时照样开跑，反而拖慢起播。
+        awaitSelfBuffered(activePlayer)
         if (videos.isEmpty()) return@LaunchedEffect
         // 取用「下一个视频」的预取结果。
         // 注意这里**不能 await 联网预取**：加密源要走 WebView 嗅探，最长 20 秒以上，
@@ -426,6 +429,7 @@ fun FullscreenVideoPlayer(
                     // 预取结果自带的请求头（含嗅探出的 Referer）优先
                     next.headers.takeIf { it.isNotEmpty() } ?: headers,
                     next.startPositionMs,
+                    bufferMs = preloadBufferMs(context),
                 )
             }
         }
@@ -2107,6 +2111,39 @@ data class NextVideoPreload(
  *
  * 只保留一集：预缓冲新的会释放旧的。全部仅在主线程访问，无需加锁。
  */
+/** 移动网络下「下一个视频」的预缓冲时长（毫秒） */
+private const val PRELOAD_BUFFER_MS_MOBILE = 10_000
+/** WiFi 下「下一个视频」的预缓冲时长（毫秒）：不按流量计费，多缓冲一段换切过去更稳 */
+private const val PRELOAD_BUFFER_MS_WIFI = 30_000
+/** 开跑预缓冲前，要求当前这一集自己已经攒下的缓冲量（毫秒） */
+private const val PRELOAD_SELF_AHEAD_MS = 5_000L
+
+/**
+ * 预缓冲前先等当前这一路站稳。
+ *
+ * 预缓冲的意义是「切过去秒开」，代价是和正在播的这一路抢带宽：
+ * 它自己还在转圈时不许开跑，否则两头都卡。
+ * 超时也要放行——当前集真卡死时，不能连预缓冲一起拖住。
+ */
+private suspend fun awaitSelfBuffered(
+    activePlayer: MutableState<Player?>,
+    timeoutMs: Long = 20_000L,
+) {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline) {
+        val p = activePlayer.value
+        if (p != null
+            && p.playbackState == Player.STATE_READY
+            && p.bufferedPosition - p.currentPosition >= PRELOAD_SELF_AHEAD_MS
+        ) return
+        delay(500)
+    }
+}
+
+/** 预缓冲时长按网络类型区分：WiFi 下多缓冲一段，移动网络省着花 */
+private fun preloadBufferMs(context: Context): Int =
+    if (context.isWifiConnect) PRELOAD_BUFFER_MS_WIFI else PRELOAD_BUFFER_MS_MOBILE
+
 internal object PreloadCache {
     private var cachedUri: Uri? = null
     private var cachedHeaders: Map<String, String>? = null
@@ -2150,6 +2187,8 @@ internal object PreloadCache {
         uri: Uri,
         headers: Map<String, String>,
         startPositionMs: Long = 0L,
+        // 缓冲多长：由调用方按网络类型给（WiFi 30 秒 / 移动网络 10 秒）
+        bufferMs: Int = PRELOAD_BUFFER_MS_MOBILE,
     ) {
         if (bookUrl.isBlank() || uri == Uri.EMPTY) return
         if (SharedPlayer.hasNextVideo(bookUrl, index, headers)) return
@@ -2157,7 +2196,7 @@ internal object PreloadCache {
             .setMediaSourceFactory(buildMediaSourceFactory(context, headers))
             .setLoadControl(
                 DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(10_000, 10_000, 2_000, 5_000)
+                    .setBufferDurationsMs(bufferMs, bufferMs, 2_000, 5_000)
                     .build()
             )
             .build()

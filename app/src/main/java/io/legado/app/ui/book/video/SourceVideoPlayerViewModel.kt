@@ -98,9 +98,16 @@ object SourceVideoPlayerSession {
     private var chapters: List<BookChapter> = emptyList()
     /** 搜索/发现入口带来的视频列表（动态供给：分页加载出来的也会进入切换范围） */
     private var feed: VideoFeedStore.Feed? = null
-    /** 预取到的下一部视频（避免同一部被反复解析）；跨线程读写（UI 取用 / IO 解析） */
+    /** 最靠前的那一个预取结果（N+1），给播放器建缓冲用；跨线程读写（UI 取用 / IO 解析） */
     @Volatile
     private var prefetchedNext: NextVideoPreload? = null
+    /**
+     * 已解析出首集地址的后续视频，按 bookUrl 索引（N+1、N+2…）。
+     *
+     * 解析很便宜、建缓冲很贵，所以这里可以多存几部：只有最靠前那部会真正预缓冲，
+     * 其余先只留地址，等它变成 N+1 时直接接着用。
+     */
+    private val prefetchedAhead = ConcurrentHashMap<String, NextVideoPreload>()
     /** 预取「下一个视频」的互斥锁：会话层与播放器层可能同时来要，只解析一次 */
     private val prefetchMutex = Mutex()
     /**
@@ -118,6 +125,16 @@ object SourceVideoPlayerSession {
      * 超时就丢弃、走正常解析重新拿，而不是一直抱着过期地址。
      */
     private const val PREFETCH_URL_TTL = 10 * 60_000L
+    /**
+     * 预取深度：一次解析后续几部的地址。
+     *
+     * 只解析不缓冲，成本是几次规则请求，换来连续下滑两部都不必现场拉目录。
+     * 取 2 而不是更大：再往后用户的下一次滑动大概率已经超出预取范围，
+     * 多解析只是白白给源站加压（部分源还有频控）。
+     */
+    private const val PREFETCH_LOOKAHEAD = 2
+    /** 预取结果缓存上限：换了分类/搜索后旧的永不再命中，堆多了整体清一次 */
+    private const val PREFETCH_AHEAD_MAX = 16
     /** 上一次预取**失败**的时间 */
     @Volatile
     private var prefetchFailedAt = 0L
@@ -608,73 +625,95 @@ object SourceVideoPlayerSession {
     }
 
     /**
-     * 预取「下一个视频」的首集：只解析、不切换会话、不拉起任何界面。
+     * 预取后续几部视频的首集：只解析、不切换会话、不拉起任何界面。
      *
-     * 两个触发点：[loadInternal] 切到当前视频时立即后台调用（主路径），
-     * 以及播放器起播 2 秒后的预缓冲轮询（兜底，命中缓存不重复解析）。
-     * 列表里还有下一个视频，就把那一部的目录与首集地址提前解析出来，
-     * 播放器据此提前缓冲一小段，右侧竖滑切过去直接接管，不再转圈。
-     * 顺带把该部剧的章节预热进库，真正切过去时 [load] 也不必再联网拉目录。
+     * 把「解析」与「建缓冲」分开——解析（拉目录→跑正文规则→必要时嗅探）只是几次网络请求，
+     * 一次多解析几部很划算；真正占带宽的建缓冲只对最靠前的一部做。
+     * 于是连续下滑两部都不必现场等解析，流量却只多花一份。
+     *
+     * 两个触发点：[loadInternal] 切到当前视频时（主路径）与播放稳定后的兜底轮询。
      */
     suspend fun prefetchNextVideo(): NextVideoPreload? = withContext(Dispatchers.IO) {
-        val nextUrl = nextVideoUrl() ?: return@withContext null
-        // 同一部只解析一次：播放器可能因为切集/重组多次来问，别重复联网
-        prefetchedNext?.let { if (it.bookUrl == nextUrl) return@withContext it }
-        // 会话层（load 完成时）与播放器层（起播 2 秒后）可能同时来要：
-        // 加锁串行化，拿到锁后再查一次缓存，保证整条「拉目录→解析直链」只跑一遍
+        // 会话层（load 完成时）与播放器层可能同时来要：
+        // 加锁串行化，保证整条「拉目录→解析直链→必要时嗅探」对同一目标只跑一遍
         prefetchMutex.withLock {
-            prefetchedNext?.let { if (it.bookUrl == nextUrl) return@withContext it }
-            runCatching {
-                // 搜索缓存里的下一部必须**先转正入库**：chapters.bookUrl 外键引用 books.bookUrl，
-                // 未入库的书直接插章节会 FOREIGN KEY constraint failed（code 787）。
-                // 与 [loadInternal] 对齐：带 notShelf，不自动上书架。
-                val nextBook = appDb.bookDao.getBook(nextUrl)
-                    ?: appDb.searchBookDao.getSearchBook(nextUrl)?.toBook()?.also { newBook ->
-                        newBook.addType(BookType.notShelf)
-                        appDb.bookDao.insert(newBook)
-                    }
-                    ?: return@runCatching null
-                val nextSource = nextBook.getBookSource() ?: return@runCatching null
-                val chapters = VideoSourcePlayer.prepareChapters(nextBook, nextSource)
-                if (chapters.isEmpty()) return@runCatching null
-                val index = feed?.startIndexOf(nextUrl)?.coerceIn(0, chapters.lastIndex) ?: 0
-                val resolve = VideoSourcePlayer.resolveChapter(nextBook, nextSource, chapters[index])
-                var url = resolve.directUrl
-                // 请求头以书源配置为基础，嗅探到 Referer 时再补上（见下）
-                val headers = HashMap(nextSource.getHeaderMap(true))
-                // 下一部若是网页播放器型/加密源：直链为空但 webPlayerUrl 存在时，
-                // 预取阶段就提前嗅探出真直链，竖滑切过去直接接管、不再现场跑浏览器。
-                if (url.isNullOrBlank() && !resolve.webPlayerUrl.isNullOrBlank()) {
-                    val sniffed = VideoUrlSniffer.sniff(resolve.webPlayerUrl!!, headers)
-                    url = sniffed?.url
-                    // 嗅探到的那次请求自带 Referer：加密源普遍按它防盗链，
-                    // 必须原样交给 ExoPlayer，否则缓冲建起来了、切过去还是 403。
-                    sniffed?.referer?.takeIf { it.isNotBlank() }?.let { headers["Referer"] = it }
+            val targets = nextVideoUrls(PREFETCH_LOOKAHEAD)
+            if (targets.isEmpty()) return@withLock null
+            var first: NextVideoPreload? = null
+            for (url in targets) {
+                // 已解析过就跳过：切集/重组会反复来问，别重复联网。
+                // 加密直链有寿命，过期的不算数。
+                val cached = prefetchedAhead[url]
+                    ?.takeIf { !isPrefetchExpired("${it.bookUrl}#${it.index}") }
+                if (cached != null) {
+                    if (first == null) first = cached
+                    continue
                 }
-                if (url.isNullOrBlank()) return@runCatching null
-                // 这部之前看过：预缓冲时就定位到上次的进度，切过去接着看
-                val startPosition = if (nextBook.durChapterIndex == index) {
-                    nextBook.durChapterPos.toLong().coerceAtLeast(0)
-                } else {
-                    0L
+                val result = runCatching { resolveVideo(url) }
+                    .onFailure { AppLog.put("预取下一个视频失败\n${it.localizedMessage}", it) }
+                    .getOrNull()
+                if (result != null) {
+                    prefetchedAhead[url] = result
+                    if (first == null) first = result
                 }
-                val result = NextVideoPreload(nextUrl, index, url, startPosition, headers)
-                prefetchedUrls["$nextUrl#$index"] = url
-                prefetchedUrlTimes["$nextUrl#$index"] = System.currentTimeMillis()
-                prefetchedHeaders["$nextUrl#$index"] = headers
-                prefetchedNext = result
-                result
-            }.onFailure {
-                AppLog.put("预取下一个视频失败\n${it.localizedMessage}", it)
-            }.getOrNull()
+            }
+            // 换了分类/搜索后，旧列表里的结果再也不会被命中，堆多了就整体清一次
+            if (prefetchedAhead.size > PREFETCH_AHEAD_MAX) prefetchedAhead.clear()
+            prefetchedNext = first
+            first
         }
+    }
+
+    /**
+     * 解析某一部的首集，给出可直接预缓冲的结果；拿不到直链则为 null。
+     *
+     * 顺带把该部的目录预热进库，真正切过去时 [load] 也不必再联网拉目录。
+     */
+    private suspend fun resolveVideo(bookUrl: String): NextVideoPreload? {
+        // 搜索缓存里的这一部必须**先转正入库**：chapters.bookUrl 外键引用 books.bookUrl，
+        // 未入库的书直接插章节会 FOREIGN KEY constraint failed（code 787）。
+        // 与 [loadInternal] 对齐：带 notShelf，不自动上书架。
+        val nextBook = appDb.bookDao.getBook(bookUrl)
+            ?: appDb.searchBookDao.getSearchBook(bookUrl)?.toBook()?.also { newBook ->
+                newBook.addType(BookType.notShelf)
+                appDb.bookDao.insert(newBook)
+            }
+            ?: return null
+        val nextSource = nextBook.getBookSource() ?: return null
+        val chapters = VideoSourcePlayer.prepareChapters(nextBook, nextSource)
+        if (chapters.isEmpty()) return null
+        val index = feed?.startIndexOf(bookUrl)?.coerceIn(0, chapters.lastIndex) ?: 0
+        val resolve = VideoSourcePlayer.resolveChapter(nextBook, nextSource, chapters[index])
+        var url = resolve.directUrl
+        // 请求头以书源配置为基础，嗅探到 Referer 时再补上（见下）
+        val headers = HashMap(nextSource.getHeaderMap(true))
+        // 网页播放器型/加密源：直链为空但 webPlayerUrl 存在时，
+        // 预取阶段就提前嗅探出真直链，竖滑切过去直接接管、不再现场跑浏览器。
+        if (url.isNullOrBlank() && !resolve.webPlayerUrl.isNullOrBlank()) {
+            val sniffed = VideoUrlSniffer.sniff(resolve.webPlayerUrl!!, headers)
+            url = sniffed?.url
+            // 嗅探到的那次请求自带 Referer：加密源普遍按它防盗链，
+            // 必须原样交给 ExoPlayer，否则缓冲建起来了、切过去还是 403。
+            sniffed?.referer?.takeIf { it.isNotBlank() }?.let { headers["Referer"] = it }
+        }
+        if (url.isNullOrBlank()) return null
+        // 这部之前看过：预缓冲时就定位到上次的进度，切过去接着看
+        val startPosition = if (nextBook.durChapterIndex == index) {
+            nextBook.durChapterPos.toLong().coerceAtLeast(0)
+        } else {
+            0L
+        }
+        prefetchedUrls["$bookUrl#$index"] = url
+        prefetchedUrlTimes["$bookUrl#$index"] = System.currentTimeMillis()
+        prefetchedHeaders["$bookUrl#$index"] = headers
+        return NextVideoPreload(bookUrl, index, url, startPosition, headers)
     }
 
     /**
      * 播放器层取用预取结果：**非挂起**。
      *
      * 只交出已经就绪的结果；还没就绪就确认一次后台任务在跑，然后返回 null，
-     * 下一轮（切集/列表更新后 2 秒）再来取。
+     * 下一轮（切集/列表更新、且当前集自身缓冲充足后）再来取。
      * 关键是别在这里 await：加密源要开 WebView 嗅探 20 秒以上，
      * 一旦 await 就等于把它挂到界面的 LaunchedEffect 上，随时被重组取消且静默失败。
      */
@@ -718,12 +757,16 @@ object SourceVideoPlayerSession {
     }
 
     /** 切换列表里当前视频的下一个（没有则 null） */
-    private fun nextVideoUrl(): String? {
-        val urls = feed?.urls() ?: return null
-        val currentUrl = book?.bookUrl ?: return null
+    private fun nextVideoUrl(): String? = nextVideoUrls(1).firstOrNull()
+
+    /** 列表里紧跟着当前的后面几部（不足则少给几个） */
+    private fun nextVideoUrls(count: Int): List<String> {
+        val urls = feed?.urls() ?: return emptyList()
+        val currentUrl = book?.bookUrl ?: return emptyList()
         val pos = urls.indexOf(currentUrl)
-        if (pos < 0) return null
-        return urls.getOrNull(pos + 1)
+        if (pos < 0) return emptyList()
+        val end = (pos + 1 + count).coerceAtMost(urls.size)
+        return if (pos + 1 >= end) emptyList() else urls.subList(pos + 1, end)
     }
 
     /**
