@@ -31,11 +31,6 @@
         app:showAsAction="never" />
 
     <item
-        android:id="@+id/menu_clear_cache"
-        android:title="清除本页缓存并重开"
-        app:showAsAction="never" />
-
-    <item
         android:id="@+id/menu_show_web_log"
         android:title="@string/show_web_log"
         android:checkable="true" />

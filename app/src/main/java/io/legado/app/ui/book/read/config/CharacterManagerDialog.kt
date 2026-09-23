@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Bundle
-import android.preference.PreferenceManager
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.inputmethod.EditorInfo
@@ -22,6 +21,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.textfield.TextInputEditText
 import io.legado.app.R
+import io.legado.app.help.MiyueKeyManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -620,394 +620,15 @@ class CharacterManagerDialog : DialogFragment() {
     }
 
     // ==================== 密钥管理 ====================
-
-    private fun getCurrentKey(): String {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-        return prefs.getString("miyue", "") ?: ""
-    }
-
-    private fun saveKeyToPrefs(key: String) {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-        prefs.edit().putString("miyue", key).apply()
-    }
+    // 保存密钥 / 恢复密钥的完整逻辑已抽到 [MiyueKeyManager]，
+    // 角色管理页与朗读脚本页共用同一份实现，避免两处维护不一致。
 
     private fun saveKey() {
-        // 第一步：弹出输入框让用户输入密钥内容
-        val keyInput = TextInputEditText(requireContext()).apply {
-            hint = "输入密钥内容"
-            setPadding(50, 30, 50, 30)
-        }
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("保存密钥 - 第1步")
-            .setView(keyInput)
-            .setPositiveButton("下一步") { _, _ ->
-                val keyContent = keyInput.text?.toString()?.trim() ?: ""
-                if (keyContent.isNotEmpty()) {
-                    // 第二步：弹出输入框让用户输入密钥名称
-                    val nameInput = TextInputEditText(requireContext()).apply {
-                        hint = "输入密钥名称"
-                        setPadding(50, 30, 50, 30)
-                    }
-
-                    AlertDialog.Builder(requireContext())
-                        .setTitle("保存密钥 - 第2步")
-                        .setView(nameInput)
-                        .setPositiveButton("保存") { _, _ ->
-                            val name = nameInput.text?.toString()?.trim() ?: ""
-                            if (name.isNotEmpty()) {
-                                // 保存到 keys.json 并更新 miyue.txt
-                                saveKeyToJson(name, keyContent)
-                                toast("密钥已保存: $name")
-                            } else {
-                                toast("名称不能为空")
-                            }
-                        }
-                        .setNegativeButton("取消", null)
-                        .show()
-                } else {
-                    toast("密钥内容不能为空")
-                }
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    // 保存密钥到 keys.json，并同时保存纯密钥内容到 miyue.txt
-    private fun saveKeyToJson(name: String, key: String) {
-        val keyMap = getKeyMap()
-        putKeyToFront(keyMap, name, key)
-        saveKeyMap(keyMap)
-        // 同时更新 miyue.txt（保存纯密钥内容）
-        writeTxtFile("miyue.txt", key)
-    }
-
-    /**
-     * 将指定密钥移到列表最前面（顶部），保持旧格式 {name:key, ...} 不变。
-     * 通过重建 keyMap 的插入顺序实现置顶：先放入 name，再按原有顺序放入其余密钥。
-     * 不引入任何额外字段（如 keys 数组），确保与旧版本（降级）完全兼容。
-     */
-    private fun putKeyToFront(keyMap: JSONObject, name: String, value: String) {
-        // 收集当前所有密钥名称与值（排除将要置顶的 name）
-        val orderedNames = keyMap.keys().asSequence()
-            .filter { it != name }
-            .toMutableList()
-        val valueMap = mutableMapOf<String, String>()
-        orderedNames.forEach { n -> valueMap[n] = keyMap.optString(n, "") }
-
-        // 重建 keyMap：name 置顶，其余按原顺序跟随
-        keyMap.remove(name)
-        orderedNames.forEach { keyMap.remove(it) }
-        keyMap.put(name, value)
-        orderedNames.forEach { n -> keyMap.put(n, valueMap[n] ?: "") }
+        MiyueKeyManager.saveKey(requireContext())
     }
 
     private fun restoreKey() {
-        val keyMap = getKeyMap()
-        val names = getKeyNames(keyMap)
-
-        if (names.isEmpty()) {
-            toast("没有已保存的密钥")
-            return
-        }
-
-        // 创建自定义对话框
-        val dialog = Dialog(requireContext())
-        dialog.setContentView(R.layout.dialog_key_list)
-        dialog.window?.setLayout(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT
-        )
-
-        val listView = dialog.findViewById<ListView>(R.id.lv_keys)
-        val btnDelete = dialog.findViewById<Button>(R.id.btn_delete_key)
-        val btnShowCurrent = dialog.findViewById<Button>(R.id.btn_show_current)
-        val btnCancel = dialog.findViewById<Button>(R.id.btn_cancel)
-
-        // 自定义适配器：每项右侧带“修改”图标；点击整行（除修改按钮）即恢复该密钥
-        val adapter = object : ArrayAdapter<String>(
-            requireContext(),
-            R.layout.dialog_key_item,
-            R.id.tv_key_name,
-            names
-        ) {
-            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
-                val view = convertView
-                    ?: layoutInflater.inflate(R.layout.dialog_key_item, parent, false)
-                val name = names[position]
-                val tv = view.findViewById<TextView>(R.id.tv_key_name)
-                tv.text = name
-                // 恢复原先的正常文字颜色，避免变浅看不清
-                tv.setTextColor(androidx.core.content.ContextCompat.getColor(requireContext(), R.color.primaryText))
-
-                // 点击整行密钥（除“修改”按钮）即恢复该密钥到 miyue.txt 并关闭弹窗
-                view.setOnClickListener {
-                    val key = keyMap.optString(name, "")
-                    writeTxtFile("miyue.txt", key)
-                    saveKeyToPrefs(key)
-                    toast("已恢复密钥: $name")
-                    dialog.dismiss()
-                }
-
-                // “修改”按钮单独处理，覆盖整行点击
-                view.findViewById<ImageButton>(R.id.btn_edit_key).setOnClickListener {
-                    dialog.dismiss()
-                    modifyKey(name)
-                }
-                return view
-            }
-        }
-        listView.adapter = adapter
-
-        // 底部按钮
-        btnDelete.setOnClickListener {
-            dialog.dismiss()
-            selectKeyToDelete()
-        }
-        btnShowCurrent.setOnClickListener {
-            dialog.dismiss()
-            showCurrentKeyDialog()
-        }
-        btnCancel.setOnClickListener {
-            dialog.dismiss()
-        }
-
-        dialog.show()
-    }
-
-    private fun selectKeyToRestore() {
-        val keyMap = getKeyMap()
-        val names = getKeyNames(keyMap)
-
-        if (names.isEmpty()) {
-            toast("没有已保存的密钥")
-            return
-        }
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("恢复密钥")
-            .setItems(names.toTypedArray()) { _, which ->
-                val name = names[which]
-                val key = keyMap.optString(name, "")
-                // 只把纯密钥内容保存到 miyue.txt
-                writeTxtFile("miyue.txt", key)
-                saveKeyToPrefs(key)
-                toast("已恢复密钥: $name")
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-    
-    private fun showCurrentKeyDialog() {
-        // 显示 miyue.txt 文件内容（纯密钥内容）
-        val miyueContent = readTxtFile("miyue.txt")
-        if (miyueContent.isEmpty()) {
-            toast("当前密钥为空")
-            return
-        }
-        
-        AlertDialog.Builder(requireContext())
-            .setTitle("当前密钥内容")
-            .setMessage(miyueContent)
-            .setPositiveButton("复制") { _, _ ->
-                val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("密钥", miyueContent))
-                toast("已复制到剪贴板")
-            }
-            .setNegativeButton("关闭", null)
-            .show()
-    }
-
-    private fun selectKeyToDelete() {
-        val keyMap = getKeyMap()
-        val names = getKeyNames(keyMap)
-
-        if (names.isEmpty()) {
-            toast("没有已保存的密钥")
-            return
-        }
-
-        val dialog = Dialog(requireContext())
-        dialog.setContentView(R.layout.dialog_key_delete_multi)
-        dialog.window?.setLayout(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT
-        )
-
-        val listView = dialog.findViewById<ListView>(R.id.lv_keys_multi)
-        val btnConfirm = dialog.findViewById<Button>(R.id.btn_confirm_delete)
-        val btnCancel = dialog.findViewById<Button>(R.id.btn_cancel_delete)
-
-        // 使用 CheckedTextView 支持多选显示
-        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_checked, names)
-        listView.adapter = adapter
-
-        btnConfirm.setOnClickListener {
-            val selectedIndices = mutableListOf<Int>()
-            for (i in 0 until listView.count) {
-                if (listView.isItemChecked(i)) {
-                    selectedIndices.add(i)
-                }
-            }
-            if (selectedIndices.isEmpty()) {
-                toast("请选择要删除的密钥")
-                return@setOnClickListener
-            }
-            dialog.dismiss()
-            // 倒序删除避免索引错乱
-            selectedIndices.sortedDescending().forEach { index ->
-                deleteKey(names[index])
-            }
-            toast("已删除 ${selectedIndices.size} 个密钥")
-        }
-
-        btnCancel.setOnClickListener {
-            dialog.dismiss()
-        }
-
-        dialog.show()
-    }
-
-    private fun selectKeyToModify() {
-        val keyMap = getKeyMap()
-        val names = getKeyNames(keyMap)
-
-        if (names.isEmpty()) {
-            toast("没有已保存的密钥")
-            return
-        }
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("修改密钥")
-            .setItems(names.toTypedArray()) { _, which ->
-                val name = names[which]
-                modifyKey(name)
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun getKeyNames(keyMap: JSONObject): MutableList<String> {
-        // 旧格式兼容：直接遍历 keys.json 内的所有字段（均为密钥名）
-        val names = mutableListOf<String>()
-        val keysIterator = keyMap.keys()
-        while (keysIterator.hasNext()) {
-            names.add(keysIterator.next())
-        }
-        return names
-    }
-
-    private fun deleteKey(name: String) {
-        AlertDialog.Builder(requireContext())
-            .setTitle("确认删除")
-            .setMessage("确定要删除密钥 '$name' 吗？")
-            .setPositiveButton("删除") { _, _ ->
-                val keyMap = getKeyMap()
-                keyMap.remove(name)
-                saveKeyMap(keyMap)
-                // 注意：删除密钥不修改 miyue.txt，只修改 keys.json
-                toast("已删除密钥: $name")
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun modifyKey(name: String) {
-        val keyMap = getKeyMap()
-        val currentKey = keyMap.optString(name, "")
-
-        // 创建包含两个输入框的布局
-        val container = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(50, 20, 50, 20)
-        }
-
-        // 名称输入框
-        val nameLabel = TextView(requireContext()).apply {
-            text = "密钥名称"
-            textSize = 14f
-            setPadding(0, 0, 0, 10)
-        }
-        val nameInput = TextInputEditText(requireContext()).apply {
-            hint = "输入密钥名称"
-            setText(name)
-            setPadding(0, 0, 0, 20)
-        }
-
-        // 密钥内容输入框
-        val keyLabel = TextView(requireContext()).apply {
-            text = "密钥内容"
-            textSize = 14f
-            setPadding(0, 0, 0, 10)
-        }
-        val keyInput = TextInputEditText(requireContext()).apply {
-            hint = "输入密钥内容"
-            setText(currentKey)
-        }
-
-        container.addView(nameLabel)
-        container.addView(nameInput)
-        container.addView(keyLabel)
-        container.addView(keyInput)
-
-        val dialog = AlertDialog.Builder(requireContext())
-            .setTitle("修改密钥")
-            .setView(container)
-            .setNegativeButton("取消", null)
-            .create()
-
-        // 保存并使用：更新 keys.json 并设为当前生效密钥（占原「保存」的位置，最右边）
-        dialog.setButton(AlertDialog.BUTTON_POSITIVE, "保存并使用") { _, _ ->
-            applyModifyKey(keyMap, name, nameInput, keyInput, true)
-        }
-        dialog.show()
-    }
-
-    /**
-     * 执行密钥修改。
-     * @param use true 时除写入 keys.json 外，还将该密钥设为当前生效（写入 miyue.txt 与偏好）
-     */
-    private fun applyModifyKey(
-        keyMap: JSONObject,
-        oldName: String,
-        nameInput: TextInputEditText,
-        keyInput: TextInputEditText,
-        use: Boolean
-    ) {
-        val newName = nameInput.text?.toString()?.trim() ?: ""
-        val newKey = keyInput.text?.toString()?.trim() ?: ""
-        if (newName.isNotEmpty() && newKey.isNotEmpty()) {
-            if (oldName != newName) {
-                keyMap.remove(oldName)
-            }
-            // 修改后将该密钥置顶到恢复列表最上方
-            putKeyToFront(keyMap, newName, newKey)
-            saveKeyMap(keyMap)
-            if (use) {
-                writeTxtFile("miyue.txt", newKey)
-                saveKeyToPrefs(newKey)
-                toast("已修改并启用密钥: $newName")
-            } else {
-                toast("已修改密钥: $newName")
-            }
-        } else {
-            toast("名称和密钥内容都不能为空")
-        }
-    }
-
-    private fun saveKeyMap(keyMap: JSONObject) {
-        // 只保存到 keys.json，保持旧格式 {name:key, ...} 不变（不写入额外字段）
-        writeTxtFile("keys.json", keyMap.toString())
-    }
-
-    private fun getKeyMap(): JSONObject {
-        // 从 keys.json 读取所有密钥
-        val content = readTxtFile("keys.json")
-        return try {
-            if (content.isNotEmpty()) JSONObject(content) else JSONObject()
-        } catch (e: Exception) {
-            JSONObject()
-        }
+        MiyueKeyManager.restoreKey(requireContext())
     }
 
     // ==================== 角色管理 ====================
@@ -1682,7 +1303,7 @@ class CharacterManagerDialog : DialogFragment() {
     private fun parseAndSaveKeys(json: String): Int {
         // 解析外层JSON数组
         val outerArray = JSONArray(json)
-        val keyMap = getKeyMap() // 保留现有密钥
+        val keyMap = MiyueKeyManager.getKeyMap() // 保留现有密钥
         var importCount = 0
 
         for (i in 0 until outerArray.length()) {
@@ -1715,7 +1336,7 @@ class CharacterManagerDialog : DialogFragment() {
             }
         }
 
-        saveKeyMap(keyMap)
+        MiyueKeyManager.saveKeyMap(keyMap)
         return importCount
     }
 

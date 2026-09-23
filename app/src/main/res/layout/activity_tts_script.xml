@@ -12,8 +12,51 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         app:contentInsetStartWithNavigation="0dp"
-        app:contentLayout="@layout/view_search"
         app:title="@string/tts_script" />
+
+    <!-- 密钥管理入口：与「角色管理」页共用 MiyueKeyManager -->
+    <LinearLayout
+        android:id="@+id/ll_key_manage"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
+
+        <Button
+            android:id="@+id/btn_save_key"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="5dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="保存密钥"
+            android:textSize="13sp"
+            android:backgroundTint="#4CAF50"
+            android:textColor="@android:color/white" />
+
+        <Button
+            android:id="@+id/btn_restore_key"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="5dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="恢复密钥"
+            android:textSize="13sp"
+            android:backgroundTint="#FF9800"
+            android:textColor="@android:color/white" />
+
+    </LinearLayout>
 
     <FrameLayout
         android:layout_width="match_parent"

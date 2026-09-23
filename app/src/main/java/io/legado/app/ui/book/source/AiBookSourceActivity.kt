@@ -18,6 +18,9 @@ import io.legado.app.help.book.removeType
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.model.AiBookSourceGenerator
 import io.legado.app.model.AiSourceHistory
+import io.legado.app.model.CharacterProfileManager
+import io.legado.app.data.entities.AiProfileTemplate
+import io.legado.app.service.AiChapterFixService
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.utils.GSON
@@ -63,9 +66,66 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
 
     override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            R.id.menu_set_api -> showApiKeyDialog()
             R.id.menu_clear_history -> clearHistory()
         }
         return super.onCompatOptionsItemSelected(item)
+    }
+
+    /**
+     * 设置 AI 接口（接口@@模型@@密钥）。
+     * 这里写的是本界面生成书源实际调用的「角色档案默认模板」的 apiConfig，
+     * 与生成时使用的接口完全一致；默认填混元太极本地网关地址。
+     */
+    private fun showApiKeyDialog() {
+        val current = CharacterProfileManager.getTemplate()?.apiConfig
+            ?: "http://localhost:8801/v1@@g3@@00"
+        val et = android.widget.EditText(this).apply {
+            setText(current)
+            setSelection(current.length)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setPadding(40, 24, 40, 24)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.ai_set_api)
+            .setMessage(R.string.ai_set_api_hint)
+            .setView(et)
+            .setPositiveButton("确定") { _, _ ->
+                val value = et.text?.toString()?.trim().orEmpty()
+                if (value.isBlank()) {
+                    toastOnUi("接口不能为空")
+                    return@setPositiveButton
+                }
+                if (AiChapterFixService.parseApiConfigs(value).isEmpty()) {
+                    toastOnUi("格式应为：接口@@模型@@密钥")
+                    return@setPositiveButton
+                }
+                saveApiConfig(value)
+                toastOnUi("已保存 AI 接口")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 把接口写入默认档案模板（覆盖原 apiConfig），并让模板缓存立即失效 */
+    private fun saveApiConfig(value: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val current = CharacterProfileManager.getTemplate()
+                ?: AiProfileTemplate(
+                    id = CharacterProfileManager.DEFAULT_TEMPLATE_ID,
+                    name = "默认档案模板",
+                    apiConfig = "http://localhost:8801/v1@@g3@@00",
+                    prompt = "",
+                    chapterGap = 5,
+                    retryCount = 1,
+                    timeoutSeconds = 240,
+                    autoEnable = true,
+                    isDefault = true
+                )
+            appDb.aiProfileTemplateDao.insert(current.copy(apiConfig = value, isDefault = true))
+            CharacterProfileManager.invalidateTemplateCache()
+        }
     }
 
     /**

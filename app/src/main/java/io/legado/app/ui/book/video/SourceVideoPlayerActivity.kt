@@ -72,12 +72,20 @@ import io.legado.app.R
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.help.video.VideoFeedStore
-import io.legado.app.ui.timetech.player.CoverBackdrop
 import io.legado.app.ui.timetech.player.EpisodeItem
 import io.legado.app.ui.timetech.player.FullscreenVideoPlayer
 import io.legado.app.ui.timetech.player.LocalVideo
 import io.legado.app.ui.browser.WebViewActivity
 import io.legado.app.utils.toastOnUi
+import android.graphics.drawable.Drawable
+import com.bumptech.glide.Glide
+import com.bumptech.glide.request.RequestOptions
+import com.bumptech.glide.request.target.CustomTarget
+import com.bumptech.glide.request.target.Target
+import com.bumptech.glide.request.transition.Transition
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.glide.ImageLoader
+import io.legado.app.help.glide.OkHttpModelLoader
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -120,6 +128,44 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             if (state.fallbackLaunched) finish()
         }
 
+        // 预加载封面 drawable：解析期间根底图已把它载进共享缓存，这里取出交给播放器，
+        // 让播放器内部封面在第 0 帧就铺好，避免 SurfaceView「打洞」在异步刷上之前露黑底
+        var coverDrawable by remember { mutableStateOf<Drawable?>(null) }
+        var coverTarget by remember { mutableStateOf<CustomTarget<Drawable>?>(null) }
+        DisposableEffect(Unit) {
+            onDispose {
+                coverTarget?.let { Glide.with(this@SourceVideoPlayerActivity).clear(it) }
+            }
+        }
+        LaunchedEffect(state.coverUrl, state.coverOrigin) {
+            val prev = coverTarget
+            coverTarget = null
+            prev?.let { Glide.with(this@SourceVideoPlayerActivity).clear(it) }
+            if (state.coverUrl.isBlank()) {
+                coverDrawable = null
+                return@LaunchedEffect
+            }
+            val target = object : CustomTarget<Drawable>(Target.SIZE_ORIGINAL, Target.SIZE_ORIGINAL) {
+                override fun onResourceReady(resource: Drawable, transition: Transition<in Drawable>?) {
+                    coverDrawable = resource
+                }
+
+                override fun onLoadCleared(placeholder: Drawable?) {
+                    // 不清空：该 drawable 可能正被播放器显示，引用由我们自行管理
+                }
+            }
+            coverTarget = target
+            var options = RequestOptions()
+                .set(OkHttpModelLoader.loadOnlyWifiOption, AppConfig.loadCoverOnlyWifi)
+            if (state.coverOrigin.isNotBlank()) {
+                options = options.set(OkHttpModelLoader.sourceOriginOption, state.coverOrigin)
+            }
+            ImageLoader.load(this@SourceVideoPlayerActivity, state.coverUrl)
+                .apply(options)
+                .fitCenter()
+                .into(target)
+        }
+
         // 边看边存：进入/切集时统一触发（全屏与首页模式共用同一入口）。
         // 切集时先收尾上一集、再入队当前集；已下载完的集会切成本地文件播放。
         // 之前挂在首页面板里，全屏播放时完全不触发，播完一集什么都没存下。
@@ -154,6 +200,8 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         // 切换方向：+1 下一个 / -1 上一个，0 = 本次不是切视频。
         // 放在 key(...) 之外，才能在播放器整组重建后仍记得该往哪个方向翻。
         var feedSwitchDir by remember { mutableIntStateOf(0) }
+        // 切视频进行中（正在加载下一个视频）：期间用封面+转圈覆盖，不显示黑色 Loading
+        var feedLoading by remember { mutableStateOf(false) }
         val screenHeightDp = LocalConfiguration.current.screenHeightDp
         val density = LocalDensity.current
         val feedScope = rememberCoroutineScope()
@@ -172,22 +220,21 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 ) { value, _ -> feedOffsetDp = value }
             }
         }
-        // 新视频加载完成后 bookUrl 才更新，此刻从反方向整屏滑入，接上抬手时的那段位移
+        // 新视频加载完成后 bookUrl 才更新；封面早已铺满整屏，原地接播即可，
+        // 不再做第二次「从底部滑入」动画，避免与滑出动画重复显得割裂
         LaunchedEffect(state.bookUrl) {
             val dir = feedSwitchDir
             if (dir != 0) {
                 feedSwitchDir = 0
-                feedOffsetDp = dir * screenHeightDp.toFloat()
-                animate(
-                    initialValue = feedOffsetDp,
-                    targetValue = 0f,
-                    animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
-                ) { value, _ -> feedOffsetDp = value }
+                feedLoading = false
+                feedOffsetDp = 0f
             }
         }
         // 切换失败（加载出错）时把画面滑回来，避免整块停在屏幕外看不见错误提示
         LaunchedEffect(state.error, state.fallbackFailed) {
             if ((state.error != null || state.fallbackFailed != null) && feedOffsetDp != 0f) {
+                feedLoading = false
+                feedSwitchDir = 0
                 animate(
                     initialValue = feedOffsetDp,
                     targetValue = 0f,
@@ -196,7 +243,9 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             }
         }
 
-        Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            // 播放器区域
+            Column(modifier = Modifier.fillMaxSize()) {
             // 播放器：全屏 = 占满；首页模式 = 压缩到顶部 240dp（实例不变）
             Box(
                 modifier = Modifier
@@ -208,13 +257,10 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             Modifier.weight(1f)
                         }
                     )
-                    .background(Color.Black)
-                    // 切视频时的跟手位移与翻页（0 时不影响正常布局）
+                    // 纯黑底（根 Box 已铺黑），加载/衔接无黑底闪动由播放器内部封面接管
                     .offset(y = feedOffsetDp.dp)
             ) {
                 when {
-                    state.loading -> LoadingContent()
-
                     state.error != null || state.fallbackFailed != null -> ErrorDialog(
                         message = state.error ?: state.fallbackFailed.orEmpty(),
                         onDismiss = {
@@ -255,9 +301,13 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             onOpenHome = { homeMode = true },
                             onFeedSwitch = if (state.feedEnabled) {
                                 { offset ->
-                                    // 记住方向（新视频就绪后据此从反方向滑入），
-                                    // 再把当前这部沿手指方向整屏滑出，然后才去加载下一部
+                                    // 先把当前这部沿手指方向整屏滑出（此间露出下一个视频封面，不黑屏），
+                                    // 滑出完成后再开始加载下一个视频；新视频就绪后封面已铺满，
+                                    // 直接原地接播、不再做第二次滑入动画（避免与滑出动画重复割裂）；
+                                    // 若已是列表首尾（无下一个），则滑回原位并复位。
                                     feedSwitchDir = offset
+                                    // 立刻用第二个（目标）视频的封面铺底，让滑动全程露出的都是即将播放的视频封面
+                                    SourceVideoPlayerSession.previewFeed(offset)
                                     feedScope.launch {
                                         animate(
                                             initialValue = feedOffsetDp,
@@ -267,8 +317,21 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                                                 easing = FastOutSlowInEasing,
                                             ),
                                         ) { value, _ -> feedOffsetDp = value }
+                                        if (SourceVideoPlayerSession.feedSwitch(offset)) {
+                                            feedLoading = true
+                                        } else {
+                                            feedLoading = false
+                                            feedSwitchDir = 0
+                                            animate(
+                                                initialValue = feedOffsetDp,
+                                                targetValue = 0f,
+                                                animationSpec = tween(
+                                                    durationMillis = 220,
+                                                    easing = FastOutSlowInEasing,
+                                                ),
+                                            ) { value, _ -> feedOffsetDp = value }
+                                        }
                                     }
-                                    SourceVideoPlayerSession.feedSwitch(offset)
                                 }
                             } else {
                                 null
@@ -276,14 +339,15 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             onFeedDrag = if (state.feedEnabled) onFeedDrag else null,
                             onFeedCancel = if (state.feedEnabled) onFeedCancel else null,
                             coverUrl = state.coverUrl,
+                            sourceOrigin = state.coverOrigin,
                             bookUrl = state.bookUrl,
+                            coverDrawable = coverDrawable,
                             compactMode = homeMode,
                             onAddShelf = { SourceVideoPlayerSession.addToShelf() },
                         )
                     }
 
-                    // 白名单书源：没有剧集可渲染，正在等书源自己拉起播放器
-                    state.fallbackIndex != null -> LoadingContent()
+                    // 白名单书源：没有剧集可渲染，正在等书源自己拉起播放器（根封面 + 下方转圈层已覆盖）
                 }
             }
 
@@ -292,6 +356,20 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                     state = state,
                     onExpand = { homeMode = false },
                 )
+            }
+            }
+            // 加载/解析/切换中转圈：根 Box 已铺黑底，无黑屏闪动
+            if (state.loading || feedLoading || state.fallbackIndex != null) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
             }
         }
     }
@@ -1021,20 +1099,6 @@ private fun DownloadStateItem(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun LoadingContent() {
-    Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black),
-        contentAlignment = Alignment.Center
-    ) {
-        CircularProgressIndicator(
-            color = Color.White,
-            strokeWidth = 3.dp,
-            modifier = Modifier.size(40.dp)
-        )
     }
 }
 

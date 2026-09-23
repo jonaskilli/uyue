@@ -9,7 +9,6 @@ import android.view.SubMenu
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.widget.PopupMenu
-import androidx.appcompat.widget.SearchView
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -21,8 +20,8 @@ import io.legado.app.data.entities.TtsScript
 import io.legado.app.databinding.ActivityTtsScriptBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.help.MiyueKeyManager
 import io.legado.app.lib.theme.primaryColor
-import io.legado.app.lib.theme.primaryTextColor
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.widget.SelectActionBar
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
@@ -30,7 +29,6 @@ import io.legado.app.ui.widget.recycler.ItemTouchCallback
 import io.legado.app.ui.widget.recycler.VerticalDivider
 import io.legado.app.utils.GSON
 import io.legado.app.utils.StringUtils
-import io.legado.app.utils.applyTint
 import io.legado.app.utils.readText
 import io.legado.app.utils.sendToClip
 import io.legado.app.utils.setEdgeEffectColor
@@ -47,7 +45,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptViewModel>(),
-    SearchView.OnQueryTextListener,
     PopupMenu.OnMenuItemClickListener,
     SelectActionBar.CallBack,
     TtsScriptAdapter.CallBack {
@@ -55,9 +52,6 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
     override val binding by viewBinding(ActivityTtsScriptBinding::inflate)
     override val viewModel by viewModels<TtsScriptViewModel>()
     private val adapter by lazy { TtsScriptAdapter(this, this) }
-    private val searchView: SearchView by lazy {
-        binding.titleBar.findViewById(R.id.search_view)
-    }
     private var scriptFlowJob: Job? = null
     private var dataInit = false
 
@@ -102,7 +96,7 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         initRecyclerView()
-        initSearchView()
+        initKeyManageView()
         initSelectActionView()
         observeScriptData()
     }
@@ -126,10 +120,16 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
         ItemTouchHelper(itemTouchCallback).attachToRecyclerView(binding.recyclerView)
     }
 
-    private fun initSearchView() {
-        searchView.applyTint(primaryTextColor)
-        searchView.queryHint = getString(R.string.tts_script_search)
-        searchView.setOnQueryTextListener(this)
+    /**
+     * 顶部密钥管理入口：与「角色管理」页的保存密钥 / 恢复密钥完全同一套实现。
+     */
+    private fun initKeyManageView() {
+        binding.btnSaveKey.setOnClickListener {
+            MiyueKeyManager.saveKey(this)
+        }
+        binding.btnRestoreKey.setOnClickListener {
+            MiyueKeyManager.restoreKey(this)
+        }
     }
 
     override fun selectAll(selectAll: Boolean) {
@@ -202,15 +202,6 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
                 )
             }
         }
-        return false
-    }
-
-    override fun onQueryTextChange(newText: String?): Boolean {
-        observeScriptData(newText)
-        return false
-    }
-
-    override fun onQueryTextSubmit(query: String?): Boolean {
         return false
     }
 

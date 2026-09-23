@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.view.ViewGroup
@@ -113,7 +114,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import com.bumptech.glide.Glide
+import com.bumptech.glide.request.RequestOptions
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.glide.ImageLoader
+import io.legado.app.help.glide.OkHttpModelLoader
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.constant.AppLog
 import io.legado.app.help.video.VideoCache
@@ -227,8 +231,12 @@ fun FullscreenVideoPlayer(
     onFeedCancel: (() -> Unit)? = null,
     // 书籍封面：加载/解析时铺底显示，快速切换时可辨认视频
     coverUrl: String = "",
+    // 封面所属书源 origin：与列表一致的图片缓存 key，避免封面重新联网拉取黑屏
+    sourceOrigin: String = "",
     // 当前书籍地址：无缝切换交接池的键之一
     bookUrl: String = "",
+    // 预加载好的封面 drawable：同步铺到播放器内部封面，避免解析↔缓冲交界那 1 帧黑屏
+    coverDrawable: Drawable? = null,
     // 首页压缩模式：视频区固定高度、强制竖屏、显示系统栏（同一播放器实例，不销毁）
     compactMode: Boolean = false,
     // 加入书架（null 则不显示按钮）
@@ -416,7 +424,7 @@ fun FullscreenVideoPlayer(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+    Box(modifier = Modifier.fillMaxSize()) {
         VerticalPager(
             state = pagerState,
             modifier = Modifier.fillMaxSize(),
@@ -456,8 +464,13 @@ fun FullscreenVideoPlayer(
                 onFeedDrag = onFeedDrag,
                 onFeedCancel = onFeedCancel,
                 coverUrl = coverUrl,
+                sourceOrigin = sourceOrigin,
                 bookUrl = bookUrl,
+                coverDrawable = coverDrawable,
                 onAddShelf = onAddShelf,
+                // 首/末集：该方向没有集可切，竖滑改为切列表里的上一个/下一个视频
+                noPrevEpisode = page == 0 || videos.size <= 1,
+                noNextEpisode = page == videos.lastIndex || videos.size <= 1,
             )
         }
 
@@ -548,13 +561,19 @@ private fun VideoPage(
     onFeedDrag: ((Float) -> Unit)? = null,
     onFeedCancel: (() -> Unit)? = null,
     coverUrl: String = "",
+    sourceOrigin: String = "",
     bookUrl: String = "",
+    // 预加载好的封面 drawable：同步铺到播放器内部封面，避免解析↔缓冲交界那 1 帧黑屏
+    coverDrawable: Drawable? = null,
     onAddShelf: (() -> Unit)? = null,
+    // 播放顺序上前一集/后一集是否存在。为 false 时该方向的竖滑改为切换列表视频
+    noPrevEpisode: Boolean = false,
+    noNextEpisode: Boolean = false,
 ) {
     // 地址尚未解析出来（需要跑书源规则的源）：先占位，等外层补齐 uri 后这里会重新组合；
     // 但若交接池里有该集的播放器实例（大屏↔首页无缝切换），直接接管，不显示占位
     if (video.uri == Uri.EMPTY && !SharedPlayer.has(bookUrl, index)) {
-        PendingVideoPage(video = video, index = index, total = total, seriesTitle = seriesTitle)
+        PendingVideoPage(video = video, index = index, total = total, seriesTitle = seriesTitle, coverUrl = coverUrl, sourceOrigin = sourceOrigin)
         return
     }
     VideoPlayerPage(
@@ -583,7 +602,10 @@ private fun VideoPage(
         onFeedCancel = onFeedCancel,
         coverUrl = coverUrl,
         bookUrl = bookUrl,
+        coverDrawable = coverDrawable,
         onAddShelf = onAddShelf,
+        noPrevEpisode = noPrevEpisode,
+        noNextEpisode = noNextEpisode,
     )
 }
 
@@ -676,13 +698,14 @@ private fun PendingVideoPage(
     total: Int,
     seriesTitle: String?,
     coverUrl: String = "",
+    sourceOrigin: String = "",
 ) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
         // 封面铺底：快速切换时一眼认出这是哪部视频
-        CoverBackdrop(coverUrl = coverUrl, modifier = Modifier.fillMaxSize())
+        CoverBackdrop(coverUrl = coverUrl, sourceOrigin = sourceOrigin, modifier = Modifier.fillMaxSize())
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp)
             Spacer(Modifier.height(12.dp))
@@ -703,6 +726,8 @@ internal fun VideoPlayerPage(
     index: Int,
     total: Int,
     active: Boolean,
+    noPrevEpisode: Boolean = false,
+    noNextEpisode: Boolean = false,
     startPosition: Long,
     onPositionSave: (Long) -> Unit,
     onProgressChange: ((index: Int, positionMs: Long) -> Unit)?,
@@ -723,7 +748,10 @@ internal fun VideoPlayerPage(
     onFeedDrag: ((Float) -> Unit)? = null,
     onFeedCancel: (() -> Unit)? = null,
     coverUrl: String = "",
+    sourceOrigin: String = "",
     bookUrl: String = "",
+    // 预加载好的封面 drawable：同步铺到内部封面，避免解析↔缓冲交界那 1 帧黑屏
+    coverDrawable: Drawable? = null,
     onAddShelf: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -909,7 +937,6 @@ internal fun VideoPlayerPage(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
     ) {
         // 视频首帧缩略图：垫在 PlayerView 之下。
         // 非当前页没有 PlayerView，用它做占位；当前页则覆盖 SurfaceView 就绪前的黑帧。
@@ -947,7 +974,10 @@ internal fun VideoPlayerPage(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(video.uri, onFeedSwitch, onFeedDrag, onFeedCancel) {
+                    .pointerInput(
+                        video.uri, onFeedSwitch, onFeedDrag, onFeedCancel,
+                        noPrevEpisode, noNextEpisode,
+                    ) {
                         detectPlayerGestures(
                             onTap = { showControls = !showControls },
                             onDoubleTap = { x ->
@@ -975,7 +1005,9 @@ internal fun VideoPlayerPage(
                             onFeedSwitch = onFeedSwitch,
                             onFeedDrag = onFeedDrag,
                             onFeedCancel = onFeedCancel,
-                            singleEpisode = total <= 1,
+                            // 整部只有一集时两个方向都没有集可切
+                            noPrevEpisode = total <= 1 || noPrevEpisode,
+                            noNextEpisode = total <= 1 || noNextEpisode,
                         )
                     }
             )
@@ -983,7 +1015,12 @@ internal fun VideoPlayerPage(
 
         // 加载/缓冲时用书籍封面铺底（已开播出画面后不再显示）
         if (!started.value && errorText == null) {
-            CoverBackdrop(coverUrl = coverUrl, modifier = Modifier.fillMaxSize())
+            CoverBackdrop(
+                coverUrl = coverUrl,
+                sourceOrigin = sourceOrigin,
+                initialDrawable = coverDrawable,
+                modifier = Modifier.fillMaxSize()
+            )
         }
         if (buffering) {
             CircularProgressIndicator(
@@ -1584,8 +1621,10 @@ private suspend fun PointerInputScope.detectPlayerGestures(
     onFeedSwitch: ((Int) -> Unit)? = null,
     onFeedDrag: ((Float) -> Unit)? = null,
     onFeedCancel: (() -> Unit)? = null,
-    /** 当前视频只有一集：没有"上下集"可切，任意区域竖滑都改成切换上一个/下一个视频 */
-    singleEpisode: Boolean = false,
+    /** 播放顺序上前面没有集可切（第一集，或整部只有一集）：下滑改为切换列表里的上一个视频 */
+    noPrevEpisode: Boolean = false,
+    /** 播放顺序上后面没有集可切（最后一集，或整部只有一集）：上滑改为切换列表里的下一个视频 */
+    noNextEpisode: Boolean = false,
 ) {
     val slop = viewConfiguration.touchSlop
     val longPressTimeout = viewConfiguration.longPressTimeoutMillis
@@ -1622,9 +1661,7 @@ private suspend fun PointerInputScope.detectPlayerGestures(
         var accumDy = 0f
         // 右侧 20% 区域且存在列表：竖滑切换列表里的视频（不是切集），手势由本层消费。
         // 收窄到 20% 是为了减少误触：30% 时正常握持/调音量的落点常常落在区内。
-        // 只有一集时没有上下集可切，分页器本来也不会动，此时放开到整屏都能切视频。
-        val feedMode = onFeedSwitch != null &&
-            (down.position.x >= size.width * 0.8f || singleEpisode)
+        val inFeedZone = down.position.x >= size.width * 0.8f
 
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Main)
@@ -1638,8 +1675,13 @@ private suspend fun PointerInputScope.detectPlayerGestures(
                     seeking = true
                     onSeekStart()
                 } else if (abs(accumDy) > slop) {
-                    // 纵向滑动：交给外层分页器切换视频
+                    // 纵向滑动：默认交给外层分页器切集；
+                    // 但该方向已经没有集可切时（最后一集再上滑、第一集再下滑），
+                    // 分页器本来也不会动，这时整屏都改为切列表里的下一个/上一个视频。
                     verticalTaken = true
+                    val up = accumDy < 0
+                    val feedMode = onFeedSwitch != null &&
+                        (inFeedZone || (up && noNextEpisode) || (!up && noPrevEpisode))
                     if (feedMode) {
                         feedTaken = true
                         feedDragBase = accumDy
@@ -1731,7 +1773,13 @@ fun formatFileSize(bytes: Long): String {
  * 用 Glide 加载（与项目图片体系一致），URL 为空时退回纯黑。
  */
 @Composable
-internal fun CoverBackdrop(coverUrl: String, modifier: Modifier = Modifier) {
+internal fun CoverBackdrop(
+    coverUrl: String,
+    sourceOrigin: String? = null,
+    modifier: Modifier = Modifier,
+    /** 已预加载好的封面：传入则同步铺上，避免 SurfaceView「打洞」在异步刷上之前那 1 帧露出黑底 */
+    initialDrawable: Drawable? = null,
+) {
     if (coverUrl.isBlank()) {
         Box(modifier = modifier.background(Color.Black))
         return
@@ -1740,13 +1788,27 @@ internal fun CoverBackdrop(coverUrl: String, modifier: Modifier = Modifier) {
         factory = { ctx ->
             android.widget.ImageView(ctx).apply {
                 scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                if (initialDrawable != null) setImageDrawable(initialDrawable)
             }
         },
         update = { view ->
-            com.bumptech.glide.Glide.with(view)
-                .load(coverUrl)
-                .fitCenter()
-                .into(view)
+            if (initialDrawable != null) {
+                // 已用预加载的同步底图铺好：跳过异步加载，否则 Glide 会先清空再重_load，
+                // 反而又制造一帧空封面 → 黑底闪动
+                if (view.drawable != initialDrawable) view.setImageDrawable(initialDrawable)
+            } else {
+                // 与搜索/发现列表完全相同的图片加载链路（同一 ImageLoader + 书源 origin 头 + 共享缓存），
+                // 列表已加载过的封面直接命中缓存、瞬间显示，不再重新联网拉取而露出黑底
+                var options = RequestOptions()
+                    .set(OkHttpModelLoader.loadOnlyWifiOption, AppConfig.loadCoverOnlyWifi)
+                if (!sourceOrigin.isNullOrBlank()) {
+                    options = options.set(OkHttpModelLoader.sourceOriginOption, sourceOrigin)
+                }
+                ImageLoader.load(view.context, coverUrl)
+                    .apply(options)
+                    .fitCenter()
+                    .into(view)
+            }
         },
         modifier = modifier
     )

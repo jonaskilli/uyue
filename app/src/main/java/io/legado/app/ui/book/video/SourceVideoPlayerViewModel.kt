@@ -43,6 +43,8 @@ data class SourceVideoPlayerUiState(
     val feedEnabled: Boolean = false,
     /** 书籍封面：加载/解析时铺底显示，便于快速切换时辨认视频 */
     val coverUrl: String = "",
+    /** 封面所属书源 origin：用于与列表一致的图片缓存 key，避免封面重新联网拉取导致黑屏 */
+    val coverOrigin: String = "",
     /**
      * 剧集列表。uri 为 [Uri.EMPTY] 表示这一集的地址还没解析出来，
      * 播放器会先显示占位，滚到/点到它时才真正去解析。
@@ -219,6 +221,17 @@ object SourceVideoPlayerSession {
     }
 
     fun load(bookUrl: String, startIndex: Int) {
+        // 乐观铺底：书库/搜索缓存里通常已有该视频的封面（本地元数据，无需联网），
+        // 让解析/加载期间显示封面+转圈，而不是纯黑屏
+        val bookInDb = appDb.bookDao.getBook(bookUrl)
+        val searchBook = appDb.searchBookDao.getSearchBook(bookUrl)
+        val incoming = bookInDb ?: searchBook?.toBook()
+        val incomingOrigin = bookInDb?.origin ?: searchBook?.origin
+        incoming?.coverUrl?.let { cover ->
+            if (cover.isNotBlank()) {
+                _uiState.update { s -> s.copy(coverUrl = cover, coverOrigin = incomingOrigin ?: "") }
+            }
+        }
         // 同一本书且剧集已就绪（退出后再打开）：同步索引并重置解析结果。
         // 关键点：重新进入必须把上次的直链/网页地址清空、重新解析，
         // 否则带时效的 token 失效、网络波动等造成的"播放错误"会被记住，
@@ -311,6 +324,7 @@ object SourceVideoPlayerSession {
                     currentIndex = startIndex.coerceIn(0, chapters.lastIndex),
                     feedEnabled = feedEnabled,
                     coverUrl = book.coverUrl ?: "",
+                    coverOrigin = book.origin,
                     fallbackIndex = startIndex.coerceIn(0, chapters.lastIndex),
                 )
             }
@@ -345,6 +359,7 @@ object SourceVideoPlayerSession {
                 currentIndex = index,
                 feedEnabled = feedEnabled,
                 coverUrl = book.coverUrl ?: "",
+                coverOrigin = book.origin,
                 episodes = episodes,
                 startIndex = index,
                 startPositionMs = book.durChapterPos.toLong().coerceAtLeast(0),
@@ -601,19 +616,51 @@ object SourceVideoPlayerSession {
      * 重新走 load 流程（新书籍的目录需要联网拉取）；上一个视频若还留在
      * SharedPlayer 交接池里，可无缝接管继续播。
      */
-    fun feedSwitch(offset: Int) {
-        val feed = feed ?: return
+    /** 计算竖滑切到的目标视频 URL（无有效目标返回 null） */
+    private fun resolveFeedTarget(offset: Int): String? {
+        val feed = feed ?: return null
         val urls = feed.urls()
-        val currentUrl = book?.bookUrl ?: return
+        val currentUrl = book?.bookUrl ?: return null
         val pos = urls.indexOf(currentUrl)
-        if (pos < 0) return
-        val next = pos + offset
-        val url = urls.getOrNull(next) ?: run {
+        if (pos < 0) return null
+        return urls.getOrNull(pos + offset)
+    }
+
+    /** 切视频前先乐观地把目标（第二个）视频封面设为铺底：本地书库/搜索缓存即可取到，无需联网，
+     *  让滑动全程露出的都是即将播放的视频封面，而非第一个视频的封面；
+     *  返回是否存在有效目标（无则已是列表首尾）。 */
+    fun previewFeed(offset: Int): Boolean {
+        val url = resolveFeedTarget(offset) ?: return false
+        val bookInDb = appDb.bookDao.getBook(url)
+        val searchBook = appDb.searchBookDao.getSearchBook(url)
+        val incoming = bookInDb ?: searchBook?.toBook()
+        val incomingOrigin = bookInDb?.origin ?: searchBook?.origin
+        incoming?.coverUrl?.let { cover ->
+            if (cover.isNotBlank()) {
+                _uiState.update { s -> s.copy(coverUrl = cover, coverOrigin = incomingOrigin ?: "") }
+            }
+        }
+        return true
+    }
+
+    fun feedSwitch(offset: Int): Boolean {
+        val url = resolveFeedTarget(offset) ?: run {
             appCtx.toastOnUi(
                 if (offset > 0) "已经是列表最后一个" else "已经是列表第一个"
             )
-            return
+            return false
         }
-        load(url, feed.startIndexOf(url))
+        // 目标封面已在 previewFeed 中铺底；这里再保险设一次（如跳过 previewFeed 直接调用时）
+        val bookInDb = appDb.bookDao.getBook(url)
+        val searchBook = appDb.searchBookDao.getSearchBook(url)
+        val incoming = bookInDb ?: searchBook?.toBook()
+        val incomingOrigin = bookInDb?.origin ?: searchBook?.origin
+        incoming?.coverUrl?.let { cover ->
+            if (cover.isNotBlank()) {
+                _uiState.update { s -> s.copy(coverUrl = cover, coverOrigin = incomingOrigin ?: "") }
+            }
+        }
+        load(url, feed?.startIndexOf(url) ?: 0)
+        return true
     }
 }

@@ -1494,4 +1494,6 @@
     <string name="searching">搜索中…</string>
     <string name="search_video_empty">没有找到相关视频</string>
     <string name="ai_clear_source_history">清除网址记录</string>
+    <string name="ai_set_api">设置 AI 接口</string>
+    <string name="ai_set_api_hint">接口@@模型@@密钥（3 段一组，可多组追加轮换）</string>
 </resources>

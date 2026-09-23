@@ -197,7 +197,7 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                         currentIndex = state.currentIndex,
                         onAddShelf = { SourceVideoPlayerSession.addToShelf() },
                         onPickEpisode = { index -> playEpisodeInPlace(index) },
-                        onClearCache = { clearCacheAndReload() },
+                        onClearCache = { clearPlayCache() },
                         fullscreen = fullScreenState,
                         onToggleFullScreen = { toggleFullScreen() },
                     )
@@ -326,7 +326,6 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
             }
 
             R.id.menu_full_screen -> toggleFullScreen()
-            R.id.menu_clear_cache -> clearCacheAndReload()
             R.id.menu_show_web_log -> {
                 sessionShowWebLog = !sessionShowWebLog
                 item.isChecked = sessionShowWebLog
@@ -361,27 +360,11 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
         putPrefBoolean(PreferKey.browserFullScreen, next)
     }
 
-    /** 403/401 时自动清缓存重开，只做一次，避免失效源反复重试 */
-    private var autoClearedOnError = false
-    /** WebView 是否已归还池（防重复释放） */
-    private var webViewReleased = false
-    /** 上次滑动切集/切视频的时间：连续快滑时丢掉过密的请求 */
-    private var lastSwitchAt = 0L
-
     /**
-     * 清除本页缓存并重开。
-     *
-     * 合成认证/登录态失效后，站点常把它缓存成 403 页面（openresty 那种
-     * "403 Forbidden … Hit-status"），之后怎么刷新都是同一张错误页。
-     * 这里清掉 WebView 缓存与该站点的 cookie，让页面重新走一次认证，然后重新加载。
+     * 删除内置播放器（WebView）与当前视频播放相关的缓存：WebView 缓存 + 当前站点 cookie。
+     * 仅清缓存，不重建播放页、不弹提示。
      */
-    private fun clearCacheAndReload() {
-        // 先放开全局定时器：若之前有 Activity 把进程留在"全局暂停"状态，
-        // 所有 WebView 都不会加载，光清缓存没用，这一步能把白屏直接救回来
-        runCatching {
-            currentWebView.resumeTimers()
-            currentWebView.onResume()
-        }
+    private fun clearPlayCache() {
         runCatching { currentWebView.clearCache(true) }
         // cookie 里过期的认证信息同样是 403 的常见来源，一并清掉触发重新认证
         runCatching {
@@ -399,10 +382,13 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                 }
             }
         }
-        // 缓存与 cookie 都清掉后重新加载，让页面重新走一次认证
-        currentWebView.reload()
-        toastOnUi("已清除缓存并重开")
     }
+
+    /** WebView 是否已归还池（防重复释放） */
+    private var webViewReleased = false
+    /** 上次滑动切集/切视频的时间：连续快滑时丢掉过密的请求 */
+    private var lastSwitchAt = 0L
+
 
 
 
@@ -635,25 +621,6 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
     }
 
     inner class CustomWebViewClient : WebViewClient() {
-
-        /**
-         * 主文档返回 401/403：多半是认证过期后被缓存住了，自动清一次缓存重开。
-         * 只自动重试一次，源本身失效时不再反复刷新。
-         */
-        override fun onReceivedHttpError(
-            view: WebView?,
-            request: WebResourceRequest?,
-            errorResponse: WebResourceResponse?,
-        ) {
-            super.onReceivedHttpError(view, request, errorResponse)
-            val code = errorResponse?.statusCode ?: return
-            if (code != 403 && code != 401) return
-            if (request?.isForMainFrame != true) return
-            if (autoClearedOnError) return
-            autoClearedOnError = true
-            AppLog.put("[内置播放器] 主文档返回 $code，自动清缓存重开")
-            clearCacheAndReload()
-        }
 
         override fun shouldOverrideUrlLoading(
             view: WebView?,
@@ -984,7 +951,8 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
                     modifier = Modifier.size(22.dp)
                 )
             }
-            // 认证过期被缓存成 403 时用；全屏下顶栏菜单点不到，必须有这个入口
+
+            // 清除与当前视频播放相关的缓存（WebView 缓存 + 站点 cookie），不重建页面
             IconButton(
                 onClick = onClearCache,
                 modifier = Modifier
@@ -993,11 +961,12 @@ class WebViewActivity : VMBaseActivity<ActivityWebViewBinding, WebViewModel>() {
             ) {
                 Icon(
                     Icons.Filled.Delete,
-                    contentDescription = "清除缓存并重开",
+                    contentDescription = "清除播放器缓存",
                     tint = Color.White,
                     modifier = Modifier.size(22.dp)
                 )
             }
+
             // 全屏开关：点一下彻底去掉/恢复顶栏，并记住选择
             IconButton(
                 onClick = onToggleFullScreen,
