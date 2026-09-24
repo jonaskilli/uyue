@@ -25,8 +25,10 @@
         android:text="▾"
         android:textSize="14sp" />
 
-    <androidx.appcompat.widget.SwitchCompat
-        android:id="@+id/switch_enabled"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
+    <!-- 视频源总开关：三态指示圆（关闭=空心灰圆 / 开启=红色实心圆 / 部分开启=红圆内白色空心圆） -->
+    <io.legado.app.ui.main.video.SourceStateCircleView
+        android:id="@+id/state_view"
+        android:layout_width="26dp"
+        android:layout_height="26dp"
+        android:clickable="true" />
 </LinearLayout>

@@ -44,6 +44,17 @@ object VideoFeedStore {
     @Volatile
     private var feed: Feed? = null
 
+    /**
+     * 常驻 feed（无限刷专用）。
+     *
+     * [take] 是一次性的（取走即清空），进程被杀后 Activity 重建时会话里的列表也没了，
+     * 结果就是"无限刷退化成单视频、滑不动"。无限刷的列表由 [provider] 实时供给，
+     * 本就应该长期有效，所以这里额外留一份**不会被 take 清掉**的引用，
+     * 供播放器在任何时候重新挂上。
+     */
+    @Volatile
+    private var persistent: Feed? = null
+
     /** [currentBookUrl]：点击的那一条，用于记录起始位置 */
     fun put(
         provider: () -> List<String>,
@@ -54,6 +65,31 @@ object VideoFeedStore {
         val list = runCatching { provider() }.getOrDefault(emptyList())
         if (list.size < 2 || !list.contains(currentBookUrl)) return
         feed = Feed(provider, currentBookUrl, System.currentTimeMillis(), loadMore, startIndexOf, list)
+    }
+
+    /**
+     * 登记一条常驻 feed（无限刷）：不设过期、不被 [take] 清掉，
+     * 播放页任何时候都能用 [peekPersistent] 重新挂上。
+     */
+    fun putPersistent(
+        provider: () -> List<String>,
+        currentBookUrl: String,
+        loadMore: (() -> Unit)? = null,
+    ) {
+        val list = runCatching { provider() }.getOrDefault(emptyList())
+        if (list.isEmpty()) return
+        persistent = Feed(provider, currentBookUrl, System.currentTimeMillis(), loadMore, { 0 }, list)
+    }
+
+    /** 取用常驻 feed（列表里包含当前视频才有效） */
+    fun peekPersistent(bookUrl: String): Feed? {
+        val f = persistent ?: return null
+        return if (f.urls().contains(bookUrl)) f else null
+    }
+
+    /** 退出播放器时清掉常驻 feed：下次从分类/搜索进入都使用当时的列表 */
+    fun clearPersistent() {
+        persistent = null
     }
 
     /** 播放器消费：命中当前书籍且未过期才返回，无论是否命中都清空 */

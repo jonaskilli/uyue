@@ -311,7 +311,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         }
         // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）：只要处在有列表可切的
         // 场景（无限刷、发现页/搜索竖滑等），就自动切到下一个视频，而不是卡在坏链上。
-        LaunchedEffect(state.playbackError, state.feedEnabled) {
+        LaunchedEffect(state.playbackError, state.feedEnabled, infiniteSwipe) {
             val msg = state.playbackError ?: return@LaunchedEffect
             if (!state.feedEnabled) {
                 // 单视频没有下一个可切，清掉状态避免反复触发
@@ -319,7 +319,9 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 return@LaunchedEffect
             }
             val failedUrl = state.bookUrl
-            if (failedUrl.isNotBlank()) InfiniteSwipeFeed.markFailed(failedUrl)
+            // 只有无限刷才把坏视频永久拉黑：发现页/搜索页竖滑只是临时看看，
+            // 一次偶发 403/超时就把人家永久屏蔽，以后正常浏览再也刷不到（且换网络也回不来）
+            if (infiniteSwipe && failedUrl.isNotBlank()) InfiniteSwipeFeed.markFailed(failedUrl)
             consecutiveFails++
             if (consecutiveFails > 10) {
                 SourceVideoPlayerSession.clearError()

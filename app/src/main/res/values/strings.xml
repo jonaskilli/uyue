@@ -1434,6 +1434,7 @@
     <string name="video">视频</string>
     <string name="infinite_swipe">无限刷</string>
     <string name="infinite_swipe_no_source">没有可用的视频源</string>
+    <string name="infinite_swipe_no_source_selected">还没选择视频源，长按「无限刷」按钮选择要刷的书源</string>
     <string name="infinite_swipe_skip_failed">该视频失效，自动切换下一个</string>
     <string name="infinite_swipe_too_many_failed">连续多个视频失效，已退出无限刷</string>
     <string name="infinite_swipe_filter_title">无限刷 · 分类筛选</string>

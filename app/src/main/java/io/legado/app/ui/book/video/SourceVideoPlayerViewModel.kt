@@ -298,6 +298,11 @@ object SourceVideoPlayerSession {
     }
 
     fun load(bookUrl: String, startIndex: Int) {
+        // **必须在早退分支之前把"切换列表"挂上**。
+        // 重新进入播放器时若还是同一部视频（无限刷的续播列表第一条常常就是上次正在看的那条），
+        // 下面会走"剧集已就绪"的早退分支；feed 只在 loadInternal 里取的话就永远挂不上，
+        // 表现成"只有这一个视频，竖滑提示已经是列表最后一个"。
+        ensureFeed(bookUrl)
         // 乐观铺底：书库/搜索缓存里通常已有该视频的封面（本地元数据，无需联网），
         // 让解析/加载期间显示封面+转圈，而不是纯黑屏
         val bookInDb = appDb.bookDao.getBook(bookUrl)
@@ -334,11 +339,17 @@ object SourceVideoPlayerSession {
                     fallbackIndex = null,
                     fallbackLaunched = false,
                     fallbackFailed = null,
+                    // 早退分支没走 loadInternal，这里必须同步刷新"能否竖滑切换"，
+                    // 否则沿用上一次的旧值（要么该滑不能滑，要么能滑却提示最后一个）
+                    feedEnabled = (feed?.urls()?.size ?: 0) > 1,
                     currentIndex = idx,
                     startIndex = idx,
                     startPositionMs = book?.durChapterPos?.toLong()?.coerceAtLeast(0) ?: 0L,
                 )
             }
+            // 列表刚挂上：立刻确认后续够不够、并预取下一个视频
+            ensureMore()
+            ensureNextVideoPrefetch()
             return
         }
         // 必须清掉上一部视频遗留的所有错误状态，否则失败一次后
@@ -364,15 +375,25 @@ object SourceVideoPlayerSession {
         }
     }
 
-    private suspend fun loadInternal(bookUrl: String, startIndex: Int) {
-        // 列表随时跟随来源：当前视频不在已记录列表中（换了分类/搜索），
-        // 就重新消费入口列表；在同一列表内切集/切换则沿用
-        if (feed?.urls()?.contains(bookUrl) != true) {
-            // take() 无论命中与否都会清空暂存，两次并发 load（如横竖屏重建）时
-            // 第二次拿到 null。这时**不能**把已有的 feed 覆盖成 null，
-            // 否则这一整轮都没有切换列表，预取下一部必然为空。
-            VideoFeedStore.take(bookUrl)?.let { feed = it }
+    /**
+     * 确保"切换列表"已挂到当前视频上：命中现有列表就沿用，否则依次尝试
+     * 一次性 feed（[VideoFeedStore.take]）与无限刷常驻 feed（[VideoFeedStore.peekPersistent]）。
+     */
+    private fun ensureFeed(bookUrl: String) {
+        if (feed?.urls()?.contains(bookUrl) == true) return
+        // take() 无论命中与否都会清空暂存，两次并发 load（如横竖屏重建）时
+        // 第二次拿到 null。这时**不能**把已有的 feed 覆盖成 null，
+        // 否则这一整轮都没有切换列表，预取下一部必然为空。
+        VideoFeedStore.take(bookUrl)?.let { feed = it }
+        // 一次性 feed 已被取走（进程被杀后重建、或并发 load 抢先消费）：
+        // 无限刷登记过常驻 feed，这里重新挂上，避免退化成"单视频、滑不动"
+        if (feed == null) {
+            VideoFeedStore.peekPersistent(bookUrl)?.let { feed = it }
         }
+    }
+
+    private suspend fun loadInternal(bookUrl: String, startIndex: Int) {
+        ensureFeed(bookUrl)
         val feedEnabled = (feed?.urls()?.size ?: 0) > 1
         val book = appDb.bookDao.getBook(bookUrl)
             // 竖滑切到的视频可能还没入库：从搜索缓存转正并插入书库（带 notShelf：不自动上书架）
@@ -855,8 +876,10 @@ object SourceVideoPlayerSession {
     private fun ensureMore() {
         val f = feed ?: return
         val urls = f.urls()
-        val cur = book?.bookUrl?.let { urls.indexOf(it) } ?: return
-        if (urls.isEmpty() || cur + 2 >= urls.size) {
+        val cur = book?.bookUrl?.let { urls.indexOf(it) } ?: -1
+        // 当前视频不在列表里（列表刚被换掉）也按"到底了"处理，立即补货；
+        // 剩余不足 5 条就开始补，不再等到只剩最后 2 条才补（补货要联网，来不及）
+        if (cur < 0 || urls.size - cur - 1 < 5) {
             f.loadMore?.invoke()
         }
     }
@@ -864,6 +887,7 @@ object SourceVideoPlayerSession {
     /** 退出播放器时清空切换列表：下次从任意分类/搜索进入都使用当时的列表 */
     fun clearFeed() {
         feed = null
+        VideoFeedStore.clearPersistent()
         prefetchedNext = null
         prefetchJob?.cancel()
         prefetchJob = null

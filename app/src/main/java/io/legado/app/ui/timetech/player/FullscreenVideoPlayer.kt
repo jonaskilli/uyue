@@ -862,11 +862,11 @@ internal fun VideoPlayerPage(
     val started = remember(video.uri) { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
-    // 切到新视频 / 正在缓冲准备播放时，顶部标题短暂显示 2 秒，方便确认当前看的是哪个视频
+    // 切到新视频 / 正在缓冲准备播放时，顶部标题显示 6 秒，方便确认当前看的是哪个视频
     var showTitleHint by remember { mutableStateOf(false) }
     LaunchedEffect(video.uri) {
         showTitleHint = true
-        delay(2000)
+        delay(6000)
         showTitleHint = false
     }
 
@@ -1127,7 +1127,7 @@ internal fun VideoPlayerPage(
             )
         }
 
-        // 切视频 / 缓冲时顶部标题短暂提示 2 秒，方便确认当前看的是哪个视频
+        // 切视频 / 缓冲时顶部标题提示 6 秒，方便确认当前看的是哪个视频
         AnimatedVisibility(
             visible = showTitleHint,
             enter = fadeIn(),

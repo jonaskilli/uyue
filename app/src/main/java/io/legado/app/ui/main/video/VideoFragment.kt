@@ -33,6 +33,7 @@ import io.legado.app.help.book.addType
 import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.video.InfiniteSwipeFeed
+import io.legado.app.help.video.InfiniteSwipeFilter
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.backgroundColor
@@ -435,8 +436,11 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
     }
 
     /**
-     * 无限刷入口：后台随机混 5 个视频源的发现页分类（每分类 4 页），
-     * 组成混合列表喂给播放器；刷满 80 个后由 [InfiniteSwipeFeed] 在后台续接新批次。
+     * 无限刷入口：以"分类"为单位，随机挑 8 个视频源发现分类，每个分类先只抓 4 页，
+     * 够 15 条就先做成先行播放列表立刻开播；随后后台把每个分类的**全部页取完**，
+     * 取完再随机挑下一批分类继续取（只往前取，不回头、不循环），
+     * 并按水位（当前位置之后始终留 150 条可播）自动续接到播放列表尾部。
+     * 全部由 [InfiniteSwipeFeed] 负责。
      */
     private fun initInfiniteSwipe() {
         // 长按：打开分类筛选面板（每个视频源总开关 + 各分类开关），确认后开始无限刷
@@ -451,6 +455,12 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
 
     /** 按当前筛选配置执行无限刷（短按按钮、面板「开始无限刷」都会走到这里） */
     private fun startInfiniteSwipe() {
+        // 一个书源都没选过（全新安装默认全关 / 用户全关了）：
+        // 直接提示去长按按钮选源，别白跑一轮抓取、也不用干等超时
+        if (InfiniteSwipeFilter.hasNoEnabledSource()) {
+            toastOnUi(getString(R.string.infinite_swipe_no_source_selected))
+            return
+        }
         binding.fabInfiniteSwipe.isEnabled = false
         lifecycleScope.launch(IO) {
             var toastMsg: String? = null
@@ -460,6 +470,13 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
                     toastMsg = getString(R.string.infinite_swipe_no_source)
                 } else {
                     VideoFeedStore.put(
+                        provider = { InfiniteSwipeFeed.urls(SourceVideoPlayerSession.getBook()?.bookUrl) },
+                        currentBookUrl = first,
+                        loadMore = { InfiniteSwipeFeed.requestMore() }
+                    )
+                    // 常驻一份：进程被杀/页面重建后播放页能把这张动态列表重新挂回去，
+                    // 否则会退化成"只能播当前一个视频、竖滑切不动"
+                    VideoFeedStore.putPersistent(
                         provider = { InfiniteSwipeFeed.urls(SourceVideoPlayerSession.getBook()?.bookUrl) },
                         currentBookUrl = first,
                         loadMore = { InfiniteSwipeFeed.requestMore() }

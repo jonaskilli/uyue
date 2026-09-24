@@ -3,6 +3,7 @@ package io.legado.app.help.video
 import android.content.Context
 import android.net.Uri
 import android.os.Environment
+import android.widget.Toast
 import androidx.media3.common.C
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.AppPattern
@@ -1115,7 +1116,19 @@ object VideoDownloader {
     fun mergeToMp4(task: Task) {
         scope.launch {
             runCatching { mergeEpisode(task) }
-                .onFailure { AppLog.put("合并为 MP4 失败：${titleOf(task)}", it) }
+                .onSuccess { mp4 ->
+                    // 合并是在后台协程里跑的，界面上原本没有任何反馈：
+                    // 成功/无分片都弹一下，否则点完「合并为MP4」完全不知道结果
+                    if (mp4 != null) {
+                        appCtx.toastOnUi("已合并为 MP4：${mp4.name}", Toast.LENGTH_LONG)
+                    } else {
+                        appCtx.toastOnUi("合并失败：${titleOf(task)} 没有可合并的分片", Toast.LENGTH_LONG)
+                    }
+                }
+                .onFailure {
+                    AppLog.put("合并为 MP4 失败：${titleOf(task)}", it)
+                    appCtx.toastOnUi("合并失败：${titleOf(task)}", Toast.LENGTH_LONG)
+                }
         }
     }
 
