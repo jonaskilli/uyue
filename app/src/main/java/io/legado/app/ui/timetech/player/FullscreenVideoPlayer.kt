@@ -263,6 +263,9 @@ fun FullscreenVideoPlayer(
     // 当前正在播放的播放器实例（由 VideoPlayerPage 在成为当前页时上报），
     // 供 Activity 层的 MediaSession / 通知栏控制真正的播放器。
     activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
+    // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）回调。
+    // 上层据此在可切换列表的场景自动跳到下一个视频。
+    onPlaybackError: ((PlaybackException) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -508,6 +511,7 @@ fun FullscreenVideoPlayer(
                 coverDrawable = coverDrawable,
                 onAddShelf = onAddShelf,
                 activePlayer = activePlayer,
+                onPlaybackError = onPlaybackError,
                 // 首/末集：该方向没有集可切，竖滑改为切列表里的上一个/下一个视频
                 noPrevEpisode = page == 0 || videos.size <= 1,
                 noNextEpisode = page == videos.lastIndex || videos.size <= 1,
@@ -624,6 +628,8 @@ private fun VideoPage(
     onAddShelf: (() -> Unit)? = null,
     // 当前正在播放的播放器实例，透传给 VideoPlayerPage 上报给 Activity
     activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
+    // 播放阶段出错回调，透传给 VideoPlayerPage
+    onPlaybackError: ((PlaybackException) -> Unit)? = null,
     // 播放顺序上前一集/后一集是否存在。为 false 时该方向的竖滑改为切换列表视频
     noPrevEpisode: Boolean = false,
     noNextEpisode: Boolean = false,
@@ -663,6 +669,7 @@ private fun VideoPage(
         coverDrawable = coverDrawable,
         onAddShelf = onAddShelf,
         activePlayer = activePlayer,
+        onPlaybackError = onPlaybackError,
         noPrevEpisode = noPrevEpisode,
         noNextEpisode = noNextEpisode,
     )
@@ -819,6 +826,8 @@ internal fun VideoPlayerPage(
     onAddShelf: (() -> Unit)? = null,
     // 当前正在播放的播放器实例（由本页在成为当前页 active 时上报给 Activity）
     activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
+    // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）回调
+    onPlaybackError: ((PlaybackException) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     // 播放器的监听在整个页面存活期间只注册一次，用 updatedState 保证它读到的是最新的回调，
@@ -853,6 +862,14 @@ internal fun VideoPlayerPage(
     val started = remember(video.uri) { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
+    // 切到新视频 / 正在缓冲准备播放时，顶部标题短暂显示 2 秒，方便确认当前看的是哪个视频
+    var showTitleHint by remember { mutableStateOf(false) }
+    LaunchedEffect(video.uri) {
+        showTitleHint = true
+        delay(2000)
+        showTitleHint = false
+    }
+
     // 进入播放后默认隐藏控制条，点一下屏幕才显示
     var showControls by remember { mutableStateOf(false) }
     var locked by remember { mutableStateOf(false) }
@@ -886,6 +903,8 @@ internal fun VideoPlayerPage(
                 }
                 errorText = error.message ?: "播放失败"
                 AppLog.put("视频播放失败：${video.name}", error)
+                // 上报播放错误，交由上层在有列表可切时自动跳到下一个视频
+                onPlaybackError?.invoke(error)
             }
 
             override fun onVideoSizeChanged(size: VideoSize) {
@@ -1107,6 +1126,32 @@ internal fun VideoPlayerPage(
                 modifier = Modifier.fillMaxSize()
             )
         }
+
+        // 切视频 / 缓冲时顶部标题短暂提示 2 秒，方便确认当前看的是哪个视频
+        AnimatedVisibility(
+            visible = showTitleHint,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .safeTop()
+                .padding(top = 8.dp)
+        ) {
+            Surface(
+                color = Color.Black.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text(
+                    episodeTitle(seriesTitle, video.name, index, total),
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                )
+            }
+        }
+
         if (buffering) {
             CircularProgressIndicator(
                 color = Color.White,
@@ -1933,7 +1978,21 @@ internal fun CoverBackdrop(
     }
     AndroidView(
         factory = { ctx ->
-            android.widget.ImageView(ctx).apply {
+            object : android.widget.ImageView(ctx) {
+                override fun onDraw(canvas: android.graphics.Canvas) {
+                    val d = drawable
+                    // 兜底：封面 bitmap 已被图片框架回收（如切视频时旧封面释放），
+                    // 若仍被绘制会抛「Canvas: trying to use a recycled bitmap」。这里跳过绘制，
+                    // 露出下方黑底，等封面重新加载即可，避免崩溃。
+                    if (d is android.graphics.drawable.BitmapDrawable
+                        && d.bitmap?.isRecycled == true
+                    ) {
+                        super.setImageDrawable(null)
+                        return
+                    }
+                    super.onDraw(canvas)
+                }
+            }.apply {
                 scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
                 if (initialDrawable != null) setImageDrawable(initialDrawable)
             }

@@ -32,6 +32,7 @@ import io.legado.app.databinding.FragmentVideoBinding
 import io.legado.app.help.book.addType
 import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.video.InfiniteSwipeFeed
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.backgroundColor
@@ -44,6 +45,7 @@ import io.legado.app.ui.book.search.SearchScope
 import io.legado.app.ui.book.search.SearchAdapter
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.book.video.SourceVideoPlayerActivity
+import io.legado.app.ui.book.video.SourceVideoPlayerSession
 import io.legado.app.ui.book.video.VideoDownloadActivity
 import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.main.explore.ExploreAdapter
@@ -113,6 +115,7 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         initRecyclerView()
         upVideoData()
         initSearchObserve()
+        initInfiniteSwipe()
     }
 
     override fun onPause() {
@@ -427,6 +430,58 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
             }.onFailure {
                 AppLog.put("打开搜索结果失败\n${it.localizedMessage}", it)
                 toastOnUi(it.localizedMessage ?: "打开失败")
+            }
+        }
+    }
+
+    /**
+     * 无限刷入口：后台随机混 5 个视频源的发现页分类（每分类 4 页），
+     * 组成混合列表喂给播放器；刷满 80 个后由 [InfiniteSwipeFeed] 在后台续接新批次。
+     */
+    private fun initInfiniteSwipe() {
+        // 长按：打开分类筛选面板（每个视频源总开关 + 各分类开关），确认后开始无限刷
+        binding.fabInfiniteSwipe.setOnLongClickListener {
+            InfiniteSwipeFilterDialog { startInfiniteSwipe() }
+                .show(childFragmentManager, "infinite_swipe_filter")
+            true
+        }
+        // 短按：按当前筛选配置直接开始无限刷
+        binding.fabInfiniteSwipe.setOnClickListener { startInfiniteSwipe() }
+    }
+
+    /** 按当前筛选配置执行无限刷（短按按钮、面板「开始无限刷」都会走到这里） */
+    private fun startInfiniteSwipe() {
+        binding.fabInfiniteSwipe.isEnabled = false
+        lifecycleScope.launch(IO) {
+            var toastMsg: String? = null
+            try {
+                val first = InfiniteSwipeFeed.prepareFirst()
+                if (first == null) {
+                    toastMsg = getString(R.string.infinite_swipe_no_source)
+                } else {
+                    VideoFeedStore.put(
+                        provider = { InfiniteSwipeFeed.urls(SourceVideoPlayerSession.getBook()?.bookUrl) },
+                        currentBookUrl = first,
+                        loadMore = { InfiniteSwipeFeed.requestMore() }
+                    )
+                    withContext(Dispatchers.Main) {
+                        startActivity(
+                            SourceVideoPlayerActivity.createIntent(
+                                requireContext(),
+                                first,
+                                0,
+                                infiniteSwipe = true
+                            )
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                AppLog.put("准备无限刷失败\n${e.localizedMessage}", e)
+                toastMsg = e.localizedMessage ?: "准备失败"
+            }
+            withContext(Dispatchers.Main) {
+                binding.fabInfiniteSwipe.isEnabled = true
+                toastMsg?.let { toastOnUi(it) }
             }
         }
     }

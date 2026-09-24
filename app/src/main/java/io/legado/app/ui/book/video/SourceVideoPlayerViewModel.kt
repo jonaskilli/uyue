@@ -63,6 +63,9 @@ data class SourceVideoPlayerUiState(
     /** 书源配置的请求头，m3u8 与分片普遍要校验 UA/Referer */
     val headers: Map<String, String> = emptyMap(),
     val error: String? = null,
+    /** 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等），
+     *  有列表可切（feedEnabled）时由上层自动切到下一个视频 */
+    val playbackError: String? = null,
     /** 这一集解析不出直链，需要退回书源自带的播放器 */
     val fallbackIndex: Int? = null,
     /** 书源播放器已拉起，页面可以关闭了 */
@@ -344,6 +347,7 @@ object SourceVideoPlayerSession {
             it.copy(
                 loading = true,
                 error = null,
+                playbackError = null,
                 fallbackIndex = null,
                 fallbackLaunched = false,
                 fallbackFailed = null,
@@ -801,7 +805,20 @@ object SourceVideoPlayerSession {
 
     /** 清空会话中的错误状态（错误框关闭时调用，避免旧错误污染后续视频） */
     fun clearError() {
-        _uiState.update { it.copy(error = null, fallbackFailed = null) }
+        _uiState.update { it.copy(error = null, fallbackFailed = null, playbackError = null) }
+    }
+
+    /** 记录播放阶段出错（ExoPlayer 报错），交由上层在可切换列表时自动跳下一个视频 */
+    fun setPlaybackError(msg: String?) {
+        _uiState.update { it.copy(playbackError = msg) }
+    }
+
+    /**
+     * 无限刷模式用：不拉起书源自带播放器，直接跳过该视频（清掉回退标志）。
+     * 与 [clearError] 一起把"需要回退/失败"的状态复位，交给上层自动切下一个视频。
+     */
+    fun skipFallback() {
+        _uiState.update { it.copy(fallbackIndex = null, fallbackLaunched = false, fallbackFailed = null) }
     }
 
     /** 加入书架：清除 notShelf 标记（看过的视频默认不上书架，仅此入口手动添加） */

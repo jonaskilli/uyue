@@ -72,6 +72,7 @@ import io.legado.app.R
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.help.video.VideoFeedStore
+import io.legado.app.help.video.InfiniteSwipeFeed
 import io.legado.app.ui.timetech.player.EpisodeItem
 import io.legado.app.ui.timetech.player.FullscreenVideoPlayer
 import io.legado.app.ui.timetech.player.LocalVideo
@@ -239,6 +240,16 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         var homeMode by remember {
             mutableStateOf(intent.getBooleanExtra("homeMode", false))
         }
+        // infiniteSwipe：无限刷模式（来自视频发现页的「无限刷」按钮）。
+        // 该模式下所有视频都用时光播放器播放；解析/播放失败或需书源自带播放器时，
+        // 不弹错误退出，而是自动切到下一个视频。
+        var infiniteSwipe by remember {
+            mutableStateOf(intent.getBooleanExtra("infiniteSwipe", false))
+        }
+        // 连续失败计数：超过阈值（10）仍全是失效视频则退出，避免死循环
+        var consecutiveFails by remember { mutableIntStateOf(0) }
+        // 失败切换冷却：避免解析/播放失败时瞬间狂跳，把一整批视频在零点几秒内全跳过
+        var lastSkipMs by remember { mutableStateOf(0L) }
 
         // 播放顺序（显示顺序）：videos 的下标序列，分页第 page 页播 videos[playOrder[page]]。
         // 提升到 Activity 层，让「选集面板」与「主页下方目录」共用同一份顺序，
@@ -256,10 +267,88 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             )
         }
 
-        // 这一集拿不到直链：交给书源自己的播放器
+        // 这一集拿不到直链：交给书源自己的播放器（无限刷模式下不拉起，改由下面的失败自动切换处理）
         LaunchedEffect(state.fallbackIndex) {
             val index = state.fallbackIndex ?: return@LaunchedEffect
+            if (infiniteSwipe) return@LaunchedEffect
             SourceVideoPlayerSession.playWithSourcePlayer(index)
+        }
+        // 无限刷模式：解析/播放失败、或需要书源自带播放器时，不弹错误、不退出，
+        // 自动切到下一个视频；连续过多失效才真正退出（防死循环）。
+        LaunchedEffect(
+            state.error,
+            state.fallbackFailed,
+            state.fallbackIndex,
+            infiniteSwipe,
+        ) {
+            if (!infiniteSwipe) return@LaunchedEffect
+            val failed = state.error != null
+                    || state.fallbackFailed != null
+                    || state.fallbackIndex != null
+            if (!failed) return@LaunchedEffect
+            // 解析/回退类失败（详情页出错、目录列表为空、拉不起书源播放器等）：
+            // 多半是书源规则对该页面不适应或临时网络问题，不当成"视频失效"永久屏蔽，
+            // 否则能播的视频会被误删、列表越刷越少（markFailed 会持久化屏蔽并移出缓存列表）。
+            consecutiveFails++
+            if (consecutiveFails > 10) {
+                SourceVideoPlayerSession.clearError()
+                SourceVideoPlayerSession.skipFallback()
+                toastOnUi(this@SourceVideoPlayerActivity.getString(R.string.infinite_swipe_too_many_failed))
+                finish()
+            } else {
+                // 冷却：避免零点几秒内狂跳，把一批视频在瞬间全跳过
+                val wait = (800L - (System.currentTimeMillis() - lastSkipMs)).coerceAtLeast(0)
+                if (wait > 0) delay(wait)
+                lastSkipMs = System.currentTimeMillis()
+                SourceVideoPlayerSession.clearError()
+                SourceVideoPlayerSession.skipFallback()
+                toastOnUi(this@SourceVideoPlayerActivity.getString(R.string.infinite_swipe_skip_failed))
+                val ok = SourceVideoPlayerSession.feedSwitch(1)
+                if (!ok && !SourceVideoPlayerSession.feedSwitch(-1)) {
+                    finish()
+                }
+            }
+        }
+        // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）：只要处在有列表可切的
+        // 场景（无限刷、发现页/搜索竖滑等），就自动切到下一个视频，而不是卡在坏链上。
+        LaunchedEffect(state.playbackError, state.feedEnabled) {
+            val msg = state.playbackError ?: return@LaunchedEffect
+            if (!state.feedEnabled) {
+                // 单视频没有下一个可切，清掉状态避免反复触发
+                SourceVideoPlayerSession.clearError()
+                return@LaunchedEffect
+            }
+            val failedUrl = state.bookUrl
+            if (failedUrl.isNotBlank()) InfiniteSwipeFeed.markFailed(failedUrl)
+            consecutiveFails++
+            if (consecutiveFails > 10) {
+                SourceVideoPlayerSession.clearError()
+                SourceVideoPlayerSession.skipFallback()
+                toastOnUi(this@SourceVideoPlayerActivity.getString(R.string.infinite_swipe_too_many_failed))
+                finish()
+            } else {
+                // 冷却：避免零点几秒内狂跳
+                val wait = (800L - (System.currentTimeMillis() - lastSkipMs)).coerceAtLeast(0)
+                if (wait > 0) delay(wait)
+                lastSkipMs = System.currentTimeMillis()
+                SourceVideoPlayerSession.clearError()
+                SourceVideoPlayerSession.skipFallback()
+                toastOnUi(this@SourceVideoPlayerActivity.getString(R.string.infinite_swipe_skip_failed))
+                val ok = SourceVideoPlayerSession.feedSwitch(1)
+                if (!ok && !SourceVideoPlayerSession.feedSwitch(-1)) {
+                    finish()
+                }
+            }
+        }
+        // 成功加载出可播的视频（无错误、有剧集）时，重置连续失败计数
+        LaunchedEffect(state.error, state.episodes.size, state.fallbackIndex) {
+            if (infiniteSwipe
+                && state.error == null
+                && state.fallbackIndex == null
+                && state.episodes.isNotEmpty()
+            ) {
+                consecutiveFails = 0
+            }
         }
         // 必须等浏览器真的拉起来再关页面，否则还在转场就被销毁，播放器起不来
         LaunchedEffect(state.fallbackLaunched) {
@@ -279,8 +368,11 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             val prev = coverTarget
             coverTarget = null
             prev?.let { Glide.with(this@SourceVideoPlayerActivity).clear(it) }
+            // 旧封面已被 Glide 释放（底层 bitmap 可能被回收入池），立即摘除显示，
+            // 否则 CoverBackdrop 的 ImageView 仍持有它并在下一帧绘制 →
+            // 「Canvas: trying to use a recycled bitmap」崩溃（切视频时必现）
+            coverDrawable = null
             if (state.coverUrl.isBlank()) {
-                coverDrawable = null
                 return@LaunchedEffect
             }
             val target = object : CustomTarget<Drawable>(Target.SIZE_ORIGINAL, Target.SIZE_ORIGINAL) {
@@ -399,7 +491,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                     .offset(y = feedOffsetDp.dp)
             ) {
                 when {
-                    state.error != null || state.fallbackFailed != null -> ErrorDialog(
+                    (state.error != null || state.fallbackFailed != null) && !infiniteSwipe -> ErrorDialog(
                         message = state.error ?: state.fallbackFailed.orEmpty(),
                         onDismiss = {
                             // 关闭错误框时同步清掉会话里的错误，防止残留到下一个视频
@@ -488,6 +580,9 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                                 SourceVideoPlayerSession.setReverseOrder(state.bookUrl, reversed)
                             },
                             onAddShelf = { SourceVideoPlayerSession.addToShelf() },
+                            onPlaybackError = { err ->
+                                SourceVideoPlayerSession.setPlaybackError(err.localizedMessage ?: "播放出错")
+                            },
                             activePlayer = activePlayer,
                         )
                     }
@@ -600,11 +695,13 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             bookUrl: String,
             startIndex: Int = 0,
             homeMode: Boolean = false,
+            infiniteSwipe: Boolean = false,
         ): Intent = Intent(context, SourceVideoPlayerActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             putExtra("bookUrl", bookUrl)
             putExtra("startIndex", startIndex)
             putExtra("homeMode", homeMode)
+            putExtra("infiniteSwipe", infiniteSwipe)
         }
     }
 }
