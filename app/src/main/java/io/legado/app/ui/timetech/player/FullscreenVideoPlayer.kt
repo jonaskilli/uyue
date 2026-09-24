@@ -434,7 +434,6 @@ fun FullscreenVideoPlayer(
                     next.headers.takeIf { it.isNotEmpty() } ?: headers,
                     next.startPositionMs,
                     bufferMs = preloadBufferMs(context),
-                    maxShards = preloadMaxShards(context),
                 )
             }
         }
@@ -734,8 +733,8 @@ private fun buildMediaItem(uri: Uri): MediaItem {
 private fun buildMediaSourceFactory(
     context: android.content.Context,
     headers: Map<String, String>,
-    // 传了就统计实际下载的分片数，供按分片数限制预缓冲用；播放侧一般不需要
-    shardCounter: ShardCounter? = null,
+    // 传了就跟踪分片传输状态，供预缓冲补齐到分片边界用；播放侧不需要
+    shardTracker: ShardTracker? = null,
 ): DefaultMediaSourceFactory {
     val httpFactory = DefaultHttpDataSource.Factory()
         .setAllowCrossProtocolRedirects(true)
@@ -743,8 +742,8 @@ private fun buildMediaSourceFactory(
         httpFactory.setDefaultRequestProperties(headers)
     }
     val dataSourceFactory = DefaultDataSource.Factory(context, VideoCache.wrap(httpFactory))
-    if (shardCounter != null) {
-        dataSourceFactory.setTransferListener(shardCounter)
+    if (shardTracker != null) {
+        dataSourceFactory.setTransferListener(shardTracker)
     }
     return DefaultMediaSourceFactory(dataSourceFactory)
 }
@@ -2121,20 +2120,10 @@ data class NextVideoPreload(
  *
  * 只保留一集：预缓冲新的会释放旧的。全部仅在主线程访问，无需加锁。
  */
-/** 移动网络下「下一个视频」的预缓冲时长（毫秒） */
-private const val PRELOAD_BUFFER_MS_MOBILE = 10_000
-/** WiFi 下「下一个视频」的预缓冲时长（毫秒）：不按流量计费，多缓冲一段换切过去更稳 */
-private const val PRELOAD_BUFFER_MS_WIFI = 30_000
-/**
- * 预缓冲的**分片数**上限（移动网络）。
- *
- * m3u8 的最小下载单位就是分片，ExoPlayer 报的"已缓冲时长"只是把分片时长累加出来的估算，
- * 分片时长从 2 秒到 10 秒都有，按时间算粒度太粗：同样 10 秒可能是 1 个分片也可能是 5 个。
- * 直接数分片才可控。与时长上限并存，谁先到谁生效。
- */
-private const val PRELOAD_MAX_SHARDS_MOBILE = 2
-/** 预缓冲的分片数上限（WiFi） */
-private const val PRELOAD_MAX_SHARDS_WIFI = 5
+/** 移动网络下「下一个视频」的预缓冲时长（毫秒）：移动流量贵，但仍给到 20 秒缓解卡顿 */
+private const val PRELOAD_BUFFER_MS_MOBILE = 20_000
+/** WiFi 下「下一个视频」的预缓冲时长（毫秒）：不按流量计费，多缓冲到 40 秒换切过去更稳 */
+private const val PRELOAD_BUFFER_MS_WIFI = 40_000
 /**
  * 开跑预缓冲前，要求当前这一集自己已经攒下的缓冲量（毫秒）。
  *
@@ -2176,71 +2165,77 @@ private suspend fun awaitSelfBuffered(
 private fun preloadBufferMs(context: Context): Int =
     if (context.isWifiConnect) PRELOAD_BUFFER_MS_WIFI else PRELOAD_BUFFER_MS_MOBILE
 
-/** 预缓冲分片数按网络类型区分 */
-private fun preloadMaxShards(context: Context): Int =
-    if (context.isWifiConnect) PRELOAD_MAX_SHARDS_WIFI else PRELOAD_MAX_SHARDS_MOBILE
-
 /**
- * 数实际下载了几个**媒体分片**。
+ * 记录**当前是否有分片正在传输**，供预缓冲补齐到分片边界用。
  *
- * 播放列表（m3u8/mpd）本身只是索引，不算；只有 .ts/.m4s/.mp4 这类真正的数据块才计数。
- * 非 HLS 的直链 mp4 整段就是一个请求，计数恒为 1——那种情况由时长上限兜底，正好合它。
+ * 注意是"在途数"而不是累计数：累计数只增不减，一旦拿去当闸门，接管开始播放后
+ * 就再也打不开，播放器不再继续加载（表现为每次都转圈）。这里只关心"手上还有没有
+ * 没下完的分片"。
  */
-private class ShardCounter : TransferListener {
+private class ShardTracker : TransferListener {
     @Volatile
-    var count = 0
+    var inFlight = 0
         private set
 
     override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) = Unit
+
     override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
-        if (isNetwork && isMediaShard(dataSpec.uri.toString())) count++
+        if (isNetwork && isMediaShard(dataSpec.uri.toString())) inFlight++
     }
+
     override fun onBytesTransferred(
         source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int,
     ) = Unit
-    override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) = Unit
+
+    override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+        if (isNetwork && isMediaShard(dataSpec.uri.toString()) && inFlight > 0) inFlight--
+    }
 }
 
 /**
- * 这个请求下载的是媒体分片而不是播放列表。
+ * 这个请求下载的是**分片流的数据块**，而不是播放列表、也不是直链单文件。
  *
- * 必须先排除 m3u8/mpd：不少源的播放列表地址本身就带 /m3u8/ 路径段
- * （如 https://x/m3u8/index.m3u8），不排掉的话 master + media 两级列表会先吃掉
- * 分片配额，真正的数据分片反而下不了几个。
+ * 两类都要排除：
+ * - m3u8/mpd 是索引不是数据，且不少源的列表地址本身就带 /m3u8/ 路径段
+ *   （如 https://x/m3u8/index.m3u8），不排掉会被误判成数据块；
+ * - .mp4/.m4v/.webm 直链整段就是一个请求，"补齐"等于把整个文件下完，
+ *   那种流只该按时长截断（与不加分片时的行为一致）。
  */
 private fun isMediaShard(url: String): Boolean {
     val path = url.substringBefore('?').lowercase()
     if (path.endsWith(".m3u8") || path.endsWith(".mpd")) return false
-    return path.endsWith(".ts") || path.endsWith(".m4s") || path.endsWith(".mp4")
-        || path.endsWith(".m4v") || path.endsWith(".webm") || path.contains("/m3u8/")
+    if (path.endsWith(".mp4") || path.endsWith(".m4v") || path.endsWith(".webm")) return false
+    return path.endsWith(".ts") || path.endsWith(".m4s") || path.contains("/m3u8/")
 }
 
 /**
- * 给预缓冲加两道闸门：**分片数**与**时长**，谁先到谁生效。
+ * 预缓冲专用：**按时长叫停，但不在分片中间截断**。
  *
- * 必须**继承**而不能写成 `LoadControl by delegate`：Kotlin 的接口委托不会转发 Java 接口的
- * default 方法，getBackBufferDurationUs() 会落到 LoadControl 的空默认实现上，
- * 直接抛 IllegalStateException("getBackBufferDurationUs not implemented")。
- * 继承 DefaultLoadControl 则所有方法都有正确实现，这里只收紧 shouldContinueLoading。
+ * HLS 的最小下载单位是分片（.ts）。只看时长的话，10 秒一到就把传输掐断，很容易停在
+ * 分片中间——那半个分片既播不了（要重下）又白花了流量。所以时长达标后不立刻收，
+ * 允许把手上已经开始传输的那个分片下完，凑到分片边界再停；那个分片收尾后
+ * inFlight 归零，下一次询问才真正返回 false（最多多补一个分片）。
  *
- * 另一个坑：override 的必须是 `shouldContinueLoading(Parameters)` 这一版。
- * media3 1.8 把 LoadControl 换成了 Parameters 版，老的 (long, long, float) 不再被调用，
- * override 它等于没写。
+ * 分片在这里**只用于补齐，不做上限**：分片计数只增不减，拿它当闸门会在接管
+ * 开始播放后永久拦截加载，切过去反而每次都转圈。
+ *
+ * 两个实现上的坑：
+ * 1. 必须**继承**而不能写成 `LoadControl by delegate`——Kotlin 的接口委托不转发
+ *    Java 接口的 default 方法，getBackBufferDurationUs() 会落到空默认实现上直接抛
+ *    IllegalStateException；
+ * 2. override 的必须是 `shouldContinueLoading(Parameters)` 这一版，media3 1.8 已把
+ *    LoadControl 换成 Parameters 版，老的 (long, long, float) 不再被调用。
  */
-private class ShardLimitLoadControl(
+private class ShardAwareLoadControl(
     private val bufferMs: Int,
-    private val maxShards: Int,
-    private val counter: ShardCounter,
+    private val shards: ShardTracker,
 ) : DefaultLoadControl() {
 
     override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean {
-        // 分片闸门**只在预缓冲阶段**生效（playWhenReady == false）。
-        // 分片计数只增不减，若接管开始播放后还继续拦，shouldContinueLoading 就永远
-        // 返回 false，播放器不再继续加载——切过去只能播完那点预缓冲，每次都转圈。
-        if (!parameters.playWhenReady && counter.count >= maxShards) return false
-        // 时长闸门始终生效：它按当前 bufferedDurationUs 动态判断，缓冲被播放消耗后
-        // 会自然放行，不会像分片计数那样卡死。接管后也靠它把默认 50 秒收回到 10/30 秒。
-        if (parameters.bufferedDurationUs >= bufferMs * 1_000L) return false
+        // 时长达标、且手上没有还在传输的分片 → 收；否则让它把当前分片下完
+        if (parameters.bufferedDurationUs >= bufferMs * 1_000L && shards.inFlight == 0) return false
+        // 未达标时走 DefaultLoadControl 自己的策略；它默认要 50 秒，
+        // 上面这条会在 10/30 秒先行拦住，所以真正生效的是传入的 bufferMs
         return super.shouldContinueLoading(parameters)
     }
 }
@@ -2290,19 +2285,14 @@ internal object PreloadCache {
         startPositionMs: Long = 0L,
         // 缓冲多长：由调用方按网络类型给（WiFi 30 秒 / 移动网络 10 秒）
         bufferMs: Int = PRELOAD_BUFFER_MS_MOBILE,
-        // 缓冲几个分片：同样按网络类型给。m3u8 按分片算比按时长算更准
-        maxShards: Int = PRELOAD_MAX_SHARDS_MOBILE,
     ) {
         if (bookUrl.isBlank() || uri == Uri.EMPTY) return
         if (SharedPlayer.hasNextVideo(bookUrl, index, headers)) return
-        val counter = ShardCounter()
+        // 跟踪分片传输，只为"补齐到分片边界"服务，不做数量上限
+        val shards = ShardTracker()
         val player = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(buildMediaSourceFactory(context, headers, counter))
-            .setLoadControl(
-                // 两道上限并存，谁先到谁生效：
-                // 分片数为主（HLS 的最小下载单位），时长为辅（直链 mp4 这类单文件）
-                ShardLimitLoadControl(bufferMs, maxShards, counter)
-            )
+            .setMediaSourceFactory(buildMediaSourceFactory(context, headers, shards))
+            .setLoadControl(ShardAwareLoadControl(bufferMs, shards))
             .build()
             .apply {
                 setMediaItem(buildMediaItem(uri))
