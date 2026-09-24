@@ -351,6 +351,29 @@ object InfiniteSwipeFeed {
         synchronized(lock) { resetProgressLocked() }
     }
 
+    /**
+     * 切换筛选模式（模式一 ↔ 模式二）后调用：**清空旧模式抓出来的播放列表**，
+     * 并重置分页进度，下次无限刷按新模式的书源/分类从零开始抓。
+     *
+     * 不清空已看历史与失效屏蔽 —— 那是跨模式通用的（看过的、失效的在任何模式下都不该再出现）。
+     */
+    fun onModeSwitched() {
+        synchronized(lock) {
+            savedList.clear()
+            mixedUrls = mutableListOf()
+            pendingUrls.clear()
+            buckets.clear()
+            activeCats.clear()
+            seenAll.clear()
+            seenAll.addAll(blocked)
+            seenAll.addAll(history)
+            lastCurrent = null
+            keepUrl = null
+            ACache.get(ACACHE_NAME).remove(SAVED_ACACHE_KEY)
+            resetProgressLocked()
+        }
+    }
+
     private fun resetProgressLocked() {
         categoryPage.clear()
         emptyCats.clear()

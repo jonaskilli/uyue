@@ -5,6 +5,7 @@ import androidx.lifecycle.lifecycleScope
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.isGone
@@ -65,11 +66,20 @@ class InfiniteSwipeFilterDialog(
     private lateinit var adapter: FilterAdapter
     /** 用户是否改动过筛选配置（改过则开始无限刷时重置取视频的进度） */
     private var configChanged = false
+    private lateinit var btnMode1: Button
+    private lateinit var btnMode2: Button
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
         val recycler = view.findViewById<RecyclerView>(R.id.recycler_view)
         val progress = view.findViewById<View>(R.id.progress)
         recycler.layoutManager = LinearLayoutManager(requireContext())
+
+        // 模式切换：模式一 / 模式二是两套独立的书源分类配置
+        btnMode1 = view.findViewById(R.id.btn_mode_1)
+        btnMode2 = view.findViewById(R.id.btn_mode_2)
+        btnMode1.setOnClickListener { applyMode(InfiniteSwipeFilter.MODE_1) }
+        btnMode2.setOnClickListener { applyMode(InfiniteSwipeFilter.MODE_2) }
+        updateModeButtons()
         adapter = FilterAdapter(
             items = items,
             onSourceClick = { pos -> onSourceClick(pos) },
@@ -121,6 +131,37 @@ class InfiniteSwipeFilterDialog(
                 withContext(Dispatchers.Main) { progress.isGone = true }
             }
         }
+    }
+
+    /** 选中态：当前模式实心显示、另一个半透明，末尾加 ✓ */
+    private fun updateModeButtons() {
+        val m = InfiniteSwipeFilter.mode
+        val is1 = m == InfiniteSwipeFilter.MODE_1
+        btnMode1.isSelected = is1
+        btnMode2.isSelected = !is1
+        btnMode1.alpha = if (is1) 1f else 0.5f
+        btnMode2.alpha = if (is1) 0.5f else 1f
+        btnMode1.text = getString(R.string.infinite_swipe_mode_1) + if (is1) " ✓" else ""
+        btnMode2.text = getString(R.string.infinite_swipe_mode_2) + if (!is1) " ✓" else ""
+    }
+
+    /**
+     * 切换开启模式：换用该模式自己的一套书源/分类配置，
+     * 并清空旧模式抓出来的播放列表（下次无限刷按新模式重新抓）。
+     */
+    private fun applyMode(mode: Int) {
+        if (InfiniteSwipeFilter.mode == mode) return
+        InfiniteSwipeFilter.setMode(mode)
+        InfiniteSwipeFeed.onModeSwitched()
+        configChanged = true
+        updateModeButtons()
+        rebuildItems()
+        adapter.notifyDataSetChanged()
+        Toast.makeText(
+            requireContext(),
+            getString(if (mode == InfiniteSwipeFilter.MODE_2) R.string.infinite_swipe_mode_2 else R.string.infinite_swipe_mode_1),
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     /** 该源下的可用分类（url 型发现分类） */

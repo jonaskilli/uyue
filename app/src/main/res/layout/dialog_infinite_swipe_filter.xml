@@ -19,6 +19,45 @@
         android:text="@string/infinite_swipe_filter_hint"
         android:textSize="12sp" />
 
+    <!-- 两套独立的开启模式：模式一 / 模式二，切换后按新模式重新抓 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/infinite_swipe_mode_label"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btn_mode_1"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:minWidth="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/infinite_swipe_mode_1"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btn_mode_2"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:minWidth="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/infinite_swipe_mode_2"
+            android:textSize="13sp" />
+    </LinearLayout>
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

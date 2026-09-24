@@ -1,26 +1,34 @@
 package io.legado.app.help.video
 
-import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import io.legado.app.utils.GSON
 import splitties.init.appCtx
 
 /**
- * 无限刷分类筛选配置。
+ * 无限刷分类筛选配置（**两套独立模式**）。
  *
  * 每个视频源一个**总开关**，每个视频源下的每一个发现分类一个**开关**；
  * 只有开启的源、以及开启的分类才会参与 [InfiniteSwipeFeed] 的后台随机获取。
  *
- * 持久化到 SharedPreferences，跨重启保留。未配置过的源/分类一律默认**开启**，
- * 因此老用户（或全新安装）不打开面板时，行为与改动前完全一致（所有源所有分类都参与）。
+ * ## 模式一 / 模式二
+ * 两套配置**完全独立、互不干扰**：模式一里选的书源分类与模式二无关，
+ * 切到模式二就是另一套（默认一个都没开），可以随时来回切。
+ * 切换后由调用方清空已保存的播放列表与分页进度，再按新模式重新抓。
+ *
+ * 持久化到 SharedPreferences（每个模式一份），跨重启保留。
+ * 未配置过的源/分类一律默认**关闭**，由用户自己挑要用哪些书源。
  */
 object InfiniteSwipeFilter {
 
-    private const val SP_NAME = "infinite_swipe_filter"
-    private const val KEY = "config_v1"
+    const val MODE_1 = 1
+    const val MODE_2 = 2
 
-    /** 视频源 url -> 该源的开关配置 */
-    private val config = mutableMapOf<String, SourceEntry>()
+    private const val SP_NAME = "infinite_swipe_filter"
+    private const val KEY_MODE = "current_mode"
+    private const val KEY_PREFIX = "config_v2_m"
+    /** 老版本只有一份配置，升级后作为模式一的初始值，避免配置丢失 */
+    private const val KEY_LEGACY = "config_v1"
+    private const val DEFAULT_MODE = MODE_1
 
     private val sp = appCtx.getSharedPreferences(SP_NAME, android.content.Context.MODE_PRIVATE)
 
@@ -32,17 +40,47 @@ object InfiniteSwipeFilter {
 
     private val type = object : TypeToken<Map<String, SourceEntry>>() {}.type
 
+    /** 当前模式（[MODE_1] / [MODE_2]），持久化 */
+    @Volatile
+    var mode: Int = DEFAULT_MODE
+        private set
+
+    /** 当前模式的配置：视频源 url -> 该源的开关配置 */
+    private var config: MutableMap<String, SourceEntry> = mutableMapOf()
+
     init {
-        runCatching {
-            val str = sp.getString(KEY, null) ?: return@runCatching
-            val map = GSON.fromJson<Map<String, SourceEntry>>(str, type) ?: return@runCatching
-            config.clear()
-            config.putAll(map)
-        }
+        mode = if (sp.getInt(KEY_MODE, DEFAULT_MODE) == MODE_2) MODE_2 else MODE_1
+        config = loadConfig(mode)
     }
 
+    private fun keyOf(m: Int): String = "$KEY_PREFIX$m"
+
+    private fun loadConfig(m: Int): MutableMap<String, SourceEntry> {
+        readMap(keyOf(m))?.let { return it }
+        if (m == MODE_1) readMap(KEY_LEGACY)?.let { return it }
+        return mutableMapOf()
+    }
+
+    private fun readMap(key: String): MutableMap<String, SourceEntry>? = runCatching {
+        val str = sp.getString(key, null) ?: return@runCatching null
+        val map = GSON.fromJson<Map<String, SourceEntry>>(str, type) ?: return@runCatching null
+        mutableMapOf<String, SourceEntry>().apply { putAll(map) }
+    }.getOrNull()
+
     private fun save() {
-        runCatching { sp.edit().putString(KEY, GSON.toJson(config)).apply() }
+        runCatching { sp.edit().putString(keyOf(mode), GSON.toJson(config)).apply() }
+    }
+
+    /**
+     * 切换模式：换用另一套独立配置（模式一与模式二互不影响）。
+     * 切换后需要清空旧模式抓出来的播放列表，再按新模式重新抓（见 [InfiniteSwipeFeed.onModeSwitched]）。
+     */
+    fun setMode(m: Int) {
+        val target = if (m == MODE_2) MODE_2 else MODE_1
+        if (target == mode) return
+        mode = target
+        config = loadConfig(target)
+        runCatching { sp.edit().putInt(KEY_MODE, target).apply() }
     }
 
     /**
@@ -74,7 +112,7 @@ object InfiniteSwipeFilter {
     }
 
     /**
-     * 是否一个视频源都没开启（全新安装 / 用户全部关掉）。
+     * 当前模式下是否一个视频源都没开启（全新安装 / 用户全部关掉 / 新模式还没选）。
      * 此时直接点「无限刷」刷不出任何东西，应当提示先长按按钮去选书源。
      */
     fun hasNoEnabledSource(): Boolean = config.values.none { it.enabled }

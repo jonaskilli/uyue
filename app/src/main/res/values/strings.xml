@@ -1439,6 +1439,9 @@
     <string name="infinite_swipe_too_many_failed">连续多个视频失效，已退出无限刷</string>
     <string name="infinite_swipe_filter_title">无限刷 · 分类筛选</string>
     <string name="infinite_swipe_filter_hint">关闭的视频源与分类不会参与后台随机获取</string>
+    <string name="infinite_swipe_mode_label">开启模式</string>
+    <string name="infinite_swipe_mode_1">模式一</string>
+    <string name="infinite_swipe_mode_2">模式二</string>
     <string name="expand_all">全展开</string>
     <string name="collapse_all">全折叠</string>
     <string name="filter_enable_all">全开</string>
