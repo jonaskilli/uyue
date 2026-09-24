@@ -99,7 +99,6 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.Player
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.NotificationId
-import io.legado.app.utils.activityPendingIntent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -227,7 +226,10 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             playing = playing,
                             title = title,
                             subtitle = episode,
-                            sessionToken = mediaSession.sessionToken
+                            sessionToken = mediaSession.sessionToken,
+                            bookUrl = ui.bookUrl,
+                            homeMode = this@SourceVideoPlayerActivity.intent.getBooleanExtra("homeMode", false),
+                            startIndex = ui.currentIndex,
                         ).build()
                     )
                 }
@@ -531,6 +533,9 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         title: String,
         subtitle: String,
         sessionToken: MediaSessionCompat.Token,
+        bookUrl: String = "",
+        homeMode: Boolean = false,
+        startIndex: Int = 0,
     ): NotificationCompat.Builder {
         val toggleIntent = Intent(ACTION_TOGGLE_VIDEO_PLAYBACK).setPackage(packageName)
         val togglePi = PendingIntent.getBroadcast(
@@ -539,7 +544,17 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             toggleIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val contentPi = activityPendingIntent<SourceVideoPlayerActivity>("activity")
+        // 点击通知栏：回到正在播放的视频，复用已有会话（load 内部命中"同一本书且剧集已就绪"
+        // 分支，不会重新拉起/解析视频）。SINGLE_TOP 让 Activity 已在前台时直接复用、不重建。
+        val contentIntent = createIntent(this, bookUrl, startIndex, homeMode).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val contentPi = PendingIntent.getActivity(
+            this,
+            0,
+            contentIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         val views = RemoteViews(packageName, R.layout.notification_video).apply {
             setTextViewText(R.id.tv_title, title.ifBlank { getString(R.string.video) })
