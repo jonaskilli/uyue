@@ -81,6 +81,16 @@ object InfiniteSwipeFeed {
     // 交织本身是"源间轮流 + 源内分类轮流"，大桶自然排在后面，不会一上来就霸占列表。
     /** 攒够这么多条就先做成"先行播放列表"立刻开播 */
     private const val MIN_READY = 15
+    /**
+     * 列表里保留最近多少个**已播过**的视频。
+     *
+     * 不保留的话，每次并入新内容都会把"当前这条之前的"全裁掉，
+     * 于是"往回滑看上一个"能不能用，取决于那一刻后台有没有刚好续接上（随机）；
+     * 后台一续接，上一个立刻消失、只能提示「已经是列表第一个」。
+     * 保留最近 15 个后，往回滑始终可用（与抖音下滑回看一致），
+     * 更久以前的照旧丢弃，列表不会无限增长。
+     */
+    private const val KEEP_PLAYED = 15
     /** 水位：始终保证"当前播放位置之后还有这么多条可播" */
     private const val TARGET_UNPLAYED = 150
     /** 无论如何最多等这么久就返回（哪怕还没攒够） */
@@ -648,7 +658,7 @@ object InfiniteSwipeFeed {
         result
     }
 
-    /** 把待合并队列并入播放列表（[mergeFeed] 去重并锚定当前播放项） */
+    /** 把待合并队列并入播放列表（[mergeFeed] 去重并保留最近若干个已播项） */
     private fun drainPending(): Boolean = synchronized(lock) {
         if (pendingUrls.isEmpty()) return false
         val batch = pendingUrls.toList()
@@ -658,24 +668,29 @@ object InfiniteSwipeFeed {
     }
 
     /**
-     * 把新内容合并进当前播放队列：保留从当前播放那条开始的未看尾巴，新内容接在后面，
-     * 并把当前播放那条锚到最前（保证 feedSwitch 按 indexOf 定位不丢锚点）。
+     * 把新内容合并进当前播放队列：
+     * - 保留**最近 [KEEP_PLAYED] 个已播过的** + 从当前那条开始的未看尾巴，
+     *   更久以前已播的丢弃（列表不会无限增长）；
+     * - 新内容接在尾巴后面（新内容内部已按「源间轮流 + 源内分类轮流」交织）；
+     * - 当前那条保持在原位（不再强行挪到最前），这样往回滑（feedSwitch(-1)）才有目标。
      */
     private fun mergeFeed(fresh: List<String>): List<String> = synchronized(lock) {
         val cur = lastCurrent ?: keepUrl
         val base = if (cur != null) {
             val i = mixedUrls.indexOf(cur)
-            if (i >= 0) mixedUrls.subList(i, mixedUrls.size).toList() else mixedUrls.toList()
+            if (i >= 0) {
+                // 多留 KEEP_PLAYED 个已播的，保证"上一个视频"随时可回看
+                val from = (i - KEEP_PLAYED).coerceAtLeast(0)
+                mixedUrls.subList(from, mixedUrls.size).toList()
+            } else {
+                mixedUrls.toList()
+            }
         } else {
             mixedUrls.toList()
         }
         val baseSet = base.toSet()
         val freshFiltered = fresh.filter { it !in baseSet && it !in recentSeen && it !in blocked }
         val result = (base + freshFiltered).toMutableList()
-        if (cur != null && result.firstOrNull() != cur) {
-            result.remove(cur)
-            result.add(0, cur)
-        }
         mixedUrls = result
         result
     }
