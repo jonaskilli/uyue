@@ -771,7 +771,14 @@ private class KeyExpandableAdapter(
             }
             r != null -> {
                 paintDot(dot, if (r.ok) dotOk else dotFail)
-                status.text = if (r.ok) "✅ ${r.costMs}ms" else "❌ ${r.message}"
+                status.text = if (r.ok) {
+                    "✅ ${r.costMs}ms"
+                } else {
+                    // 错误可能很长（如 HTTP 400 的完整响应体），截断显示，
+                    // 避免把右侧「测试 / 模型」按钮挤出去；完整信息点子行详情可见
+                    val msg = r.message
+                    "❌ ${msg.take(60)}${if (msg.length > 60) "…" else ""}"
+                }
             }
             else -> {
                 paintDot(dot, dotNone)
@@ -791,36 +798,44 @@ private class KeyExpandableAdapter(
         return view
     }
 
-    /** 点子行：这个 API 的详情菜单 */
+    /** 点子行：这个 API 的详情，下方四个按钮分别复制 接口 / 模型 / 密钥 / 全部 */
     fun showDetail(g: Int, c: Int) {
         val name = names[g]
         val entry = entriesOf(name).getOrNull(c) ?: return
-        val r = results[rk(name, c)]
+        val key = rk(name, c)
+        val r = results[key]
         val stateText = when {
-            testing.contains(rk(name, c)) -> "测试中…"
+            testing.contains(key) -> "测试中…"
             r == null -> "未测试"
             r.ok -> "可用（${r.costMs}ms）"
-            else -> "不可用：${r.message}"
+            else -> "不可用：${r.message.take(80)}${if (r.message.length > 80) "…" else ""}"
         }
-        AlertDialog.Builder(context)
-            .setTitle(entry.model)
-            .setMessage(
-                "状态：$stateText\n" +
-                    "场景：${entry.scene}\n" +
-                    "地址：${entry.endpoint}\n" +
-                    "密钥：${entry.keyMask()}"
-            )
-            .setItems(
-                arrayOf("复制地址", "复制密钥（完整）", "删除该 API")
-            ) { _, which ->
-                when (which) {
-                    0 -> copy(entry.endpoint, "地址")
-                    1 -> copy(entry.key, "密钥")
-                    2 -> confirmRemove(name, entry)
-                }
-            }
-            .setNegativeButton("关闭", null)
-            .show()
+        val info = "状态：$stateText\n" +
+            "场景：${entry.scene}\n" +
+            "地址：${entry.endpoint}\n" +
+            "密钥：${entry.keyMask()}"
+
+        val dialog = AlertDialog.Builder(context).create()
+        val view = LayoutInflater.from(context)
+            .inflate(R.layout.dialog_key_child_detail, null)
+        view.findViewById<TextView>(R.id.tv_detail_info).text = info
+        view.findViewById<Button>(R.id.btn_detail_endpoint).setOnClickListener {
+            copy(entry.endpoint, "接口")
+        }
+        view.findViewById<Button>(R.id.btn_detail_model).setOnClickListener {
+            copy(entry.model, "模型")
+        }
+        view.findViewById<Button>(R.id.btn_detail_key).setOnClickListener {
+            copy(entry.key, "密钥")
+        }
+        view.findViewById<Button>(R.id.btn_detail_all).setOnClickListener {
+            // 全部：接口地址@@模型名字@@密钥，单行紧凑格式
+            copy("${entry.endpoint}@@${entry.model}@@${entry.key}", "全部")
+        }
+        dialog.setTitle(entry.model)
+        dialog.setView(view)
+        dialog.setCancelable(true)
+        dialog.show()
     }
 
     /** 长按子项时用：直接弹删除确认 */
