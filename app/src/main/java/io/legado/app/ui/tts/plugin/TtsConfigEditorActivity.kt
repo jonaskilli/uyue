@@ -42,6 +42,8 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
     override val binding by viewBinding(ActivityTtsConfigEditorBinding::inflate)
     private var config: JReadVoiceEngine.VoiceConfig = JReadVoiceEngine.VoiceConfig(voiceTag = "")
     private var plugins: List<JReadVoiceEngine.VoicePlugin> = emptyList()
+    /** 恢复表单期间为 true：此时音色下拉的选中回调不得改写「显示名称」 */
+    private var restoringVoiceSelection = false
     private var mediaPlayer: MediaPlayer? = null
     private var localeOptions: List<JReadVoicePluginRuntime.LocaleOption> = emptyList()
     private var voiceOptions: List<JReadVoicePluginRuntime.VoiceOption> = emptyList()
@@ -374,7 +376,12 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
                 // 恢复当前选中的音色
                 val currentVoice = config.voice
                 val voiceIdx = voiceOptions.indexOfFirst { it.id == currentVoice }
+                // setSelection 会同步触发 onVoiceSelected，而那里会把「显示名称」覆盖成音色名。
+                // 恢复表单期间必须屏蔽，否则打开页面就悄悄改掉用户已保存的显示名，
+                // 与配置列表、角色管理里显示的 displayName 对不上。
+                restoringVoiceSelection = true
                 if (voiceIdx >= 0) binding.spinnerVoice.setSelection(voiceIdx)
+                restoringVoiceSelection = false
             }
         }
     }
@@ -382,8 +389,11 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
     private fun onVoiceSelected(position: Int) {
         if (voiceOptions.isEmpty() || position >= voiceOptions.size) return
         val voice = voiceOptions[position]
-        // 切换发音人时强制同步显示名称；之后用户可随意手改，直到下次切换发言人才再覆盖
-        binding.etDisplayName.setText(voice.name.ifBlank { voice.id })
+        // 仅用户主动切换音色时，才用音色名同步「显示名称」；之后用户可随意手改，
+        // 直到下次切换发音人才再覆盖。恢复表单（打开页面）时不覆盖，保持已保存的名字。
+        if (!restoringVoiceSelection) {
+            binding.etDisplayName.setText(voice.name.ifBlank { voice.id })
+        }
         notifyVoiceChanged(voice.id)
     }
 

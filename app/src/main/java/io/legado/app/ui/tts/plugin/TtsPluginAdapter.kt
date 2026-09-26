@@ -439,14 +439,17 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         private val ivMore: ImageView = itemView.findViewById(R.id.iv_more)
 
         fun bind(config: JReadVoiceEngine.VoiceConfig, indentLevel: Int = 0) {
-            // 标签：只显示真正的标签字段 voiceTag；为空则隐藏标签行，不用其它字段冒充
-            if (config.voiceTag.isBlank()) {
+            // 主名称（左上角）：取「显示名称」，即编辑页「显示名称」输入框里的值；
+            // 显示名称为空才退回音色 id，绝不用 voiceTag 冒充，避免与右上角标签重复。
+            tvName.text = config.displayName.ifBlank { config.voice }
+            // 标签（右上角）：与已显示的显示名称完全相同时不再重复展示一遍
+            val tag = config.voiceTag.trim()
+            if (tag.isBlank() || tag == tvName.text.toString().trim()) {
                 tvTag.visibility = View.GONE
             } else {
                 tvTag.visibility = View.VISIBLE
-                tvTag.text = config.voiceTag
+                tvTag.text = tag
             }
-            tvName.text = config.displayName.ifBlank { config.voice }
             val plugin = pluginsMap[config.pluginId]
             tvPluginName.text = if (plugin != null) displayNameForConfigCard(plugin) else ""
             // 采样率从 data.sampleRate 读取（导入配置多为字符串），缺省回退 24000

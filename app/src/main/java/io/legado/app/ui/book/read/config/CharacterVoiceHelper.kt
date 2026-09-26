@@ -349,6 +349,71 @@ object CharacterVoiceHelper {
         return getAvailableVoices()
     }
 
+    /** 发音人标签对应的内置配置条目：配置列表里的显示名字 + 配置 id（用于直接打开编辑页） */
+    data class VoiceTagRef(
+        val displayName: String,
+        val configId: String,
+    )
+
+    /**
+     * 发音人标签 → 该标签在「TTS引擎插件 / 配置列表」里的配置条目。
+     *
+     * 与 [getAvailableVoices] 同源：只有朗读引擎选择了内置TTS插件时，标签才来自
+     * 配置列表的 voiceTag，此时才有对应的 displayName / 配置 id 可查；其他引擎
+     * （系统TTS / 普通HTTP源）发音人取自 fayinren.json，本就没有配置条目，
+     * 返回空 map，角色管理据此只显示标签本身、且不给编辑入口。
+     *
+     * 列表通常命中 JReadVoiceEngine 的内存缓存；即便未命中也只是读一次
+     * SharedPreferences，因此调用方在打开界面时取一次即可，不要在 bind 里逐行调用。
+     *
+     * 同名标签优先取「启用」配置（启用项后写入，覆盖停用项）。
+     */
+    /**
+     * 供角色管理使用的「当前引擎可用标签 -> 配置条目」关联表。
+     *
+     * 在 [getVoiceTagRefs] 之上再套一层校验，只有同时满足两点才建立关联：
+     * 1. 朗读引擎选中的确实是内置TTS插件（发音人来自配置列表的 voiceTag）；
+     * 2. 该标签确实存在于当前引擎的可用发音人列表（配置列表启用项）中。
+     *
+     * 原因：其他引擎（系统TTS / 普通HTTP源）的发音人取自 fayinren.json，
+     * 与内置配置没有任何对应关系，强行关联会出现「标签和名字对不上」；
+     * 另外引擎判定对 `@js:` 脚本较宽松（脚本里出现 synthesize 即算内置），
+     * 加上第 2 条校验后，即使被判为内置，不属于当前配置列表的标签也不会错误关联。
+     */
+    fun getVoiceTagRefsForCurrentEngine(): Map<String, VoiceTagRef> {
+        if (!isUsingBuiltinTtsPlugin()) return emptyMap()
+        val refs = getVoiceTagRefs()
+        if (refs.isEmpty()) return emptyMap()
+        val availableTags = getAvailableVoices().map { it.trim() }.toSet()
+        return refs.filterKeys { it in availableTags }
+    }
+
+    private fun getVoiceTagRefs(): Map<String, VoiceTagRef> {
+        if (!isUsingBuiltinTtsPlugin()) return emptyMap()
+        return try {
+            val configs = JReadVoiceEngine.listConfigs(appCtx, ensureBuiltIns = false)
+            val map = HashMap<String, VoiceTagRef>()
+            configs.forEach { config ->
+                val tag = config.voiceTag.trim()
+                val name = config.displayName.trim()
+                if (tag.isNotEmpty() && name.isNotEmpty()) {
+                    map[tag] = VoiceTagRef(name, config.id)
+                }
+            }
+            configs.forEach { config ->
+                if (!config.enabled) return@forEach
+                val tag = config.voiceTag.trim()
+                val name = config.displayName.trim()
+                if (tag.isNotEmpty() && name.isNotEmpty()) {
+                    map[tag] = VoiceTagRef(name, config.id)
+                }
+            }
+            map
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
     fun previewCharacterVoice(
         context: Context,
         lifecycleOwner: LifecycleOwner,

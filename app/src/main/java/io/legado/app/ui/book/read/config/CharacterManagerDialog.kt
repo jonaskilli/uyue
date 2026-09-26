@@ -50,6 +50,10 @@ class CharacterManagerDialog : DialogFragment() {
     private var currentBook = "默认"
     private var bookList = mutableListOf<String>()
     private var characterRecords = JSONArray()
+    // 发音人标签 -> 配置列表里的条目（仅内置TTS引擎插件下有值），打开界面时取一次
+    private var voiceTagRefs: Map<String, CharacterVoiceHelper.VoiceTagRef> = emptyMap()
+    // 是否跳转过配置编辑页：返回后需要重取标签映射、并让发音人缓存失效
+    private var pendingVoiceConfigEdit = false
     private var markedIndices = mutableListOf<Int>()
     private var selectedIndex = -1
     private var longPressedIndex = -1
@@ -116,6 +120,17 @@ class CharacterManagerDialog : DialogFragment() {
         super.onStart()
         // 页面渲染完毕后，切换到当前阅读书籍
         autoSwitchToCurrentBook()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从配置编辑页返回：标签/显示名可能已改动，重取映射并刷新列表
+        if (!pendingVoiceConfigEdit) return
+        pendingVoiceConfigEdit = false
+        voiceTagRefs = CharacterVoiceHelper.getVoiceTagRefsForCurrentEngine()
+        // 朗读脚本侧的发音人缓存同步失效，避免拿到编辑前的旧列表
+        io.legado.app.help.VirtualExternalFiles.invalidate()
+        if (::characterAdapter.isInitialized) characterAdapter.notifyDataSetChanged()
     }
 
     private fun initViews() {
@@ -261,6 +276,9 @@ class CharacterManagerDialog : DialogFragment() {
                 JSONArray()
             }
         }
+
+        // 只有内置TTS引擎下发音人标签才与配置列表一一对应，其他引擎不做关联显示
+        voiceTagRefs = CharacterVoiceHelper.getVoiceTagRefsForCurrentEngine()
     }
 
     private fun setupRecyclerView() {
@@ -327,6 +345,32 @@ class CharacterManagerDialog : DialogFragment() {
         }
         // 与发音人列表里的试听按钮共用同一实现，保证两处试听效果一致
         CharacterVoiceHelper.previewVoice(requireContext(), this, voice) { msg -> toast(msg) }
+    }
+
+    /**
+     * 打开内置 TTS 配置的编辑页（即「配置列表」里点某条配置进入的同一页面），
+     * 可直接改显示名字、标签、分组、插件、音色、语速音量音高等。
+     * 打不开（页面不存在/未使用内置引擎）时提示，不影响角色管理本身。
+     */
+    private fun openVoiceConfigEditor(configId: String?) {
+        if (configId.isNullOrBlank()) {
+            toast("未找到该发音人对应的配置")
+            return
+        }
+        try {
+            val intent = android.content.Intent(
+                requireContext(),
+                io.legado.app.ui.tts.plugin.TtsConfigEditorActivity::class.java
+            ).apply {
+                putExtra(io.legado.app.ui.tts.plugin.TtsConfigEditorActivity.EXTRA_CONFIG_ID, configId)
+                putExtra(io.legado.app.ui.tts.plugin.TtsConfigEditorActivity.EXTRA_IS_NEW, false)
+            }
+            startActivity(intent)
+            // 编辑页可能改了标签/显示名，返回后需要重取映射并让发音人缓存失效
+            pendingVoiceConfigEdit = true
+        } catch (e: Exception) {
+            toast("无法打开配置编辑页")
+        }
     }
 
     // 字符串标准化（去特殊字符、trim）
@@ -1484,7 +1528,9 @@ class CharacterManagerDialog : DialogFragment() {
         inner class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
             private val tvName: TextView = itemView.findViewById(R.id.tv_character_name)
             private val tvAliases: TextView = itemView.findViewById(R.id.tv_character_aliases)
+            private val llVoice: LinearLayout = itemView.findViewById(R.id.ll_voice_info)
             private val tvVoice: TextView = itemView.findViewById(R.id.tv_voice_info)
+            private val tvVoiceName: TextView = itemView.findViewById(R.id.tv_voice_name)
             private val ivFixed: ImageView = itemView.findViewById(R.id.iv_fixed_mark)
 
             fun bind(character: JSONObject?, position: Int) {
@@ -1522,6 +1568,19 @@ class CharacterManagerDialog : DialogFragment() {
                 // 发音人：格式为【发音人名称】（usageCount==100 时发音人加【】）
                 val voiceDisplay = if (usageCount == 100 && voice.isNotEmpty()) "【$voice】" else if (voice.isNotEmpty()) "【$voice】" else ""
                 tvVoice.text = voiceDisplay
+                // 标签下方补一行：该配置的「显示名称」（编辑页「显示名称」输入框里的值）
+                val tagRef = voiceTagRefs[voice.trim()]
+                val voiceName = tagRef?.displayName.orEmpty()
+                if (voiceName.isNotEmpty()) {
+                    tvVoiceName.visibility = View.VISIBLE
+                    tvVoiceName.text = voiceName
+                    // 点配置名直接进该配置的编辑页（改显示名/标签/插件/音色等）
+                    tvVoiceName.setOnClickListener { openVoiceConfigEditor(tagRef?.configId) }
+                } else {
+                    tvVoiceName.visibility = View.GONE
+                    tvVoiceName.text = ""
+                    tvVoiceName.setOnClickListener(null)
+                }
 
                 // 固定标记 - 隐藏（不再显示✓）
                 ivFixed.visibility = View.GONE
@@ -1559,7 +1618,7 @@ class CharacterManagerDialog : DialogFragment() {
                 // 点击回调传列表位置，真实索引由 setupRecyclerView 的 getRealIndex 统一换算
                 itemView.setOnClickListener { onItemClick?.invoke(position) }
                 itemView.setOnLongClickListener { onItemLongClick?.invoke(position); true }
-                tvVoice.setOnClickListener { onVoiceClick?.invoke(position) }
+                llVoice.setOnClickListener { onVoiceClick?.invoke(position) }
                 tvName.setOnClickListener { previewCharacterVoice(realIndex) }
             }
         }
