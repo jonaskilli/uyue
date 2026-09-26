@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 恢复密钥：子行（该密钥里的一个 API）。默认只显示模型名，域名以小字补充 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="38dp"
+    android:paddingEnd="8dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <View
+            android:id="@+id/view_child_dot"
+            android:layout_width="10dp"
+            android:layout_height="10dp"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_key_dot" />
+
+        <TextView
+            android:id="@+id/tv_child_index"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:textSize="12sp"
+            android:alpha="0.5" />
+
+        <TextView
+            android:id="@+id/tv_child_model"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="middle"
+            android:singleLine="true"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/tv_child_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_child_test"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:minHeight="28dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="测试"
+            android:textSize="11sp" 
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp"
+                android:includeFontPadding="false"
+                android:focusable="false" />
+
+        <Button
+            android:id="@+id/btn_child_models"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:minWidth="0dp"
+            android:minHeight="28dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="模型"
+            android:textSize="11sp" 
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp"
+                android:includeFontPadding="false"
+                android:focusable="false" />
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tv_child_host"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textSize="11sp"
+        android:alpha="0.5" />
+
+</LinearLayout>

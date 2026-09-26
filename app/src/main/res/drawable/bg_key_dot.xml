@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 测试状态圆点：底色在这里，颜色由代码按结果设置（绿=可用 / 红=失败 / 黄=测试中或部分失败 / 灰=未测） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="#9E9E9E" />
+    <size
+        android:width="10dp"
+        android:height="10dp" />
+</shape>

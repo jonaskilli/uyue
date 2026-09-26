@@ -122,6 +122,13 @@ object SourceVideoPlayerSession {
      */
     private var prefetchJob: Job? = null
     /**
+     * 当前这一轮「加载视频」的任务。
+     *
+     * 解析常常要好几秒，而这期间用户就能竖滑切走；不持有它就无法取消上一轮，
+     * 两轮并发结束时，慢的那一轮会把新视频的状态覆盖回旧视频（串台）。
+     */
+    private var loadJob: Job? = null
+    /**
      * 预取地址的存活时间。
      *
      * 嗅探出来的加密直链常带一次性签名/短时效 token，隔太久再用必然 403。
@@ -303,6 +310,10 @@ object SourceVideoPlayerSession {
         // 下面会走"剧集已就绪"的早退分支；feed 只在 loadInternal 里取的话就永远挂不上，
         // 表现成"只有这一个视频，竖滑提示已经是列表最后一个"。
         ensureFeed(bookUrl)
+        // 立刻把"能否竖滑切换"写进状态：解析往往要好几秒，若等剧集就绪才写，
+        // 这段时间里界面拿到的还是上一部（或 false）的旧值，
+        // 表现就是"解析中滑不动，解析完了才能滑"。
+        _uiState.update { s -> s.copy(feedEnabled = (feed?.urls()?.size ?: 0) > 1) }
         // 乐观铺底：书库/搜索缓存里通常已有该视频的封面（本地元数据，无需联网），
         // 让解析/加载期间显示封面+转圈，而不是纯黑屏
         val bookInDb = appDb.bookDao.getBook(bookUrl)
@@ -364,7 +375,10 @@ object SourceVideoPlayerSession {
                 fallbackFailed = null,
             )
         }
-        scope.launch {
+        // 解析途中也可能被竖滑切走：必须先取消上一轮，
+        // 否则两轮 loadInternal 并发，慢的那一轮后写入会把新视频的状态覆盖成旧的
+        loadJob?.cancel()
+        loadJob = scope.launch {
             runCatching { loadInternal(bookUrl, startIndex) }
                 .onFailure { e ->
                     // 协程取消不是错误，页面销毁/重新加载时会走到这里，不能当成失败弹给用户
@@ -395,6 +409,9 @@ object SourceVideoPlayerSession {
     private suspend fun loadInternal(bookUrl: String, startIndex: Int) {
         ensureFeed(bookUrl)
         val feedEnabled = (feed?.urls()?.size ?: 0) > 1
+        // 同步写进状态：解析（拉详情/目录/直链）可能持续数秒，
+        // 期间界面就靠这个值决定右侧竖滑能不能用，不能等最后才写。
+        _uiState.update { s -> s.copy(feedEnabled = feedEnabled) }
         val book = appDb.bookDao.getBook(bookUrl)
             // 竖滑切到的视频可能还没入库：从搜索缓存转正并插入书库（带 notShelf：不自动上书架）
             ?: appDb.searchBookDao.getSearchBook(bookUrl)?.toBook()?.also { newBook ->

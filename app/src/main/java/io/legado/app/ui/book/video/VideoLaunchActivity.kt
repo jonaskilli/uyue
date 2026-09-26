@@ -29,6 +29,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.legado.app.R
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.constant.Theme
+import io.legado.app.ui.timetech.player.ErrorNotice
 
 /**
  * 视频启动页。
@@ -67,7 +68,8 @@ class VideoLaunchActivity : BaseComposeActivity(
 
         VideoLaunchContent(
             state = state,
-            onDismiss = { finish() }
+            onRetry = { viewModel.launch(intent) },
+            onExit = { finish() }
         )
     }
 
@@ -88,32 +90,21 @@ class VideoLaunchActivity : BaseComposeActivity(
 @Composable
 private fun VideoLaunchContent(
     state: VideoLaunchUiState,
-    onDismiss: () -> Unit
+    onRetry: () -> Unit,
+    onExit: () -> Unit
 ) {
+    // 失败不再用模态弹窗（它一出现就吃掉所有触摸，点「关闭」还会直接 finish()，
+    // 于是"打开失败 = 只剩退出"）。改成底部提示条：不拦其它区域、不自动退出，
+    // 可以原地重试，也可以主动退出。
     if (state.error != null) {
-        Dialog(onDismissRequest = onDismiss) {
-            Column(
-                modifier = Modifier
-                    .widthIn(max = 320.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = stringResource(R.string.video_get_url_fail),
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    text = state.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-                TextButton(onClick = onDismiss) {
-                    Text(text = stringResource(R.string.close))
-                }
-            }
+        Box(modifier = Modifier.fillMaxSize()) {
+            ErrorNotice(
+                message = state.error,
+                // 本页是单视频入口，没有可切换的列表
+                canSwitch = false,
+                onRetry = onRetry,
+                onExit = onExit,
+            )
         }
         return
     }

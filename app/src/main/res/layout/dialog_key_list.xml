@@ -14,14 +14,30 @@
         android:padding="16dp"
         android:gravity="center" />
 
-    <ListView
+    <TextView
+        android:id="@+id/tv_key_hint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp"
+        android:gravity="center"
+        android:text="点击展开可查看该密钥里的每个 API"
+        android:textSize="12sp"
+        android:alpha="0.6" />
+
+    <!-- 组 = 一个已保存的密钥；子 = 该密钥里的每个 API -->
+    <ExpandableListView
         android:id="@+id/lv_keys"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:minHeight="200dp"
+        android:minHeight="220dp"
         android:divider="@color/divider"
-        android:dividerHeight="1dp" />
+        android:dividerHeight="1dp"
+        android:groupIndicator="@null"
+        android:childIndicator="@null"
+        android:childDivider="@color/divider" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -30,28 +46,71 @@
         android:padding="8dp">
 
         <Button
-            android:id="@+id/btn_delete_key"
+            android:id="@+id/btn_test_all"
+            style="?android:attr/buttonStyleSmall"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:minWidth="0dp"
+            android:minHeight="32dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="测试全部"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:includeFontPadding="false"
+            android:textSize="11sp" />
+
+        <Button
+            android:id="@+id/btn_delete_key"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:minWidth="0dp"
+            android:minHeight="32dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
             android:text="删除密钥"
-            android:textSize="12sp" />
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:includeFontPadding="false"
+            android:textSize="11sp" />
 
         <Button
             android:id="@+id/btn_show_current"
+            style="?android:attr/buttonStyleSmall"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="显示当前密钥"
-            android:textSize="12sp" />
+            android:layout_marginStart="4dp"
+            android:minWidth="0dp"
+            android:minHeight="32dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="当前密钥"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:includeFontPadding="false"
+            android:textSize="11sp" />
 
         <Button
             android:id="@+id/btn_cancel"
+            style="?android:attr/buttonStyleSmall"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:minWidth="0dp"
+            android:minHeight="32dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
             android:text="取消"
-            android:textSize="12sp" />
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:includeFontPadding="false"
+            android:textSize="11sp" />
 
     </LinearLayout>
 

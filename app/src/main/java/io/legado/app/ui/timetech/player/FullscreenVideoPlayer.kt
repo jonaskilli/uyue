@@ -18,6 +18,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -88,6 +89,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
@@ -121,6 +123,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.bumptech.glide.request.RequestOptions
+import io.legado.app.R
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.glide.ImageLoader
 import io.legado.app.help.glide.OkHttpModelLoader
@@ -2385,5 +2388,68 @@ internal object PreloadCache {
         player = null
         cachedUri = null
         cachedHeaders = null
+    }
+}
+
+/**
+ * 播放/解析失败时的提示条（取代各处原来的模态错误弹窗）。
+ *
+ * 旧实现是一个 Dialog：一出现就吃掉所有触摸，点「关闭」还会直接 finish()，
+ * 于是"这一部看不了就只能退出播放页"，连竖滑切下一个视频都做不到。
+ * 现在这条提示贴在底部、只吃掉自己几个按钮的点击，不拦其它区域，页面也不退出：
+ * 可以点「重试」，有列表时（canSwitch）右侧 20% 照旧能竖滑切下一个。
+ *
+ * 播放器页（SourceVideoPlayerActivity）与书源启动页（VideoLaunchActivity）共用。
+ */
+@Composable
+internal fun BoxScope.ErrorNotice(
+    message: String,
+    canSwitch: Boolean,
+    onRetry: () -> Unit,
+    onExit: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(start = 16.dp, end = 16.dp, bottom = 40.dp)
+            .fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xDD1C1C1E),
+        contentColor = Color.White,
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Text(
+                text = stringResource(R.string.video_get_url_fail),
+                style = MaterialTheme.typography.titleSmall,
+                color = Color.White,
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.75f),
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            if (canSwitch) {
+                Text(
+                    text = "可滑动屏幕右侧切换下一个视频",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onRetry) {
+                    Text(text = "重试", color = Color.White)
+                }
+                TextButton(onClick = onExit) {
+                    // 文案用「退出」而不是「关闭」：这个按钮是真的离开播放页，
+                    // 标成「关闭」会让人以为只是关掉提示（正是旧弹窗最别扭的地方）
+                    Text(text = "退出", color = Color.White)
+                }
+            }
+        }
     }
 }

@@ -8,8 +8,10 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -60,8 +62,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -73,7 +77,9 @@ import io.legado.app.base.BaseComposeActivity
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.help.video.InfiniteSwipeFeed
+import io.legado.app.ui.timetech.player.CoverBackdrop
 import io.legado.app.ui.timetech.player.EpisodeItem
+import io.legado.app.ui.timetech.player.ErrorNotice
 import io.legado.app.ui.timetech.player.FullscreenVideoPlayer
 import io.legado.app.ui.timetech.player.LocalVideo
 import io.legado.app.ui.browser.WebViewActivity
@@ -100,6 +106,7 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.Player
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.NotificationId
+import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -352,6 +359,13 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 consecutiveFails = 0
             }
         }
+        // 解析/回退失败只弹一次 toast 告知，不再用模态错误框打断操作：
+        // 页面留在播放页，可点提示条上的「重试」，有列表时右侧 20% 竖滑即可切下一个视频。
+        LaunchedEffect(state.error, state.fallbackFailed) {
+            val msg = state.error ?: state.fallbackFailed ?: return@LaunchedEffect
+            if (infiniteSwipe) return@LaunchedEffect
+            toastOnUi(msg)
+        }
         // 必须等浏览器真的拉起来再关页面，否则还在转场就被销毁，播放器起不来
         LaunchedEffect(state.fallbackLaunched) {
             if (state.fallbackLaunched) finish()
@@ -452,6 +466,35 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 ) { value, _ -> feedOffsetDp = value }
             }
         }
+        /**
+         * 切到列表里的上一个/下一个视频（offset：+1 下一个，-1 上一个）。
+         *
+         * 抽成变量而不是内联在播放器参数里，是为了让「解析失败」这种没有播放器可渲染的状态
+         * 也能复用同一套切换动作（见下方 FeedSwipeZone）。
+         */
+        val switchFeed: (Int) -> Unit = { offset ->
+            feedSwitchDir = offset
+            // 立刻用第二个（目标）视频的封面铺底，让滑动全程露出的都是即将播放的视频封面
+            SourceVideoPlayerSession.previewFeed(offset)
+            feedScope.launch {
+                animate(
+                    initialValue = feedOffsetDp,
+                    targetValue = -offset * screenHeightDp.toFloat(),
+                    animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+                ) { value, _ -> feedOffsetDp = value }
+                if (SourceVideoPlayerSession.feedSwitch(offset)) {
+                    feedLoading = true
+                } else {
+                    feedLoading = false
+                    feedSwitchDir = 0
+                    animate(
+                        initialValue = feedOffsetDp,
+                        targetValue = 0f,
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    ) { value, _ -> feedOffsetDp = value }
+                }
+            }
+        }
         // 新视频加载完成后 bookUrl 才更新；封面早已铺满整屏，原地接播即可，
         // 不再做第二次「从底部滑入」动画，避免与滑出动画重复显得割裂
         LaunchedEffect(state.bookUrl) {
@@ -493,13 +536,17 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                     .offset(y = feedOffsetDp.dp)
             ) {
                 when {
-                    (state.error != null || state.fallbackFailed != null) && !infiniteSwipe -> ErrorDialog(
-                        message = state.error ?: state.fallbackFailed.orEmpty(),
-                        onDismiss = {
-                            // 关闭错误框时同步清掉会话里的错误，防止残留到下一个视频
-                            SourceVideoPlayerSession.clearError()
-                            finish()
-                        }
+                    // 解析/回退失败：不再弹模态错误框。
+                    // 早先它一出现就吃掉全部触摸，点「关闭」还会直接 finish()，
+                    // 于是"这一部看不了就只能退出"，连竖滑切下一个视频都做不到。
+                    // 现在这里铺封面（竖滑露出的是封面而不是黑屏），
+                    // 错误由外层的 ErrorNotice 以提示条呈现，页面不退出，
+                    // 有列表时右侧 20% 照旧能竖滑切下一个。
+                    (state.error != null || state.fallbackFailed != null) && !infiniteSwipe -> CoverBackdrop(
+                        coverUrl = state.coverUrl,
+                        sourceOrigin = state.coverOrigin,
+                        initialDrawable = coverDrawable,
+                        modifier = Modifier.fillMaxSize(),
                     )
 
                     state.episodes.isNotEmpty() -> key(state.bookUrl) {
@@ -532,43 +579,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             onPrefetchNextVideo = SourceVideoPlayerSession::peekNextVideo,
                             onProgressChange = SourceVideoPlayerSession::saveProgress,
                             onOpenHome = { homeMode = true },
-                            onFeedSwitch = if (state.feedEnabled) {
-                                { offset ->
-                                    // 先把当前这部沿手指方向整屏滑出（此间露出下一个视频封面，不黑屏），
-                                    // 滑出完成后再开始加载下一个视频；新视频就绪后封面已铺满，
-                                    // 直接原地接播、不再做第二次滑入动画（避免与滑出动画重复割裂）；
-                                    // 若已是列表首尾（无下一个），则滑回原位并复位。
-                                    feedSwitchDir = offset
-                                    // 立刻用第二个（目标）视频的封面铺底，让滑动全程露出的都是即将播放的视频封面
-                                    SourceVideoPlayerSession.previewFeed(offset)
-                                    feedScope.launch {
-                                        animate(
-                                            initialValue = feedOffsetDp,
-                                            targetValue = -offset * screenHeightDp.toFloat(),
-                                            animationSpec = tween(
-                                                durationMillis = 200,
-                                                easing = FastOutSlowInEasing,
-                                            ),
-                                        ) { value, _ -> feedOffsetDp = value }
-                                        if (SourceVideoPlayerSession.feedSwitch(offset)) {
-                                            feedLoading = true
-                                        } else {
-                                            feedLoading = false
-                                            feedSwitchDir = 0
-                                            animate(
-                                                initialValue = feedOffsetDp,
-                                                targetValue = 0f,
-                                                animationSpec = tween(
-                                                    durationMillis = 220,
-                                                    easing = FastOutSlowInEasing,
-                                                ),
-                                            ) { value, _ -> feedOffsetDp = value }
-                                        }
-                                    }
-                                }
-                            } else {
-                                null
-                            },
+                            onFeedSwitch = if (state.feedEnabled) switchFeed else null,
                             onFeedDrag = if (state.feedEnabled) onFeedDrag else null,
                             onFeedCancel = if (state.feedEnabled) onFeedCancel else null,
                             coverUrl = state.coverUrl,
@@ -589,7 +600,15 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                         )
                     }
 
-                    // 白名单书源：没有剧集可渲染，正在等书源自己拉起播放器（根封面 + 下方转圈层已覆盖）
+                    // 白名单书源：没有剧集可渲染，正在等书源自己拉起播放器；
+                    // 解析中（剧集还没就绪）也走这里——铺上封面，
+                    // 这样解析途中竖滑切走时露出的是封面，而不是一片黑
+                    else -> CoverBackdrop(
+                        coverUrl = state.coverUrl,
+                        sourceOrigin = state.coverOrigin,
+                        initialDrawable = coverDrawable,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
             }
 
@@ -601,6 +620,37 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 )
             }
             }
+
+            // 播放器没渲染出来时（解析中、或解析失败），播放器内部那套右侧竖滑手势
+            // 根本不存在，这里补一层，于是：
+            //   · 解析要几秒也能中途滑走，不必等它解析完；
+            //   · 解析失败也不会卡在这一部，照样能滑到下一个视频。
+            // 手势区在下、提示条在上：提示条只吃掉自己几个按钮的点击，不拦其它区域。
+            val playerRendered = state.episodes.isNotEmpty()
+                    && state.error == null
+                    && state.fallbackFailed == null
+            if (!playerRendered && !infiniteSwipe) {
+                FeedSwipeZone(
+                    enabled = state.feedEnabled,
+                    onDrag = onFeedDrag,
+                    onCancel = onFeedCancel,
+                    onSwitch = switchFeed,
+                )
+            }
+
+            // 解析/回退失败：只给提示，不弹窗、不退出
+            if ((state.error != null || state.fallbackFailed != null) && !infiniteSwipe) {
+                ErrorNotice(
+                    message = state.error ?: state.fallbackFailed.orEmpty(),
+                    canSwitch = state.feedEnabled,
+                    onRetry = {
+                        SourceVideoPlayerSession.clearError()
+                        SourceVideoPlayerSession.load(state.bookUrl, state.currentIndex)
+                    },
+                    onExit = { finish() },
+                )
+            }
+
             // 加载/解析/切换中转圈：根 Box 已铺黑底，无黑屏闪动
             if (state.loading || feedLoading || state.fallbackIndex != null) {
                 Box(
@@ -1423,36 +1473,49 @@ private fun DownloadStateItem(
     }
 }
 
+/**
+ * 右侧 20% 竖滑切换区：给「没有播放器可渲染」的状态补上这套手势。
+ *
+ * 正常播放时该手势由播放器内部提供；但解析失败时 episodes 为空、播放器压根不渲染，
+ * 手势也就跟着没了——这正是"失败即只能退出"的根因。
+ * 这里按与播放器内部一致的口径（右侧 20%、越过 slop*6 触发、跟手位移）补一层，
+ * 让失败状态下照样能滑到列表里的下一个视频。
+ */
 @Composable
-private fun ErrorDialog(message: String, onDismiss: () -> Unit) {
+private fun BoxScope.FeedSwipeZone(
+    enabled: Boolean,
+    onDrag: (Float) -> Unit,
+    onCancel: () -> Unit,
+    onSwitch: (Int) -> Unit,
+) {
+    if (!enabled) return
+    val viewConfiguration = LocalViewConfiguration.current
     Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)),
-        contentAlignment = Alignment.Center
-    ) {
-        Dialog(onDismissRequest = onDismiss) {
-            Column(
-                modifier = Modifier
-                    .widthIn(max = 320.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = stringResource(R.string.video_get_url_fail),
-                    style = MaterialTheme.typography.titleMedium
+        modifier = Modifier
+            .align(Alignment.CenterEnd)
+            .fillMaxHeight()
+            .fillMaxWidth(0.2f)
+            .pointerInput(onSwitch) {
+                // 与播放器内部同一阈值：touchSlop * 6
+                val thresholdPx = viewConfiguration.touchSlop * 6f
+                var total = 0f
+                var fired = false
+                detectVerticalDragGestures(
+                    onDragStart = { total = 0f; fired = false },
+                    onDragEnd = { if (!fired && total != 0f) onCancel() },
+                    onDragCancel = { if (!fired) onCancel() },
+                    onVerticalDrag = { change, dragAmount ->
+                        if (fired) return@detectVerticalDragGestures
+                        change.consume()
+                        total += dragAmount
+                        onDrag(total)
+                        if (abs(total) > thresholdPx) {
+                            fired = true
+                            // 与播放器内部一致：上滑（位移为负）看下一个
+                            onSwitch(if (total < 0) 1 else -1)
+                        }
+                    },
                 )
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-                TextButton(onClick = onDismiss) {
-                    Text(text = stringResource(R.string.close))
-                }
             }
-        }
-    }
+    )
 }
