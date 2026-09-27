@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.widget.EditText
+import android.widget.LinearLayout
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
@@ -23,6 +24,7 @@ import io.legado.app.data.entities.rule.ExploreRule
 import io.legado.app.data.entities.rule.SearchRule
 import io.legado.app.data.entities.rule.TocRule
 import io.legado.app.databinding.ActivityBookSourceEditBinding
+import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.lib.dialogs.SelectItem
 import io.legado.app.lib.dialogs.alert
@@ -44,6 +46,7 @@ import io.legado.app.ui.widget.keyboard.KeyboardToolPop
 import io.legado.app.ui.widget.recycler.NoChildScrollLinearLayoutManager
 import io.legado.app.ui.widget.text.EditEntity
 import io.legado.app.utils.GSON
+import io.legado.app.utils.fromJsonObject
 import io.legado.app.utils.imeHeight
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.launch
@@ -195,6 +198,7 @@ class BookSourceEditActivity :
             }
 
             R.id.menu_set_source_variable -> setSourceVariable()
+            R.id.menu_replace_domain -> replaceDomain()
             R.id.menu_search -> viewModel.save(getSource()) { source ->
                 startActivity<SearchActivity> {
                     putExtra("searchScope", SearchScope(source).toString())
@@ -721,6 +725,61 @@ class BookSourceEditActivity :
                             if (scrollDistance > 0 && binding.recyclerView.canScrollVertically(1) || scrollDistance < 0 && binding.recyclerView.canScrollVertically(-1)) {
                                 binding.recyclerView.smoothScrollBy(0, scrollDistance)
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 替换域名：整份书源里所有出现旧域名的字符串一次性换成新域名。
+     *
+     * 换域名的源结构完全不变，只是域名变了，逐个字段手改太麻烦。
+     * 这里把整份源序列化成 JSON 再做字符串替换——书源地址、搜索/发现/目录/正文规则、
+     * header、登录地址、注释等所有字段都跑得掉，比只改某几个字段彻底。
+     * 替换后反序列化回 BookSource 校验一次：解析不了说明新域名破坏了 JSON
+     * （比如带了引号之类的非法字符），提示用户且不写入界面。
+     */
+    private fun replaceDomain() {
+        val source = getSource()
+        val json = GSON.toJson(source)
+        val oldBinding = DialogEditTextBinding.inflate(layoutInflater)
+        val newBinding = DialogEditTextBinding.inflate(layoutInflater)
+        oldBinding.editView.hint = getString(R.string.replace_domain_old)
+        newBinding.editView.hint = getString(R.string.replace_domain_new)
+        // 预填当前书源地址：多数情况只需把它改掉后半段
+        oldBinding.editView.setText(source.bookSourceUrl)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(oldBinding.root)
+            addView(newBinding.root)
+        }
+        alert(R.string.replace_domain) {
+            customView { container }
+            noButton()
+            yesButton {
+                val oldText = oldBinding.editView.text.toString().trim()
+                val newText = newBinding.editView.text.toString().trim()
+                when {
+                    oldText.isEmpty() || newText.isEmpty() -> {
+                        toastOnUi(getString(R.string.replace_domain_empty))
+                    }
+
+                    !json.contains(oldText) -> {
+                        toastOnUi(getString(R.string.replace_domain_not_found))
+                    }
+
+                    else -> {
+                        val count = json.split(oldText).size - 1
+                        val newSource = GSON.fromJsonObject<BookSource>(
+                            json.replace(oldText, newText)
+                        ).getOrNull()
+                        if (newSource == null) {
+                            toastOnUi(getString(R.string.replace_domain_failed))
+                        } else {
+                            upSourceView(newSource)
+                            toastOnUi(getString(R.string.replace_domain_done, count))
                         }
                     }
                 }

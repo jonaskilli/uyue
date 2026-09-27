@@ -59,6 +59,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_replace_domain"
+        android:title="@string/replace_domain"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_qr_code_camera"
         android:title="@string/import_by_qr_code"
         app:showAsAction="never" />
