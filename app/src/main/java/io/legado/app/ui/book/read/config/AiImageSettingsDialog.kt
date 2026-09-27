@@ -23,6 +23,8 @@ import io.legado.app.base.BaseDialogFragment
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.AiImageTemplate
+import io.legado.app.help.ApiEntry
+import io.legado.app.help.MiyueKeyManager
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.ReadBook
@@ -384,7 +386,33 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
         etModelUrl = edit(AiImageGenerator.DEFAULT_MODEL_URL, "例如 https://api.siliconflow.cn/v1")
 
         label("模型名")
-        etModelName = edit(AiImageGenerator.DEFAULT_MODEL_NAME, "例如 Kwai-Kolors/Kolors")
+        // 模型名输入框 + 右侧「获取模型」按钮（复用密钥管理的模型列表弹窗）
+        val modelNameRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 4.dpToPx())
+        }
+        etModelName = EditText(context).apply {
+            setText(AiImageGenerator.DEFAULT_MODEL_NAME)
+            hint = "例如 Kwai-Kolors/Kolors"
+        }
+        modelNameRow.addView(
+            etModelName,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        val btnFetchModels = Button(context).apply {
+            text = "获取模型"
+            setPadding(8.dpToPx())
+            setOnClickListener { fetchModelsForImage() }
+        }
+        modelNameRow.addView(
+            btnFetchModels,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = 8.dpToPx() }
+        )
+        root.addView(modelNameRow)
 
         labelWithHelp(
             "API 密钥",
@@ -762,6 +790,29 @@ sk-aaa@@sk-bbb@@sk-ccc
                 }
             }
         ).show(childFragmentManager, "aiImageTemplateList")
+    }
+
+    /**
+     * 获取当前 AI 生图接口的可用模型：复用密钥管理里的模型列表弹窗（MiyueKeyManager.showModelsDialog）。
+     * 弹窗自带搜索框、点整行切换、右侧复制按钮，逻辑与密钥管理完全一致。
+     * 仅用当前「AI 模型地址」拼 /models、用「API 密钥」做鉴权；选中后直接填入模型名输入框。
+     */
+    private fun fetchModelsForImage() {
+        val url = etModelUrl.text?.toString()?.trim().orEmpty()
+        if (url.isEmpty()) {
+            toastOnUi("请先填写 AI 模型地址")
+            return
+        }
+        val entry = ApiEntry(
+            endpoint = url,
+            model = etModelName.text?.toString()?.trim().orEmpty(),
+            key = etModelKey.text?.toString()?.trim().orEmpty(),
+            scene = "aiImage",
+        )
+        MiyueKeyManager.showModelsDialog(requireContext(), entry) { picked ->
+            etModelName.setText(picked)
+            toastOnUi("已选择模型：$picked")
+        }
     }
 
     /** 保存当前模板配置到数据库 */
