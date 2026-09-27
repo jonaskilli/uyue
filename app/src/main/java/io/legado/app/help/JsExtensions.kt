@@ -1443,7 +1443,15 @@ private fun saveResponseHeadersIfWebPage(
      */
     fun toast(msg: Any?) {
         rhinoContextOrNull?.ensureActive()
-        appCtx.toastOnUi("${getTag()}: ${msg.toString()}")
+        // 源名前缀由本方法统一加，所以弹出来的样子是「源名: 提示内容」。
+        // 开关关掉后只落日志：视频源常在正文里 toast「正在加载第N集」，
+        // 播放/切集时反复弹很碍眼（设置 → 其它设置 → 书源提示）。
+        val text = "${getTag()}: ${msg.toString()}"
+        if (AppConfig.sourceToast) {
+            appCtx.toastOnUi(text)
+        } else {
+            AppLog.putDebug("[书源提示] $text")
+        }
     }
 
     /**
@@ -1451,7 +1459,12 @@ private fun saveResponseHeadersIfWebPage(
      */
     fun longToast(msg: Any?) {
         rhinoContextOrNull?.ensureActive()
-        appCtx.longToastOnUi("${getTag()}: ${msg.toString()}")
+        val text = "${getTag()}: ${msg.toString()}"
+        if (AppConfig.sourceToast) {
+            appCtx.longToastOnUi(text)
+        } else {
+            AppLog.putDebug("[书源提示] $text")
+        }
     }
 
     /**

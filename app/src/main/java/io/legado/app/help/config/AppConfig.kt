@@ -79,6 +79,27 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var optimizeRender = CanvasRecorderFactory.isSupport
             && appCtx.getPrefBoolean(PreferKey.optimizeRender, false)
     var recordLog = appCtx.getPrefBoolean(PreferKey.recordLog)
+    /**
+     * 书源规则里的 `java.toast` / `java.longToast` 是否真的弹提示。
+     *
+     * 用 getter 而不是初始化时求值：object 的属性只会算一次，写成 `var x = getPrefBoolean()`
+     * 在设置页改完开关后这里仍是旧值。默认 false——不少视频源在正文规则里 toast
+     * "正在加载第N集"，播放/切集时反复弹窗很碍眼，关掉后只写日志。
+     */
+    val sourceToast: Boolean get() = appCtx.getPrefBoolean(PreferKey.sourceToast, false)
+
+    /**
+     * 禁止书源弹出任何验证：图片验证码对话框（`java.getVerificationCode`）与验证网页
+     * （`java.startBrowserAwait`、带验证标记的 startBrowser）一律不弹。
+     *
+     * 开了之后需要验证码才能过的源会直接失败（规则里抛异常），不会再打断操作。
+     * 注意：视频播放走的是 `startBrowser(videoMode=true)`，**不属于验证**，不受这个开关影响。
+     */
+    var disableSourceVerification: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.disableSourceVerification, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.disableSourceVerification, value)
+        }
     var editFontScale = appCtx.getPrefInt(PreferKey.editFontScale, 16)
     var editNonPrintable = appCtx.getPrefInt(PreferKey.editNonPrintable, 0)
     var editAutoWrap = appCtx.getPrefBoolean(PreferKey.editAutoWrap, true)

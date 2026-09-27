@@ -5,6 +5,7 @@ import io.legado.app.data.entities.BaseSource
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.CacheManager
 import io.legado.app.help.IntentData
+import io.legado.app.help.config.AppConfig
 import io.legado.app.ui.association.VerificationCodeActivity
 import io.legado.app.ui.browser.WebViewActivity
 import io.legado.app.utils.isMainThread
@@ -42,6 +43,11 @@ object SourceVerificationHelp {
             ?: throw NoStackTraceException("getVerificationResult parameter source cannot be null")
         require(url.length < 64 * 1024) { "getVerificationResult parameter url too long" }
         check(!isMainThread) { "getVerificationResult must be called on a background thread" }
+        // 总开关（书源管理右上角「禁止弹出验证」）：开了就一个都不弹，
+        // 让需要验证码的源直接失败，而不是弹窗打断搜索/阅读。
+        if (AppConfig.disableSourceVerification) {
+            throw NoStackTraceException("已开启「禁止弹出验证」，跳过书源验证")
+        }
 
         clearResult(source.getKey())
 
@@ -88,6 +94,11 @@ object SourceVerificationHelp {
     ) {
         source ?: throw NoStackTraceException("startBrowser parameter source cannot be null")
         require(url.length < 64 * 1024) { "startBrowser parameter url too long" }
+        // 只有「验证用途」的调用会被总开关拦下（saveResult=true 表示要把网页结果回传给书源）。
+        // 视频播放走的是 videoMode=true 且 saveResult=false，属于播放而非验证，必须放行。
+        if (saveResult == true && AppConfig.disableSourceVerification) {
+            throw NoStackTraceException("已开启「禁止弹出验证」，跳过书源验证")
+        }
         appCtx.startActivity<WebViewActivity> {
             putExtra("title", title)
             putExtra("url", url)

@@ -402,4 +402,9 @@ object PreferKey {
     const val aiSourceRuleHistory = "aiSourceRuleHistory"
     // 内置浏览器/内置播放器是否全屏（勾选后一直生效，切换视频重建页面也能保持）
     const val browserFullScreen = "browserFullScreen"
+    // 书源规则里的 java.toast / java.longToast 是否真的弹出提示
+    // 默认关：很多视频源在正文规则里用 toast 报"正在加载第N集"，播放/切集时反复弹很碍眼
+    const val sourceToast = "sourceToast"
+    // 禁止书源弹出任何验证（图片验证码对话框 / 验证网页）。开关在「我的 → 书源管理」右上角菜单
+    const val disableSourceVerification = "disableSourceVerification"
 }

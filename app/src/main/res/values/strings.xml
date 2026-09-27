@@ -1515,4 +1515,7 @@
     <string name="ai_clear_source_history">清除网址记录</string>
     <string name="ai_set_api">设置 AI 接口</string>
     <string name="ai_set_api_hint">接口@@模型@@密钥（3 段一组，可多组追加轮换）</string>
+    <string name="disable_source_verification">禁止弹出验证</string>
+    <string name="pt_source_toast">书源提示（java.toast）</string>
+    <string name="ps_source_toast">书源规则里 java.toast 弹的提示（形如「源名: 正在加载第N集」）。关掉后只写日志，不再弹窗</string>
 </resources>

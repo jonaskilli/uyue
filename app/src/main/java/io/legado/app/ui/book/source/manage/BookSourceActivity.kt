@@ -28,6 +28,7 @@ import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.databinding.ActivityBookSourceBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.help.DirectLinkUpload
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.primaryColor
@@ -166,6 +167,9 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
         val sortSubMenu = menu.findItem(R.id.action_sort).subMenu!!
         sortSubMenu.findItem(R.id.menu_sort_desc).isChecked = !sortAscending
         sortSubMenu.setGroupCheckable(R.id.menu_group_sort, true, true)
+        // 勾选态从配置里回读：菜单每次打开都会重建，不回显的话看着像没生效
+        menu.findItem(R.id.menu_disable_verification).isChecked =
+            AppConfig.disableSourceVerification
         upGroupMenu()
         return super.onPrepareOptionsMenu(menu)
     }
@@ -259,6 +263,13 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
                 groupSourcesByDomain = item.isChecked
                 adapter.showSourceHost = item.isChecked
                 upBookSource(searchView.query?.toString())
+            }
+
+            // 禁止弹出验证：勾选后所有书源都不会再弹图片验证码/验证网页，
+            // 需要验证码才能过的源会直接失败，不再打断搜索与阅读
+            R.id.menu_disable_verification -> {
+                item.isChecked = !item.isChecked
+                AppConfig.disableSourceVerification = item.isChecked
             }
 
             R.id.menu_help -> showHelp("SourceMBookHelp")
