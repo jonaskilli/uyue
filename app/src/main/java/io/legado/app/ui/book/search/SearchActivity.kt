@@ -90,6 +90,7 @@ class SearchActivity : VMBaseActivity<ActivityBookSearchBinding, SearchViewModel
     private var historyFlowJob: Job? = null
     private var booksFlowJob: Job? = null
     private var precisionSearchMenuItem: MenuItem? = null
+    private var excludeVideoSourceMenuItem: MenuItem? = null
     private var isManualStopSearch = false
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
@@ -111,6 +112,8 @@ class SearchActivity : VMBaseActivity<ActivityBookSearchBinding, SearchViewModel
         this.menu = menu
         precisionSearchMenuItem = menu.findItem(R.id.menu_precision_search)
         precisionSearchMenuItem?.isChecked = getPrefBoolean(PreferKey.precisionSearch)
+        excludeVideoSourceMenuItem = menu.findItem(R.id.menu_exclude_video_source)
+        excludeVideoSourceMenuItem?.isChecked = getPrefBoolean(PreferKey.searchExcludeVideo)
         return super.onCompatCreateOptionsMenu(menu)
     }
 
@@ -162,6 +165,20 @@ class SearchActivity : VMBaseActivity<ActivityBookSearchBinding, SearchViewModel
                     !getPrefBoolean(PreferKey.precisionSearch)
                 )
                 precisionSearchMenuItem?.isChecked = getPrefBoolean(PreferKey.precisionSearch)
+                searchView.query?.toString()?.trim()?.let {
+                    searchView.setQuery(it, true)
+                }
+            }
+
+            // 不搜索视频源：视频源有独立入口（视频页里的搜索），勾上后只搜普通书源。
+            // 改完立刻用当前关键词重搜一次，跟「精确搜索」的行为保持一致
+            R.id.menu_exclude_video_source -> {
+                putPrefBoolean(
+                    PreferKey.searchExcludeVideo,
+                    !getPrefBoolean(PreferKey.searchExcludeVideo)
+                )
+                excludeVideoSourceMenuItem?.isChecked =
+                    getPrefBoolean(PreferKey.searchExcludeVideo)
                 searchView.query?.toString()?.trim()?.let {
                     searchView.setQuery(it, true)
                 }

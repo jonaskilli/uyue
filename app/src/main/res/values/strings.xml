@@ -1516,6 +1516,14 @@
     <string name="ai_set_api">设置 AI 接口</string>
     <string name="ai_set_api_hint">接口@@模型@@密钥（3 段一组，可多组追加轮换）</string>
     <string name="disable_source_verification">禁止弹出验证</string>
+    <string name="exclude_video_source">不搜索视频源</string>
+    <string name="replace_domain">替换域名</string>
+    <string name="replace_domain_old">原域名（如 https://old.com）</string>
+    <string name="replace_domain_new">新域名（如 https://new.com）</string>
+    <string name="replace_domain_empty">原域名和新域名都要填</string>
+    <string name="replace_domain_not_found">这个书源里没有找到该域名</string>
+    <string name="replace_domain_failed">替换后书源无法解析，请检查新域名是否含有特殊字符</string>
+    <string name="replace_domain_done">已替换 %1$d 处，确认无误后点右上角保存</string>
     <string name="pt_source_toast">书源提示（java.toast）</string>
     <string name="ps_source_toast">书源规则里 java.toast 弹的提示（形如「源名: 正在加载第N集」）。关掉后只写日志，不再弹窗</string>
 </resources>

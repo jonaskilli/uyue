@@ -6,7 +6,9 @@ import io.legado.app.data.appDb
 import io.legado.app.data.dao.getVideoSourceParts
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
+import io.legado.app.constant.PreferKey
 import io.legado.app.help.config.AppConfig
+import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.splitNotBlank
 import splitties.init.appCtx
 
@@ -158,7 +160,24 @@ data class SearchScope(private var scope: String) {
                 }
             }
         }
-        return list.sortedBy { it.customOrder }
+        return excludeVideoSource(list.sortedBy { it.customOrder })
+    }
+
+    /**
+     * 「不搜索视频源」（书架搜索菜单里的勾选项）：勾上后搜索只走普通书源。
+     *
+     * 视频源有独立的入口（视频页里的搜索），混在书架搜索里既拖速度、
+     * 又总把视频结果排在前面，所以给一个开关彻底排除。
+     * 两点边界：
+     * - 范围是「所有视频源」([VIDEO_SCOPE]) 时不过滤——那本来就是搜视频的入口；
+     * - 单源搜索（[isSource]，即换源时指定的那一个源）不过滤——那是用户显式点名的源。
+     */
+    private fun excludeVideoSource(list: List<BookSourcePart>): List<BookSourcePart> {
+        if (!appCtx.getPrefBoolean(PreferKey.searchExcludeVideo, false)) return list
+        if (isSource()) return list
+        val videoUrls = appDb.bookSourceDao.getVideoSourceParts()
+            .mapTo(hashSetOf()) { it.bookSourceUrl }
+        return list.filterNot { it.bookSourceUrl in videoUrls }
     }
 
     fun isAll(): Boolean {

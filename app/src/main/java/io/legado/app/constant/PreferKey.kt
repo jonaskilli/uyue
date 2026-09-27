@@ -407,4 +407,6 @@ object PreferKey {
     const val sourceToast = "sourceToast"
     // 禁止书源弹出任何验证（图片验证码对话框 / 验证网页）。开关在「我的 → 书源管理」右上角菜单
     const val disableSourceVerification = "disableSourceVerification"
+    // 书架搜索「不搜索视频源」：勾选后搜索只走非视频源（视频源有独立的搜索入口）
+    const val searchExcludeVideo = "searchExcludeVideo"
 }
