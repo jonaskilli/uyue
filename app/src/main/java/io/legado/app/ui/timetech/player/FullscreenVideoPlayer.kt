@@ -1,11 +1,15 @@
 package io.legado.app.ui.timetech.player
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -14,6 +18,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -86,8 +91,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.MutableState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -726,6 +736,29 @@ private fun buildMediaItem(uri: Uri): MediaItem {
 }
 
 /**
+ * 把 PlayerView 的视频层刷黑。
+ *
+ * 切集/切视频时 Compose 会**复用同一个 PlayerView**（组合槽位没变，factory 不会再跑），
+ * 而它的视频层是 SurfaceView——独立合成层，换 player 不会自动清屏：上一个视频的最后一帧
+ * 原样留在 Surface 上，直到新视频首帧渲染出来才被覆盖，表现为"新视频还没播，先闪一下
+ * 上一个画面的残留"（通常不到 1 秒，正是新视频起播的时间）。
+ * 这里在绑定新 player 之前先把 Surface 刷黑，从根上消除残留。
+ */
+private fun clearVideoSurface(view: PlayerView) {
+    val surfaceView = view.videoSurfaceView as? android.view.SurfaceView ?: return
+    runCatching {
+        val surface = surfaceView.holder?.surface ?: return
+        if (!surface.isValid) return
+        val canvas = surface.lockCanvas(null) ?: return
+        try {
+            canvas.drawColor(android.graphics.Color.BLACK)
+        } finally {
+            surface.unlockCanvasAndPost(canvas)
+        }
+    }
+}
+
+/**
  * 构造带默认请求头的 MediaSourceFactory。
  *
  * 视频站的 m3u8 与分片普遍校验 UA / Referer / Cookie，ExoPlayer 默认不带任何请求头，
@@ -1060,7 +1093,13 @@ internal fun VideoPlayerPage(
                 },
                 onRelease = { view -> view.player = null },
                 update = { view ->
-                    view.player = player
+                    // 换了播放器才清屏：同一实例的重复 update（resizeMode 变化等）不该擦掉画面
+                    if (view.player !== player) {
+                        // 先解绑，让旧播放器的渲染线程停下来，否则它可能在我们刷黑之后又画一帧
+                        view.player = null
+                        clearVideoSurface(view)
+                        view.player = player
+                    }
                     view.resizeMode = scaleMode.resizeMode
                 },
                 modifier = Modifier.fillMaxSize()
@@ -1344,6 +1383,122 @@ private fun rememberClockText(): String {
 private fun clockText(): String =
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
 
+/** 电量：百分比 + 是否在充电 */
+private data class BatteryState(val percent: Int, val charging: Boolean)
+
+private fun parseBattery(intent: Intent?): BatteryState {
+    if (intent == null) return BatteryState(0, false)
+    val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+    val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+    val percent = if (level >= 0 && scale > 0) level * 100 / scale else 0
+    val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+    val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+        status == BatteryManager.BATTERY_STATUS_FULL
+    return BatteryState(percent.coerceIn(0, 100), charging)
+}
+
+/**
+ * 控制栏右上角显示的**电量**（与系统时间并排）。
+ *
+ * ACTION_BATTERY_CHANGED 是粘性广播，注册即回调一次，所以首帧就是真实电量，
+ * 不必等下一次电量变化广播（那种广播几分钟才来一次，开局会先显示 0%）。
+ * 与时间一样放在控制条内部：收起控制条后本页不再组合，广播随之注销，不在后台空转。
+ */
+@Composable
+private fun rememberBatteryState(): BatteryState {
+    val context = LocalContext.current
+    var state by remember {
+        mutableStateOf(
+            runCatching {
+                context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            }.getOrNull().let { parseBattery(it) }
+        )
+    }
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                state = parseBattery(intent)
+            }
+        }
+        runCatching {
+            context.registerReceiver(receiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
+    }
+    return state
+}
+
+/**
+ * 电池图标：外壳 + 正极帽 + 按电量填充的内部条，充电时中间叠一道闪电。
+ * 低电量（≤20%）转红、充电转绿，其余白色——全屏播放时没有系统状态栏可看，
+ * 这里就是唯一的电量提示，颜色必须一眼分得出来。
+ */
+@Composable
+private fun BatteryIcon(
+    percent: Int,
+    charging: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val color = when {
+        charging -> Color(0xFF4CD964)
+        percent <= 20 -> Color(0xFFFF453A)
+        else -> Color.White
+    }
+    Canvas(modifier = modifier.size(width = 22.dp, height = 11.dp)) {
+        val w = size.width
+        val h = size.height
+        val strokeW = 1.dp.toPx()
+        val capW = w * 0.08f
+        val capH = h * 0.44f
+        val bodyW = w - capW
+        // 正极帽
+        drawRoundRect(
+            color = color.copy(alpha = 0.9f),
+            topLeft = Offset(bodyW, (h - capH) / 2f),
+            size = Size(capW, capH),
+            cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+        )
+        // 外壳
+        drawRoundRect(
+            color = color.copy(alpha = 0.9f),
+            topLeft = Offset(strokeW / 2f, strokeW / 2f),
+            size = Size(bodyW - strokeW, h - strokeW),
+            cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+            style = Stroke(width = strokeW),
+        )
+        // 电量填充
+        val inset = strokeW * 2f
+        val innerW = bodyW - inset * 2f
+        val innerH = h - inset * 2f
+        val fillW = innerW * (percent / 100f)
+        if (fillW > 0f) {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(inset, inset),
+                // 极窄时保证还能看见一小段，否则 1% 时填充宽度趋近 0 像空电池
+                size = Size(fillW.coerceAtLeast(innerH * 0.6f), innerH),
+                cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+            )
+        }
+        // 充电闪电：画在电池正中，用深色压在填充色上，绿/白底都看得清
+        if (charging) {
+            val cx = bodyW / 2f
+            val cy = h / 2f
+            val s = h
+            val path = Path().apply {
+                moveTo(cx + s * 0.10f, cy - s * 0.46f)
+                lineTo(cx - s * 0.26f, cy + s * 0.06f)
+                lineTo(cx - s * 0.02f, cy + s * 0.06f)
+                lineTo(cx - s * 0.12f, cy + s * 0.46f)
+                lineTo(cx + s * 0.26f, cy - s * 0.06f)
+                lineTo(cx + s * 0.02f, cy - s * 0.06f)
+                close()
+            }
+            drawPath(path, Color(0xFF1C1C1E).copy(alpha = 0.75f))
+        }
+    }
+}
+
 @Composable
 private fun PlayerControls(
     title: String,
@@ -1397,7 +1552,7 @@ private fun PlayerControls(
                 .padding(vertical = 4.dp)
         ) {
             // 视频名称独占一行置于控制条最上方，避免原先与按钮挤在同一行导致名字被截断显示不全。
-            // 同一行右端显示系统当前时间（与下方进度条的"播放进度"是两回事）
+            // 同一行右端显示系统当前时间与电量（与下方进度条的"播放进度"是两回事）
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1413,12 +1568,25 @@ private fun PlayerControls(
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(12.dp))
-                Text(
-                    rememberClockText(),
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    maxLines = 1,
-                )
+                // 右上角：系统时间 + 电量（全屏播放时系统状态栏是隐藏的，这里补上）
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        rememberClockText(),
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    val battery = rememberBatteryState()
+                    Text(
+                        "${battery.percent}%",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    BatteryIcon(percent = battery.percent, charging = battery.charging)
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1998,6 +2166,9 @@ internal fun CoverBackdrop(
                 }
             }.apply {
                 scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                // 必须铺黑底：ImageView 默认透明，封面异步加载完成前会露出下面一层
+                // （上一视频留在 Surface 上的残帧），看着像"闪一下上一个画面"。
+                setBackgroundColor(android.graphics.Color.BLACK)
                 if (initialDrawable != null) setImageDrawable(initialDrawable)
             }
         },
