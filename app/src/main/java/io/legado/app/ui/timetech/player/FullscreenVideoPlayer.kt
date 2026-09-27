@@ -494,8 +494,9 @@ fun FullscreenVideoPlayer(
                 headers = headers,
                 seriesTitle = seriesTitle,
                 loopMode = loopMode,
-                // 锁定竖屏时强制自适应（FIT），横版视频居中显示、上下留黑边
-                scaleMode = if (lockedPortrait) ScaleMode.FIT else scaleMode,
+                // 锁定竖屏只控制屏幕方向，画面缩放模式保持用户的选择，
+                // 这样在锁定竖屏状态下也能正常切换显示方式（自适应/裁剪/拉伸）
+                scaleMode = scaleMode,
                 onLoopModeChange = { loopMode = it },
                 onScaleModeChange = { scaleMode = it },
                 onPlayEnded = handlePlayEnded,
