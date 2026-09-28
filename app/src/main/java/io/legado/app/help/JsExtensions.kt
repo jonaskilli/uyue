@@ -104,7 +104,7 @@ import io.legado.app.help.config.ThemeConfig
  * /android/data/{package}/cache/...
  */
 /**
- * 网页请求（GET 且响应为 HTML / 请求 Accept 含 text/html）的响应头侧存：
+ * 响应头侧存（GET / POST 均可，仅当请求显式带 saveHeaders=true 时触发）：
  * 不改变 ajaxRaceDelayed 原有返回值（仅响应体字符串），把响应头（含 Set-Cookie）
  * 按 URL 写入 Download 目录下的 JSON 文件，供朗读等 JS 脚本拿到响应体后另行读取。
  * 路径随当前朗读引擎切换（mingwuyan / mingwuyanZ）。
@@ -293,27 +293,18 @@ interface JsExtensions : JsEncodeUtils {
         return resultRef.get()
     }
 
-    /**
-     * 执行单个 ajaxRace / ajaxRaceDelayed 请求。
-     * 提取为独立方法以避免在两个竞速方法中重复代码。
-     *
-     * 注意：此方法改为普通函数（非 suspend），因为内部没有真正的挂起点，
-     * 且需要在普通 Thread 中调用。
-     */
-private fun saveResponseHeadersIfWebPage(
+/**
+ * 响应头侧存：把本次请求的全部响应头（含 Set-Cookie）按 URL 写入 response_headers.json。
+ *
+ * 是否落盘完全由调用方的 `saveHeaders=true` 开关决定，不再限制 method 与 Content-Type：
+ * 例如 studioglobal 的匿名凭证必须 POST /api/creator/anonymous-session 才能拿到，
+ * 而该接口返回的是 application/json，旧的「仅 GET + text/html」判断会把这类请求全部挡掉。
+ */
+private fun saveResponseHeaders(
     url: String,
-    method: String,
-    requestHeaders: Map<String, String>?,
     response: okhttp3.Response
 ) {
         try {
-            val contentType = response.header("Content-Type") ?: ""
-            val accept = requestHeaders?.get("Accept") ?: ""
-            // 仅 GET 请求且为网页格式（响应 Content-Type 或请求 Accept 含 text/html）才侧存响应头
-            val isWebPage = method.equals("GET", true)
-                    && (contentType.contains("text/html", ignoreCase = true)
-                        || accept.contains("text/html", ignoreCase = true))
-            if (!isWebPage) return
             val headersMap = linkedMapOf<String, String>()
             for (name in response.headers.names()) {
                 headersMap[name] = response.headers.values(name).joinToString("; ")
@@ -332,6 +323,13 @@ private fun saveResponseHeadersIfWebPage(
         }
     }
 
+    /**
+     * 执行单个 ajaxRace / ajaxRaceDelayed 请求。
+     * 提取为独立方法以避免在两个竞速方法中重复代码。
+     *
+     * 注意：此方法改为普通函数（非 suspend），因为内部没有真正的挂起点，
+     * 且需要在普通 Thread 中调用。
+     */
     private fun executeAjaxRequest(reqJson: String, ignoreTimeout: Boolean = false): String? {
         val reqMap = GSON.fromJsonObject<Map<String, Any>>(reqJson).getOrNull()
             ?: return null
@@ -366,6 +364,8 @@ private fun saveResponseHeadersIfWebPage(
             // write / call 会继承全局客户端的 15s / 60s，使脚本设的超时失效。
             val response = postDirect(url, body, headerMap ?: emptyMap(), timeoutMs)
             response.use {
+                // 必须在读 body 之前取 header（匿名凭证等就靠 POST 响应的 Set-Cookie 下发）
+                if (saveHeaders) saveResponseHeaders(url, it)
                 if (it.code == 200) {
                     it.body?.string()
                 } else {
@@ -384,7 +384,7 @@ private fun saveResponseHeadersIfWebPage(
                 coroutineContext = kotlin.coroutines.EmptyCoroutineContext
             )
             val strResponse = analyzeUrl.getStrResponse()
-            if (saveHeaders) saveResponseHeadersIfWebPage(url, method, headerMap, strResponse.raw)
+            if (saveHeaders) saveResponseHeaders(url, strResponse.raw)
             strResponse.body
         }
     }
