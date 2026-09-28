@@ -315,15 +315,19 @@ object SourceVideoPlayerSession {
         // 表现就是"解析中滑不动，解析完了才能滑"。
         _uiState.update { s -> s.copy(feedEnabled = (feed?.urls()?.size ?: 0) > 1) }
         // 乐观铺底：书库/搜索缓存里通常已有该视频的封面（本地元数据，无需联网），
-        // 让解析/加载期间显示封面+转圈，而不是纯黑屏
+        // 让解析/加载期间显示封面+转圈，而不是纯黑屏。
+        // 库里没有封面时必须**清空**：否则会一直沿用上一部视频的封面，
+        // 看着就像“点开新视频，先闪一下上一个视频”。
         val bookInDb = appDb.bookDao.getBook(bookUrl)
         val searchBook = appDb.searchBookDao.getSearchBook(bookUrl)
         val incoming = bookInDb ?: searchBook?.toBook()
         val incomingOrigin = bookInDb?.origin ?: searchBook?.origin
-        incoming?.coverUrl?.let { cover ->
-            if (cover.isNotBlank()) {
-                _uiState.update { s -> s.copy(coverUrl = cover, coverOrigin = incomingOrigin ?: "") }
-            }
+        val incomingCover = incoming?.coverUrl.orEmpty()
+        _uiState.update { s ->
+            s.copy(
+                coverUrl = incomingCover,
+                coverOrigin = if (incomingCover.isBlank()) "" else (incomingOrigin ?: ""),
+            )
         }
         // 同一本书且剧集已就绪（退出后再打开）：同步索引并重置解析结果。
         // 关键点：重新进入必须把上次的直链/网页地址清空、重新解析，
@@ -373,6 +377,16 @@ object SourceVideoPlayerSession {
                 fallbackIndex = null,
                 fallbackLaunched = false,
                 fallbackFailed = null,
+                // 上一部视频的剧集必须在这里**同步**清掉。
+                // 本会话是全局单例（跨 Activity 存活），而下面的 loadInternal 要联网拉目录：
+                // 在那几秒里界面若还拿着上一部已解析的直链，播放器会照着那个地址
+                // 真把上一部视频播出一小段——表现就是“点开新视频，先闪一下上一个视频的画面”。
+                // 清空后界面走「封面 + 转圈」，等新目录就绪再渲染真正的播放器。
+                episodes = emptyList(),
+                bookName = incoming?.name ?: "",
+                currentIndex = startIndex,
+                startIndex = startIndex,
+                startPositionMs = 0L,
             )
         }
         // 解析途中也可能被竖滑切走：必须先取消上一轮，
