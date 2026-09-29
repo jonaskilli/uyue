@@ -453,6 +453,7 @@ fun ProxyScreen(
         "deepseek" to "DeepSeek",
         "zhipu" to "智谱",
         "glm-image-hd" to "智谱-电影级生图",
+        "wenxin" to "文心",
         "longcat" to "龙猫",
         "longcat-search" to "龙猫-搜索"
     )

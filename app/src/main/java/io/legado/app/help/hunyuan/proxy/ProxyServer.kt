@@ -277,6 +277,9 @@ object ProxyServer {
     /** 识别为 LongCat（美团龙猫）模型的名称（前缀匹配，大小写不敏感）。 */
     private val LONGCAT_MODELS = listOf("longcat")
 
+    /** 识别为文心模型的名称（免登录，chat.baidu.com 匿名会话）。 */
+    private val WENXIN_MODELS = listOf("wenxin")
+
     // ── LongCat 配置轮换（龙猫配置为整段 JSON：mtgsig / m-traceid / Cookie）──
     private val longcatLock = Any()
     @Volatile private var longcatConfigList: List<String> = emptyList()
@@ -364,7 +367,8 @@ object ProxyServer {
                         {"id":"glm-image","object":"model","owned_by":"zhipu"},
                         {"id":"glm-image-hd","object":"model","owned_by":"zhipu"},
                         {"id":"qwen","object":"model","owned_by":"qwen"},
-                        {"id":"qwen-think","object":"model","owned_by":"qwen"}
+                        {"id":"qwen-think","object":"model","owned_by":"qwen"},
+                        {"id":"wenxin","object":"model","owned_by":"wenxin"}
                     ]}"""
                     try {
                         val data = org.json.JSONArray()
@@ -383,7 +387,8 @@ object ProxyServer {
                             "glm-image" to "zhipu",
                             "glm-image-hd" to "zhipu",
                             "qwen" to "qwen",
-                            "qwen-think" to "qwen"
+                            "qwen-think" to "qwen",
+                            "wenxin" to "wenxin"
                         )
                         for ((id, owner) in entries) {
                             data.put(
@@ -442,6 +447,14 @@ object ProxyServer {
                 val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
                 val created = (System.currentTimeMillis() / 1000).toInt()
                 handleZhipuChat(req, completionId, created, isZhipuPlusModel(req.model))
+                return
+            }
+
+            // 文心模型 → 走文心网页端匿名会话（免登录）
+            if (isWenxinModel(req.model)) {
+                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+                val created = (System.currentTimeMillis() / 1000).toInt()
+                handleWenxinChat(req, completionId, created)
                 return
             }
 
@@ -707,6 +720,12 @@ object ProxyServer {
         return LONGCAT_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
+    /** 是否文心模型（免登录匿名会话，聊天与生图同一入口）。 */
+    private fun isWenxinModel(m: String): Boolean {
+        val lower = m.lowercase()
+        return WENXIN_MODELS.any { lower == it || lower.startsWith(it) || lower.contains(it) }
+    }
+
     /**
      * 是否智谱文本模型（免登录）。
      *  - 本地接口：model 名以 gml/zhipu 开头或包含，或恰为 "glm"（不匹配 "glm-5.2" 等透传给 CNB 的名字）
@@ -964,6 +983,90 @@ object ProxyServer {
     }
 
     /**
+     * 文心（免登录匿名会话）聊天。
+     *
+     * 网页端接口只接受单段文本，故先按 [extractDeepSeekPrompt] 把 system 人设与历史
+     * 合并成一段，再一次性取回完整正文。上游已在客户端聚合完成，客户端要求流式时
+     * 按「整段一次性下发 + stop」返回，保证 OpenAI 格式兼容。
+     */
+    private suspend fun RoutingContext.handleWenxinChat(
+        req: ChatCompletionRequest, completionId: String, created: Int
+    ) {
+        val text = extractDeepSeekPrompt(req.messages)
+        LogStore.i("Wenxin", "调用聊天，输入长度=${text.length} 消息数=${req.messages.size}")
+
+        val (content, errMsg) = withContext(Dispatchers.IO) {
+            try {
+                withTimeout(UPSTREAM_TIMEOUT_MS) { WenxinClient.chat(text) } to null
+            } catch (e: Exception) {
+                LogStore.e("Wenxin", "请求异常: ${e.stackTraceToString()}")
+                null to (e.localizedMessage ?: e.toString())
+            }
+        }
+
+        if (errMsg != null) {
+            call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+            return
+        }
+        val contentText = content ?: ""
+        if (contentText.isBlank()) {
+            call.respond(
+                HttpStatusCode.BadGateway,
+                mapOf("error" to "文心未返回内容（可能触发限流，请稍后重试）")
+            )
+            return
+        }
+
+        if (req.stream) {
+            call.respond(object : OutgoingContent.WriteChannelContent() {
+                override val contentType = ContentType.Text.EventStream
+                override val headers = Headers.build {
+                    append("Cache-Control", "no-cache")
+                    append("Connection", "keep-alive")
+                    append("X-Accel-Buffering", "no")
+                }
+
+                override suspend fun writeTo(channel: ByteWriteChannel) {
+                    try {
+                        val chunk = ChatCompletionChunk(
+                            completionId, "chat.completion.chunk", created, req.model,
+                            listOf(ChunkChoice(delta = ChoiceDelta(content = contentText)))
+                        )
+                        channel.writeFully(
+                            ("data: " + json.encodeToString(
+                                ChatCompletionChunk.serializer(), chunk
+                            ) + "\n\n").toByteArray()
+                        )
+                        val stop = ChatCompletionChunk(
+                            completionId, "chat.completion.chunk", created, req.model,
+                            listOf(ChunkChoice(delta = ChoiceDelta(), finish_reason = "stop"))
+                        )
+                        channel.writeFully(
+                            ("data: " + json.encodeToString(
+                                ChatCompletionChunk.serializer(), stop
+                            ) + "\n\n").toByteArray()
+                        )
+                        channel.writeFully("data: [DONE]\n\n".toByteArray())
+                        channel.flush()
+                    } catch (e: Exception) {
+                        LogStore.e("Wenxin", "流式写出异常: ${e.stackTraceToString()}")
+                    }
+                }
+            })
+            return
+        }
+
+        LogStore.i("Wenxin", "返回完成结果，长度=${contentText.length}")
+        call.respond(
+            ChatCompletion(
+                completionId, "chat.completion", created, req.model,
+                listOf(Choice(message = Msg("assistant", contentText), finish_reason = "stop")),
+                Usage(), ""
+            )
+        )
+    }
+
+    /**
      * LongCat（美团龙猫）聊天：上游恒为 SSE 流式。
      *  - 客户端要求流式 → 边解析边转发 OpenAI 格式 chunk
      *  - 客户端要求非流式 → 聚合完整文本后返回单个 JSON
@@ -1150,7 +1253,7 @@ object ProxyServer {
     }
 
 
-    /** 生图接口：POST /v1/images/generations → 豆包生图 / 智谱生图（按 model 区分）。 */
+    /** 生图接口：POST /v1/images/generations → 豆包生图 / 智谱生图 / 文心生图（按 model 区分）。 */
     private suspend fun RoutingContext.handleImageGen() {
         try {
             val raw = call.receiveText()
@@ -1160,6 +1263,38 @@ object ProxyServer {
             val model = o.optString("model", "")
             // 外部指定且可识别 → 用之；否则用设置界面尺寸；再不行兜底 9:16 竖版
             val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
+
+            // 文心生图（免登录）：model 命中 wenxin → 走文心妙图，只返回第一张
+            if (isWenxinModel(model)) {
+                LogStore.i("Wenxin", "调用生图，prompt=${prompt.take(60)}")
+                val (urls, errMsg) = withContext(Dispatchers.IO) {
+                    try {
+                        WenxinClient.generateImage(prompt) to null
+                    } catch (e: Exception) {
+                        LogStore.e("Wenxin", "生图异常: ${e.stackTraceToString()}")
+                        emptyList<String>() to (e.localizedMessage ?: e.toString())
+                    }
+                }
+                if (errMsg != null) {
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+                    return
+                }
+                if (urls.isEmpty()) {
+                    call.respond(
+                        HttpStatusCode.BadGateway,
+                        mapOf("error" to "文心生图未返回图片（可能触发限流，请稍后重试）")
+                    )
+                    return
+                }
+                // 服务端一次返回 4 张，只返回第一张
+                call.respond(
+                    ImageGenResponse(
+                        created = (System.currentTimeMillis() / 1000).toInt(),
+                        data = listOf(ImageDataItem(url = urls.first()))
+                    )
+                )
+                return
+            }
 
             // 智谱生图（免登录）：model 命中智谱生图 / UI「智谱」(zhipu) → 走智谱，只返回第一张
             if (isZhipuImageModel(model)) {
@@ -1783,6 +1918,7 @@ object ProxyServer {
             val content = when {
                 isKimiModel(model) -> kimiText(req)
                 isZhipuModel(model) -> zhipuText(req, isZhipuPlusModel(model))
+                isWenxinModel(model) -> wenxinText(req)
                 isLongCatModel(model) -> longCatText(req)
                 isQwenModel(model) -> qwenText(req)
                 isDeepSeekModel(model) -> return DEEPSEEK_NEEDS_SERVER
@@ -1812,7 +1948,12 @@ object ProxyServer {
         val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
         LogStore.i("Proxy", "进程内生图 | model=$model ratio=$ratio")
         return try {
-            val urls = if (isZhipuImageModel(model)) {
+            val urls = if (isWenxinModel(model)) {
+                // 文心（免登录）：一次返回 4 张，只取第一张
+                upstream("Wenxin") {
+                    WenxinClient.generateImage(prompt).take(1)
+                }
+            } else if (isZhipuImageModel(model)) {
                 upstream("Zhipu") {
                     ZhipuClient.generateImage(prompt, ratio, isZhipuCinematicImageModel(model))
                 }
@@ -1860,7 +2001,8 @@ object ProxyServer {
             "glm-image" to "zhipu",
             "glm-image-hd" to "zhipu",
             "qwen" to "qwen",
-            "qwen-think" to "qwen"
+            "qwen-think" to "qwen",
+            "wenxin" to "wenxin"
         )
         val data = org.json.JSONArray()
         entries.forEach { (id, owner) ->
@@ -1925,6 +2067,11 @@ object ProxyServer {
             }
             sb.toString()
         }
+
+    /** 文心（免登录匿名会话，进程内）：网页端只接受单段文本，先合并再请求。 */
+    private suspend fun wenxinText(req: ChatCompletionRequest): String = upstream("Wenxin") {
+        WenxinClient.chat(extractDeepSeekPrompt(req.messages))
+    }
 
     private suspend fun longCatText(req: ChatCompletionRequest): String = upstream("LongCat") {
         applyNextLongCatConfig()
