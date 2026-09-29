@@ -23,6 +23,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -77,6 +78,20 @@ private val InputAreaHeight = 52.dp
 private val FieldFont = 12.sp
 // 关键：默认 OutlinedTextField 上下内边距约 16dp，在固定小高度下会把文字挤出可视区；此处收紧到 4dp。
 private val FieldContentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+
+/** 服务商列表：中转页按钮行与浏览器页下拉共用，顺序即展示顺序（混元3 置顶）。 */
+private val PROVIDERS = listOf(
+    "cnb" to "混元3",
+    "doubao" to "豆包",
+    "kimi" to "Kimi",
+    "qwen" to "千问",
+    "deepseek" to "DeepSeek",
+    "longcat" to "龙猫"
+)
+
+/** 服务商 id → 展示名（避免各处 when 分支漏掉 cnb 而误显示成「豆包」）。 */
+private fun providerLabel(id: String): String =
+    PROVIDERS.firstOrNull { it.first == id }?.second ?: id
 
 /**
  * 紧凑输入框：基于 BasicTextField + OutlinedTextField 装饰盒，
@@ -160,6 +175,7 @@ private fun COutBtn(
     onLongClick: (() -> Unit)? = null
 ) {
     val c = colors ?: ButtonDefaults.outlinedButtonColors()
+    val interaction = remember { MutableInteractionSource() }
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = c.containerColor,
@@ -173,7 +189,13 @@ private fun COutBtn(
                         onTap = { onClick() },
                         onLongPress = { onLongClick() }
                     )
-                } else Modifier.clickable { onClick() }
+                } else Modifier.clickable(
+                    // 必须显式给出 indication：clickable 默认 indication 为 null，
+                    // 点了没有任何水波纹反馈，看起来就像「按钮点不动」
+                    interactionSource = interaction,
+                    indication = LocalIndication.current,
+                    onClick = onClick
+                )
             )
     ) {
         Box(
@@ -258,7 +280,7 @@ fun App(vm: ProxyViewModel) {
 
     if (showCookieDialog) {
         CredentialPickerDialog(
-            title = "选择 ${if (provider == "kimi") "Kimi" else "豆包"} Cookie",
+            title = "选择 ${providerLabel(provider)} Cookie",
             items = cookiesFlow,
             selectedIndex = selectedIdx,
             labelOf = { i -> if (i == 0) "默认Cookie" else "Cookie ${i + 1}" },
@@ -498,20 +520,21 @@ fun ProxyScreen(
     }
 
     Column(modifier) {
-        // 服务商选择：去掉「服务商:」前缀文字以节省横向空间，混元3 置顶
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            listOf("cnb" to "混元3", "doubao" to "豆包", "kimi" to "Kimi", "qwen" to "千问", "deepseek" to "DeepSeek", "longcat" to "龙猫").forEach { (id, label) ->
+        // 服务商选择：用 FlowRow 自动换行，避免一行放不下时被挤出屏幕外点不到
+        FlowRow(
+            verticalArrangement = Arrangement.Center,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            PROVIDERS.forEach { (id, label) ->
                 val selected = provider == id
                 COutBtn(
-                    onClick = {
-                        onProviderChange(id)
-                    },
+                    onClick = { onProviderChange(id) },
                     text = label,
                     colors = if (selected) ButtonDefaults.outlinedButtonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     ) else ButtonDefaults.outlinedButtonColors()
                 )
-                Spacer(Modifier.width(6.dp))
             }
         }
         Spacer(Modifier.height(2.dp))
@@ -553,6 +576,17 @@ fun ProxyScreen(
                     )
                     Spacer(Modifier.width(6.dp))
                     CBtn(onClick = onOpenCookieDialog, text = "Cookie")
+                    if (provider == "cnb") {
+                        // 混元3 的登录 Cookie 与 csrftoken 绑定，一条凭证只在本次会话内复用，
+                        // 界面给一个「换号」入口手动切到下一条（并重新取凭证）
+                        Spacer(Modifier.width(6.dp))
+                        CBtn(
+                            onClick = {
+                                Toast.makeText(context, vm.rotateCnbCookie(), Toast.LENGTH_SHORT).show()
+                            },
+                            text = "换号"
+                        )
+                    }
                 }
             }
         }
@@ -1013,7 +1047,7 @@ fun BrowserScreen(
                 }, 400)
             }
             // 服务商选择框：选择即进入对应站点；旁边「清空」按钮清该站点 Cookie（龙猫为清空配置）
-            val provItems = listOf("cnb" to "混元3", "doubao" to "豆包", "kimi" to "Kimi", "qwen" to "千问", "deepseek" to "DeepSeek", "longcat" to "龙猫")
+            val provItems = PROVIDERS
             var provExpanded by remember { mutableStateOf(false) }
             ExposedDropdownMenuBox(
                 expanded = provExpanded,
@@ -1021,9 +1055,7 @@ fun BrowserScreen(
                 modifier = Modifier.width(120.dp)
             ) {
                 CField(
-                    value = when (provider) {
-                        "kimi" -> "Kimi"; "qwen" -> "千问"; "deepseek" -> "DeepSeek"; "longcat" -> "龙猫"; else -> "豆包"
-                    },
+                    value = providerLabel(provider),
                     onValueChange = {},
                     readOnly = true,
                     modifier = Modifier.menuAnchor().fillMaxWidth().height(FieldHeight),

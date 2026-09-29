@@ -295,6 +295,11 @@ object ProxyServer {
         }
     }
 
+    /** 混元3：强制轮换到下一条登录 Cookie 并刷新凭证（界面「换号」用）。 */
+    fun rotateCnbCookie() {
+        CnbClient.rotateCookie()
+    }
+
     /** 设置参与轮换的 LongCat 配置列表（自动过滤空值）。 */
     fun setLongCatConfigList(list: List<String>) {
         synchronized(longcatLock) {

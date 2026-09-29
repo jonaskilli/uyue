@@ -69,12 +69,36 @@ object CnbClient {
      */
     @Volatile private var activeCookie: String = ""
 
-    /** 当前使用的登录 Cookie；未注入时返回空串。 */
+    /** 当前使用的登录 Cookie；未注入时返回空串。每次调用轮换到列表下一条。 */
     private fun currentCookie(): String {
         val valid = cookieList
         if (valid.isEmpty()) return ""
         val idx = kotlin.math.abs(rotationIdx.getAndIncrement() % valid.size)
-        return valid[idx]
+        val c = valid[idx]
+        val preview = if (c.length <= 16) c else c.take(16) + "...(len=${c.length})"
+        LogStore.i("CNB", "轮换：使用第 ${idx + 1} 条 Cookie（共 ${valid.size} 条），预览=${preview}")
+        return c
+    }
+
+    /**
+     * 强制轮换到下一条 Cookie 并重新取凭证（界面「换号」用）。
+     * 混元3 的 csrftoken 与某条登录会话绑定，换号必须同时丢弃旧 token 重新获取，
+     * 否则会出现「token 是 A 号的、Cookie 是 B 号」的 401。
+     */
+    @Synchronized
+    fun rotateCookie() {
+        if (cookieList.isEmpty()) {
+            LogStore.w("CNB", "换号失败：未配置任何登录 Cookie")
+            return
+        }
+        csrftoken = ""
+        activeCookie = ""
+        try {
+            tokenFile().writeText("")
+        } catch (_: Exception) {
+        }
+        ensureAuth(force = true)
+        LogStore.i("CNB", "已切换到下一条 Cookie 并刷新凭证")
     }
     /** 上次成功获取凭证的时间戳（用于 8 小时限频）。 */
     @Volatile private var lastAuthTime = 0L
