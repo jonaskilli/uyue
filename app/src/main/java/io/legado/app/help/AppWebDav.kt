@@ -165,7 +165,37 @@ object AppWebDav {
         authorization?.let {
             val putUrl = "$rootWebDavUrl$fileName"
             WebDav(putUrl, it).upload(Backup.zipFilePath)
+            clearOldBackups()
         }
+    }
+
+    /**
+     * 清理webDav上的旧备份,只保留最新的[keepCount]个备份
+     * 备份文件名按时间倒序排列,超出数量的旧备份会被删除
+     * [keepCount]小于等于0时不限制数量,不删除任何备份
+     * @return 删除的备份数量
+     */
+    suspend fun clearOldBackups(keepCount: Int = AppConfig.webDavBackupKeepCount): Int {
+        if (keepCount <= 0) return 0
+        val authorization = authorization ?: return 0
+        if (!NetworkUtils.isAvailable()) return 0
+        return kotlin.runCatching {
+            val files = WebDav(rootWebDavUrl, authorization).listFiles()
+                .filter { !it.isDir && it.displayName.startsWith("backup") }
+                .sortedWith { o1, o2 ->
+                    AlphanumComparator.compare(o2.displayName, o1.displayName)
+                }
+            var count = 0
+            files.forEachIndexed { index, file ->
+                if (index >= keepCount && file.delete()) {
+                    count++
+                }
+            }
+            count
+        }.onFailure {
+            currentCoroutineContext().ensureActive()
+            AppLog.put("清理webDav旧备份失败\n${it.localizedMessage}", it)
+        }.getOrDefault(0)
     }
 
     /**

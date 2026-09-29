@@ -127,12 +127,22 @@ class BackupConfigFragment : PreferenceFragment(),
                 editText.setSelection(editText.text.length)
             }
         }
+        findPreference<EditTextPreference>(PreferKey.webDavBackupKeepCount)?.let {
+            it.setOnBindEditTextListener { editText ->
+                editText.inputType = InputType.TYPE_CLASS_NUMBER
+                editText.setSelection(editText.text.length)
+            }
+        }
         upPreferenceSummary(PreferKey.webDavUrl, getPrefString(PreferKey.webDavUrl))
         upPreferenceSummary(PreferKey.webDavAccount, getPrefString(PreferKey.webDavAccount))
         upPreferenceSummary(PreferKey.webDavPassword, getPrefString(PreferKey.webDavPassword))
         upPreferenceSummary(PreferKey.webDavDir, AppConfig.webDavDir)
         upPreferenceSummary(PreferKey.webDavDeviceName, AppConfig.webDavDeviceName)
         upPreferenceSummary(PreferKey.backupPath, getPrefString(PreferKey.backupPath))
+        upPreferenceSummary(
+            PreferKey.webDavBackupKeepCount,
+            AppConfig.webDavBackupKeepCount.toString()
+        )
         findPreference<io.legado.app.lib.prefs.Preference>("web_dav_restore")
             ?.onLongClick {
                 restoreFromLocal()
@@ -185,6 +195,7 @@ class BackupConfigFragment : PreferenceFragment(),
             }
 
             PreferKey.webDavDeviceName -> upPreferenceSummary(key, getPrefString(key))
+            PreferKey.webDavBackupKeepCount -> upPreferenceSummary(key, getPrefString(key))
         }
     }
 
@@ -215,6 +226,15 @@ class BackupConfigFragment : PreferenceFragment(),
             PreferKey.webDavDir -> preference.summary = when (value) {
                 null -> "legado"
                 else -> value
+            }
+
+            PreferKey.webDavBackupKeepCount -> {
+                val count = value?.toIntOrNull() ?: AppConfig.webDavBackupKeepCount
+                preference.summary = if (count <= 0) {
+                    getString(R.string.webdav_backup_keep_count_unlimited)
+                } else {
+                    getString(R.string.webdav_backup_keep_count_s, count.toString())
+                }
             }
 
             else -> {

@@ -195,6 +195,7 @@ object PreferKey {
     const val disableMangaPageAnim = "disableMangaPageAnim"
     const val paddingDisplayCutouts = "paddingDisplayCutouts"
     const val autoCheckNewBackup = "autoCheckNewBackup"
+    const val webDavBackupKeepCount = "webDavBackupKeepCount"
 
     const val dThemeName = "durThemeName"
     const val dNThemeName = "durThemeNameNight"

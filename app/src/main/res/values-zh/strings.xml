@@ -1330,6 +1330,10 @@
     <string name="sure_cache_book">是否确认开始缓存？</string>
     <string name="auto_check_new_backup_t">自动检查新备份</string>
     <string name="auto_check_new_backup_s">打开软件时检查是否有新备份，有新备份时提示是否更新</string>
+    <string name="webdav_backup_keep_count_t">WebDav备份保留数量</string>
+    <string name="webdav_backup_keep_count_summary">每次备份后自动删除超出数量的旧备份</string>
+    <string name="webdav_backup_keep_count_s">每次备份后只保留最新的%1$s个备份，超出的旧备份自动删除</string>
+    <string name="webdav_backup_keep_count_unlimited">不限制数量，不删除任何备份</string>
     <string name="sys_image_picker">系统图片选择器</string>
     <string name="download_manage">下载管理</string>
     <string name="search_video_name">搜索视频名</string>

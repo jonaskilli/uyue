@@ -690,6 +690,13 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     val onlyLatestBackup get() = appCtx.getPrefBoolean(PreferKey.onlyLatestBackup, true)
 
+    /**
+     * webDav备份保留数量,小于等于0为不限制
+     */
+    var webDavBackupKeepCount: Int
+        get() = appCtx.getPrefInt(PreferKey.webDavBackupKeepCount, 30)
+        set(value) = appCtx.putPrefInt(PreferKey.webDavBackupKeepCount, value)
+
     val autoCheckNewBackup get() = appCtx.getPrefBoolean(PreferKey.autoCheckNewBackup, true)
 
     val defaultHomePage get() = appCtx.getPrefString(PreferKey.defaultHomePage, "bookshelf")

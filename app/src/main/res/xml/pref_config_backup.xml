@@ -105,6 +105,15 @@
             android:title="@string/only_latest_backup_t"
             app:iconSpaceReserved="false" />
 
+        <io.legado.app.lib.prefs.EditTextPreference
+            android:key="webDavBackupKeepCount"
+            android:title="@string/webdav_backup_keep_count_t"
+            android:summary="@string/webdav_backup_keep_count_summary"
+            android:defaultValue="30"
+            android:inputType="number"
+            android:maxLines="1"
+            app:iconSpaceReserved="false" />
+
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="true"
             android:key="autoCheckNewBackup"
