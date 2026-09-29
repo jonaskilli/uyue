@@ -1196,8 +1196,8 @@
     <string name="read_aloud_cover_top_margin_summary">朗读对话框中封面/图片距顶部的距离（dp），默认16，与长按图片设置联动</string>
     <string name="read_aloud_cover_width">封面宽度</string>
     <string name="read_aloud_cover_width_summary">自定义朗读对话框封面宽度（dp），高度自动按340/240比例匹配，默认240</string>
-    <string name="read_aloud_image_in_read_page">阅读界面显示AI图片</string>
-    <string name="read_aloud_image_in_read_page_summary">开启后，阅读界面顶部显示与朗读界面同源的AI图片，随朗读进度自动切换；下方仍是正常正文，左右翻页、上下滚动等操作不受影响。也可直接用手势开关本功能：阅读页从上向下滑 = 打开并显示，在图片上从下向上滑 = 关闭并隐藏（下滑手势仅在非滚动翻页模式生效）</string>
+    <string name="read_aloud_image_in_read_page">阅读界面手势控制AI图片</string>
+    <string name="read_aloud_image_in_read_page_summary">本开关控制是否允许用手势开关阅读界面顶部的AI图片（而非直接显示/隐藏图片）。开启后：阅读页顶部向下滑 = 显示图片，图片上从下向上滑 = 隐藏图片；关闭后图片始终隐藏，且上滑、下滑手势对图片都无效（下滑仅在非滚动翻页模式生效）。图片真正显示与否由手势决定，不在本开关上。</string>
     <string name="read_aloud_image_in_read_page_width">阅读界面AI图片宽度</string>
     <string name="read_aloud_image_in_read_page_width_summary">阅读界面顶部AI图片的宽度（dp），默认240，范围80-600，高度按340/240比例；长按图片也可直接设置</string>
 

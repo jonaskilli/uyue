@@ -55,6 +55,14 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
                 sp.edit().putString(key, v.toString()).apply()
             }
         }
+        // 旧版 readAloudImageInReadPage 既是「显示开关」也是「手势落点」。
+        // 改版后它只作为「手势开关」，图片是否显示由 readAloudImageShowing 单独记录。
+        // 升级时若旧值为真，则默认让图片继续显示（并开启手势），避免老用户图片凭空消失。
+        if (sp.all[PreferKey.readAloudImageShowing] == null
+            && sp.getBoolean(PreferKey.readAloudImageInReadPage, false)
+        ) {
+            sp.edit().putBoolean(PreferKey.readAloudImageShowing, true).apply()
+        }
     }
 
     val isCronet = appCtx.getPrefBoolean(PreferKey.cronet)
@@ -1510,10 +1518,15 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
                 value
             )
         }
-    // 阅读界面顶部是否显示朗读 AI 图片（默认关闭）
+    // 阅读界面顶部 AI 图片「手势开关」：开启后才允许用顶部下滑/图片上滑开关图片（默认关闭）
     var readAloudImageInReadPage: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.readAloudImageInReadPage, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.readAloudImageInReadPage, value)
+
+    // 阅读界面顶部 AI 图片「当前是否正在显示」：由手势打开/关闭，与手势开关解耦（默认关闭）
+    var readAloudImageShowing: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.readAloudImageShowing, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.readAloudImageShowing, value)
 
     /**
      * 阅读界面顶部 AI 图片宽度（dp，默认 240，范围 80-600），独立于朗读界面图片宽度。

@@ -245,8 +245,10 @@ object PreferKey {
     const val aiEffectMaxCandidates = "aiEffectMaxCandidates"
 
     const val aiEffectMixOnMerge = "aiEffectMixOnMerge"
-    // 阅读界面顶部显示朗读AI图片（与朗读界面同源，随朗读进度切换）
+    // 阅读界面顶部AI图片「手势开关」：开启后才允许用顶部下滑/图片上滑来开关图片
     const val readAloudImageInReadPage = "readAloudImageInReadPage"
+    // 阅读界面顶部AI图片「当前是否正在显示」：由手势打开/关闭，与上面的手势开关解耦
+    const val readAloudImageShowing = "readAloudImageShowing"
     // 阅读界面顶部AI图片宽度（dp），独立于朗读界面的图片宽度
     const val readAloudImageInReadPageWidth = "readAloudImageInReadPageWidth"
     // 显示图片界面时正文字号减小量（sp），0 表示不减小，默认 2

@@ -289,10 +289,12 @@ class ReadView(context: Context, attrs: AttributeSet) :
                     }
                     if (bottomSwipeUp) return true
                     //非滚动翻页模式下，从屏幕上半部分（排除顶部10%，避免与下拉状态栏冲突）任意位置向下滑动停止朗读
+                    //手势总开关（readAloudImageInReadPage）关闭时，不识别该手势，让触摸正常落到翻页/其它操作
                     if (!isScroll
                         && !isTextSelected
                         && !topSwipeDown
                         && !bottomSwipeUp
+                        && AppConfig.readAloudImageInReadPage
                         && startY > height * 0.1f
                         && startY < height * 0.667f
                         && event.y > startY + bottomSwipeSlop

@@ -280,10 +280,22 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
                     }
                 }
 
+                PreferKey.readAloudImageInReadPage -> {
+                    // 关闭手势开关时，强制隐藏图片并清空显示状态，
+                    // 下次开启开关后仍需重新用手势打开
+                    if (sharedPreferences?.getBoolean(
+                            PreferKey.readAloudImageInReadPage, false
+                        ) != true
+                    ) {
+                        AppConfig.readAloudImageShowing = false
+                    }
+                    postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)
+                }
+
                 PreferKey.showReadAloudCoverSubtitle, PreferKey.readAloudCoverWidth,
                 PreferKey.readAloudCoverMarqueeEnabled, PreferKey.readAloudCoverMarqueeSpeed,
                 PreferKey.marqueeBgmLinkEnabled,
-                PreferKey.readAloudImageInReadPage, PreferKey.readAloudImageInReadPageWidth -> {
+                PreferKey.readAloudImageInReadPageWidth -> {
                     postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)
                 }
 

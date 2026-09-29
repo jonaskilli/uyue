@@ -2447,7 +2447,13 @@ class ReadBookActivity : BaseReadBookActivity(),
     /** 应用开关与尺寸：顶部图片区域显示与朗读界面同款图片 */
     private fun upReadAiImageBar() {
         val iv = binding.readAiImage
+        // 手势开关关 → 图片必须隐藏（无论之前是否显示过）
         if (!AppConfig.readAloudImageInReadPage) {
+            setReadAiImageVisible(false)
+            return
+        }
+        // 手势开关开，但还没通过手势打开过 → 不显示
+        if (!AppConfig.readAloudImageShowing) {
             setReadAiImageVisible(false)
             return
         }
@@ -2513,10 +2519,12 @@ class ReadBookActivity : BaseReadBookActivity(),
      * 等价于把「阅读界面显示AI图片」开关打开，状态持久化，不会因为重新朗读而恢复。
      */
     override fun onTopSwipeDown() {
-        if (AppConfig.readAloudImageInReadPage
+        // 手势开关关 → 下滑无效（不打开图片）
+        if (!AppConfig.readAloudImageInReadPage) return
+        if (AppConfig.readAloudImageShowing
             && binding.readAiImage.visibility == View.VISIBLE
         ) return
-        AppConfig.readAloudImageInReadPage = true
+        AppConfig.readAloudImageShowing = true
         upReadAiImageBar()
         toastOnUi("已进入图片界面")
     }
@@ -2526,8 +2534,10 @@ class ReadBookActivity : BaseReadBookActivity(),
      * 等价于把「阅读界面显示AI图片」开关关闭，状态持久化，直到再次下滑进入。
      */
     private fun exitReadAiImageBar() {
+        // 手势开关关 → 上滑无效（图片本就隐藏）
+        if (!AppConfig.readAloudImageInReadPage) return
         if (binding.readAiImage.visibility != View.VISIBLE) return
-        AppConfig.readAloudImageInReadPage = false
+        AppConfig.readAloudImageShowing = false
         setReadAiImageVisible(false)
         toastOnUi("已退出图片界面")
     }
@@ -2564,7 +2574,8 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     /** 收到生图事件后更新顶部图片 */
     private fun updateReadAiImage(imagePath: String) {
-        if (!AppConfig.readAloudImageInReadPage) return
+        // 手势开关关，或还没用手势打开过图片 → 不显示，避免新图自动弹出
+        if (!AppConfig.readAloudImageInReadPage || !AppConfig.readAloudImageShowing) return
         if (imagePath.isBlank()) {
             // 无 AI 图片时回退到书籍封面，保持与朗读界面一致
             lastReadAiImagePath = ""
