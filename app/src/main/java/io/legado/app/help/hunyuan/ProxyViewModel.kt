@@ -288,22 +288,6 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putInt(key, selectedIndex.value).apply()
     }
 
-    /**
-     * 混元3：手动轮换到下一条登录 Cookie 并刷新凭证（界面「换号」）。
-     * @return 供 Toast 展示的结果文案
-     */
-    fun rotateCnbCookie(): String {
-        val count = cnbCookies.value.count { it.isNotBlank() }
-        if (count == 0) return "混元3 还没有可用 Cookie，请先在浏览器页提取"
-        ProxyServer.rotateCnbCookie()
-        HunyuanLocalGateway.invalidateConfig()
-        return if (count == 1) {
-            "只有 1 条混元3 Cookie，已刷新凭证"
-        } else {
-            "已切换到下一条混元3 Cookie（共 $count 条）"
-        }
-    }
-
     /** 凭证展示名：豆包与 Kimi 统一用 Cookie。 */
     fun cookieLabel(i: Int): String {
         val isKimi = provider.value == "kimi"

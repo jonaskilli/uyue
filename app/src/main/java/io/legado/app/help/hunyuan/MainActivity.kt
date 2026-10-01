@@ -79,15 +79,22 @@ private val FieldFont = 12.sp
 // 关键：默认 OutlinedTextField 上下内边距约 16dp，在固定小高度下会把文字挤出可视区；此处收紧到 4dp。
 private val FieldContentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
 
-/** 服务商列表：中转页按钮行与浏览器页下拉共用，顺序即展示顺序（混元3 置顶）。 */
+/**
+ * 服务商列表：中转页按钮行与浏览器页下拉共用，顺序即展示顺序。
+ *
+ * 顺序按「常用程度」排，不常用的（豆包 / DeepSeek）放最后：
+ * 按钮行宽度不够时会换行，而换到第二排的那几个按钮点不到
+ * （Compose 绘制不裁剪所以看得到，但命中测试会在 FlowRow 边界处被跳过），
+ * 因此把不常用的排到末尾，保证常用的都落在第一排、都能点。
+ */
 private val PROVIDERS = listOf(
     "cnb" to "混元3",
-    "doubao" to "豆包",
+    "longcat" to "龙猫",
+    "bailian" to "百炼",
     "kimi" to "Kimi",
     "qwen" to "千问",
-    "deepseek" to "DeepSeek",
-    "longcat" to "龙猫",
-    "bailian" to "百炼"
+    "doubao" to "豆包",
+    "deepseek" to "DeepSeek"
 )
 
 /** 服务商 id → 展示名（避免各处 when 分支漏掉 cnb 而误显示成「豆包」）。 */
@@ -622,7 +629,10 @@ fun ProxyScreen(
     }
 
     Column(modifier) {
-        // 服务商选择：用 FlowRow 自动换行的按钮样式（保持最初的紧凑排布，两排紧挨）
+        // 服务商选择：FlowRow 自动换行（与远程仓库一致）。
+        // 已知问题：换行到第二排的按钮「看得见却点不到」——Compose 绘制不裁剪所以显示得出来，
+        // 但点击命中测试会在 FlowRow 的布局边界处跳过整棵子树，触摸既到不了按钮也落不到别的组件。
+        // 因此 PROVIDERS 的顺序按常用程度排，把不常用的挤到第二排，保证常用的都在第一排可点。
         FlowRow(
             verticalArrangement = Arrangement.Center,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -688,18 +698,12 @@ fun ProxyScreen(
                         modifier = Modifier.weight(1f).height(InputAreaHeight)
                     )
                     Spacer(Modifier.width(6.dp))
+                    // 混元3 与其它服务商保持一致的入口：只有一个「Cookie」按钮，
+                    // 多条 Cookie 的轮换交给 CnbClient 内部轮询（与豆包 / Kimi / 千问一样）。
+                    // 此前这里多一个「换号」按钮，它在 Compose 点击回调（主线程）里
+                    // 直接调 CnbClient.ensureAuth() 发网络请求，必然抛
+                    // NetworkOnMainThreadException，故移除。
                     CBtn(onClick = onOpenCookieDialog, text = "Cookie")
-                    if (provider == "cnb") {
-                        // 混元3 的登录 Cookie 与 csrftoken 绑定，一条凭证只在本次会话内复用，
-                        // 界面给一个「换号」入口手动切到下一条（并重新取凭证）
-                        Spacer(Modifier.width(6.dp))
-                        CBtn(
-                            onClick = {
-                                Toast.makeText(context, vm.rotateCnbCookie(), Toast.LENGTH_SHORT).show()
-                            },
-                            text = "换号"
-                        )
-                    }
                 }
             }
         }

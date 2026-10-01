@@ -80,26 +80,6 @@ object CnbClient {
         return c
     }
 
-    /**
-     * 强制轮换到下一条 Cookie 并重新取凭证（界面「换号」用）。
-     * 混元3 的 csrftoken 与某条登录会话绑定，换号必须同时丢弃旧 token 重新获取，
-     * 否则会出现「token 是 A 号的、Cookie 是 B 号」的 401。
-     */
-    @Synchronized
-    fun rotateCookie() {
-        if (cookieList.isEmpty()) {
-            LogStore.w("CNB", "换号失败：未配置任何登录 Cookie")
-            return
-        }
-        csrftoken = ""
-        activeCookie = ""
-        try {
-            tokenFile().writeText("")
-        } catch (_: Exception) {
-        }
-        ensureAuth(force = true)
-        LogStore.i("CNB", "已切换到下一条 Cookie 并刷新凭证")
-    }
     /** 上次成功获取凭证的时间戳（用于 8 小时限频）。 */
     @Volatile private var lastAuthTime = 0L
 
