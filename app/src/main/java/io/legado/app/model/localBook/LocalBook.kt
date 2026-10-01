@@ -54,6 +54,7 @@ import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.isDataUrl
 import io.legado.app.utils.isUri
+import io.legado.app.utils.normalizeFileName
 import io.legado.app.utils.printOnDebug
 import kotlinx.coroutines.runBlocking
 import org.apache.commons.text.StringEscapeUtils
@@ -635,7 +636,47 @@ object LocalBook {
     fun isOnBookShelf(
         fileName: String
     ): Boolean {
-        return appDb.bookDao.hasFile(fileName) == true
+        if (appDb.bookDao.hasFile(fileName)) return true
+        return findShelfBook(fileName) != null
+    }
+
+    /**
+     * 按远程文件名在书架中查找对应书籍（用于"是否已在书架/直接打开"的判定）。
+     *
+     * 文件名精确匹配之外的兼容：
+     * 1. .zip 包装 —— 上传 txt 时自动压缩生成（如 斗罗大陆.txt.zip）
+     * 2. 规范化差异 —— 本地保存时 SAF/normalizeFileName 会替换 \/:*?"<>| 等非法字符，
+     *    与网盘原始文件名可能字面不一致
+     * 3. 文件名含作者信息 —— 导入时会拆分为书名+作者显示（书架只显示书名），
+     *    文件名字面往往与网盘副本不一致，按解析出的 书名+作者 / 仅书名 匹配
+     */
+    fun findShelfBook(fileName: String): Book? {
+        // 1. originName 精确匹配
+        appDb.bookDao.getBookByFileName(fileName)?.let { return it }
+        // 2. .zip 包装
+        val plain = if (fileName.endsWith(".zip", true)) {
+            fileName.removeSuffix(".zip")
+        } else {
+            fileName
+        }
+        if (plain != fileName) {
+            appDb.bookDao.getBookByFileName(plain)?.let { return it }
+        }
+        // 3. 保存时被规范化的文件名
+        val normalized = plain.normalizeFileName()
+        if (normalized != plain) {
+            appDb.bookDao.getBookByFileName(normalized)?.let { return it }
+        }
+        // 4. 按导入时同样的规则拆分书名/作者, 再按书名(±作者)匹配
+        val (name, author) = analyzeNameAuthor(plain)
+        if (name.isBlank() || name == plain.substringBeforeLast('.')) {
+            // 没拆分出作者信息, 文件名精确匹配已覆盖
+            return null
+        }
+        if (author.isNotBlank()) {
+            appDb.bookDao.getBook(name, author)?.let { return it }
+        }
+        return appDb.bookDao.findByName(name).firstOrNull()
     }
 
     /**

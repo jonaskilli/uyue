@@ -9,6 +9,7 @@ import android.view.MenuItem
 import android.view.SubMenu
 import androidx.activity.addCallback
 import androidx.activity.viewModels
+import androidx.appcompat.widget.PopupMenu
 import androidx.core.view.isGone
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -18,6 +19,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.backgroundColor
+import io.legado.app.model.localBook.LocalBook
 import io.legado.app.model.remote.RemoteBook
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.book.import.BaseImportBookActivity
@@ -39,6 +41,7 @@ import java.io.File
 class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
     RemoteBookAdapter.CallBack,
     SelectActionBar.CallBack,
+    PopupMenu.OnMenuItemClickListener,
     ServersDialog.Callback {
 
     override val viewModel by viewModels<RemoteBookViewModel>()
@@ -96,6 +99,9 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
         binding.recyclerView.adapter = adapter
         binding.selectActionBar.setMainActionText(R.string.add_to_bookshelf)
         binding.selectActionBar.setCallBack(this)
+        // 选择栏弹出菜单: 批量删除选中项
+        binding.selectActionBar.inflateMenu(R.menu.remote_book_sel)
+        binding.selectActionBar.setOnMenuItemClickListener(this)
         if (!LocalConfig.webDavBookHelpVersionIsLast) {
             showHelp("webDavBookHelp")
         }
@@ -223,6 +229,14 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
         }
     }
 
+    /** 选择栏弹出菜单: 批量删除选中项(含确认) */
+    override fun onMenuItemClick(item: MenuItem): Boolean {
+        when (item.itemId) {
+            R.id.menu_del_selection -> deleteRemoteBooks(adapter.selected)
+        }
+        return false
+    }
+
     override fun onSearchTextChange(newText: String?) {
         viewModel.updateCallBackFlow(newText)
     }
@@ -246,18 +260,14 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
 
     override fun startRead(remoteBook: RemoteBook) {
         val downloadFileName = remoteBook.filename
-        // 上传 txt 时自动生成的 .zip 包装(如 斗罗大陆.txt.zip):
-        // 下载时会解压成原文件名入库, 这里先按解压后的名字查书架直接打开
-        if (downloadFileName.endsWith(".zip", true)) {
-            appDb.bookDao.getBookByFileName(downloadFileName.removeSuffix(".zip"))?.let {
-                startReadBook(it)
-                return
-            }
+        // 兼容文件名含作者/zip 包装等差异, 按书名级匹配查找书架中的对应书籍
+        LocalBook.findShelfBook(downloadFileName)?.let {
+            startReadBook(it)
+            return
         }
         if (!ArchiveUtils.isArchive(downloadFileName)) {
-            appDb.bookDao.getBookByFileName(downloadFileName)?.let {
-                startReadBook(it)
-            }
+            // 书架里没有对应书籍, 保持静默(由用户勾选后加入书架)
+            return
         } else {
             AppConfig.defaultBookTreeUri ?: return
             val downloadArchiveFileDoc = FileDoc.fromUri(Uri.parse(AppConfig.defaultBookTreeUri), true)

@@ -160,13 +160,19 @@ object AppWebDav {
      * @param fileName 备份文件名
      */
     @Throws(Exception::class)
-    suspend fun backUpWebDav(fileName: String) {
-        if (!NetworkUtils.isAvailable()) return
+    /**
+     * 上传备份文件到 webDav
+     * @return 是否上传成功(无网络/未配置/上传抛异常均为 false)
+     */
+    suspend fun backUpWebDav(fileName: String): Boolean {
+        if (!NetworkUtils.isAvailable()) return false
         authorization?.let {
             val putUrl = "$rootWebDavUrl$fileName"
             WebDav(putUrl, it).upload(Backup.zipFilePath)
             clearOldBackups()
+            return true
         }
+        return false
     }
 
     /**

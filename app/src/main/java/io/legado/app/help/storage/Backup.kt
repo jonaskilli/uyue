@@ -246,7 +246,13 @@ object Backup {
                 }
             }
             try {
-                AppWebDav.backUpWebDav(zipFileName)
+                if (AppWebDav.backUpWebDav(zipFileName)) {
+                    // 上传成功后重置本地备份时间戳:
+                    // 云端文件的 lastModify 是服务器在接收完成时生成的, 慢网上传耗时可能远超
+                    // 打包耗时, 若沿用备份开始时(137行)记录的时间, backupSync 会把云端误判为
+                    // "备份领先当前"而弹出恢复提示; 以本地此刻时间为准即可吸收上传耗时差
+                    LocalConfig.lastBackup = System.currentTimeMillis()
+                }
             } catch (e: Exception) {
                 AppLog.put("上传备份至webdav失败\n$e", e)
             }
