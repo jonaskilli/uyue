@@ -277,6 +277,30 @@ object ProxyServer {
     /** 识别为 LongCat（美团龙猫）模型的名称（前缀匹配，大小写不敏感）。 */
     private val LONGCAT_MODELS = listOf("longcat")
 
+    /** 识别为百炼（阿里云）模型的名称（前缀匹配，大小写不敏感）。 */
+    private val BAILIAN_MODELS = listOf("bailian")
+
+    // ── 百炼配置轮换（百炼配置为整段 JSON：cookies / bx_ua / bx_et / bx_umidtoken / model_id）──
+    private val bailianLock = Any()
+    @Volatile private var bailianConfigList: List<String> = emptyList()
+    private val bailianRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 设置参与轮换的百炼配置列表（自动过滤空值）。 */
+    fun setBailianConfigList(list: List<String>) {
+        synchronized(bailianLock) {
+            bailianConfigList = list.filter { it.isNotBlank() }
+            if (bailianRotationIdx.get() >= bailianConfigList.size) bailianRotationIdx.set(0)
+        }
+    }
+
+    /** 取下一个百炼配置并应用到 BailianClient（在已保存的非空配置间轮询）。 */
+    fun applyNextBailianConfig() {
+        val list = synchronized(bailianLock) { bailianConfigList }
+        if (list.isEmpty()) return
+        val idx = bailianRotationIdx.getAndUpdate { (it + 1) % list.size }
+        BailianClient.applyConfig(list[idx])
+    }
+
     /** 识别为文心模型的名称（免登录，chat.baidu.com 匿名会话）。 */
     private val WENXIN_MODELS = listOf("wenxin")
 
@@ -361,6 +385,7 @@ object ProxyServer {
                         {"id":"hy3-preview","object":"model","owned_by":"cnb"},
                         {"id":"longcat","object":"model","owned_by":"longcat"},
                         {"id":"longcat-search","object":"model","owned_by":"longcat"},
+                        {"id":"bailian","object":"model","owned_by":"bailian"},
                         {"id":"doubao","object":"model","owned_by":"doubao"},
                         {"id":"doubao-think","object":"model","owned_by":"doubao"},
                         {"id":"doubao-image","object":"model","owned_by":"doubao"},
@@ -381,6 +406,7 @@ object ProxyServer {
                             CnbClient.DEFAULT_MODEL to "cnb",          // hy3-preview
                             "longcat" to "longcat",
                             "longcat-search" to "longcat",
+                            "bailian" to "bailian",
                             "doubao" to "doubao",
                             "doubao-think" to "doubao",
                             "doubao-image" to "doubao",
@@ -468,6 +494,14 @@ object ProxyServer {
                 val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
                 val created = (System.currentTimeMillis() / 1000).toInt()
                 handleLongCatChat(req, completionId, created)
+                return
+            }
+
+            // 百炼（阿里云）模型 → 走百炼控制台接口
+            if (isBailianModel(req.model)) {
+                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+                val created = (System.currentTimeMillis() / 1000).toInt()
+                handleBailianChat(req, completionId, created)
                 return
             }
 
@@ -723,6 +757,12 @@ object ProxyServer {
     private fun isLongCatModel(m: String): Boolean {
         val lower = m.lowercase()
         return LONGCAT_MODELS.any { lower.startsWith(it) || lower.contains(it) }
+    }
+
+    /** 是否百炼（阿里云）模型。 */
+    private fun isBailianModel(m: String): Boolean {
+        val lower = m.lowercase()
+        return BAILIAN_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否文心模型（免登录匿名会话，聊天与生图同一入口）。 */
@@ -1197,6 +1237,158 @@ object ProxyServer {
                 }
             } else if (line.startsWith("data:")) {
                 data.append(line.substring(5).trimStart()).append("\n")
+            }
+        }
+    }
+
+    /**
+     * 百炼（阿里云）聊天：上游恒为 SSE 流式，正文为累积全文（由 parseBailianSse 切增量）。
+     *  - 客户端要求流式 → 边解析边转发 OpenAI 格式 chunk
+     *  - 客户端要求非流式 → 聚合完整文本后返回单个 JSON
+     */
+    private suspend fun RoutingContext.handleBailianChat(
+        req: ChatCompletionRequest, completionId: String, created: Int
+    ) {
+        // 每次请求轮换到下一个百炼配置（多账号），并应用到 BailianClient
+        applyNextBailianConfig()
+        if (!BailianClient.isConfigured()) {
+            call.respond(
+                HttpStatusCode.BadGateway,
+                mapOf(
+                    "error" to
+                        "百炼未配置：请在「中转」页选择百炼并粘贴抓包 JSON" +
+                        "（cookies + bx_ua / bx_et / bx_umidtoken）"
+                )
+            )
+            return
+        }
+        val model = req.model
+        LogStore.i("Bailian", "调用百炼控制台对话，消息数=${req.messages.size} model=$model")
+
+        if (req.stream) {
+            call.respond(object : OutgoingContent.WriteChannelContent() {
+                override val contentType = ContentType.Text.EventStream
+                override val headers = Headers.build {
+                    append("Cache-Control", "no-cache")
+                    append("Connection", "keep-alive")
+                    append("X-Accel-Buffering", "no")
+                }
+
+                override suspend fun writeTo(channel: ByteWriteChannel) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            withTimeout(300_000) {
+                                BailianClient.chatCompletion(req.messages, model).use { resp ->
+                                    parseBailianSse(resp.body!!.source()) { delta ->
+                                        val chunk = ChatCompletionChunk(
+                                            completionId, "chat.completion.chunk", created, model,
+                                            listOf(ChunkChoice(delta = ChoiceDelta(content = delta)))
+                                        )
+                                        channel.writeFully(
+                                            ("data: " + json.encodeToString(ChatCompletionChunk.serializer(), chunk) + "\n\n").toByteArray()
+                                        )
+                                        channel.flush()
+                                    }
+                                }
+                                channel.writeFully(
+                                    ("data: " + json.encodeToString(
+                                        ChatCompletionChunk.serializer(),
+                                        ChatCompletionChunk(
+                                            completionId, "chat.completion.chunk", created, model,
+                                            listOf(ChunkChoice(delta = ChoiceDelta(), finish_reason = "stop"))
+                                        )
+                                    ) + "\n\n").toByteArray()
+                                )
+                                channel.writeFully("data: [DONE]\n\n".toByteArray())
+                                channel.flush()
+                            }
+                        } catch (e: Exception) {
+                            LogStore.e("Bailian", "流式转发异常: ${e.stackTraceToString()}")
+                        }
+                    }
+                }
+            })
+            return
+        }
+
+        val (content, errMsg) = withContext(Dispatchers.IO) {
+            try {
+                withTimeout(300_000) {
+                    BailianClient.chatCompletion(req.messages, model).use { resp ->
+                        val sb = StringBuilder()
+                        parseBailianSse(resp.body!!.source()) { sb.append(it) }
+                        sb.toString() to null
+                    }
+                }
+            } catch (e: Exception) {
+                LogStore.e("Bailian", "请求异常: ${e.stackTraceToString()}")
+                null to (e.localizedMessage ?: e.toString())
+            }
+        }
+
+        if (errMsg != null) {
+            call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+            return
+        }
+
+        val contentText = content ?: ""
+        LogStore.i("Bailian", "返回完成结果，长度=${contentText.length}")
+        call.respond(
+            ChatCompletion(
+                completionId, "chat.completion", created, model,
+                listOf(Choice(message = Msg("assistant", contentText), finish_reason = "stop")),
+                Usage(), ""
+            )
+        )
+    }
+
+    /**
+     * 解析百炼 SSE。每块 data:{"data":[{"type":"JSON_TEXT","value":"<内嵌JSON>"}]}，
+     * 内嵌 JSON 的 data.messageList 最后一项 contentList 中 type=text 的 content 为
+     * **累积完整文本**（非增量），本地做前缀切分回调增量；非前缀帧整帧丢弃
+     * （与 parseZhipuSse 同策略，避免位置错乱/重复）。
+     */
+    private suspend fun parseBailianSse(src: okio.BufferedSource, onDelta: suspend (String) -> Unit) {
+        var prevFull = ""
+        while (true) {
+            val line = src.readUtf8Line() ?: break
+            if (!line.startsWith("data:")) continue
+            val payload = line.substring(5).trim()
+            if (payload.isEmpty() || payload == "[DONE]") continue
+            try {
+                val o = org.json.JSONObject(payload)
+                val arr = o.optJSONArray("data") ?: return
+                for (i in 0 until arr.length()) {
+                    val d = arr.optJSONObject(i) ?: continue
+                    if (d.optString("type") != "JSON_TEXT") continue
+                    val inner = runCatching { org.json.JSONObject(d.optString("value")) }
+                        .getOrNull() ?: continue
+                    val dataObj = inner.optJSONObject("data") ?: continue
+                    val messageList = dataObj.optJSONArray("messageList") ?: continue
+                    val lastMsg = messageList.optJSONObject(messageList.length() - 1) ?: continue
+                    val contentList = lastMsg.optJSONArray("contentList") ?: continue
+                    // 取 contentList 中最后一个 type=text 的累积全文
+                    var full: String? = null
+                    for (j in 0 until contentList.length()) {
+                        val c = contentList.optJSONObject(j) ?: continue
+                        if (c.optString("type") == "text") full = c.optString("content", "")
+                    }
+                    val f = full ?: continue
+                    if (f.isEmpty()) continue
+                    if (f.length >= prevFull.length && f.startsWith(prevFull)) {
+                        val delta = f.substring(prevFull.length)
+                        if (delta.isNotEmpty()) {
+                            prevFull = f
+                            onDelta(delta)
+                        }
+                    } else if (prevFull.isEmpty()) {
+                        // 首帧即非空：整体作为增量
+                        prevFull = f
+                        onDelta(f)
+                    }
+                    // 非前缀且已有基准 → 整帧丢弃
+                }
+            } catch (_: Exception) {
             }
         }
     }
@@ -1925,6 +2117,7 @@ object ProxyServer {
                 isZhipuModel(model) -> zhipuText(req, isZhipuPlusModel(model))
                 isWenxinModel(model) -> wenxinText(req)
                 isLongCatModel(model) -> longCatText(req)
+                isBailianModel(model) -> bailianText(req)
                 isQwenModel(model) -> qwenText(req)
                 isDeepSeekModel(model) -> return DEEPSEEK_NEEDS_SERVER
                 isDoubaoModel(model) -> doubaoText(req)
@@ -1995,6 +2188,7 @@ object ProxyServer {
             CnbClient.DEFAULT_MODEL to "cnb",
             "longcat" to "longcat",
             "longcat-search" to "longcat",
+            "bailian" to "bailian",
             "doubao" to "doubao",
             "doubao-think" to "doubao",
             "doubao-image" to "doubao",
@@ -2089,6 +2283,24 @@ object ProxyServer {
         val sb = StringBuilder()
         try {
             parseLongCatSse(resp.body!!.source()) { sb.append(it) }
+        } finally {
+            resp.close()
+        }
+        sb.toString()
+    }
+
+    /** 百炼（阿里云，进程内）：聚合完整文本。 */
+    private suspend fun bailianText(req: ChatCompletionRequest): String = upstream("Bailian") {
+        applyNextBailianConfig()
+        if (!BailianClient.isConfigured()) {
+            throw IllegalStateException(
+                "百炼未配置：请在混元太极「中转」页选择百炼并粘贴抓包 JSON（cookies + bx 三件套）"
+            )
+        }
+        val resp = BailianClient.chatCompletion(req.messages, req.model)
+        val sb = StringBuilder()
+        try {
+            parseBailianSse(resp.body!!.source()) { sb.append(it) }
         } finally {
             resp.close()
         }

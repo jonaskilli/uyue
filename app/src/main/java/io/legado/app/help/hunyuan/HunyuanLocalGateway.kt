@@ -3,6 +3,7 @@ package io.legado.app.help.hunyuan
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Looper
+import io.legado.app.help.hunyuan.proxy.BailianClient
 import io.legado.app.help.hunyuan.proxy.CnbClient
 import io.legado.app.help.hunyuan.proxy.LogStore
 import io.legado.app.help.hunyuan.proxy.LongCatClient
@@ -215,6 +216,14 @@ object HunyuanLocalGateway : Interceptor {
         ProxyServer.setLongCatConfigList(longcat)
         val lcIdx = p.getInt("longcat_config_selected", 0)
         longcat.getOrNull(lcIdx)?.let { LongCatClient.applyConfig(it) }
+
+        // 百炼（阿里云）：与 longcat 同理。进程内直连没有「点启动」那一步，
+        // 不在此还原的话 bailianConfigList 为空 → applyNextBailianConfig() 直接 return
+        // → BailianClient 保持空配置 → 报「百炼未配置」（表现就是「不开服务用不了」）。
+        val bailian = loadList(p, "bailian_configs", "bailian_config")
+        ProxyServer.setBailianConfigList(bailian)
+        val blIdx = p.getInt("bailian_config_selected", 0)
+        bailian.getOrNull(blIdx)?.let { BailianClient.applyConfig(it) }
 
         configLoaded = true
         LogStore.i("Gateway", "已还原混元太极凭证（端口未启动，走进程内直连）")

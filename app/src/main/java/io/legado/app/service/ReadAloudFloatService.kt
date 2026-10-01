@@ -32,6 +32,7 @@ import io.legado.app.model.BookCover
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.read.ReadBookActivity
+import io.legado.app.ui.hunyuan.HunyuanTaijiActivity
 import io.legado.app.utils.defaultSharedPreferences
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefInt
@@ -53,6 +54,12 @@ class ReadAloudFloatService : BaseService() {
         /** ReadBookActivity 是否在前台 */
         @Volatile
         var isReadBookActivityForeground = false
+
+        /** 混元太极是否在前台：前台期间不显示悬浮球，
+         * 否则 66dp 的悬浮球会浮在混元太极界面上，覆盖范围内的触摸全部被它
+         * 拦截（按钮/横滑/下拉框点不动，且位置随拖动记录漂移，极难排查） */
+        @Volatile
+        var isHunyuanTaijiForeground = false
 
         /** 无权限时，附加悬浮窗View的前台Activity引用 */
         @Volatile
@@ -91,6 +98,13 @@ class ReadAloudFloatService : BaseService() {
          */
         fun onActivityResumed(activity: Activity) {
             if (activity is ReadBookActivity) return
+            if (activity is HunyuanTaijiActivity) {
+                // 混元太极在前台：不作为悬浮球宿主，并隐藏悬浮球（避免挡住该页触摸）
+                isHunyuanTaijiForeground = true
+                updateVisibility(activity)
+                return
+            }
+            isHunyuanTaijiForeground = false
             hostActivity = activity
             // 通知Service重新评估悬浮窗显示
             updateVisibility(activity)
@@ -100,6 +114,10 @@ class ReadAloudFloatService : BaseService() {
          * 无权限模式下：Activity在onPause时调用
          */
         fun onActivityPaused(activity: Activity) {
+            if (activity is HunyuanTaijiActivity) {
+                isHunyuanTaijiForeground = false
+                updateVisibility(activity)
+            }
             if (hostActivity === activity) {
                 hostActivity = null
             }
@@ -204,7 +222,7 @@ class ReadAloudFloatService : BaseService() {
             removeFloatingWindow()
             return
         }
-        if (isReadBookActivityForeground) {
+        if (isReadBookActivityForeground || isHunyuanTaijiForeground) {
             removeFloatingWindow()
             return
         }

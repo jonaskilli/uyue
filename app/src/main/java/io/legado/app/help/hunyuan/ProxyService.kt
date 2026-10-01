@@ -48,6 +48,10 @@ class ProxyService : android.app.Service() {
             val deepseek = loadList(prefs, "deepseek_tokens", "deepseek_token")
             val longcat = loadList(prefs, "longcat_configs", "longcat_config")
             val cnb = loadList(prefs, "cnb_cookies", "cnb_cookie")
+            // 百炼：此前这里漏了还原，导致 App 重启后自动恢复服务时
+            // ProxyServer 的百炼轮换列表为空（用户明明提取过很多条），
+            // 接口一调用就报「百炼未配置」。必须与 longcat/cnb 一样从配置还原。
+            val bailian = loadList(prefs, "bailian_configs", "bailian_config")
             val stream = prefs.getBoolean("stream_mode", true)
             val mode = prefs.getString("deepseek_mode", "default") ?: "default"
             val imageSize = prefs.getString("image_size", "9:16") ?: "9:16"
@@ -62,6 +66,7 @@ class ProxyService : android.app.Service() {
             ProxyServer.setCnbCookieList(cnb)
             ProxyServer.setDeepSeekTokenList(deepseek)
             ProxyServer.setLongCatConfigList(longcat)
+            ProxyServer.setBailianConfigList(bailian)
 
             val intent = Intent(context, ProxyService::class.java).apply {
                 putExtra(EXTRA_PORT, port)
@@ -123,6 +128,8 @@ class ProxyService : android.app.Service() {
         val lcPrefs = getSharedPreferences("ds_proxy", Context.MODE_PRIVATE)
         val longcat = loadList(lcPrefs, "longcat_configs", "longcat_config")
         ProxyServer.setLongCatConfigList(longcat)
+        // 百炼：任何启动路径（界面启动 / 自动恢复）都要还原，否则轮换列表为空
+        ProxyServer.setBailianConfigList(loadList(lcPrefs, "bailian_configs", "bailian_config"))
         // 混元3（CNB）登录 Cookie 不经过 intent 传递，统一在此从配置还原，
         // 保证任何启动路径（界面启动 / 自动恢复）都能带上登录态 Cookie。
         ProxyServer.setCnbCookieList(loadList(lcPrefs, "cnb_cookies", "cnb_cookie"))

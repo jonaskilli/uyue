@@ -20,6 +20,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import io.legado.app.help.hunyuan.proxy.BailianClient
 import io.legado.app.help.hunyuan.proxy.LogStore
 import io.legado.app.help.hunyuan.proxy.LongCatClient
 import io.legado.app.help.hunyuan.proxy.ProxyServer
@@ -103,6 +104,112 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         // 启动时把当前选中的 LongCat 配置应用到客户端，并把列表交给服务端用于轮换
         applyLongCatConfig(longCatConfigs.value.getOrNull(longCatSelectedIndex.value) ?: "")
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
+    }
+
+    // ── 百炼（阿里云）配置：cookies + 无痕验证三件套（bx_ua/bx_et/bx_umidtoken）+ model_id ──
+
+    /** 百炼配置 JSON 列表（索引 0 为「默认配置」），支持多个并自动轮换。 */
+    private val bailianConfigs = MutableStateFlow(loadList("bailian_configs", "bailian_config"))
+
+    /** 当前选中的百炼配置下标（浏览器提取会写入此下标）。 */
+    val bailianSelectedIndex = MutableStateFlow(loadBailianSelectedIndex())
+
+    /** 暴露给 UI 的百炼配置列表（供切换/新建弹窗）。 */
+    val bailianConfigsFlow: StateFlow<List<String>> = bailianConfigs
+
+    /** 当前选中的百炼配置（供 UI 输入框展示/编辑）。 */
+    val bailianConfig: StateFlow<String> = combine(bailianConfigs, bailianSelectedIndex) { list, idx ->
+        list.getOrNull(idx) ?: ""
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    init {
+        // 启动时同步百炼配置到客户端与服务端轮换列表
+        applyBailianConfig(bailianConfigs.value.getOrNull(bailianSelectedIndex.value) ?: "")
+        ProxyServer.setBailianConfigList(bailianConfigs.value)
+    }
+
+    /** 设置百炼配置（写入选中下标并持久化+应用）。 */
+    fun setBailianConfig(value: String) {
+        val i = bailianSelectedIndex.value
+        val list = bailianConfigs.value.toMutableList()
+        if (i in list.indices) list[i] = value else list.add(value)
+        bailianConfigs.value = list
+        persistBailian()
+        applyBailianConfig(value)
+        ProxyServer.setBailianConfigList(bailianConfigs.value)
+    }
+
+    private fun persistBailian() {
+        val arr = org.json.JSONArray()
+        bailianConfigs.value.forEach { arr.put(it) }
+        prefs.edit().putString("bailian_configs", arr.toString()).apply()
+    }
+
+    private fun loadBailianSelectedIndex(): Int {
+        val list = bailianConfigs.value
+        return prefs.getInt("bailian_config_selected", 0).coerceIn(0, list.lastIndex.coerceAtLeast(0))
+    }
+
+    /** 选中某个百炼配置。 */
+    fun setBailianSelectedIndex(i: Int) {
+        if (i in bailianConfigs.value.indices) {
+            bailianSelectedIndex.value = i
+            prefs.edit().putInt("bailian_config_selected", i).apply()
+            applyBailianConfig(bailianConfigs.value[i])
+        }
+    }
+
+    /** 新增一条空白百炼配置并选中。 */
+    fun addBailianConfig() {
+        val list = bailianConfigs.value.toMutableList()
+        list.add("")
+        bailianConfigs.value = list
+        persistBailian()
+        setBailianSelectedIndex(list.lastIndex)
+        ProxyServer.setBailianConfigList(bailianConfigs.value)
+    }
+
+    /** 删除指定下标的百炼配置（至少保留 1 条）。 */
+    fun removeBailianConfig(i: Int) {
+        val list = bailianConfigs.value.toMutableList()
+        if (list.size <= 1) {
+            list[0] = ""
+        } else {
+            list.removeAt(i)
+        }
+        bailianConfigs.value = list
+        persistBailian()
+        val ni = bailianSelectedIndex.value.coerceIn(0, list.lastIndex.coerceAtLeast(0))
+        bailianSelectedIndex.value = ni
+        applyBailianConfig(list.getOrNull(ni) ?: "")
+        ProxyServer.setBailianConfigList(bailianConfigs.value)
+    }
+
+    /**
+     * 浏览器抓包一键写入：拼接百炼配置 JSON。
+     * @param cookie 阿里云控制台完整 Cookie（含 login_aliyunid_ticket）
+     * @param bxUa / bxEt / bxUmidToken 无痕验证风控三件套
+     */
+    fun setBailianFromRequest(
+        cookie: String,
+        bxUa: String,
+        bxEt: String,
+        bxUmidToken: String,
+        modelId: String
+    ) {
+        val o = runCatching {
+            org.json.JSONObject(bailianConfig.value.ifBlank { "{}" })
+        }.getOrElse { org.json.JSONObject() }
+        o.put("cookies", cookie)
+        if (bxUa.isNotBlank()) o.put("bx_ua", bxUa)
+        if (bxEt.isNotBlank()) o.put("bx_et", bxEt)
+        if (bxUmidToken.isNotBlank()) o.put("bx_umidtoken", bxUmidToken)
+        if (!o.has("model_id")) o.put("model_id", modelId.ifBlank { "qwen3.8-max" })
+        setBailianConfig(o.toString())
+    }
+
+    private fun applyBailianConfig(json: String) {
+        BailianClient.applyConfig(json)
     }
 
     /** 当前服务商对应的凭证列表（供 UI 展示/编辑）。 */
@@ -270,6 +377,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.setCnbCookieList(cnbCookies.value)
         ProxyServer.setDeepSeekTokenList(deepseekTokens.value)
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
+        ProxyServer.setBailianConfigList(bailianConfigs.value)
         // 界面改了凭证 → 让本地网关下次请求重新读取，避免沿用旧缓存
         HunyuanLocalGateway.invalidateConfig()
     }
@@ -322,6 +430,44 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         persistLongCat()
         applyLongCatConfig(value)
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
+    }
+
+    /**
+     * 浏览器页「清空」时调用：只清掉**当前选中这一条**凭证，已保存的其余条目全部保留。
+     *
+     * 语义（与错误修改前的原版一致）：「清空」是清浏览器的登录态，好让你重新登录/换号，
+     * 保存的那几条凭证本来就是用来多号轮换的，绝不能一次全清。
+     * 原版龙猫就是这个做法：`onLongCatConfigClear = { vm.setLongCatConfig("") }`
+     * ——只把当前选中那条写空，列表长度不变。
+     *
+     * 曾一度被改成 `xxx.value = listOf("")`（整个列表清成一条空串），
+     * 结果点一次「清空」，攒的所有配置全没了，无法轮换。这里恢复原版语义。
+     */
+    fun clearProviderCredentials(p: String) {
+        when (p) {
+            "deepseek" -> setDeepSeekToken("")
+            "longcat" -> setLongCatConfig("")   // 原版行为：只清当前选中这条
+            "bailian" -> {
+                // 百炼的「清空」是为了轮换游客身份：清掉浏览器里的访客标识，重新提取一份新的。
+                // 所以**不能**清掉已保存的配置列表——那样攒的多条游客配置全没了，没法轮换
+                // （旧实现 listOf("") 会把用户辛苦攒的 N 条配置一次性清空）。
+                // 正确做法：旧条目原样保留，新开一条空槽位并选中，
+                // 之后点「提取」就写进这条新的，多条配置交给 ProxyServer 轮换。
+                val list = bailianConfigs.value
+                if (list.isEmpty() || list.last().isNotBlank()) {
+                    addBailianConfig()   // 新增空配置并选中（内部已持久化 + 同步轮换列表）
+                } else {
+                    setBailianSelectedIndex(list.lastIndex)
+                }
+                // 只复位内存中转当前用的那份凭证；磁盘上保存的配置不动
+                BailianClient.applyConfig("")
+            }
+            // Cookie 类凭证（混元3 / Kimi / 千问 / 豆包）：
+            // updateSelectedCookie("") 只把当前选中那条写空，其余条目与选中下标保持不变。
+            else -> updateSelectedCookie("")
+        }
+        syncServerCookies()
+        LogStore.i("Proxy", "已清空 $p 当前选中的凭证（其余条目保留，仍可轮换）")
     }
 
     private fun persistLongCat() {

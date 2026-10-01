@@ -86,7 +86,8 @@ private val PROVIDERS = listOf(
     "kimi" to "Kimi",
     "qwen" to "千问",
     "deepseek" to "DeepSeek",
-    "longcat" to "龙猫"
+    "longcat" to "龙猫",
+    "bailian" to "百炼"
 )
 
 /** 服务商 id → 展示名（避免各处 when 分支漏掉 cnb 而误显示成「豆包」）。 */
@@ -167,6 +168,58 @@ private fun CBtn(onClick: () -> Unit, text: String) {
 /** 浏览器拦截 LongCat 请求时暂存下来的请求头（mtgsig / m-traceid / base_url），由「提取」按钮再合并 CookieManager 里的 Cookie。 */
 private data class LongCatCaptured(val mtgsig: String, val mTraceId: String, val baseUrl: String)
 
+/** 浏览器拦截百炼控制台请求时暂存的请求头（bx 无痕验证三件套），由「提取」按钮再合并 CookieManager 里的 Cookie。 */
+private data class BailianCaptured(val bxUa: String, val bxEt: String, val bxUmidToken: String)
+
+/** 在「当前页面所属源」上执行的清理脚本：localStorage/sessionStorage/IndexedDB/Cache/ServiceWorker。
+ *  注意 localStorage 等只能清当前源的，所以跨源清理要靠逐个加载源再执行本脚本。
+ *
+ *  百炼实测结论（Chromium 真实浏览器验证，同一实例连续 3 轮均成功换新 cna）：
+ *  1) 只清 Cookie 时 cna 一个字符都不会变——Aplus 把 cna 备份在 localStorage
+ *     （key：__ETAG__CNA__ID__、APLUS_CNA，值形如 "20261002_<cna>"，按天缓存），
+ *     Cookie 一清它就从备份原样写回。所以必须显式删掉这几个 key，并把 setItem
+ *     置为 no-op，防止清完之后、跳走之前 Aplus 又写回去。
+ *  2) 只清 localStorage 也不够——真正的持久化还有 IndexedDB / Cache Storage /
+ *     Service Worker（埋点源 ynuf.aliapp.org、gm/log/wgo.mmstat.com 上尤其重要）。
+ *     之前几轮失败就是漏了这层。这里用 async 返回 Promise，等三层异步清理真正
+ *     完成后 evaluateJavascript 才回调，调用方据此再跳下一个源。 */
+private val WIPE_STORAGE_JS = """
+(async () => {
+  try{localStorage.removeItem('__ETAG__CNA__ID__');
+      localStorage.removeItem('APLUS_CNA');
+      localStorage.removeItem('APLUS_LS_KEY');}catch(e){}
+  try{localStorage.clear();sessionStorage.clear();}catch(e){}
+  try{Object.defineProperty(localStorage,'setItem',{value:function(){},writable:true});}catch(e){}
+  try{if(window.indexedDB&&indexedDB.databases){
+      var ds=await indexedDB.databases();
+      await Promise.all(ds.map(function(d){return new Promise(function(r){
+        var q=indexedDB.deleteDatabase(d.name);
+        q.onsuccess=q.onerror=q.onblocked=function(){r();};});}));}catch(e){}
+  try{if(window.caches&&caches.keys){
+      var ks=await caches.keys();
+      await Promise.all(ks.map(function(k){return caches.delete(k);}));}catch(e){}
+  try{if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){
+      var rs=await navigator.serviceWorker.getRegistrations();
+      await Promise.all(rs.map(function(r){return r.unregister();}));}catch(e){}
+  return 'ok';
+})()
+""".trimIndent()
+
+/** 随机生成一个移动端 UA：清空凭证时调用，让服务端把本次会话当作一台「新设备」。
+ *  Chrome 版本 / 安卓版本 / 机型 / build 号全部随机，每清空一次变一个。 */
+private fun randomMobileUa(): String {
+    val chrome = 108 + kotlin.random.Random.nextInt(0, 26)
+    val android = 11 + kotlin.random.Random.nextInt(0, 4)
+    val model = listOf(
+        "Pixel 6", "Pixel 7", "Pixel 7 Pro", "SM-S9010", "SM-S9110",
+        "SM-A5360", "M2102J20SC", "2201123G", "V2242A", "PEEM00"
+    ).random()
+    val build = 1000 + kotlin.random.Random.nextInt(0, 9000)
+    return "Mozilla/5.0 (Linux; Android $android; $model) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/$chrome.0.$build.0 Mobile Safari/537.36"
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun COutBtn(
     onClick: () -> Unit,
@@ -175,33 +228,52 @@ private fun COutBtn(
     onLongClick: (() -> Unit)? = null
 ) {
     val c = colors ?: ButtonDefaults.outlinedButtonColors()
-    val interaction = remember { MutableInteractionSource() }
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = c.containerColor,
-        contentColor = c.contentColor,
-        border = BorderStroke(1.dp, c.contentColor),
-        modifier = Modifier
-            .heightIn(min = CompactBtnHeight)
-            .then(
-                if (onLongClick != null) Modifier.pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { onClick() },
-                        onLongPress = { onLongClick() }
-                    )
-                } else Modifier.clickable(
-                    // 必须显式给出 indication：clickable 默认 indication 为 null，
-                    // 点了没有任何水波纹反馈，看起来就像「按钮点不动」
+    if (onLongClick == null) {
+        // 紧凑按钮：Surface + clickable。注意不能用 Surface(onClick=...)——
+        // 那会带 minimumInteractiveComponentSize 把按钮实际撑大到 48dp，
+        // 视觉尺寸和间距全变（按钮行变得稀疏就是这个原因）
+        val interaction = remember { MutableInteractionSource() }
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = c.containerColor,
+            contentColor = c.contentColor,
+            border = BorderStroke(1.dp, c.contentColor),
+            modifier = Modifier
+                .heightIn(min = CompactBtnHeight)
+                .clickable(
+                    // 显式 indication：否则点击没有水波纹反馈，看起来像没反应
                     interactionSource = interaction,
                     indication = LocalIndication.current,
                     onClick = onClick
                 )
-            )
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier.padding(CompactBtnPadding)
-        ) { Text(text, fontSize = CompactBtnFont) }
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.padding(CompactBtnPadding)
+            ) { Text(text, fontSize = CompactBtnFont) }
+        }
+    } else {
+        // 长按路径：不能用 Surface(onClick)，否则其自带 clickable 会抢占长按手势；
+        // 单击/长按统一交给 pointerInput 处理，不能再叠加 clickable（会双触发）。
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = c.containerColor,
+            contentColor = c.contentColor,
+            border = BorderStroke(1.dp, c.contentColor),
+            modifier = Modifier
+                .heightIn(min = CompactBtnHeight)
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { onClick() },
+                        onLongPress = { onLongClick() }
+                    )
+                }
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.padding(CompactBtnPadding)
+            ) { Text(text, fontSize = CompactBtnFont) }
+        }
     }
 }
 
@@ -252,6 +324,11 @@ fun App(vm: ProxyViewModel) {
     LaunchedEffect(longCatConfigFlow) { longCatConfig = longCatConfigFlow }
     val longCatConfigsFlow by vm.longCatConfigsFlow.collectAsState()
     val longCatSelIdx by vm.longCatSelectedIndex.collectAsState()
+    val bailianConfigFlow by vm.bailianConfig.collectAsState()
+    var bailianConfig by remember { mutableStateOf(bailianConfigFlow) }
+    LaunchedEffect(bailianConfigFlow) { bailianConfig = bailianConfigFlow }
+    val bailianConfigsFlow by vm.bailianConfigsFlow.collectAsState()
+    val bailianSelIdx by vm.bailianSelectedIndex.collectAsState()
 
     var provider by remember { mutableStateOf(providerFlow) }
     var cookieText by remember { mutableStateOf(cookiesFlow.getOrNull(selectedIdx) ?: "") }
@@ -268,6 +345,7 @@ fun App(vm: ProxyViewModel) {
     var showCookieDialog by remember { mutableStateOf(false) }
     var showTokenDialog by remember { mutableStateOf(false) }
     var showLongCatDialog by remember { mutableStateOf(false) }
+    var showBailianDialog by remember { mutableStateOf(false) }
 
     val appContext = LocalContext.current
     // 每次打开 APP 强制刷新一次混元凭证（最多 8 小时限频由 CnbClient 内部保证，此处为强制触发）
@@ -317,6 +395,19 @@ fun App(vm: ProxyViewModel) {
             onDismiss = { showLongCatDialog = false }
         )
     }
+    if (showBailianDialog) {
+        CredentialPickerDialog(
+            title = "选择百炼配置",
+            items = bailianConfigsFlow,
+            selectedIndex = bailianSelIdx,
+            labelOf = { i -> if (i == 0) "默认配置" else "配置 ${i + 1}" },
+            addLabel = "新增配置",
+            onSelect = { vm.setBailianSelectedIndex(it); showBailianDialog = false },
+            onAdd = { vm.addBailianConfig() },
+            onDelete = { vm.removeBailianConfig(it) },
+            onDismiss = { showBailianDialog = false }
+        )
+    }
 
     MaterialTheme(typography = compactTypography()) {
         Scaffold(
@@ -349,6 +440,7 @@ fun App(vm: ProxyViewModel) {
                     onOpenCookieDialog = { showCookieDialog = true },
                     onOpenTokenDialog = { showTokenDialog = true },
                     onOpenLongCatDialog = { showLongCatDialog = true },
+                    onOpenBailianDialog = { showBailianDialog = true },
                     onModelChange = {
                         model = it
                         // 运行中切换模型立即生效：同步给 ViewModel，聊天框发送时会用新模型请求服务端
@@ -358,6 +450,11 @@ fun App(vm: ProxyViewModel) {
                     onLongCatConfigChange = {
                         longCatConfig = it
                         vm.setLongCatConfig(it)
+                    },
+                    bailianConfig = bailianConfig,
+                    onBailianConfigChange = {
+                        bailianConfig = it
+                        vm.setBailianConfig(it)
                     },
                     onPortChange = { port = it },
                     onInputChange = { input = it },
@@ -406,8 +503,9 @@ fun App(vm: ProxyViewModel) {
                 BrowserScreen(
                     provider = provider,
                     onProviderChange = { provider = it; vm.setProvider(it) },
-                    onLongCatConfigClear = { vm.setLongCatConfig("") },
+                    onClearCredentials = { vm.clearProviderCredentials(it) },
                     onLongCatCaptured = { m, t, c, u -> vm.setLongCatFromRequest(m, t, c, u) },
+                    onBailianCaptured = { c, ua, et, um -> vm.setBailianFromRequest(c, ua, et, um, "") },
                     onCookieExtracted = {
                         vm.updateSelectedCookie(it)
                         cookieText = it
@@ -441,9 +539,12 @@ fun ProxyScreen(
     onOpenCookieDialog: () -> Unit,
     onOpenTokenDialog: () -> Unit,
     onOpenLongCatDialog: () -> Unit,
+    onOpenBailianDialog: () -> Unit,
     onModelChange: (String) -> Unit,
     longCatConfig: String,
     onLongCatConfigChange: (String) -> Unit,
+    bailianConfig: String,
+    onBailianConfigChange: (String) -> Unit,
     onPortChange: (String) -> Unit,
     onInputChange: (String) -> Unit,
     deepseekToken: String,
@@ -477,7 +578,8 @@ fun ProxyScreen(
         "glm-image-hd" to "智谱-电影级生图",
         "wenxin" to "文心",
         "longcat" to "龙猫",
-        "longcat-search" to "龙猫-搜索"
+        "longcat-search" to "龙猫-搜索",
+        "bailian" to "百炼"
     )
     var modelExpanded by remember { mutableStateOf(false) }
 
@@ -520,7 +622,7 @@ fun ProxyScreen(
     }
 
     Column(modifier) {
-        // 服务商选择：用 FlowRow 自动换行，避免一行放不下时被挤出屏幕外点不到
+        // 服务商选择：用 FlowRow 自动换行的按钮样式（保持最初的紧凑排布，两排紧挨）
         FlowRow(
             verticalArrangement = Arrangement.Center,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -561,6 +663,17 @@ fun ProxyScreen(
                     )
                     Spacer(Modifier.width(6.dp))
                     CBtn(onClick = onOpenLongCatDialog, text = "配置")
+                }
+                "bailian" -> {
+                    // 百炼为抓包配置（cookies + 无痕验证三件套），原样粘贴 JSON；右侧「配置」按钮多账号切换
+                    CField(
+                        value = bailianConfig, onValueChange = onBailianConfigChange,
+                        placeholder = "粘贴百炼配置 JSON（含 cookies / bx_ua / bx_et / bx_umidtoken）",
+                        singleLine = false, maxLines = 3,
+                        modifier = Modifier.weight(1f).height(InputAreaHeight)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    CBtn(onClick = onOpenBailianDialog, text = "配置")
                 }
                 else -> {
                     CField(
@@ -915,17 +1028,28 @@ fun LogScreen(
 fun BrowserScreen(
     provider: String,
     onProviderChange: (String) -> Unit,
-    onLongCatConfigClear: () -> Unit,
+    onClearCredentials: (String) -> Unit,
     onLongCatCaptured: (String, String, String, String) -> Unit,
+    onBailianCaptured: (String, String, String, String) -> Unit,
     onCookieExtracted: (String) -> Unit,
     onDeepSeekTokenExtracted: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
+    // 「清空」的跨源存储清理：Cookie 只是一半，cna/umid 等设备标识还存在
+    // 各埋点源的 localStorage/IndexedDB 里，localStorage 只能清当前加载页的源，
+    // 所以用队列逐个加载源、每加载完一个就在 onPageFinished 里清一个，
+    // 全部清完再回到目标页。这两个实例会被 WebView factory 闭包捕获，必须稳定。
+    val wipeQueue = remember { ArrayDeque<String>() }
+    val wipeTarget = remember { mutableStateOf<String?>(null) }
+    // 跨源清理「进行中」标志。不能拿 wipeQueue.isNotEmpty() 代替：队列在加载最后一个源时
+    // 就已经空了，会导致最后一个源的存储没被清、而且永远不会跳回目标页（停在空白页）。
+    val wiping = remember { mutableStateOf(false) }
     // DeepSeek 的 Bearer 在请求头 authorization 里（不在 cookie），靠 shouldInterceptRequest 拦截抓取
     val capturedToken = remember { mutableStateOf<String?>(null) }
     val capturedLongCat = remember { mutableStateOf<LongCatCaptured?>(null) }
+    val capturedBailian = remember { mutableStateOf<BailianCaptured?>(null) }
     var url by remember(provider) {
         mutableStateOf(
             when (provider) {
@@ -934,6 +1058,7 @@ fun BrowserScreen(
                 "qwen" -> "https://www.qianwen.com/"
                 "deepseek" -> "https://chat.deepseek.com/"
                 "longcat" -> "https://longcat.chat/t"
+                "bailian" -> "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
                 else -> "https://www.doubao.com/chat/"
             }
         )
@@ -941,16 +1066,54 @@ fun BrowserScreen(
     var progress by remember { mutableStateOf(0) }
     var toast by remember { mutableStateOf<String?>(null) }
 
+    // 跨源清理收尾：所有源的存储都清完后，才轮到 Cookie / WebStorage / HTTP 缓存，
+    // 最后回目标页。顺序不能反——先清 Cookie 的话 Aplus 会立刻从备份写回。
+    // 注意：必须定义在 BrowserScreen 函数体作用域（而不是某个 Row/Column 的 lambda 里），
+    // 否则 AndroidView 的 WebViewClient 回调引用不到。
+    fun finishBailianWipe(view: WebView) {
+        if (!wiping.value) return
+        wiping.value = false
+        val cm = CookieManager.getInstance()
+        cm.removeAllCookies(null)
+        cm.removeSessionCookies(null)
+        cm.flush()
+        // 兜底：清掉其余源（含加载不出来的埋点源）的 WebStorage
+        try {
+            android.webkit.WebStorage.getInstance().deleteAllData()
+        } catch (_: Throwable) {
+        }
+        try {
+            view.clearCache(true)
+        } catch (_: Throwable) {
+        }
+        view.loadUrl(wipeTarget.value ?: url)
+        toast = "已清空各源存储与全部 Cookie，点「提取」写入新的游客配置"
+    }
+
+    // 驱动跨源清理：清当前源（含 IndexedDB/Cache/SW）→ 完成后跳下一个源；队列空了就收尾
+    fun wipeCurrentThenNext(view: WebView) {
+        view.evaluateJavascript(WIPE_STORAGE_JS) { _ ->
+            if (!wiping.value) return@evaluateJavascript
+            if (wipeQueue.isNotEmpty()) {
+                view.post { view.loadUrl(wipeQueue.removeFirst()) }
+            } else {
+                view.post { finishBailianWipe(view) }
+            }
+        }
+    }
+
     // 切换服务商时跳转到对应站点
     LaunchedEffect(provider) {
         capturedToken.value = null
         capturedLongCat.value = null
+        capturedBailian.value = null
         val target = when (provider) {
             "cnb" -> "https://cnb.cool/npc/CodeBuddy"
             "kimi" -> "https://www.kimi.com/"
             "qwen" -> "https://www.qianwen.com/"
             "deepseek" -> "https://chat.deepseek.com/"
             "longcat" -> "https://longcat.chat/t"
+            "bailian" -> "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
             else -> "https://www.doubao.com/chat/"
         }
         url = target
@@ -969,10 +1132,13 @@ fun BrowserScreen(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 选择框：选择模型/服务商即进入对应站点；旁边「清空」按钮清空该站点 Cookie（龙猫为清空配置）
+            // 「清空」按钮：彻底清掉当前服务商的登录态，分三层——
+            // 1) 中转用的已保存凭证（Cookie/Token/配置 JSON）——此前漏掉的正是这层，
+            //    中转服务用的就是它，所以表现为「清了却还在用旧 Cookie」
+            // 2) WebView CookieManager 的会话 Cookie（host-only 与 domain 级都删）
+            // 3) 站点 localStorage/sessionStorage
             fun clearProviderCookies(p: String) {
                 if (p == "longcat") {
-                    onLongCatConfigClear()
                     // 同时清掉 longcat.chat 网站的登录 Cookie，彻底退出登录（否则重新打开仍已登录）
                     val cm = CookieManager.getInstance()
                     cm.flush()
@@ -985,22 +1151,53 @@ fun BrowserScreen(
                         }
                     }
                     cm.flush()
+                    onClearCredentials(p)
                     toast = "已清空龙猫配置并退出网站登录"
                     webViewRef.value?.loadUrl(url)
                     return
                 }
                 val cm = CookieManager.getInstance()
-                // 该服务商对应的 base 域（即“关键词”）。含该关键词的所有网址 Cookie 都清
-                val bases = when (p) {
+                // 各站点具体 host：host-only Cookie（Set-Cookie 未带 domain 属性的）必须逐 host 删，
+                // 宁可多列不能漏列，漏掉的 host-only Cookie 就是「清不掉」的常见原因
+                val hosts = when (p) {
+                    "cnb" -> listOf("cnb.cool", "www.cnb.cool", "api.cnb.cool", "account.cnb.cool")
+                    "kimi" -> listOf("kimi.com", "www.kimi.com", "api.kimi.com", "chat.kimi.com", "m.kimi.com")
+                    "qwen" -> listOf("qianwen.com", "www.qianwen.com", "chat.qianwen.com", "m.qianwen.com")
+                    "deepseek" -> listOf(
+                        "deepseek.com", "www.deepseek.com", "chat.deepseek.com", "api.deepseek.com"
+                    )
+                    // 百炼免登录的「访客身份」不止记在 bailian 域的 Cookie 里：
+                    // cna / umid 等设备标识写在 .aliyun.com 主域与埋点域
+                    // （aliapp.org / mmstat.com / aliyuncs.com）上，这些不清，
+                    // 网站仍然认得你，免登录额度不会重置。凡网址带 bailian 的
+                    // 都属于阿里云系，放心全清（其他模型用不到这些域）
+                    "bailian" -> listOf(
+                        // 控制台 / 百炼本体
+                        "bailian.console.aliyun.com", "bailian-cs.console.aliyun.com",
+                        "bailian-mgmt.console.aliyun.com", "bailian-models.console.aliyun.com",
+                        // 阿里云主域与登录/账号
+                        "aliyun.com", "www.aliyun.com", "account.aliyun.com", "login.aliyun.com",
+                        "aliyunid.aliyun.com", "aliyunid-cn.aliyun.com", "myaliyun.aliyun.com",
+                        "user.aliyun.com", "free.aliyun.com",
+                        // 控制台其他子站（访客 Cookie 常写在这些 host 上）
+                        "console.aliyun.com", "homenew.console.aliyun.com", "help.aliyun.com",
+                        "market.aliyun.com", "promotion.aliyun.com", "care.aliyun.com",
+                        // 埋点 / 设备指纹域（cna、umid 的真正来源）
+                        "ynuf.aliapp.org", "log.mmstat.com", "spmm.mmstat.com", "gm.mmstat.com",
+                        "arms-retcode.aliyuncs.com", "retcode.aliyuncs.com"
+                    )
+                    else -> listOf("doubao.com", "www.doubao.com", "sso.doubao.com", "m.doubao.com")
+                }
+                // domain 级 Cookie 用根域删（domain=.根域 会覆盖其所有子域）；
+                // 百炼要把埋点域的根一起删，才能把 cna/umid 等设备标识一并清掉
+                val roots = when (p) {
                     "cnb" -> listOf("cnb.cool")
                     "kimi" -> listOf("kimi.com")
                     "qwen" -> listOf("qianwen.com")
                     "deepseek" -> listOf("deepseek.com")
+                    "bailian" -> listOf("aliyun.com", "aliapp.org", "mmstat.com", "aliyuncs.com")
                     else -> listOf("doubao.com")
                 }
-                // 常见子域前缀，拼出“网址里带该关键词”的所有可能 host
-                val subPrefixes = listOf("", "www.", "api.", "account.", "accounts.", "auth.", "login.", "platform.", "chat.", "m.")
-                val hosts = bases.flatMap { base -> subPrefixes.map { "https://$it$base" } }
 
                 val expired = "expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; path=/"
                 // host -> 该 host 上的 cookie 名集合（用于删 host-only cookie）
@@ -1008,42 +1205,82 @@ fun BrowserScreen(
                 // 全量 cookie 名（用于删 domain 级 cookie，覆盖所有子域）
                 val allNames = mutableSetOf<String>()
                 hosts.forEach { host ->
-                    cm.getCookie(host)?.split(";")?.forEach { piece ->
+                    // hosts 里是不带 scheme 的裸域名，getCookie 必须传完整 URL，
+                    // 否则解析失败永远返回 null（表现为「每次清空都说没有 Cookie」）
+                    cm.getCookie("https://$host")?.split(";")?.forEach { piece ->
                         val name = piece.substringBefore("=").trim()
                         // 跳过非法 cookie 名（如以 . 开头的 .thumbcache_xxx）
                         if (name.isNotEmpty() && !name.startsWith(".")) {
-                            hostCookieNames.getOrPut(host) { mutableSetOf() }.add(name)
+                            hostCookieNames.getOrPut("https://$host") { mutableSetOf() }.add(name)
                             allNames.add(name)
                         }
                     }
                 }
-                val label = when (p) { "cnb" -> "混元3"; "kimi" -> "Kimi"; "qwen" -> "千问"; "deepseek" -> "DeepSeek"; else -> "豆包" }
+                val label = providerLabel(p)
+                // 无论浏览器里有没有 Cookie，已保存凭证都必须清（这才是中转实际用的那份）
+                onClearCredentials(p)
                 if (allNames.isEmpty()) {
                     webViewRef.value?.loadUrl(url)
-                    toast = "没有可清空的 $label Cookie"
+                    toast = "没有 $label 的浏览器 Cookie，已清空其保存的凭证"
                     return
                 }
-                // 1) 删 host-only cookie（各具体 host）
-                hostCookieNames.forEach { (host, names) ->
-                    names.forEach { n -> cm.setCookie(host, "$n=; $expired", null) }
-                }
-                // 2) 删 domain 级 cookie：Android 旧版把 "deepseek.com" 与 ".deepseek.com" 视为不同域，
-                //    两种都删；domain 级删除后，该关键词下所有子域的会话 Cookie 一并失效
-                bases.forEach { base ->
+                if (p != "bailian") {
+                    // 1) 删 host-only cookie（各具体 host）
+                    hostCookieNames.forEach { (host, names) ->
+                        names.forEach { n -> cm.setCookie(host, "$n=; $expired", null) }
+                    }
+                    // 2) 删 domain 级 cookie：Android 旧版把 "a.com" 与 ".a.com" 视为不同域，
+                    //    两种都删；用根域删，domain=.根域 会覆盖其所有子域的会话 Cookie
                     allNames.forEach { n ->
-                        cm.setCookie("https://$base", "$n=; domain=.$base; $expired", null)
-                        cm.setCookie("https://$base", "$n=; domain=$base; $expired", null)
+                        roots.forEach { root ->
+                            cm.setCookie("https://$root", "$n=; domain=.$root; $expired", null)
+                            cm.setCookie("https://$root", "$n=; domain=$root; $expired", null)
+                        }
                     }
                 }
-                // 不依赖 setCookie 回调（部分机型不触发），统一延时后 flush + 清 localStorage + 刷新
+                // 不依赖 setCookie 回调（部分机型不触发），统一延时后 flush + 清站点存储 + 刷新
                 Handler(Looper.getMainLooper()).postDelayed({
                     cm.flush()
-                    webViewRef.value?.evaluateJavascript(
-                        "try{localStorage.clear();sessionStorage.clear();}catch(e){}",
-                        null
-                    )
-                    webViewRef.value?.loadUrl(url)
-                    toast = "已清空 $label 的浏览器 Cookie，可重新登录另一个账号"
+                    if (p == "bailian") {
+                        // 百炼的顺序不能反：cna/umid 的备份散在多个源的 localStorage +
+                        // IndexedDB + Cache Storage 里。若先清 Cookie，Aplus 会立刻从备份
+                        // 写回 Cookie 与 localStorage，后面再清存储就白清了。
+                        // 所以：先清当前源（通常就是百炼自己）→ 逐源清其余源 → 全部清完后
+                        // removeAllCookies + WebStorage.deleteAllData + clearCache → 回目标页。
+                        val wv = webViewRef.value
+                        if (wv == null) {
+                            toast = "浏览器未就绪，请重试"
+                        } else {
+                            wv.settings.userAgentString = randomMobileUa()
+                            wipeQueue.clear()
+                            listOf(
+                                // cna 备份实测所在：www / account / 百炼自身
+                                "https://www.aliyun.com/",
+                                "https://account.aliyun.com/",
+                                // umid / 设备指纹埋点源：实测 IndexedDB、Cache Storage 也在这几个上
+                                "https://ynuf.aliapp.org/",
+                                "https://gm.mmstat.com/",
+                                "https://log.mmstat.com/",
+                                "https://wgo.mmstat.com/",
+                                "https://fourier.taobao.com/",
+                                "https://fourier.alibaba.com/"
+                            ).forEach { wipeQueue.add(it) }
+                            wipeTarget.value = url
+                            wiping.value = true
+                            toast = "已新开一条百炼配置，正在清各源存储与 Cookie…"
+                            // 先清当前页所在源，再走队列
+                            wipeCurrentThenNext(wv)
+                            // 兜底：个别埋点源可能加载不出来（onPageFinished 迟迟不触发），
+                            // 15 秒后不管队列剩多少都强制收尾，避免流程卡死在空白页
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                if (wiping.value) finishBailianWipe(wv)
+                            }, 15000)
+                        }
+                    } else {
+                        webViewRef.value?.evaluateJavascript(WIPE_STORAGE_JS, null)
+                        webViewRef.value?.loadUrl(url)
+                        toast = "已清空 $label 的浏览器 Cookie 与当前凭证（其余已保存条目保留），可重新登录另一个账号"
+                    }
                 }, 400)
             }
             // 服务商选择框：选择即进入对应站点；旁边「清空」按钮清该站点 Cookie（龙猫为清空配置）
@@ -1120,6 +1357,32 @@ fun BrowserScreen(
                 }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
                     Text("提取", fontSize = CompactBtnFont)
                 }
+            } else if (provider == "bailian") {
+                Button(onClick = {
+                    val cap = capturedBailian.value
+                    if (cap == null || cap.bxUa.isBlank()) {
+                        toast = "请先在百炼模型体验页登录并发一条消息，以便捕获无痕验证头"
+                        return@Button
+                    }
+                    val cm = CookieManager.getInstance()
+                    cm.flush()
+                    val cookie = listOf(
+                        "https://bailian.console.aliyun.com",
+                        "https://bailian-cs.console.aliyun.com",
+                        "https://aliyun.com"
+                    )
+                        .flatMap { cm.getCookie(it).orEmpty().split(';') }
+                        .map { it.trim() }.filter { it.isNotBlank() }
+                        .distinct().joinToString("; ")
+                    if (cookie.isBlank()) {
+                        toast = "未获取到 Cookie，请先登录百炼控制台"
+                        return@Button
+                    }
+                    onBailianCaptured(cookie, cap.bxUa, cap.bxEt, cap.bxUmidToken)
+                    toast = "已提取百炼配置（Cookie + 无痕验证三件套）"
+                }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
+                    Text("提取", fontSize = CompactBtnFont)
+                }
             } else {
                 Button(onClick = {
                     val cm = CookieManager.getInstance()
@@ -1193,6 +1456,14 @@ fun BrowserScreen(
 
                         override fun onPageFinished(view: WebView?, urlStr: String?) {
                             progress = 0
+                            // 跨源清理流程：每加载完一个源就清该源的本地存储/缓存，然后加载下一个；
+                            // 队列空了说明「最后一个源」也加载完了——此时必须先清它的存储，
+                            // 再 removeAllCookies，最后才回到目标页。
+                            // 用 wiping 标志而不是 wipeQueue.isNotEmpty()：后者在加载最后一个源时
+                            // 已经是空的，会导致最后一个源漏清、且永远跳不回目标页。
+                            if (view == null || !wiping.value) return
+                            // 清该源（含 IndexedDB/Cache/SW），清理真正完成后才跳下一个源
+                            wipeCurrentThenNext(view)
                         }
 
                         override fun onReceivedError(
@@ -1237,6 +1508,16 @@ fun BrowserScreen(
                                 if (!mg.isNullOrBlank()) {
                                     val tid = h?.get("m-traceid") ?: h?.get("M-Traceid") ?: ""
                                     capturedLongCat.value = LongCatCaptured(mg, tid, request.url.toString())
+                                }
+                            }
+                            // 百炼：拦截控制台 RPC 请求，记下无痕验证三件套（Cookie 由「提取」按钮从 CookieManager 取）。
+                            if (request?.url?.host?.contains("bailian-cs.console.aliyun.com") == true) {
+                                val h = request?.requestHeaders
+                                val ua = h?.get("bx-ua") ?: h?.get("Bx-Ua") ?: ""
+                                val et = h?.get("bx_et") ?: h?.get("Bx_Et") ?: ""
+                                val um = h?.get("bx-umidtoken") ?: h?.get("Bx-Umidtoken") ?: ""
+                                if (ua.isNotBlank() && et.isNotBlank()) {
+                                    capturedBailian.value = BailianCaptured(ua, et, um)
                                 }
                             }
                             return null
