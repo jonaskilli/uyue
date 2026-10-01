@@ -27,6 +27,29 @@ var DEFAULT_VOICE_IDX = "少女01";
 var IS_BOOK_SWITCHED = false;
 var markMode = 2;
 
+// ===================== ★ 使用的模型（想换模型只改这里）=====================
+// 改法一：直接改 SG_MODEL_DEFAULT 的值
+// 改法二（推荐，改完不用动脚本）：在 mingwuyan 目录下新建 sg_model.txt，第一行写模型名，优先级高于此处
+// 【实测匿名免登录可用清单】全部免费、无需任何密钥（2026-09-29 实测）
+//   OpenAI：gpt6Sol（当前默认） gpt6Astra gpt6Luna gpt56Sol gpt56Luna gpt56Terra gpt55 incognito textEmbedding3Large gptRealtime2
+//   Claude：claudeSonnet5 claudeOpus5 claudeOpus55 claudeOpus48 claudeFable5
+//   Gemini：gemini35Flash gemini37Flash gemini38Flash
+//   Grok  ：grok45 grok46
+//   国产  ：glm53（智谱） qwen38Max（阿里） kimiK3（月之暗面） minimaxM3 deepseekV4 llama33
+// 注：gpt5/gpt41/claudeSonnet4/claudeHaiku5/gemini25Flash/grok4/deepseekR1 等旧名服务端已不认，会返回 400
+var SG_MODEL_DEFAULT = "gpt6Sol";
+var SG_MODEL_FILE = EXT_DIR + "sg_model.txt";
+var SG_MODEL = (function () {
+    try {
+        var raw = java.readExternalFile(SG_MODEL_FILE);
+        if (raw) {
+            var line = String(raw).replace(/^\s+/, "").split(/[\r\n]/)[0].replace(/[\s"']/g, "");
+            if (line) return line;
+        }
+    } catch (e) {}
+    return SG_MODEL_DEFAULT;
+})();
+
 // ===================== 发音人角色配置 =====================
 var MAIN_ROLES_CONFIG = [];
 var BATCH_ROLES = [
@@ -988,7 +1011,7 @@ function extractNameItemsLoose(content) {
 //   要求 App 端 POST 分支也支持落盘（旧版只在 GET + text/html 时落盘，拿不到本认证的）。
 var SG_BASE = "https://www.studioglobal.ai";
 var SG_UA = "Mozilla/5.0 (Linux; Android 15; V2352A Build/AP3A.240905.015.A2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.71 Mobile Safari/537.36";
-var SG_MODEL = "gpt6Sol";
+// SG_MODEL 见文件顶部「使用的模型」配置区（SG_MODEL_DEFAULT / sg_model.txt）
 
 var SG_CRED_FILE = EXT_DIR + "sg_session.json";
 var SG_API_SESSION = SG_BASE + "/api/creator/anonymous-session";
@@ -1188,14 +1211,48 @@ function sgParseSse(sseText) {
     return full || joined;
 }
 
+// 简单等待（App 未暴露 sleep 接口，只能自旋，时长刻意控制在秒级，别调大）
+function sgSleep(ms) {
+    var end = new Date().getTime() + ms;
+    while (new Date().getTime() < end) {}
+}
+
+// 判断返回内容是不是错误：auth=凭证失效 / limit=频率限制 / broken=返回异常 / ""=正常
+function sgErrKind(respText) {
+    var s = String(respText || "");
+    var head = s.replace(/\s+/g, " ").substring(0, 400);
+    if (!s) return "broken";
+    if (s.indexOf('"status":401') >= 0 || head.indexOf("401") >= 0
+        || /session expired|Unauthorized/i.test(head)) return "auth";
+    if (s.indexOf('"status":429') >= 0 || s.indexOf('"status":409') >= 0
+        || /turn_frequency_limited|Too many messages|rate.?limit|previously_failed/i.test(s)) return "limit";
+    if (s.indexOf('"status":5') >= 0 || /UnsupportedToolUse|could not complete/i.test(s)) return "broken";
+    return "";
+}
+
 // 调用 studioglobal，返回模型文本（失败返回 null）
+// ★ 出错策略：只要返回异常（401 失效 / 429 限频 / 502 / 空返回 / 解析不出来），
+//   就立刻重新申请一份全新的免登录认证，换凭证后重试，不再依赖同一份会话。
 function sgChat(userContent, systemPrompt, retryTimes) {
     if (retryTimes === undefined) retryTimes = 1;
     var text = systemPrompt ? (systemPrompt + "\n\n" + userContent) : userContent;
+    var SG_MAX_REFRESH = 3;      // 本次调用最多重换几次新认证
+    var SG_MAX_BACKOFF = 8000;   // 退避上限（毫秒）
+    var refreshed = 0;
+    var backoff = 0;
     for (var attempt = 0; attempt <= retryTimes; attempt++) {
         var sess = sgGetSession();
         var gid = sgGetGuestId();
-        if (!sess) { log("【SG】无凭证且自动申请失败，跳过本次分析"); return null; }
+        if (!sess) {
+            // 连凭证都没有：先试着申请一次再说
+            if (refreshed < SG_MAX_REFRESH && sgRefreshCredFromHeaders()) {
+                refreshed++;
+                attempt--;
+                continue;
+            }
+            log("【SG】无凭证且自动申请失败，跳过本次分析");
+            return null;
+        }
         var bodyObj = {
             turnId: String(java.randomUUID()),
             aiModel: SG_MODEL,
@@ -1242,26 +1299,28 @@ function sgChat(userContent, systemPrompt, retryTimes) {
             }
         })];
         var sse = java.ajaxRaceDelayed(req, 120000);
-        if (!sse) {
-            log("【SG】聊天无返回（第 " + (attempt + 1) + " 次）");
-            continue;
+        var errKind = sgErrKind(sse);
+        if (errKind === "" ) {
+            var content = sgParseSse(sse);
+            if (content) return content;
+            errKind = "broken";
+            log("【SG】解析失败，原始返回：" + String(sse).substring(0, 300));
+        } else {
+            log("【SG】请求出错（" + errKind + "，第 " + (attempt + 1) + " 次）：" + String(sse).replace(/\s+/g, " ").substring(0, 200));
         }
-        var head = String(sse).substring(0, 300);
-        if (head.indexOf("401") !== -1) {
-            // ★ 凭证失效：先尝试从响应头自动申请新凭证，成功则用新凭证重试（不消耗重试次数）
-            if (!_sgRefreshed && sgRefreshCredFromHeaders()) {
-                _sgRefreshed = true;
-                log("【SG】已获取新凭证，重试本次请求");
+        // ★ 出错 → 重新拿一份免登录认证，用新凭证重试（不消耗重试次数）
+        if (refreshed < SG_MAX_REFRESH) {
+            backoff = (errKind === "limit") ? 3000 : 1500;
+            if (backoff > SG_MAX_BACKOFF) backoff = SG_MAX_BACKOFF;
+            log("【SG】重新申请免登录认证（第 " + (refreshed + 1) + " 次），等待 " + backoff + "ms 后重试");
+            sgSleep(backoff);
+            if (sgRefreshCredFromHeaders()) {
+                refreshed++;
                 attempt--;
                 continue;
             }
-            log("【SG】★ 凭证已失效（401），且自动申请失败。请确认 App 端已支持 POST 响应头侧存。");
-            log("【SG】原始返回：" + head);
-            return null;
+            log("【SG】重新申请认证失败，请确认 App 端已支持 POST 响应头侧存");
         }
-        var content = sgParseSse(sse);
-        if (content) return content;
-        log("【SG】解析失败，原始返回：" + String(sse).substring(0, 300));
     }
     return null;
 }

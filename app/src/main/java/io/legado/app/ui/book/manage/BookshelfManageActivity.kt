@@ -21,6 +21,7 @@ import io.legado.app.data.entities.BookGroup
 import io.legado.app.data.entities.BookSource
 import io.legado.app.databinding.ActivityArrangeBookBinding
 import io.legado.app.databinding.DialogEditTextBinding
+import io.legado.app.help.AppWebDav
 import io.legado.app.help.DirectLinkUpload
 import io.legado.app.help.book.contains
 import io.legado.app.help.book.isLocal
@@ -46,9 +47,13 @@ import io.legado.app.utils.sendToClip
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.startActivity
+import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flowOn
@@ -83,6 +88,9 @@ class BookshelfManageActivity :
     }
     private var books: List<Book>? = null
     private val waitDialog by lazy { WaitDialog(this) }
+    /** 批量上传模式: 从书架菜单"批量上传到WebDav"进入时为 true */
+    private var uploadWebDavMode = false
+    private var uploadJob: Job? = null
     private val exportDir = registerForActivityResult(HandleFileContract()) {
         it.uri?.let { uri ->
             alert(R.string.export_success) {
@@ -103,6 +111,7 @@ class BookshelfManageActivity :
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         viewModel.groupId = intent.getLongExtra("groupId", -1)
+        uploadWebDavMode = intent.getBooleanExtra("uploadWebDav", false)
         lifecycleScope.launch {
             viewModel.groupName = withContext(IO) {
                 appDb.bookGroupDao.getByID(viewModel.groupId)?.groupName
@@ -153,7 +162,62 @@ class BookshelfManageActivity :
     }
 
     override fun onClickSelectBarMainAction() {
-        selectGroup(groupRequestCode, 0)
+        if (uploadWebDavMode) {
+            uploadSelection()
+        } else {
+            selectGroup(groupRequestCode, 0)
+        }
+    }
+
+    /**
+     * 批量上传选中的本地书籍到 WebDav(默认服务器, books/ 目录)。
+     * txt 自动压缩为 .txt.zip(见 RemoteBookWebDav.upload); 已有同名远程文件会被覆盖。
+     */
+    private fun uploadSelection() {
+        val localBooks = adapter.selection.filter { it.isLocal }
+        if (localBooks.isEmpty()) {
+            toastOnUi("请选择本地书籍(仅本地书籍可上传)")
+            return
+        }
+        val webDav = AppWebDav.defaultBookWebDav
+        if (webDav == null) {
+            toastOnUi("未配置WebDav, 请先在我的-备份与恢复中配置")
+            return
+        }
+        alert(
+            "批量上传到WebDav",
+            "已选 ${adapter.selection.size} 本, 其中本地书籍 ${localBooks.size} 本, 确定上传?\n(txt 将自动压缩为 .zip)"
+        ) {
+            yesButton {
+                uploadJob = lifecycleScope.launch {
+                    waitDialog.setTitle("批量上传到WebDav")
+                    waitDialog.show()
+                    var ok = 0
+                    val failed = arrayListOf<String>()
+                    localBooks.forEachIndexed { index, book ->
+                        currentCoroutineContext().ensureActive()
+                        waitDialog.setText("上传中 ${index + 1}/${localBooks.size}\n${book.name}")
+                        runCatching { webDav.upload(book) }
+                            .onSuccess { ok++ }
+                            .onFailure { e ->
+                                if (e is CancellationException) throw e
+                                failed.add("${book.name}: ${e.localizedMessage}")
+                                AppLog.put("批量上传《${book.name}》失败\n${e.localizedMessage}", e)
+                            }
+                    }
+                    waitDialog.dismiss()
+                    if (failed.isEmpty()) {
+                        toastOnUi("已成功上传 $ok 本")
+                    } else {
+                        alert(
+                            "上传完成",
+                            "成功 $ok 本, 失败 ${failed.size} 本:\n${failed.joinToString("\n")}"
+                        ) {}
+                    }
+                }
+            }
+            noButton()
+        }
     }
 
     private fun upTitle() {
@@ -192,12 +256,17 @@ class BookshelfManageActivity :
     }
 
     private fun initOtherView() {
-        binding.selectActionBar.setMainActionText(R.string.move_to_group)
+        if (uploadWebDavMode) {
+            binding.selectActionBar.setMainActionText("上传到WebDav")
+        } else {
+            binding.selectActionBar.setMainActionText(R.string.move_to_group)
+        }
         binding.selectActionBar.inflateMenu(R.menu.bookshelf_menage_sel)
         binding.selectActionBar.setOnMenuItemClickListener(this)
         binding.selectActionBar.setCallBack(this)
         waitDialog.setOnCancelListener {
             viewModel.batchChangeSourceCoroutine?.cancel()
+            uploadJob?.cancel()
         }
     }
 

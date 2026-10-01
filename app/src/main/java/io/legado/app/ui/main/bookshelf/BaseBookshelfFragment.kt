@@ -96,6 +96,10 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
         super.onCompatOptionsItemSelected(item)
         when (item.itemId) {
             R.id.menu_remote -> startActivity<RemoteBookActivity>()
+            R.id.menu_upload_webdav -> startActivity<BookshelfManageActivity> {
+                putExtra("groupId", groupId)
+                putExtra("uploadWebDav", true)
+            }
             R.id.menu_search -> startActivity<SearchActivity>()
             R.id.menu_update_toc -> activityViewModel.upToc(books, onlyUpdateRead)
             R.id.menu_bookshelf_layout -> configBookshelf()

@@ -424,6 +424,41 @@ open class WebDav(
     }
 
     /**
+     * 移动/重命名文件或文件夹（WebDav 标准 MOVE）
+     * @param destPath 目标的完整 dav 路径（与 [path] 同一形式，支持 davs/dav 伪协议）
+     * @param overwrite 目标已存在时是否覆盖
+     */
+    @Throws(WebDavException::class)
+    suspend fun move(destPath: String, overwrite: Boolean = false): Boolean {
+        val url = httpUrl ?: return false
+        // Destination 头要求绝对地址; okhttp 的 toHttpUrl() 会对中文等字符做百分号编码
+        val destUrl = kotlin.runCatching {
+            URL(CustomUrl(destPath).getUrl())
+                .toString()
+                .replace("davs://", "https://")
+                .replace("dav://", "http://")
+                .toHttpUrl()
+                .toString()
+        }.getOrElse {
+            throw WebDavException("WebDav移动失败\n目标地址无效: $destPath")
+        }
+        return kotlin.runCatching {
+            webDavClient.newCallResponse {
+                url(url)
+                header("Destination", destUrl)
+                header("Overwrite", if (overwrite) "T" else "F")
+                method("MOVE", null)
+            }.use {
+                checkResult(it)
+            }
+        }.onFailure {
+            currentCoroutineContext().ensureActive()
+            AppLog.put("WebDav移动失败\n${it.localizedMessage}", it)
+            throw WebDavException("WebDav移动失败\n${it.localizedMessage}")
+        }.isSuccess
+    }
+
+    /**
      * 检测返回结果是否正确
      */
     private fun checkResult(response: Response) {

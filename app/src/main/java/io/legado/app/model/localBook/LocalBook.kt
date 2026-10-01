@@ -39,6 +39,7 @@ import io.legado.app.ui.book.toc.AiCacheFileUtil
 import org.json.JSONObject
 import io.legado.app.lib.webdav.WebDavException
 import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.analyzeRule.CustomUrl
 import io.legado.app.utils.ArchiveUtils
 import io.legado.app.utils.FileDoc
 import io.legado.app.utils.FileUtils
@@ -637,6 +638,37 @@ object LocalBook {
         return appDb.bookDao.hasFile(fileName) == true
     }
 
+    /**
+     * 保存远程下载的书籍文件。
+     * 远程文件为 ".zip" 包装(WebDav 上传 txt 时自动压缩生成, 命名如 斗罗大陆.txt.zip)时,
+     * 流式解出压缩包内的书籍文件直接保存, 本地不落地压缩包, 节省存储;
+     * 其他类型与 [saveBookFile] 一致。
+     */
+    @Throws(SecurityException::class)
+    fun saveRemoteBookFile(
+        inputStream: InputStream,
+        remoteFileName: String
+    ): Uri {
+        if (!remoteFileName.endsWith(".zip", ignoreCase = true)) {
+            return saveBookFile(inputStream, remoteFileName)
+        }
+        inputStream.use { raw ->
+            java.util.zip.ZipInputStream(raw).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory) {
+                        val name = entry.name.substringAfterLast('/')
+                        if (AppPattern.bookFileRegex.matches(name)) {
+                            return saveBookFile(zis, name)
+                        }
+                    }
+                    entry = zis.nextEntry
+                }
+                throw NoStackTraceException("压缩包内未找到书籍文件")
+            }
+        }
+    }
+
     //文件类书源 合并在线书籍信息 在线 > 本地
     fun mergeBook(localBook: Book, onLineBook: Book?): Book {
         onLineBook ?: return localBook
@@ -676,8 +708,13 @@ object LocalBook {
                     localBook.origin = newBook.origin
                     localBook.bookUrl = newBook.bookUrl
                 } else {
-                    // txt epub pdf umd
-                    val fileUri = saveBookFile(it, localBook.originName)
+                    // 远程文件若是上传 txt 时自动生成的 .zip 包装, 解出内部书籍文件保存
+                    val remoteName = kotlin.runCatching {
+                        CustomUrl(webDavUrl).getUrl()
+                    }.getOrDefault(webDavUrl)
+                        .substringBefore('#').substringBefore('?')
+                        .removeSuffix("/").substringAfterLast('/')
+                    val fileUri = saveRemoteBookFile(it, remoteName)
                     localBook.bookUrl = FileDoc.fromUri(fileUri, false).toString()
                     localBook.save()
                 }

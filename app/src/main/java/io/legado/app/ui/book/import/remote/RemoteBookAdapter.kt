@@ -50,16 +50,11 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
                     llBrief.gone()
                     cbSelect.isChecked = false
                 } else {
-                    if (item.isOnBookShelf) {
-                        ivIcon.setImageResource(R.drawable.ic_book_has)
-                        ivIcon.visible()
-                        cbSelect.invisible()
-                    } else {
-                        ivIcon.invisible()
-                        cbSelect.visible()
-                    }
+                    // 所有文件条目均可勾选(已上架的勾选后可批量"恢复到书架")
+                    ivIcon.invisible()
+                    cbSelect.visible()
+                    tvTag.text = if (item.isOnBookShelf) "${item.contentType}·已上架" else item.contentType
                     llBrief.visible()
-                    tvTag.text = item.contentType
                     tvSize.text = ConvertUtils.formatFileSize(item.size)
                     tvDate.text = AppConst.dateFormat.format(item.lastModify)
                     cbSelect.isChecked = selected.contains(item)
@@ -90,20 +85,51 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
                 }
             }
         }
+        // checkbox 单独点击: 已上架的书也可勾选, 供批量恢复到书架
+        binding.cbSelect.setOnClickListener {
+            getItem(holder.layoutPosition)?.let {
+                if (it.isDir) return@setOnClickListener
+                if (!selected.contains(it)) {
+                    selected.add(it)
+                } else {
+                    selected.remove(it)
+                }
+                notifyItemChanged(holder.layoutPosition, true)
+                callBack.upCountView()
+            }
+        }
         holder.itemView.setOnLongClickListener {
             getItem(holder.layoutPosition)?.let { remoteBook ->
-                if (remoteBook.isOnBookShelf) {
-                    callBack.addToBookShelfAgain(remoteBook)
-                }
+                showItemActions(remoteBook)
             }
             true
         }
     }
 
+    /**
+     * 长按操作菜单: 重命名 / 删除 / (已上架时)重新加入书架
+     */
+    @SuppressLint("NotifyDataSetChanged")
+    private fun showItemActions(remoteBook: RemoteBook) {
+        val actions = arrayListOf<Pair<String, () -> Unit>>()
+        if (remoteBook.isOnBookShelf) {
+            actions.add("重新加入书架" to { callBack.addToBookShelfAgain(remoteBook) })
+        }
+        actions.add("重命名" to { callBack.renameRemoteBook(remoteBook) })
+        actions.add("删除" to { callBack.deleteRemoteBooks(listOf(remoteBook)) })
+        val titles = actions.map { it.first }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(context)
+            .setTitle(remoteBook.filename)
+            .setItems(titles) { _, which ->
+                actions[which].second.invoke()
+            }
+            .show()
+    }
+
     private fun upCheckableCount() {
         checkableCount = 0
         getItems().forEach {
-            if (!it.isDir && !it.isOnBookShelf) {
+            if (!it.isDir) {
                 checkableCount++
             }
         }
@@ -114,7 +140,7 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
     fun selectAll(selectAll: Boolean) {
         if (selectAll) {
             getItems().forEach {
-                if (!it.isDir && !it.isOnBookShelf) {
+                if (!it.isDir) {
                     selected.add(it)
                 }
             }
@@ -127,7 +153,7 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
 
     fun revertSelection() {
         getItems().forEach {
-            if (!it.isDir && !it.isOnBookShelf) {
+            if (!it.isDir) {
                 if (selected.contains(it)) {
                     selected.remove(it)
                 } else {
@@ -153,5 +179,11 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
         fun upCountView()
         fun startRead(remoteBook: RemoteBook)
         fun addToBookShelfAgain(remoteBook: RemoteBook)
+
+        /** 删除远程书籍/目录(含确认) */
+        fun deleteRemoteBooks(remoteBooks: Collection<RemoteBook>)
+
+        /** 重命名远程书籍/目录(弹输入框) */
+        fun renameRemoteBook(remoteBook: RemoteBook)
     }
 }

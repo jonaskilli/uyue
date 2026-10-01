@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Bundle
 import android.view.Menu
+import android.widget.EditText
 import android.view.MenuItem
 import android.view.SubMenu
 import androidx.activity.addCallback
@@ -23,6 +24,7 @@ import io.legado.app.ui.book.import.BaseImportBookActivity
 import io.legado.app.ui.widget.SelectActionBar
 import io.legado.app.utils.ArchiveUtils
 import io.legado.app.utils.FileDoc
+import io.legado.app.utils.dpToPx
 import io.legado.app.utils.find
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.showHelp
@@ -66,7 +68,16 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
                 }
             }
             viewModel.initData {
-                upPath()
+                // 直接回到上次浏览的目录(即书籍所在文件夹);
+                // 无记录或目录已被删除时回退到书籍根目录
+                if (viewModel.restoreDirList()) {
+                    upPath(onError = {
+                        viewModel.clearDirList()
+                        upPath()
+                    })
+                } else {
+                    upPath()
+                }
             }
         }
     }
@@ -168,7 +179,7 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
         return true
     }
 
-    private fun upPath() {
+    private fun upPath(onError: (() -> Unit)? = null) {
         binding.tvGoBack.isEnabled = viewModel.dirList.isNotEmpty()
         var path = if (viewModel.isDefaultWebdav) {
             "books" + File.separator
@@ -181,11 +192,15 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
         binding.tvPath.text = path
         viewModel.dataCallback?.clear()
         adapter.selected.clear()
+        // 记住浏览位置, 下次打开直接回到此目录
+        viewModel.saveDirList()
         viewModel.loadRemoteBookList(
-            viewModel.dirList.lastOrNull()?.path
-        ) {
-            binding.refreshProgressBar.isAutoLoading = it
-        }
+            viewModel.dirList.lastOrNull()?.path,
+            {
+                binding.refreshProgressBar.isAutoLoading = it
+            },
+            onError
+        )
     }
 
     override fun openDir(remoteBook: RemoteBook) {
@@ -195,6 +210,11 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
 
     override fun upCountView() {
         binding.selectActionBar.upCountView(adapter.selected.size, adapter.checkableCount)
+        // 选中含已上架的书时, 主按钮语义是"重新下载恢复", 而非首次加入
+        binding.selectActionBar.setMainActionText(
+            if (adapter.selected.any { it.isOnBookShelf }) "恢复到书架"
+            else getString(R.string.add_to_bookshelf)
+        )
     }
 
     override fun onDialogDismiss(tag: String) {
@@ -226,6 +246,14 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
 
     override fun startRead(remoteBook: RemoteBook) {
         val downloadFileName = remoteBook.filename
+        // 上传 txt 时自动生成的 .zip 包装(如 斗罗大陆.txt.zip):
+        // 下载时会解压成原文件名入库, 这里先按解压后的名字查书架直接打开
+        if (downloadFileName.endsWith(".zip", true)) {
+            appDb.bookDao.getBookByFileName(downloadFileName.removeSuffix(".zip"))?.let {
+                startReadBook(it)
+                return
+            }
+        }
         if (!ArchiveUtils.isArchive(downloadFileName)) {
             appDb.bookDao.getBookByFileName(downloadFileName)?.let {
                 startReadBook(it)
@@ -254,6 +282,48 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
             }
             noButton()
         }
+    }
+
+    override fun deleteRemoteBooks(remoteBooks: Collection<RemoteBook>) {
+        if (remoteBooks.isEmpty()) return
+        val names = remoteBooks.joinToString("、") { it.filename }
+        alert(getString(R.string.draw), "确定删除远程书籍？\n$names\n\n删除后无法恢复！") {
+            yesButton {
+                binding.refreshProgressBar.isAutoLoading = true
+                viewModel.deleteRemoteBooks(remoteBooks) {
+                    // 重新拉取列表; 删除的是当前目录内容时也应刷新
+                    upPath()
+                }
+            }
+            noButton()
+        }
+    }
+
+    override fun renameRemoteBook(remoteBook: RemoteBook) {
+        val input = EditText(this).apply {
+            setText(remoteBook.filename)
+            setSelection(text?.length ?: 0)
+            setPadding(16.dpToPx(), 16.dpToPx(), 16.dpToPx(), 0)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("重命名")
+            .setView(input)
+            .setPositiveButton(getString(R.string.ok)) { _, _ ->
+                val newName = input.text?.toString()?.trim().orEmpty()
+                if (newName.isEmpty() || newName == remoteBook.filename) {
+                    return@setPositiveButton
+                }
+                binding.refreshProgressBar.isAutoLoading = true
+                viewModel.renameRemoteBook(remoteBook, newName) { success ->
+                    if (success) {
+                        upPath()
+                    } else {
+                        binding.refreshProgressBar.isAutoLoading = false
+                    }
+                }
+            }
+            .setNegativeButton(getString(R.string.cancel), null)
+            .show()
     }
 
 }
