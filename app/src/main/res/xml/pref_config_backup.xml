@@ -98,6 +98,18 @@
             android:title="@string/menu_import_old_version"
             app:iconSpaceReserved="false" />
 
+        <io.legado.app.lib.prefs.Preference
+            android:key="tts_backup"
+            android:summary="@string/tts_backup_s"
+            android:title="@string/tts_backup_t"
+            app:iconSpaceReserved="false" />
+
+        <io.legado.app.lib.prefs.Preference
+            android:key="tts_restore"
+            android:summary="@string/tts_restore_s"
+            android:title="@string/tts_restore_t"
+            app:iconSpaceReserved="false" />
+
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="true"
             android:key="onlyLatestBackup"

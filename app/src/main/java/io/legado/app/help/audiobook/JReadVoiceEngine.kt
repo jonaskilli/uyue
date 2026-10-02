@@ -66,6 +66,17 @@ object JReadVoiceEngine {
         cachedGroups = null
     }
 
+    /**
+     * 清空全部内存缓存。
+     * 供外部批量导入（TTS 备份恢复）后调用：直接改写了 SharedPreferences 不会走
+     * saveXxx 系列，缓存还是旧的，不清会导致界面继续显示恢复前的插件/音色列表。
+     */
+    fun invalidateAllCaches() {
+        invalidateConfigCache(resetMigration = true)
+        invalidatePluginCache()
+        invalidateGroupCache()
+    }
+
     /** 迁移幂等标志：首次执行后设 true，本次进程内不再重复迁移 */
     @Volatile
     private var migrationDone = false

@@ -28,6 +28,13 @@ object EngineDataDir {
         if (CharacterVoiceHelper.isUsingBuiltinTtsPlugin()) "$BUILTIN/" else "$ORIGINAL/"
 
     /**
+     * 两个引擎数据目录（不带尾斜杠），供备份/恢复遍历使用。
+     * 与 [baseDir] 只返回当前引擎目录不同，这里要把两份都带上，
+     * 否则切换朗读引擎后另一份的角色记录、音效规则会丢。
+     */
+    fun allDirs(): List<String> = listOf(ORIGINAL, BUILTIN)
+
+    /**
      * 把 mingwuyan 下的路径重写为当前引擎对应的目录。
      * 未命中 mingwuyan 或当前不是内置TTS插件时，原样返回。
      */

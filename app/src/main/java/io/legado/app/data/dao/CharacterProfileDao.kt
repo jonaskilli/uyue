@@ -10,6 +10,9 @@ import io.legado.app.data.entities.CharacterProfile
 @Dao
 interface CharacterProfileDao {
 
+    @Query("select * from characterProfiles")
+    fun getAllList(): List<CharacterProfile>
+
     @Query(
         """select * from characterProfiles where bookUrl = :bookUrl
         order by mentionCount desc, updatedAt desc"""

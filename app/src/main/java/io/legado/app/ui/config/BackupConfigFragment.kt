@@ -3,11 +3,13 @@ package io.legado.app.ui.config
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
+import java.io.File
 import android.text.InputType
 import android.view.Menu
 import android.view.MenuInflater
 import android.view.MenuItem
 import android.view.View
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.MenuProvider
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
@@ -26,6 +28,7 @@ import io.legado.app.help.storage.Backup
 import io.legado.app.help.storage.BackupConfig
 import io.legado.app.help.storage.ImportOldData
 import io.legado.app.help.storage.Restore
+import io.legado.app.help.storage.TtsBackup
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.permission.Permissions
@@ -36,6 +39,8 @@ import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.widget.dialog.WaitDialog
 import io.legado.app.utils.FileDoc
+import io.legado.app.utils.FileUtils
+import io.legado.app.utils.externalFiles
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.checkWrite
 import io.legado.app.utils.getPrefString
@@ -104,6 +109,35 @@ class BackupConfigFragment : PreferenceFragment(),
         it.uri?.let { uri ->
             ImportOldData.importUri(appCtx, uri)
         }
+    }
+
+    /** TTS 备份是独立 zip，和主备份格式不通用，单独导出/导入 */
+    private val ttsMimeTypes = arrayOf("application/zip", "*/*")
+    private val ttsBackupLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        uri ?: return@registerForActivityResult
+        waitDialog.setText("TTS备份中…")
+        waitDialog.show()
+        val task = Coroutine.async {
+            TtsBackup.backup(appCtx, uri)
+        }.onError {
+            AppLog.put("TTS备份失败\n${it.localizedMessage}", it)
+            appCtx.toastOnUi("TTS备份失败\n${it.localizedMessage}")
+        }.onSuccess {
+            appCtx.toastOnUi(R.string.backup_success)
+        }.onFinally {
+            waitDialog.dismiss()
+        }
+        waitDialog.setOnCancelListener {
+            task.cancel()
+        }
+    }
+    private val ttsRestoreLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri ?: return@registerForActivityResult
+        unpackTtsBackup { TtsBackup.unpackFromUri(appCtx, uri) }
     }
 
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
@@ -256,6 +290,8 @@ class BackupConfigFragment : PreferenceFragment(),
             "web_dav_backup" -> backup()
             "web_dav_restore" -> restore()
             "import_old" -> restoreOld.launch()
+            "tts_backup" -> ttsBackup()
+            "tts_restore" -> ttsRestore()
         }
         return super.onPreferenceTreeClick(preference)
     }
@@ -297,6 +333,185 @@ class BackupConfigFragment : PreferenceFragment(),
             } else {
                 backupUsePermission(backupPath)
             }
+        }
+    }
+
+    /**
+     * TTS 备份入口: 没配 webDav 就直接导出到本地, 配了就让用户选导出到哪
+     */
+    private fun ttsBackup() {
+        if (!AppWebDav.isOk) {
+            ttsBackupLauncher.launch(TtsBackup.defaultFileName())
+            return
+        }
+        requireContext().selector(items = listOf("导出到本地", "上传到 WebDav")) { _, index ->
+            when (index) {
+                0 -> ttsBackupLauncher.launch(TtsBackup.defaultFileName())
+                1 -> uploadTtsBackup()
+            }
+        }
+    }
+
+    /**
+     * TTS 恢复入口
+     */
+    private fun ttsRestore() {
+        if (!AppWebDav.isOk) {
+            ttsRestoreLauncher.launch(ttsMimeTypes)
+            return
+        }
+        requireContext().selector(items = listOf("从本地文件恢复", "从 WebDav 恢复")) { _, index ->
+            when (index) {
+                0 -> ttsRestoreLauncher.launch(ttsMimeTypes)
+                1 -> listTtsBackupFromWebDav()
+            }
+        }
+    }
+
+    private fun uploadTtsBackup() {
+        waitDialog.setText("TTS备份中…")
+        waitDialog.show()
+        val task = Coroutine.async {
+            val fileName = TtsBackup.defaultFileName()
+            val file = File(appCtx.externalFiles, fileName)
+            TtsBackup.backupToFile(file)
+            if (!AppWebDav.upTtsBackup(fileName, file)) {
+                throw NoStackTraceException("上传TTS备份失败")
+            }
+            FileUtils.delete(file.absolutePath)
+        }.onError {
+            AppLog.put("TTS备份失败\n${it.localizedMessage}", it)
+            appCtx.toastOnUi("TTS备份失败\n${it.localizedMessage}")
+        }.onSuccess {
+            appCtx.toastOnUi(R.string.backup_success)
+        }.onFinally {
+            waitDialog.dismiss()
+        }
+        waitDialog.setOnCancelListener {
+            task.cancel()
+        }
+    }
+
+    private fun listTtsBackupFromWebDav() {
+        waitDialog.setText(R.string.loading)
+        waitDialog.show()
+        val task = Coroutine.async {
+            val names = AppWebDav.getTtsBackupNames()
+            if (names.isEmpty()) {
+                throw NoStackTraceException("WebDav 上没有 TTS 备份")
+            }
+            withContext(Main) {
+                requireContext().selector(
+                    title = requireContext().getString(R.string.select_restore_file),
+                    items = names
+                ) { _, index ->
+                    if (index in 0 until names.size) {
+                        restoreTtsFromWebDav(names[index])
+                    }
+                }
+            }
+        }.onError {
+            AppLog.put("获取TTS备份列表失败\n${it.localizedMessage}", it)
+            appCtx.toastOnUi("获取TTS备份列表失败\n${it.localizedMessage}")
+        }.onFinally {
+            waitDialog.dismiss()
+        }
+        waitDialog.setOnCancelListener {
+            task.cancel()
+        }
+    }
+
+    private fun restoreTtsFromWebDav(name: String) {
+        waitDialog.setText("下载备份中…")
+        waitDialog.show()
+        val task = Coroutine.async {
+            val file = File(appCtx.externalFiles, name)
+            AppWebDav.downTtsBackup(name, file)
+            val items = TtsBackup.unpackFromFile(file)
+            FileUtils.delete(file.absolutePath)
+            if (items.isEmpty()) {
+                throw NoStackTraceException("备份里没有可恢复的内容")
+            }
+            withContext(Main) {
+                showTtsRestorePicker(items)
+            }
+        }.onError {
+            AppLog.put("TTS恢复失败\n${it.localizedMessage}", it)
+            appCtx.toastOnUi("TTS恢复失败\n${it.localizedMessage}")
+            lifecycleScope.launch(IO) { TtsBackup.finish() }
+        }.onFinally {
+            waitDialog.dismiss()
+        }
+        waitDialog.setOnCancelListener {
+            task.cancel()
+        }
+    }
+
+    /**
+     * 解压备份后弹出多选, 先只解压不写库, 用户勾选完才真正恢复
+     */
+    private fun unpackTtsBackup(unpack: suspend () -> List<TtsBackup.TtsBackupItem>) {
+        waitDialog.setText("读取备份中…")
+        waitDialog.show()
+        val task = Coroutine.async {
+            val items = unpack()
+            if (items.isEmpty()) {
+                throw NoStackTraceException("备份里没有可恢复的内容")
+            }
+            withContext(Main) {
+                showTtsRestorePicker(items)
+            }
+        }.onError {
+            AppLog.put("读取TTS备份失败\n${it.localizedMessage}", it)
+            appCtx.toastOnUi("读取TTS备份失败\n${it.localizedMessage}")
+            lifecycleScope.launch(IO) { TtsBackup.finish() }
+        }.onFinally {
+            waitDialog.dismiss()
+        }
+        waitDialog.setOnCancelListener {
+            task.cancel()
+        }
+    }
+
+    private fun showTtsRestorePicker(items: List<TtsBackup.TtsBackupItem>) {
+        val titles = items.map { "${it.title}（${it.detail}）" }.toTypedArray()
+        val checked = BooleanArray(items.size) { true }
+        alert(R.string.tts_restore_t) {
+            setMessage(R.string.tts_restore_pick_msg)
+            multiChoiceItems(titles, checked) { _, which, isChecked ->
+                checked[which] = isChecked
+            }
+            okButton {
+                val keys = items.filterIndexed { index, _ -> checked[index] }.map { it.key }
+                if (keys.isEmpty()) {
+                    appCtx.toastOnUi("没有选择任何内容")
+                    lifecycleScope.launch(IO) { TtsBackup.finish() }
+                    return@okButton
+                }
+                applyTtsRestore(keys)
+            }
+            cancelButton {
+                lifecycleScope.launch(IO) { TtsBackup.finish() }
+            }
+        }
+    }
+
+    private fun applyTtsRestore(keys: List<String>) {
+        waitDialog.setText("TTS恢复中…")
+        waitDialog.show()
+        val task = Coroutine.async {
+            TtsBackup.apply(keys)
+        }.onError {
+            AppLog.put("TTS恢复失败\n${it.localizedMessage}", it)
+            appCtx.toastOnUi("TTS恢复失败\n${it.localizedMessage}")
+        }.onSuccess {
+            appCtx.toastOnUi(R.string.restore_success)
+        }.onFinally {
+            waitDialog.dismiss()
+            lifecycleScope.launch(IO) { TtsBackup.finish() }
+        }
+        waitDialog.setOnCancelListener {
+            task.cancel()
         }
     }
 
