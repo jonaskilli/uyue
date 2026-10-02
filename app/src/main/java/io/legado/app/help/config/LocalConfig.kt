@@ -32,7 +32,11 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
     var lastBackup: Long
         get() = getLong("lastBackup", 0)
         set(value) {
-            putLong("lastBackup", value)
+            // 同步落盘: 备份刚写完时常被清理工具杀掉进程, apply() 的异步写入可能
+            // 来不及落盘, 时间戳回退到旧值会让下次启动误判成"云端备份领先当前"
+            edit(commit = true) {
+                putLong("lastBackup", value)
+            }
         }
 
     var privacyPolicyOk: Boolean

@@ -9,6 +9,7 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookProgress
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.LocalConfig
 import io.legado.app.help.storage.Backup
 import io.legado.app.help.storage.Restore
 import io.legado.app.lib.webdav.Authorization
@@ -126,8 +127,63 @@ object AppWebDav {
             FileUtils.delete(Backup.backupPath)
             ZipUtils.unZipToPath(File(Backup.zipFilePath), Backup.backupPath)
             Restore.restoreLocked(Backup.backupPath)
+            // 恢复完刷新本地备份时间戳, 否则下次启动 backupSync 会再次认为
+            // "云端领先"并重复弹出恢复提示(从备份与恢复页手动恢复时尤其明显)
+            LocalConfig.lastBackup = System.currentTimeMillis()
         }
     }
+
+    /**
+     * 列出云端所有 TTS 备份文件名
+     *
+     * TTS 备份是独立于主备份的 zip(命名 ttsBackup*.zip), 不能被 [lastBackUp] 和
+     * [clearOldBackups] 当成主备份处理, 所以这里单独按 "ttsBackup" 前缀过滤。
+     */
+    @Throws(Exception::class)
+    suspend fun getTtsBackupNames(): ArrayList<String> {
+        val names = arrayListOf<String>()
+        authorization?.let {
+            val files = WebDav(rootWebDavUrl, it).listFiles()
+                .sortedWith { o1, o2 ->
+                    AlphanumComparator.compare(o1.displayName, o2.displayName)
+                }.reversed()
+            files.forEach { webDav ->
+                if (webDav.displayName.startsWith(TTS_BACKUP_PREFIX)) {
+                    names.add(webDav.displayName)
+                }
+            }
+        } ?: throw NoStackTraceException("webDav没有配置")
+        return names
+    }
+
+    /**
+     * 上传 TTS 备份到 webDav
+     */
+    suspend fun upTtsBackup(fileName: String, file: File): Boolean {
+        if (!NetworkUtils.isAvailable()) return false
+        val authorization = authorization ?: return false
+        if (!file.exists()) return false
+        return kotlin.runCatching {
+            WebDav("$rootWebDavUrl$fileName", authorization).upload(file)
+            true
+        }.onFailure {
+            currentCoroutineContext().ensureActive()
+            AppLog.put("上传TTS备份失败\n${it.localizedMessage}", it)
+        }.getOrDefault(false)
+    }
+
+    /**
+     * 下载云端 TTS 备份到本地文件
+     */
+    @Throws(WebDavException::class)
+    suspend fun downTtsBackup(name: String, destFile: File) {
+        val authorization = authorization ?: throw WebDavException("webDav没有配置")
+        FileUtils.delete(destFile.absolutePath)
+        WebDav(rootWebDavUrl + name, authorization).downloadTo(destFile.absolutePath, true)
+    }
+
+    /** TTS 备份文件名的统一前缀 */
+    const val TTS_BACKUP_PREFIX = "ttsBackup"
 
     suspend fun hasBackUp(backUpName: String): Boolean {
         authorization?.let {
@@ -141,8 +197,12 @@ object AppWebDav {
         return kotlin.runCatching {
             authorization?.let {
                 var lastBackupFile: WebDavFile? = null
-                WebDav(rootWebDavUrl, it).listFiles().reversed().forEach { webDavFile ->
-                    if (webDavFile.displayName.startsWith("backup")) {
+                WebDav(rootWebDavUrl, it).listFiles().forEach { webDavFile ->
+                    // size 为 0 的一定是上传中断残留的半成品(正常备份不可能为空),
+                    // 不能当成最新备份, 否则恢复时会拿到一个空 zip
+                    if (webDavFile.displayName.startsWith("backup")
+                        && webDavFile.size > 0
+                    ) {
                         if (lastBackupFile == null
                             || webDavFile.lastModify > lastBackupFile.lastModify
                         ) {
@@ -156,23 +216,52 @@ object AppWebDav {
     }
 
     /**
-     * webDav备份
+     * 上传备份文件到 webDav
+     *
+     * 实测部分服务端(如 Koofr)在收到 PUT 请求、刚开始接收数据时就会创建文件并写入
+     * "传输开始"的时间戳, 只有完整传完才会把时间戳刷新为"传输完成"。因此上传失败时
+     * 云端很可能残留一个 0 字节、时间戳为"传输开始"的半成品文件。
+     * 所以这里在上传结束后统一回查一次云端文件信息并返回, 由调用方用云端真实时间戳
+     * 作为本地基准(消除设备时钟与服务器时钟的偏差、以及打包耗时带来的误判),
+     * 上传失败且云端文件不完整时顺手清理半成品。
+     *
      * @param fileName 备份文件名
      */
-    @Throws(Exception::class)
-    /**
-     * 上传备份文件到 webDav
-     * @return 是否上传成功(无网络/未配置/上传抛异常均为 false)
-     */
-    suspend fun backUpWebDav(fileName: String): Boolean {
-        if (!NetworkUtils.isAvailable()) return false
-        authorization?.let {
-            val putUrl = "$rootWebDavUrl$fileName"
-            WebDav(putUrl, it).upload(Backup.zipFilePath)
+    suspend fun backUpWebDav(fileName: String): BackUpResult {
+        val localSize = File(Backup.zipFilePath).length()
+        if (!NetworkUtils.isAvailable()) return BackUpResult()
+        val authorization = authorization ?: return BackUpResult()
+        val putUrl = "$rootWebDavUrl$fileName"
+        var uploaded = false
+        try {
+            WebDav(putUrl, authorization).upload(Backup.zipFilePath)
+            uploaded = true
             clearOldBackups()
-            return true
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            AppLog.put("上传备份至webdav失败\n${e.localizedMessage}", e)
         }
-        return false
+        val remote = kotlin.runCatching {
+            WebDav(putUrl, authorization).getWebDavFile()
+        }.onFailure {
+            currentCoroutineContext().ensureActive()
+            AppLog.put("查询webDav备份信息失败\n${it.localizedMessage}", it)
+        }.getOrNull()
+        if (remote == null) {
+            // 云端没有这个文件, 调用方回退到本地时间
+            return BackUpResult(uploaded = uploaded)
+        }
+        if (!uploaded && localSize > 0 && remote.size != localSize) {
+            // 上传中断残留的半成品, 删掉以免被当成最新备份、也避免恢复到空 zip
+            if (remote.delete()) {
+                return BackUpResult(uploaded = false)
+            }
+        }
+        return BackUpResult(
+            uploaded = uploaded,
+            remoteLastModify = remote.lastModify,
+            remoteSize = remote.size
+        )
     }
 
     /**
@@ -372,3 +461,17 @@ object AppWebDav {
     }
 
 }
+
+/**
+ * webDav 备份上传结果
+ *
+ * @property uploaded 是否完整上传成功(无网络/未配置/上传抛异常均为 false)
+ * @property remoteLastModify 云端备份文件的真实修改时间, 0 表示云端没有该文件
+ *           (未配置、上传失败且半成品已清理、或回查失败), 调用方应回退到本机时间
+ * @property remoteSize 云端备份文件大小
+ */
+data class BackUpResult(
+    val uploaded: Boolean = false,
+    val remoteLastModify: Long = 0,
+    val remoteSize: Long = 0
+)

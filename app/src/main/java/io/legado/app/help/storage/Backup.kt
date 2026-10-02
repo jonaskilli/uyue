@@ -246,11 +246,14 @@ object Backup {
                 }
             }
             try {
-                if (AppWebDav.backUpWebDav(zipFileName)) {
-                    // 上传成功后重置本地备份时间戳:
-                    // 云端文件的 lastModify 是服务器在接收完成时生成的, 慢网上传耗时可能远超
-                    // 打包耗时, 若沿用备份开始时(137行)记录的时间, backupSync 会把云端误判为
-                    // "备份领先当前"而弹出恢复提示; 以本地此刻时间为准即可吸收上传耗时差
+                val result = AppWebDav.backUpWebDav(zipFileName)
+                // 优先以云端文件的真实时间戳为准: 服务端时钟与设备时钟可能有偏差,
+                // 而备份打包耗时又可能远超 backupSync 的判断容差, 用本机时间会把
+                // "自己刚上传的备份"误判成"云端领先当前"而弹出恢复提示。
+                // 上传成功但回查不到云端信息时, 才回退到本机时间。
+                if (result.remoteLastModify > 0) {
+                    LocalConfig.lastBackup = result.remoteLastModify
+                } else if (result.uploaded) {
                     LocalConfig.lastBackup = System.currentTimeMillis()
                 }
             } catch (e: Exception) {

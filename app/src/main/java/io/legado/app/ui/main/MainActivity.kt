@@ -320,7 +320,9 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
         lifecycleScope.launch {
             val lastBackupFile =
                 withContext(IO) { AppWebDav.lastBackUp().getOrNull() } ?: return@launch
-            if (lastBackupFile.lastModify - LocalConfig.lastBackup > DateUtils.MINUTE_IN_MILLIS) {
+            // 容差放到 1 小时: 服务端时间戳与设备时钟可能有偏差, 备份打包+上传本身
+            // 也要耗时, 一分钟容差很容易把本机刚上传的备份误判成"云端领先当前"
+            if (lastBackupFile.lastModify - LocalConfig.lastBackup > DateUtils.HOUR_IN_MILLIS) {
                 LocalConfig.lastBackup = lastBackupFile.lastModify
                 alert(R.string.restore, R.string.webdav_after_local_restore_confirm) {
                     cancelButton()
