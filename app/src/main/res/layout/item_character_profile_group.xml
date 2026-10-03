@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 角色档案总揽：按书分组 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="?attr/selectableItemBackground"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingHorizontal="12dp"
+    android:paddingVertical="8dp">
+
+    <TextView
+        android:id="@+id/tv_book_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/primaryText"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+
+    <ImageView
+        android:id="@+id/iv_expand"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_marginEnd="6dp"
+        android:contentDescription="@string/character_profile_manage"
+        android:src="@drawable/ic_arrow_drop_down"
+        android:tint="@color/secondaryText" />
+
+    <TextView
+        android:id="@+id/tv_count"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:textColor="@color/secondaryText"
+        android:textSize="12sp" />
+
+    <ImageView
+        android:id="@+id/iv_delete"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/character_profile_delete_title"
+        android:padding="6dp"
+        android:src="@drawable/ic_delete"
+        android:tint="@color/secondaryText" />
+
+</LinearLayout>

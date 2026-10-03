@@ -25,6 +25,7 @@ import io.legado.app.ui.book.group.GroupManageDialog
 import io.legado.app.ui.book.import.local.ImportBookActivity
 import io.legado.app.ui.book.import.remote.RemoteBookActivity
 import io.legado.app.ui.book.manage.BookshelfManageActivity
+import io.legado.app.ui.book.read.config.CharacterProfileManageActivity
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.main.MainFragmentInterface
@@ -123,6 +124,9 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
             }
 
             R.id.menu_import_bookshelf -> importBookshelfAlert(groupId)
+            // 角色档案总揽: 按书分组列出全部 AI 角色档案。放书架而不是书籍详情页,
+            // 这样书删掉后也能直接进来, 不用先找一本书打开
+            R.id.menu_character_profile -> startActivity<CharacterProfileManageActivity>()
             R.id.menu_log -> showDialogFragment<AppLogDialog>()
         }
     }

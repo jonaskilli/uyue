@@ -379,6 +379,10 @@
         <activity
             android:name=".ui.book.bookmark.AllBookmarkActivity"
             android:launchMode="singleTop" />
+        <!-- 角色档案总揽 -->
+        <activity
+            android:name=".ui.book.read.config.CharacterProfileManageActivity"
+            android:launchMode="singleTop" />
         <!-- 缓存界面 -->
         <activity
             android:name=".ui.book.cache.CacheActivity"

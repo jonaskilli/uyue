@@ -82,4 +82,10 @@
         android:title="@string/log"
         app:showAsAction="never" />
 
+    <item
+        android:id="@+id/menu_character_profile"
+        android:icon="@drawable/ic_portrait_person"
+        android:title="@string/character_profile_manage"
+        app:showAsAction="never" />
+
 </menu>

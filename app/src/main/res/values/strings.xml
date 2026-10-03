@@ -804,6 +804,9 @@
     <string name="tts_restore_t">TTS/AI restore</string>
     <string name="tts_restore_s">Import from a TTS backup file, items with the same id are overwritten</string>
     <string name="tts_restore_pick_msg">check items to restore, all selected by default</string>
+    <string name="character_profile_manage">Character profiles</string>
+    <string name="character_profile_empty">No character profiles yet.\nProfiles built by AI while reading are listed here, grouped by book.</string>
+    <string name="character_profile_delete_title">Delete profile</string>
     <string name="enabled">Enabled</string>
     <string name="disabled">Disabled</string>
     <string name="enabled_explore">Discovery Enabled</string>
