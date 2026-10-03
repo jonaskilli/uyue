@@ -439,7 +439,7 @@ class BackupConfigFragment : PreferenceFragment(),
             AppLog.put("TTS恢复失败\n${it.localizedMessage}", it)
             appCtx.toastOnUi("TTS恢复失败\n${it.localizedMessage}")
             lifecycleScope.launch(IO) { TtsBackup.finish() }
-        }.onFinally {
+        }.onFinally(Main) {
             waitDialog.dismiss()
         }
         waitDialog.setOnCancelListener {
@@ -465,7 +465,7 @@ class BackupConfigFragment : PreferenceFragment(),
             AppLog.put("读取TTS备份失败\n${it.localizedMessage}", it)
             appCtx.toastOnUi("读取TTS备份失败\n${it.localizedMessage}")
             lifecycleScope.launch(IO) { TtsBackup.finish() }
-        }.onFinally {
+        }.onFinally(Main) {
             waitDialog.dismiss()
         }
         waitDialog.setOnCancelListener {
@@ -476,8 +476,14 @@ class BackupConfigFragment : PreferenceFragment(),
     private fun showTtsRestorePicker(items: List<TtsBackup.TtsBackupItem>) {
         val titles = items.map { "${it.title}（${it.detail}）" }.toTypedArray()
         val checked = BooleanArray(items.size) { true }
-        alert(R.string.tts_restore_t) {
-            setMessage(R.string.tts_restore_pick_msg)
+        // 提示只能放进标题, 不能调 setMessage: AlertDialog 的 message 与复选列表
+        // 互斥, 同时设置时 AlertController 不会把 ListView 加进布局, 结果就是
+        // 只剩提示文字和按钮、中间的勾选列表整个消失
+        val title = "%s（%s）".format(
+            getString(R.string.tts_restore_t),
+            getString(R.string.tts_restore_pick_msg)
+        )
+        alert(title) {
             multiChoiceItems(titles, checked) { _, which, isChecked ->
                 checked[which] = isChecked
             }
@@ -506,7 +512,7 @@ class BackupConfigFragment : PreferenceFragment(),
             appCtx.toastOnUi("TTS恢复失败\n${it.localizedMessage}")
         }.onSuccess {
             appCtx.toastOnUi(R.string.restore_success)
-        }.onFinally {
+        }.onFinally(Main) {
             waitDialog.dismiss()
             lifecycleScope.launch(IO) { TtsBackup.finish() }
         }
