@@ -70,7 +70,8 @@ object StudioGlobalClient {
      */
     fun generateImage(prompt: String, model: String = MODEL_GPT_IMAGE_2): List<String> {
         var lastError: Throwable? = null
-        // 两轮：第一轮正常跑；401 说明会话过期/额度用尽，换新会话再来一次
+        // 两轮：第一轮正常跑；会话失效或匿名额度用尽 → 换一份全新会话再来一次。
+        // 实测：新申请的匿名会话额度是独立的，换一下就能继续生。
         for (round in 0..1) {
             try {
                 val session = obtainSession()
@@ -80,6 +81,7 @@ object StudioGlobalClient {
             } catch (e: AuthExpired) {
                 lastError = e
                 cachedSession = null
+                LogStore.i("StudioGlobal", "会话失效或匿名额度用尽，换新会话重试")
                 if (round == 1) break
             } catch (e: Exception) {
                 throw e
@@ -130,19 +132,41 @@ object StudioGlobalClient {
             if (!resp.isSuccessful) {
                 throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
             }
-            return parseImageUrl(text)
-                ?: throw IllegalStateException("未返回图片：${text.take(200)}")
+            // 关键：匿名额度用尽时 HTTP 仍是 200，失败藏在 SSE 的 `event: failed` 里。
+            // 不在解析阶段认出来，就会被当成「未返回图片」反复空转，永远出不来。
+            return when (val r = parseSse(text)) {
+                is SseResult.Ok -> r.url
+                SseResult.NeedNewSession -> throw AuthExpired()
+                is SseResult.Failed -> throw IllegalStateException(r.message)
+            }
         }
     }
 
+    /** SSE 解析结果 */
+    private sealed class SseResult {
+        data class Ok(val url: String) : SseResult()
+
+        /** 会话过期或匿名额度用尽：换一份新会话就能继续 */
+        object NeedNewSession : SseResult()
+
+        /** 其它失败，[message] 是服务端给的原因 */
+        data class Failed(val message: String) : SseResult()
+    }
+
     /**
-     * 解析 SSE。成品图出现在 `event: token` 的 token 字段，形如
-     * `[{"url":"https://....png"}]`；部分模型追加一条 `event: completed`，其 content
-     * 是同样的 JSON，两个都认。
+     * 解析 SSE，三类事件都要认：
+     *  - `event: token` / `event: completed`：成品图 URL 在 payload 里，形如
+     *    `[{"url":"https://....png"}]`
+     *  - `event: failed`：服务端失败，原因在 message 字段。其中「额度/会话」类
+     *    （实测文案 `You've exceeded your current plan's usage limit. To continue...`）
+     *    归到 [SseResult.NeedNewSession] 换新会话；其余按真实原因上报，
+     *    免得所有失败都显示成"未返回图片"，看不出到底哪里错了
      */
-    private fun parseImageUrl(sse: String): String? {
+    private fun parseSse(sse: String): SseResult {
         val urlRegex = Regex("https://[^\\\"\\\\\\s]+\\.(?:png|jpg|jpeg|webp)")
+        val msgRegex = Regex("\\\"message\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"")
         var event = ""
+        var failedMsg = ""
         sse.lineSequence().forEach { raw ->
             val line = raw.trim()
             when {
@@ -150,12 +174,41 @@ object StudioGlobalClient {
                 line.startsWith("data:") -> {
                     val payload = line.removePrefix("data:").trim()
                     if (payload.isEmpty() || payload == "[DONE]") return@forEach
-                    if (event != "token" && event != "completed") return@forEach
-                    urlRegex.find(payload)?.let { m -> return m.value }
+                    when (event) {
+                        "failed" -> {
+                            msgRegex.find(payload)?.let { m ->
+                                failedMsg = m.groupValues.getOrNull(1).orEmpty()
+                            }
+                        }
+
+                        "token", "completed" -> {
+                            urlRegex.find(payload)?.let { m -> return SseResult.Ok(m.value) }
+                        }
+                    }
                 }
             }
         }
-        return null
+        if (failedMsg.isNotBlank()) {
+            return if (isQuotaOrSessionMsg(failedMsg)) {
+                LogStore.e("StudioGlobal", "命中额度/会话限制：$failedMsg")
+                SseResult.NeedNewSession
+            } else {
+                SseResult.Failed("StudioGlobal 生图失败：$failedMsg")
+            }
+        }
+        return SseResult.Failed("StudioGlobal 未返回图片（未识别到失败原因）")
+    }
+
+    /**
+     * 服务端失败原因是否属于「换一份新会话就能解决」的类别。
+     * 实测：额度用尽时 message 是 `You've exceeded your current plan's usage limit`，
+     * 换一个新申请的匿名会话即可继续出图。
+     */
+    private fun isQuotaOrSessionMsg(msg: String): Boolean {
+        val m = msg.lowercase()
+        return m.contains("usage limit") || m.contains("quota") ||
+            m.contains("rate limit") || m.contains("too many") ||
+            m.contains("session") || m.contains("expired") || m.contains("limit")
     }
 
     // ------------------------------------------------------------ 会话管理
