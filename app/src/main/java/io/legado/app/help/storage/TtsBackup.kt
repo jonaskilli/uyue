@@ -118,6 +118,33 @@ object TtsBackup {
 
     private val mutex = Mutex()
 
+    /** 所有可单独备份/恢复的模块 */
+    private fun allModuleKeys() = listOf(
+        K_AI_IMAGE, K_AI_CHAPTER_FIX, K_AI_PROFILE, K_BGM_PROMPT, K_BGM_PROVIDER,
+        K_TTS_SCRIPT, K_CHARACTER, K_HUNYUAN, K_JREAD, K_EXTERNAL
+    )
+
+    private fun moduleTitle(key: String): String = when (key) {
+        K_AI_IMAGE -> "AI 生图模板"
+        K_AI_CHAPTER_FIX -> "AI 章节修复模板"
+        K_AI_PROFILE -> "AI 人设模板"
+        K_BGM_PROMPT -> "背景音乐 AI 提示词"
+        K_BGM_PROVIDER -> "背景音乐 AI 服务商"
+        K_TTS_SCRIPT -> "朗读脚本"
+        K_CHARACTER -> "角色档案"
+        K_HUNYUAN -> "混元太极配置"
+        K_JREAD -> "TTS 引擎插件"
+        else -> "外部配置文件(含 miyue.txt)"
+    }
+
+    /**
+     * 备份时供勾选的模块清单。
+     * 与恢复用的 availableItems() 不同: 这里不检查是否已有内容。空模块勾了也
+     * 只是不写文件, 不该在选择阶段就消失, 否则用户每次都得重新判断该勾什么。
+     */
+    fun packableItems(): List<TtsBackupItem> =
+        allModuleKeys().map { TtsBackupItem(it, moduleTitle(it), "") }
+
     /** 默认导出文件名 */
     fun defaultFileName(): String {
         val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
@@ -128,11 +155,11 @@ object TtsBackup {
     // -------------------------------------------------------------------- 备份
 
     /**
-     * 打包并写入到用户选择的 [uri]
+     * 打包并写入到用户选择的 [uri], 只包含 [keys] 里勾选的模块
      */
-    suspend fun backup(context: Context, uri: Uri) {
+    suspend fun backup(context: Context, uri: Uri, keys: Collection<String>) {
         val zipFile = File(zipFilePath)
-        packTo(zipFile)
+        packTo(zipFile, keys)
         withContext(IO) {
             context.contentResolver.openOutputStream(uri)?.use { out ->
                 FileInputStream(zipFile).use { it.copyTo(out) }
@@ -144,19 +171,19 @@ object TtsBackup {
     /**
      * 打包到指定文件, 供上传到 WebDav 使用
      */
-    suspend fun backupToFile(target: File) {
-        packTo(target)
+    suspend fun backupToFile(target: File, keys: Collection<String>) {
+        packTo(target, keys)
     }
 
-    private suspend fun packTo(zipFile: File) = withContext(IO) {
+    private suspend fun packTo(zipFile: File, keys: Collection<String>) = withContext(IO) {
         mutex.withLock {
             FileUtils.delete(backupPath)
             File(backupPath).mkdirs()
-            writeTables()
+            writeTables(keys)
             currentCoroutineContext().ensureActive()
-            writeSharedPrefs()
+            writeSharedPrefs(keys)
             currentCoroutineContext().ensureActive()
-            writeExternalFiles()
+            if (K_EXTERNAL in keys) writeExternalFiles()
             currentCoroutineContext().ensureActive()
             val files = collectBackupFiles()
             FileUtils.delete(zipFile.absolutePath)
@@ -168,14 +195,28 @@ object TtsBackup {
         }
     }
 
-    private suspend fun writeTables() {
-        writeListToJson(appDb.aiImageTemplateDao.getAllList(), FILE_AI_IMAGE)
-        writeListToJson(appDb.aiChapterFixTemplateDao.getAllList(), FILE_AI_CHAPTER_FIX)
-        writeListToJson(appDb.aiProfileTemplateDao.getAllList(), FILE_AI_PROFILE)
-        writeListToJson(appDb.bgmAIPromptDao.getAllList(), FILE_BGM_PROMPT)
-        writeListToJson(appDb.bgmAIProviderDao.getAllList(), FILE_BGM_PROVIDER)
-        writeListToJson(appDb.ttsScriptDao.all, FILE_TTS_SCRIPT)
-        writeListToJson(appDb.characterProfileDao.getAllList(), FILE_CHARACTER)
+    private suspend fun writeTables(keys: Collection<String>) {
+        if (K_AI_IMAGE in keys) {
+            writeListToJson(appDb.aiImageTemplateDao.getAllList(), FILE_AI_IMAGE)
+        }
+        if (K_AI_CHAPTER_FIX in keys) {
+            writeListToJson(appDb.aiChapterFixTemplateDao.getAllList(), FILE_AI_CHAPTER_FIX)
+        }
+        if (K_AI_PROFILE in keys) {
+            writeListToJson(appDb.aiProfileTemplateDao.getAllList(), FILE_AI_PROFILE)
+        }
+        if (K_BGM_PROMPT in keys) {
+            writeListToJson(appDb.bgmAIPromptDao.getAllList(), FILE_BGM_PROMPT)
+        }
+        if (K_BGM_PROVIDER in keys) {
+            writeListToJson(appDb.bgmAIProviderDao.getAllList(), FILE_BGM_PROVIDER)
+        }
+        if (K_TTS_SCRIPT in keys) {
+            writeListToJson(appDb.ttsScriptDao.all, FILE_TTS_SCRIPT)
+        }
+        if (K_CHARACTER in keys) {
+            writeListToJson(appDb.characterProfileDao.getAllList(), FILE_CHARACTER)
+        }
     }
 
     private suspend fun writeListToJson(list: List<Any>, fileName: String) {
@@ -187,9 +228,9 @@ object TtsBackup {
             }
     }
 
-    private fun writeSharedPrefs() {
-        writeSpEncrypted(FILE_SP_HUNYUAN, SP_HUNYUAN)
-        writeSpEncrypted(FILE_SP_JREAD, SP_JREAD)
+    private fun writeSharedPrefs(keys: Collection<String>) {
+        if (K_HUNYUAN in keys) writeSpEncrypted(FILE_SP_HUNYUAN, SP_HUNYUAN)
+        if (K_JREAD in keys) writeSpEncrypted(FILE_SP_JREAD, SP_JREAD)
     }
 
     /**
@@ -318,19 +359,25 @@ object TtsBackup {
                 items.add(TtsBackupItem(key, title, sizeText(file)))
             }
         }
-        add(K_AI_IMAGE, "AI 生图模板", FILE_AI_IMAGE)
-        add(K_AI_CHAPTER_FIX, "AI 章节修复模板", FILE_AI_CHAPTER_FIX)
-        add(K_AI_PROFILE, "AI 人设模板", FILE_AI_PROFILE)
-        add(K_BGM_PROMPT, "背景音乐 AI 提示词", FILE_BGM_PROMPT)
-        add(K_BGM_PROVIDER, "背景音乐 AI 服务商", FILE_BGM_PROVIDER)
-        add(K_TTS_SCRIPT, "朗读脚本", FILE_TTS_SCRIPT)
-        add(K_CHARACTER, "角色档案", FILE_CHARACTER)
-        add(K_HUNYUAN, "混元太极配置", FILE_SP_HUNYUAN)
-        add(K_JREAD, "TTS 引擎插件", FILE_SP_JREAD)
+        add(K_AI_IMAGE, moduleTitle(K_AI_IMAGE), FILE_AI_IMAGE)
+        add(K_AI_CHAPTER_FIX, moduleTitle(K_AI_CHAPTER_FIX), FILE_AI_CHAPTER_FIX)
+        add(K_AI_PROFILE, moduleTitle(K_AI_PROFILE), FILE_AI_PROFILE)
+        add(K_BGM_PROMPT, moduleTitle(K_BGM_PROMPT), FILE_BGM_PROMPT)
+        add(K_BGM_PROVIDER, moduleTitle(K_BGM_PROVIDER), FILE_BGM_PROVIDER)
+        add(K_TTS_SCRIPT, moduleTitle(K_TTS_SCRIPT), FILE_TTS_SCRIPT)
+        add(K_CHARACTER, moduleTitle(K_CHARACTER), FILE_CHARACTER)
+        add(K_HUNYUAN, moduleTitle(K_HUNYUAN), FILE_SP_HUNYUAN)
+        add(K_JREAD, moduleTitle(K_JREAD), FILE_SP_JREAD)
         val externalCount = File(backupPath, DIR_CHAJIAN).listFiles()
             ?.sumOf { it.listFiles()?.size ?: 0 } ?: 0
         if (externalCount > 0) {
-            items.add(TtsBackupItem(K_EXTERNAL, "外部配置文件(含 miyue.txt)", "$externalCount 个文件"))
+            items.add(
+                TtsBackupItem(
+                    K_EXTERNAL,
+                    moduleTitle(K_EXTERNAL),
+                    "$externalCount 个文件"
+                )
+            )
         }
         return items
     }

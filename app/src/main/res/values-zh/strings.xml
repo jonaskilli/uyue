@@ -805,6 +805,7 @@
     <string name="import_old_summary">选择旧版备份文件夹</string>
     <string name="tts_backup_t">TTS/AI 备份</string>
     <string name="tts_backup_s">单独导出朗读脚本、TTS插件、混元太极、AI模板等，不写入主备份</string>
+    <string name="tts_backup_pick_msg">勾选要备份的内容，默认全选</string>
     <string name="tts_restore_t">TTS/AI 恢复</string>
     <string name="tts_restore_s">从 TTS 备份文件导入，同名配置会被覆盖</string>
     <string name="tts_restore_pick_msg">勾选要恢复的内容，默认全选</string>

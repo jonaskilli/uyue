@@ -800,6 +800,7 @@
     <string name="import_old_summary">Select a legacy backup folder</string>
     <string name="tts_backup_t">TTS/AI backup</string>
     <string name="tts_backup_s">Export TTS scripts, TTS plugins, HunyuanTaiji and AI templates separately, not included in the main backup</string>
+    <string name="tts_backup_pick_msg">check items to backup, all selected by default</string>
     <string name="tts_restore_t">TTS/AI restore</string>
     <string name="tts_restore_s">Import from a TTS backup file, items with the same id are overwritten</string>
     <string name="tts_restore_pick_msg">check items to restore, all selected by default</string>

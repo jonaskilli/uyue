@@ -113,14 +113,19 @@ class BackupConfigFragment : PreferenceFragment(),
 
     /** TTS 备份是独立 zip，和主备份格式不通用，单独导出/导入 */
     private val ttsMimeTypes = arrayOf("application/zip", "*/*")
+
+    /** CreateDocument 的 launch 只能传文件名, 勾选的模块用成员变量带过去 */
+    private var pendingTtsBackupKeys: List<String> = emptyList()
     private val ttsBackupLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip")
     ) { uri ->
         uri ?: return@registerForActivityResult
+        val keys = pendingTtsBackupKeys
+        pendingTtsBackupKeys = emptyList()
         waitDialog.setText("TTS备份中…")
         waitDialog.show()
         val task = Coroutine.async {
-            TtsBackup.backup(appCtx, uri)
+            TtsBackup.backup(appCtx, uri, keys)
         }.onError {
             AppLog.put("TTS备份失败\n${it.localizedMessage}", it)
             appCtx.toastOnUi("TTS备份失败\n${it.localizedMessage}")
@@ -340,14 +345,46 @@ class BackupConfigFragment : PreferenceFragment(),
      * TTS 备份入口: 没配 webDav 就直接导出到本地, 配了就让用户选导出到哪
      */
     private fun ttsBackup() {
+        val items = TtsBackup.packableItems()
+        val titles = items.map { it.title }.toTypedArray()
+        val checked = BooleanArray(items.size) { true }
+        // 与恢复同理: 提示只能放标题, setMessage 会让 multiChoiceItems 整个不渲染
+        val title = "%s（%s）".format(
+            getString(R.string.tts_backup_t),
+            getString(R.string.tts_backup_pick_msg)
+        )
+        alert(title) {
+            multiChoiceItems(titles, checked) { _, which, isChecked ->
+                checked[which] = isChecked
+            }
+            okButton {
+                val keys = items.filterIndexed { index, _ -> checked[index] }.map { it.key }
+                if (keys.isEmpty()) {
+                    appCtx.toastOnUi("没有选择任何内容")
+                    return@okButton
+                }
+                chooseTtsBackupTarget(keys)
+            }
+            cancelButton()
+        }
+    }
+
+    /**
+     * 选好备份内容后再问导出到哪。没配 webDav 就直接存到本地。
+     */
+    private fun chooseTtsBackupTarget(keys: List<String>) {
         if (!AppWebDav.isOk) {
+            pendingTtsBackupKeys = keys
             ttsBackupLauncher.launch(TtsBackup.defaultFileName())
             return
         }
         requireContext().selector(items = listOf("导出到本地", "上传到 WebDav")) { _, index ->
             when (index) {
-                0 -> ttsBackupLauncher.launch(TtsBackup.defaultFileName())
-                1 -> uploadTtsBackup()
+                0 -> {
+                    pendingTtsBackupKeys = keys
+                    ttsBackupLauncher.launch(TtsBackup.defaultFileName())
+                }
+                1 -> uploadTtsBackup(keys)
             }
         }
     }
@@ -368,13 +405,13 @@ class BackupConfigFragment : PreferenceFragment(),
         }
     }
 
-    private fun uploadTtsBackup() {
+    private fun uploadTtsBackup(keys: List<String>) {
         waitDialog.setText("TTS备份中…")
         waitDialog.show()
         val task = Coroutine.async {
             val fileName = TtsBackup.defaultFileName()
             val file = File(appCtx.externalFiles, fileName)
-            TtsBackup.backupToFile(file)
+            TtsBackup.backupToFile(file, keys)
             if (!AppWebDav.upTtsBackup(fileName, file)) {
                 throw NoStackTraceException("上传TTS备份失败")
             }
