@@ -39,6 +39,27 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
             }
         }
 
+    /**
+     * 上一次弹出「云端备份领先当前」时，云端那份备份的文件名。
+     * 只用于诊断: 连着两次弹的是同一个文件还是新文件，能直接看出触发原因
+     * （同一个=本地时间戳被重置；新文件=确实有别处的备份）。
+     */
+    var lastBackupAlertFile: String?
+        get() = getString("lastBackupAlertFile", null)
+        set(value) {
+            edit(commit = true) {
+                if (value.isNullOrBlank()) remove("lastBackupAlertFile")
+                else putString("lastBackupAlertFile", value)
+            }
+        }
+
+    /** 上一次弹出该提示的时间戳，同上，仅诊断用 */
+    var lastBackupAlertTime: Long
+        get() = getLong("lastBackupAlertTime", 0)
+        set(value) {
+            edit(commit = true) { putLong("lastBackupAlertTime", value) }
+        }
+
     var privacyPolicyOk: Boolean
         get() = getBoolean("privacyPolicyOk")
         set(value) {

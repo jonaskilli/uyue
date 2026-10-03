@@ -19,6 +19,7 @@ import io.legado.app.BuildConfig
 import io.legado.app.R
 import io.legado.app.base.VMBaseActivity
 import io.legado.app.constant.AppConst.appInfo
+import io.legado.app.constant.AppLog
 import io.legado.app.constant.EventBus
 import io.legado.app.constant.PreferKey
 import io.legado.app.databinding.ActivityMainBinding
@@ -313,6 +314,14 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
     /**
      * 备份同步
      */
+    /**
+     * 备份同步：云端出现比本地新的备份时，询问是否恢复。
+     *
+     * 这里不管弹不弹窗都打一整段诊断日志（云端/本地/当前时间、差值、时区、云端全部
+     * 备份文件、上次弹窗记录），因为"手动备份后仍反复弹云端领先"有成因不止一个：
+     * 本地时间戳被重置、被别的设备/文件干扰、服务端时钟异常……靠猜改代码容易按下葫芦
+     * 浮起瓢，有了日志一次就能定位。
+     */
     private fun backupSync() {
         if (!AppConfig.autoCheckNewBackup) {
             return
@@ -320,10 +329,59 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
         lifecycleScope.launch {
             val lastBackupFile =
                 withContext(IO) { AppWebDav.lastBackUp().getOrNull() } ?: return@launch
-            // 容差放到 1 小时: 服务端时间戳与设备时钟可能有偏差, 备份打包+上传本身
-            // 也要耗时, 一分钟容差很容易把本机刚上传的备份误判成"云端领先当前"
-            if (lastBackupFile.lastModify - LocalConfig.lastBackup > DateUtils.HOUR_IN_MILLIS) {
-                LocalConfig.lastBackup = lastBackupFile.lastModify
+            val localLast = LocalConfig.lastBackup
+            val cloudTime = lastBackupFile.lastModify
+            val diff = cloudTime - localLast
+            val threshold = DateUtils.HOUR_IN_MILLIS
+            val hit = diff > threshold
+            withContext(IO) {
+                val now = System.currentTimeMillis()
+                val sb = StringBuilder()
+                sb.append("【备份检查】结果=").append(if (hit) "弹窗" else "忽略").append('\n')
+                sb.append("  云端最新: ").append(lastBackupFile.displayName)
+                    .append("  lastModify=").append(cloudTime)
+                    .append(" (").append(AppWebDav.formatTime(cloudTime)).append(")\n")
+                sb.append("  本地 lastBackup=").append(localLast)
+                    .append(" (").append(AppWebDav.formatTime(localLast)).append(")\n")
+                sb.append("  当前系统时间=").append(now)
+                    .append(" (").append(AppWebDav.formatTime(now)).append(")\n")
+                sb.append("  差值(云端-本地)=").append(diff).append("ms  ")
+                    .append(if (diff > 0) "领先" else "落后")
+                    .append(kotlin.math.abs(diff) / 60000).append("分钟")
+                    .append("  阈值=").append(threshold / 60000).append("分钟\n")
+                sb.append("  时区=").append(java.util.TimeZone.getDefault().id)
+                    .append("  本机UTC偏移=")
+                    .append(java.util.TimeZone.getDefault().getOffset(now) / 3600000)
+                    .append("小时\n")
+                if (localLast <= 0L) {
+                    sb.append("  ⚠ 本地 lastBackup=0，本机从未成功记录过备份时间（备份失败或被清理）\n")
+                }
+                if (cloudTime - now > threshold) {
+                    sb.append("  ⚠ 云端时间比本机还晚很多：服务端时钟超前，或时区被解读错了\n")
+                }
+                if (now - cloudTime > threshold) {
+                    sb.append("  ⚠ 云端时间比本机还早很多：服务端时钟滞后\n")
+                }
+                val prevFile = LocalConfig.lastBackupAlertFile
+                if (!prevFile.isNullOrBlank()) {
+                    sb.append("  上次弹窗文件=").append(prevFile)
+                        .append("  上次时间=")
+                        .append(AppWebDav.formatTime(LocalConfig.lastBackupAlertTime)).append('\n')
+                    sb.append("  → ")
+                        .append(
+                            if (prevFile == lastBackupFile.displayName) "同一个文件：本地时间戳被重置/回退了"
+                            else "不同文件：确实有新的外部备份（另一台设备？）"
+                        ).append('\n')
+                }
+                sb.append("  云端全部备份文件:\n").append(AppWebDav.debugBackupFiles())
+                AppLog.put(sb.toString())
+                if (hit) {
+                    LocalConfig.lastBackupAlertFile = lastBackupFile.displayName
+                    LocalConfig.lastBackupAlertTime = now
+                }
+            }
+            if (hit) {
+                LocalConfig.lastBackup = cloudTime
                 alert(R.string.restore, R.string.webdav_after_local_restore_confirm) {
                     cancelButton()
                     okButton {

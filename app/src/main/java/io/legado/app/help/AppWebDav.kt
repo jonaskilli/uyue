@@ -34,6 +34,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import splitties.init.appCtx
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * webDav初始化会访问网络,不要放到主线程
@@ -131,6 +134,87 @@ object AppWebDav {
             // "云端领先"并重复弹出恢复提示(从备份与恢复页手动恢复时尤其明显)
             LocalConfig.lastBackup = System.currentTimeMillis()
         }
+    }
+
+    /**
+     * 诊断用：生成「本地进度 vs 云端进度」的对比日志。
+     *
+     * 「云端进度超过当前进度」这个弹窗此前**完全没有日志**，只能看到现象、看不到原因，
+     * 所以到底是云端真变了、还是本地进度被重置（恢复备份 / 清理 / 换设备）根本分不清。
+     * 这里把两边的章节位置、进度时间、syncTime 和最终判定一起打出来。
+     *
+     * @param from 触发来源，用于区分是进书时(ReadBookViewModel)还是界面内同步(ReadBook)
+     */
+    fun describeProgressCompare(book: Book, cloud: BookProgress?, from: String): String {
+        val sb = StringBuilder()
+        sb.append("【进度对比·").append(from).append("】《").append(book.name)
+            .append("》by ").append(book.author).append('\n')
+        sb.append("  本地: 章节=").append(book.durChapterIndex)
+            .append(" 字pos=").append(book.durChapterPos)
+            .append(" 标题=").append(book.durChapterTitle.orEmpty().ifBlank { "(空)" })
+            .append(" durTime=").append(book.durChapterTime).append('\n')
+        sb.append("  本地 syncTime=").append(book.syncTime)
+            .append(" (").append(formatTime(book.syncTime)).append(")\n")
+        sb.append("  本机设备名称=").append(AppConfig.webDavDeviceName).append('\n')
+        if (cloud == null) {
+            sb.append("  云端: 无进度文件 → 判定=上传本地进度\n")
+            return sb.toString()
+        }
+        sb.append("  云端: 章节=").append(cloud.durChapterIndex)
+            .append(" 字pos=").append(cloud.durChapterPos)
+            .append(" 标题=").append(cloud.durChapterTitle.orEmpty().ifBlank { "(空)" })
+            .append(" durTime=").append(cloud.durChapterTime)
+            .append(" (").append(formatTime(cloud.durChapterTime)).append(")\n")
+        sb.append("  云端设备名称=")
+            .append(cloud.deviceName.ifBlank { "(空,旧版本上传的进度)" }).append('\n')
+        if (cloud.isFromSameDevice()) {
+            sb.append("  判定=**同一设备** → 云端是自己之前传的, 用户退回重看属正常, ")
+                .append("按本地为准: 不提示、不上传\n")
+            return sb.toString()
+        }
+        val cloudAhead = cloud.durChapterIndex > book.durChapterIndex ||
+            (cloud.durChapterIndex == book.durChapterIndex && cloud.durChapterPos > book.durChapterPos)
+        val localAhead = cloud.durChapterIndex < book.durChapterIndex ||
+            (cloud.durChapterIndex == book.durChapterIndex && cloud.durChapterPos < book.durChapterPos)
+        sb.append("  判定=").append(
+            when {
+                cloudAhead -> "云端更新 → 会弹「是否同步」"
+                localAhead -> "本地更新 → 上传覆盖云端"
+                else -> "两者相同 → 不处理"
+            }
+        ).append('\n')
+        if (cloudAhead) {
+            sb.append("  ⚠ 云端更靠前。本地 syncTime=").append(formatTime(book.syncTime))
+                .append("，云端进度时间=").append(formatTime(cloud.durChapterTime))
+                .append("；若 syncTime 明显更早，说明本地进度被回退过")
+                .append("（恢复过备份 / 被清理 / 换过设备）\n")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * 诊断用：列出云端所有 `backup*` 文件（名称 + 最后修改时间 + 大小），按时间倒序。
+     *
+     * 配合「云端备份领先当前」弹窗前的日志一起看，能判断到底是哪份备份在触发：
+     * 是最新那份真的比本地新，还是被别的文件/别的设备干扰了。
+     */
+    suspend fun debugBackupFiles(): String {
+        val authorization = authorization ?: return "webDav 未配置"
+        val files = runCatching {
+            WebDav(rootWebDavUrl, authorization).listFiles()
+                .filter { it.displayName.startsWith("backup") }
+                .sortedByDescending { it.lastModify }
+        }.getOrNull() ?: return "读取云端文件列表失败"
+        if (files.isEmpty()) return "云端没有 backup* 文件"
+        return files.joinToString("\n") {
+            "  ${it.displayName} | lastModify=${it.lastModify} | ${formatTime(it.lastModify)} | ${it.size} 字节"
+        }
+    }
+
+    /** 诊断日志用：把毫秒时间戳格式化成可读时间（本机时区） */
+    fun formatTime(ms: Long): String = when {
+        ms <= 0L -> "未设置(0)"
+        else -> SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.getDefault()).format(Date(ms))
     }
 
     /**
@@ -445,6 +529,9 @@ object AppWebDav {
                 return
             }
             getBookProgress(book)?.let { bookProgress ->
+                // 同设备：这份云端进度是本机自己之前传的，用户主动退回重看时
+                // 不该在启动时被云端旧位置覆盖回去
+                if (bookProgress.isFromSameDevice()) return@let
                 if (bookProgress.durChapterIndex > book.durChapterIndex
                     || (bookProgress.durChapterIndex == book.durChapterIndex
                             && bookProgress.durChapterPos > book.durChapterPos)

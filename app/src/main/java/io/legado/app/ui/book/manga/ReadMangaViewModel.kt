@@ -211,7 +211,13 @@ class ReadMangaViewModel(application: Application) : BaseViewModel(application) 
         }.onError {
             AppLog.put("拉取阅读进度失败《${book.name}》\n${it.localizedMessage}", it)
         }.onSuccess { progress ->
+            AppLog.put(AppWebDav.describeProgressCompare(book, progress, "漫画进书syncBookProgress"))
             progress ?: return@onSuccess
+            // 同设备：云端是自己之前传的，用户退回重看属正常，不弹窗也不覆盖
+            if (progress.isFromSameDevice()) {
+                AppLog.put("  → 同设备云端进度，按本地为准：不提示、不上传")
+                return@onSuccess
+            }
             if (progress.durChapterIndex < book.durChapterIndex ||
                 (progress.durChapterIndex == book.durChapterIndex
                         && progress.durChapterPos < book.durChapterPos)

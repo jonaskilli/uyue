@@ -507,6 +507,12 @@ object ReadManga : CoroutineScope by MainScope() {
         }.onError {
             AppLog.put("拉取阅读进度失败", it)
         }.onSuccess { progress ->
+            AppLog.put(AppWebDav.describeProgressCompare(book, progress, "ReadManga.syncProgress"))
+            // 云端进度是本机自己之前传的 → 用户退回重看属正常，不弹窗也不覆盖
+            if (progress != null && progress.isFromSameDevice()) {
+                AppLog.put("  → 同设备云端进度，按本地为准：不提示、不上传")
+                return@onSuccess
+            }
             if (progress == null || progress.durChapterIndex < book.durChapterIndex ||
                 (progress.durChapterIndex == book.durChapterIndex
                         && progress.durChapterPos < book.durChapterPos)
