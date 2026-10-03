@@ -2183,10 +2183,6 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     private fun sureSyncProgress(progress: BookProgress) {
-        AppLog.put(
-            "【进度弹窗】sureSyncProgress 触发《${ReadBook.book?.name}》" +
-                "云端章节=${progress.durChapterIndex} 本地章节=${ReadBook.book?.durChapterIndex}"
-        )
         alert(R.string.get_book_progress) {
             setMessage(R.string.current_progress_exceeds_cloud)
             okButton {
@@ -2297,12 +2293,6 @@ class ReadBookActivity : BaseReadBookActivity(),
 
     override fun sureNewProgress(progress: BookProgress) {
         syncDialog?.dismiss()
-        // 诊断: 弹窗前必打一条, 这样"弹了但没日志"的情况不会再出现
-        AppLog.put(
-            "【进度弹窗】sureNewProgress 触发《${ReadBook.book?.name}》" +
-                "云端章节=${progress.durChapterIndex} 本地章节=${ReadBook.book?.durChapterIndex}" +
-                " syncTime=${ReadBook.book?.syncTime}"
-        )
         syncDialog = alert(R.string.get_book_progress) {
             setMessage(R.string.cloud_progress_exceeds_current)
             okButton {

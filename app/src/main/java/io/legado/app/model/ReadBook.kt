@@ -342,13 +342,9 @@ object ReadBook : CoroutineScope by MainScope() {
         }.onError {
             AppLog.put("拉取阅读进度失败", it)
         }.onSuccess { progress ->
-            // 诊断: 「云端进度超过当前进度」弹窗的真正来源，此前无任何日志，
-            // 无法判断是云端真变了还是本地进度被重置，故每次对比都打出来
-            AppLog.put(AppWebDav.describeProgressCompare(book, progress, "ReadBook.syncProgress"))
             // 云端进度是本机自己之前传的 → 用户主动退回重看章节，属正常行为。
             // 既不弹窗打断，也不拿云端旧位置覆盖用户当前选择；以本地为准。
             if (progress != null && progress.isFromSameDevice()) {
-                AppLog.put("  → 同设备云端进度，按本地为准：不提示、不上传")
                 return@onSuccess
             }
             if (progress == null || progress.durChapterIndex < book.durChapterIndex ||
