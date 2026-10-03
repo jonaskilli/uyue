@@ -309,7 +309,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             val groupsDeferred = async(Dispatchers.IO) { JReadVoiceEngine.listGroups(this@TtsPluginActivity) }
             val configsDeferred = async(Dispatchers.IO) { JReadVoiceEngine.listConfigs(this@TtsPluginActivity) }
             allPlugins = pluginsDeferred.await()
-            pluginsMap = allPlugins.associateBy { it.id }
+            pluginsMap = buildPluginsIndex(allPlugins)
             adapter.setPluginsMap(pluginsMap)
             allGroups = groupsDeferred.await()
             when (currentTab) {
@@ -589,6 +589,25 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     }
 
     /**
+     * 构建 pluginId → VoicePlugin 索引，供列表卡片显示"所属插件名"。
+     *
+     * 必须双键（记录 id + 业务 pluginId）：配置落库时 pluginId 取的是
+     * `plugin.pluginId.ifBlank { plugin.id }`（见更换插件/迁移音色分组逻辑），
+     * 而插件自身还有一条独立的记录 id（UUID 或 obj.id），两者并不相等。
+     * 若只按 `it.id` 建索引，卡片用 `config.pluginId` 反查就会全部落空，
+     * 表现为列表里其它信息正常、唯独右下角插件名空白。
+     * 这里与 JReadVoiceEngine.findPlugin 的索引策略保持一致（id 优先，pluginId 补位）。
+     */
+    private fun buildPluginsIndex(
+        plugins: List<JReadVoiceEngine.VoicePlugin>
+    ): Map<String, JReadVoiceEngine.VoicePlugin> {
+        val index = LinkedHashMap<String, JReadVoiceEngine.VoicePlugin>(plugins.size * 2)
+        plugins.forEach { index[it.id] = it }
+        plugins.forEach { if (it.pluginId.isNotBlank()) index.getOrPut(it.pluginId) { it } }
+        return index
+    }
+
+    /**
      * 仅重读列表数据（groups/configs/plugins 各读盘一次），不执行 ensureBuiltIn。
      * 用于仅改动分组/插件元信息、configs 内容不变的轻量场景。
      */
@@ -598,7 +617,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 allConfigs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity)
                 allGroups = JReadVoiceEngine.listGroups(this@TtsPluginActivity)
                 allPlugins = JReadVoiceEngine.listPlugins(this@TtsPluginActivity)
-                pluginsMap = allPlugins.associateBy { it.id }
+                pluginsMap = buildPluginsIndex(allPlugins)
             }
             adapter.setPluginsMap(pluginsMap)
             if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
@@ -1605,7 +1624,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     // 仅重读配置/插件列表（不全量 loadData），再局部刷新，避免卡顿
                     allConfigs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity)
                     allPlugins = JReadVoiceEngine.listPlugins(this@TtsPluginActivity)
-                    pluginsMap = allPlugins.associateBy { it.id }
+                    pluginsMap = buildPluginsIndex(allPlugins)
                     adapter.setPluginsMap(pluginsMap)
                 }
                 toastOnUi("导入了 $count 条")
