@@ -274,6 +274,13 @@ object ProxyServer {
     /** 识别为智谱生图模型的名称（免登录）。UI 上的 zhipu 点「生图」同样走智谱生图。 */
     private val ZHIPU_IMAGE_MODELS = listOf("智谱生图", "zhipu-image", "glm-image", "gml-image", "cogview")
 
+    /**
+     * 识别为 StudioGlobal 生图模型的名称（免登录）。
+     * 站内没有 OpenAI 兼容的 /v1/images/generations（实测 404），生图必须由
+     * [StudioGlobalClient] 转成它内部的 send-chat 协议，所以单列一支。
+     */
+    private val STUDIO_GLOBAL_IMAGE_MODELS = listOf("gpt-image")
+
     /** 识别为 LongCat（美团龙猫）模型的名称（前缀匹配，大小写不敏感）。 */
     private val LONGCAT_MODELS = listOf("longcat")
 
@@ -391,6 +398,8 @@ object ProxyServer {
                         {"id":"gml-plus","object":"model","owned_by":"zhipu"},
                         {"id":"glm-image","object":"model","owned_by":"zhipu"},
                         {"id":"glm-image-hd","object":"model","owned_by":"zhipu"},
+                        {"id":"gpt-image-2","object":"model","owned_by":"studioglobal"},
+                        {"id":"gpt-image-1.5","object":"model","owned_by":"studioglobal"},
                         {"id":"qwen","object":"model","owned_by":"qwen"},
                         {"id":"qwen-think","object":"model","owned_by":"qwen"},
                         {"id":"wenxin","object":"model","owned_by":"wenxin"}
@@ -412,6 +421,8 @@ object ProxyServer {
                             "gml-plus" to "zhipu",
                             "glm-image" to "zhipu",
                             "glm-image-hd" to "zhipu",
+                            StudioGlobalClient.MODEL_GPT_IMAGE_2 to "studioglobal",
+                            StudioGlobalClient.MODEL_GPT_IMAGE_15 to "studioglobal",
                             "qwen" to "qwen",
                             "qwen-think" to "qwen",
                             "wenxin" to "wenxin"
@@ -791,6 +802,12 @@ object ProxyServer {
     private fun isZhipuCinematicImageModel(m: String): Boolean {
         val lower = m.lowercase()
         return lower.contains("glm-image-hd") || lower.contains("gml-image-hd")
+    }
+
+    /** 是否 StudioGlobal 生图模型（免登录）：model 名含 gpt-image（gpt-image-2 / gpt-image-1.5）。 */
+    private fun isStudioGlobalImageModel(m: String): Boolean {
+        val lower = m.lowercase()
+        return STUDIO_GLOBAL_IMAGE_MODELS.any { lower.contains(it) }
     }
 
     /** 是否智谱增强（plus/思考）模型：model 名含 plus/thinking/reason 即走增强模型。
@@ -1518,6 +1535,38 @@ object ProxyServer {
                 return
             }
 
+            // StudioGlobal 生图（免登录）：model 命中 gpt-image → 走 send-chat 通道，只返回第一张
+            if (isStudioGlobalImageModel(model)) {
+                LogStore.i("StudioGlobal", "调用生图，model=$model prompt=${prompt.take(60)}")
+                val (urls, errMsg) = withContext(Dispatchers.IO) {
+                    try {
+                        StudioGlobalClient.generateImage(prompt, model) to null
+                    } catch (e: Exception) {
+                        LogStore.e("StudioGlobal", "生图异常: ${e.stackTraceToString()}")
+                        emptyList<String>() to (e.localizedMessage ?: e.toString())
+                    }
+                }
+                if (errMsg != null) {
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+                    return
+                }
+                if (urls.isEmpty()) {
+                    call.respond(
+                        HttpStatusCode.BadGateway,
+                        mapOf("error" to "StudioGlobal 生图未返回图片（匿名会话额度有限，可稍后重试）")
+                    )
+                    return
+                }
+                // 仅返回第一张
+                call.respond(
+                    ImageGenResponse(
+                        created = (System.currentTimeMillis() / 1000).toInt(),
+                        data = listOf(ImageDataItem(url = urls.first()))
+                    )
+                )
+                return
+            }
+
             val cookies = DoubaoClient.parseCookie(nextDoubaoCookie())
             LogStore.i("Doubao", "调用生图，prompt=${prompt.take(60)} ratio=$ratio")
 
@@ -2150,6 +2199,11 @@ object ProxyServer {
                 upstream("Zhipu") {
                     ZhipuClient.generateImage(prompt, ratio, isZhipuCinematicImageModel(model))
                 }
+            } else if (isStudioGlobalImageModel(model)) {
+                // StudioGlobal（免登录）：站内无 OpenAI 兼容端点，由 client 转 send-chat 协议
+                upstream("StudioGlobal") {
+                    StudioGlobalClient.generateImage(prompt, model)
+                }
             } else {
                 upstream("Doubao") {
                     val cookies = DoubaoClient.parseCookie(nextDoubaoCookie())
@@ -2194,6 +2248,8 @@ object ProxyServer {
             "gml-plus" to "zhipu",
             "glm-image" to "zhipu",
             "glm-image-hd" to "zhipu",
+            StudioGlobalClient.MODEL_GPT_IMAGE_2 to "studioglobal",
+            StudioGlobalClient.MODEL_GPT_IMAGE_15 to "studioglobal",
             "qwen" to "qwen",
             "qwen-think" to "qwen",
             "wenxin" to "wenxin"
