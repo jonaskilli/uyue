@@ -54,13 +54,14 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
     // 的取消一并取消，因此必须自己记录 Activity 是否还可用于弹窗。
     private var activityDestroyed = false
     private val shownDialogs = mutableListOf<android.app.Dialog>()
+    // 程序化回填试听文本时不触发 TextWatcher，避免把本条配置的文本写成全局默认
+    private var settingPreviewText = false
 
     companion object {
         const val EXTRA_CONFIG_ID = "configId"
         const val EXTRA_IS_NEW = "isNew"
         private const val MENU_SAVE = 1
         private const val KEY_PREVIEW_TEXT = "tts_preview_text"
-        private const val DEFAULT_PREVIEW_TEXT = "你好呀，你吃饭了吗？"
     }
 
     /**
@@ -166,16 +167,14 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         binding.btnGenerateTag.setOnClickListener { generateTimbreTag() }
         binding.ivTagSearch.setOnClickListener { showTagSearchDialog() }
         binding.btnPreview.setOnClickListener { previewConfig() }
-        // 试听文本持久化：打开时读取已保存内容，无则使用默认值
-        binding.etPreviewText.setText(
-            getPreferences(Context.MODE_PRIVATE)
-                .getString(KEY_PREVIEW_TEXT, DEFAULT_PREVIEW_TEXT)
-                .orEmpty()
-        )
+        // 试听文本：本条配置已设置的优先，否则用全局默认文案
+        setPreviewText(config.previewText.ifBlank { globalPreviewText() })
         binding.etPreviewText.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
             override fun afterTextChanged(s: android.text.Editable?) {
+                if (settingPreviewText) return
+                // 记住为全局默认，新建配置与未单独设置的条目试听沿用
                 getPreferences(Context.MODE_PRIVATE).edit()
                     .putString(KEY_PREVIEW_TEXT, s?.toString().orEmpty())
                     .apply()
@@ -252,6 +251,7 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         binding.etGroup.setText(config.groupName)
         binding.etSubGroup.setText(config.subGroupName)
         binding.etLocale.setText(config.locale)
+        setPreviewText(config.previewText.ifBlank { globalPreviewText() })
         binding.seekbarSpeed.progress = (config.speed * 100).toInt().coerceIn(0, 300)
         binding.seekbarVolume.progress = (config.volume * 100).toInt().coerceIn(0, 300)
         binding.seekbarPitch.progress = (config.pitch * 100).toInt().coerceIn(0, 300)
@@ -548,7 +548,7 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         val option = voiceOptions.getOrNull(voiceIndex) ?: return
         val voiceName = option.name.ifBlank { option.id }
         // 试听文本留空时退回默认文案，不打断试听流程（与预览按钮不同，这里无需强制输入）
-        val previewText = binding.etPreviewText.text.toString().trim().ifBlank { DEFAULT_PREVIEW_TEXT }
+        val previewText = binding.etPreviewText.text.toString().trim().ifBlank { JReadVoiceEngine.DEFAULT_PREVIEW_TEXT }
         val tempConfig = buildConfig(requireTag = false, voiceOverride = option.id) ?: return
         toastOnUi("正在试听: $voiceName")
         lifecycleScope.launch {
@@ -678,6 +678,19 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         }
     }
 
+    private fun setPreviewText(text: String) {
+        settingPreviewText = true
+        binding.etPreviewText.setText(text)
+        settingPreviewText = false
+    }
+
+    /** 全局默认试听文本：新建配置与未单独设置试听文本的条目沿用它 */
+    private fun globalPreviewText(): String =
+        getPreferences(Context.MODE_PRIVATE)
+            .getString(KEY_PREVIEW_TEXT, JReadVoiceEngine.DEFAULT_PREVIEW_TEXT)
+            .orEmpty()
+            .ifBlank { JReadVoiceEngine.DEFAULT_PREVIEW_TEXT }
+
     private fun buildDataJson(): String {
         val obj = JSONObject()
         pluginDataFields.forEach { (k, v) -> obj.put(k, v) }
@@ -721,6 +734,8 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
             pluginId = selectedPlugin.pluginId.ifBlank { selectedPlugin.id },
             voice = voice,
             locale = locale,
+            // 试听文本随配置保存，配置列表的条目试听与插件脚本预览都用它
+            previewText = binding.etPreviewText.text.toString().trim(),
             speed = binding.seekbarSpeed.progress / 100f,
             volume = binding.seekbarVolume.progress / 100f,
             pitch = binding.seekbarPitch.progress / 100f,

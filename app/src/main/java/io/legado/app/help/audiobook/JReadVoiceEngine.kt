@@ -27,6 +27,9 @@ object JReadVoiceEngine {
     private const val KEY_GROUPS = "voice_groups"
     private const val KEY_BUILTIN_SYSTEM_CONFIG_SEEDED = "builtin_jread_voice_system_configs_seeded_v3"
 
+    /** 试听文本兜底文案：配置未单独设置试听文本时，编辑页与配置列表的试听都用它 */
+    const val DEFAULT_PREVIEW_TEXT = "你好呀，你吃饭了吗？"
+
     // ===== 内存缓存：避免每次合成音频都全量解析 SharedPreferences JSON =====
     @Volatile
     private var cachedConfigs: List<VoiceConfig>? = null

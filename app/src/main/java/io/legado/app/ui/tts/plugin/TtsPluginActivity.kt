@@ -500,16 +500,35 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     }
 
     private fun previewConfig(config: JReadVoiceEngine.VoiceConfig) {
+        // 试听文本与「编辑TTS配置」里为该条设置的保持一致，未设置才用默认文案
+        val previewText = config.previewText.ifBlank { JReadVoiceEngine.DEFAULT_PREVIEW_TEXT }
         toastOnUi("正在试听: ${config.voiceTag}")
         lifecycleScope.launch {
             val requestId = UUID.randomUUID().toString()
             val pointerJson = JSONObject().put("voiceTag", config.voiceTag).toString()
             val audioBytes = withContext(Dispatchers.IO) {
-                runCatching { JReadVoiceEngine.synthesizeConfigLineAudio(this@TtsPluginActivity, config, "试听文本。", pointerJson, requestId) }.getOrNull()
+                runCatching {
+                    JReadVoiceEngine.synthesizeConfigLineAudio(
+                        this@TtsPluginActivity, config, previewText, pointerJson, requestId
+                    )
+                }.getOrNull()
             }
             if (audioBytes == null || audioBytes.isEmpty()) { toastOnUi("试听失败"); return@launch }
-            val tempFile = java.io.File(cacheDir, "preview_${requestId}.wav")
-            tempFile.writeBytes(audioBytes)
+            // 与朗读同一套后处理链路（条目 → 分组 → 插件 → 全局），
+            // 否则试听听不出条目/分组/插件级参数的效果
+            val postParams = JReadVoiceEngine.resolvePostAudioParams(this@TtsPluginActivity, config)
+            val playedBytes = if (postParams.isDefault()) {
+                audioBytes
+            } else {
+                withContext(Dispatchers.IO) {
+                    io.legado.app.utils.AudioDecodeUtil
+                        .decodeToStandardWav(audioBytes, postParams = postParams)
+                } ?: audioBytes
+            }
+            if (isFinishing || isDestroyed) return@launch
+            val tempFile = withContext(Dispatchers.IO) {
+                java.io.File(cacheDir, "preview_${requestId}.wav").apply { writeBytes(playedBytes) }
+            }
             playAudio(tempFile.absolutePath)
         }
     }
