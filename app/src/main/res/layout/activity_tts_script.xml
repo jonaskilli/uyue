@@ -51,7 +51,7 @@
             android:minHeight="0dp"
             android:paddingTop="6dp"
             android:paddingBottom="6dp"
-            android:text="恢复密钥"
+            android:text="密钥管理"
             android:textSize="13sp"
             android:backgroundTint="#FF9800"
             android:textColor="@android:color/white" />
