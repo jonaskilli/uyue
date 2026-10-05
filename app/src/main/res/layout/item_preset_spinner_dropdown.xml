@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  题材/画风下拉框「展开态」的一行：左侧名称 + 右侧「⋮」操作按钮。
+  点「⋮」弹出 删除/修改/复制/置顶。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:minHeight="40dp"
+    android:paddingStart="12dp"
+    android:paddingEnd="2dp">
+
+    <TextView
+        android:id="@+id/tv_preset_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:textSize="14sp"
+        android:textColor="@color/primaryText"
+        android:maxLines="1"
+        android:ellipsize="end"
+        tools:text="仙侠" />
+
+    <ImageButton
+        android:id="@+id/btn_preset_more"
+        android:layout_width="34dp"
+        android:layout_height="34dp"
+        android:padding="6dp"
+        android:src="@drawable/ic_more"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="更多"
+        app:tint="@color/primaryText" />
+
+</LinearLayout>

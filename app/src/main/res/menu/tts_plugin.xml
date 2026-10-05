@@ -2,6 +2,15 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
+    <!-- 新建分组：只在「配置列表」Tab 显示，见 TtsPluginActivity 里的 tab 切换处理。
+         放在 menu_add 之前，ifRoom 会按声明顺序排列，因此显示在加号左边。
+         原先这个入口挂在右下角 FAB 上，FAB 已按需求去掉，入口挪到这里。 -->
+    <item
+        android:id="@+id/menu_add_group"
+        android:icon="@drawable/ic_create_folder_outline"
+        android:title="新建分组"
+        app:showAsAction="ifRoom" />
+
     <item
         android:id="@+id/menu_add"
         android:icon="@drawable/ic_add"

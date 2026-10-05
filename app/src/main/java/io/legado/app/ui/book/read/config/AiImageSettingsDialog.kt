@@ -7,11 +7,17 @@ import android.text.method.HideReturnsTransformationMethod
 import io.legado.app.utils.putPrefString
 import android.text.method.PasswordTransformationMethod
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.PopupMenu
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.core.view.setPadding
@@ -27,6 +33,8 @@ import io.legado.app.help.ApiEntry
 import io.legado.app.help.MiyueKeyManager
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.AiImageGenerator
+import io.legado.app.model.AiImagePresets
+import io.legado.app.model.AiImagePromptPresetStore
 import io.legado.app.model.ReadBook
 import io.legado.app.utils.dpToPx
 import io.legado.app.utils.getPrefString
@@ -90,7 +98,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
             })
         }
 
-        fun labelWithHelp(text: String, helpTitle: String, helpMessage: String) {
+        fun labelWithHelp(text: String, helpTitle: String, helpMessage: String): LinearLayout {
             val row = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -106,7 +114,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
                 setTextColor(android.graphics.Color.parseColor("#1976D2"))
                 setPadding(6.dpToPx(), 0, 0, 0)
                 setOnClickListener {
-                    AlertDialog.Builder(context)
+                    AlertDialog.Builder(requireContext())
                         .setTitle(helpTitle)
                         .setMessage(helpMessage)
                         .setPositiveButton("知道了", null)
@@ -114,6 +122,80 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
                 }
             })
             root.addView(row)
+            return row
+        }
+
+        /**
+         * 题材/画风下拉框。展开后顶部「＋ 新增」，其余每行右侧「⋮」→ 删除/修改/复制/置顶。
+         *
+         * 注意 onItemSelected 在**设置 adapter 时就会被系统回调一次**（position=0），
+         * 所以必须用 [ignoreSelection] 挡掉，否则一进页面就会弹出"新增"框。
+         * 收起态初始显示「自定义」，与改造前一致。
+         */
+        fun attachPresetSpinner(
+            row: LinearLayout,
+            kind: String,
+            onApplied: (AiImagePromptPresetStore.Item) -> Unit
+        ): Spinner {
+            // 先建 Spinner 再挂 adapter。
+            // 不要写成 `lateinit var spinner` + `Spinner(context).apply { ...引用 spinner... }`：
+            // apply 块是在构造期间执行的，而 lateinit 变量要等整条赋值语句结束才完成初始化，
+            // 块里读它会抛 UninitializedPropertyAccessException（这个坑踩过一次）。
+            val spinner = Spinner(context)
+            spinner.layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { marginStart = 8.dpToPx() }
+
+            val presetAdapter = PresetSpinnerAdapter(
+                defaultContent = if (kind == AiImagePromptPresetStore.KIND_GENRE) {
+                    AiImageGenerator.DEFAULT_PROMPT_TEMPLATE
+                } else {
+                    AiImageGenerator.DEFAULT_STYLE_SUFFIX
+                },
+                onAddClick = {
+                    // 新增后直接把新预设选中并套用，省得再点一次。
+                    // 下标直接从存储查（此时 onChanged 已先刷新过，顺序与 adapter 一致），
+                    // 不能引用 presetAdapter——它正在初始化中，构造参数里取不到自己。
+                    showPresetEditor(kind, null, onChanged = { reloadPresetSpinner(spinner) }) { item ->
+                        val ctx = context
+                        val idx = ctx?.let {
+                            AiImagePromptPresetStore.list(it, kind).indexOfFirst { i -> i.id == item.id }
+                        } ?: -1
+                        if (idx >= 0) {
+                            // +2 是因为下拉 0=「默认」、1=「＋ 新增」
+                            spinner.setSelection(idx + 2, false)
+                            onApplied(item)
+                            toastOnUi("已新增并套用「${item.name}」")
+                        }
+                    }
+                },
+                onItemClick = { item, position ->
+                    // 代码更新选中项，收起态文案随之显示该预设名
+                    spinner.setSelection(position, false)
+                    onApplied(item)
+                    toastOnUi("已填入「${item.name}」，可继续手动微调")
+                },
+                onDefaultClick = { content ->
+                    spinner.setSelection(0, false)
+                    onApplied(AiImagePromptPresetStore.Item("", DEFAULT_ITEM_LABEL, content, kind))
+                    toastOnUi("已恢复最初始的默认值")
+                },
+                onMoreClick = { item, anchor ->
+                    showPresetMoreMenu(item, anchor) { reloadPresetSpinner(spinner) }
+                }
+            )
+            // 【不要给 Spinner 设 onItemSelectedListener】
+            // 设了之后要靠"守卫标记"区分程序选中与用户点击，一旦守卫没被消费
+            // （例如刷新列表后没有后续回调），用户第一次真实点击就会被误吞掉，
+            // 表现为「点新增没反应、点条目文字也没反应，只有 ⋮ 有反应」。
+            // 改成：每一行自己 setOnClickListener 吃掉触摸，Spinner 选中项只在套用时
+            // 由代码 setSelection 更新（收起态文案随之刷新）。
+            spinner.adapter = presetAdapter
+            row.addView(spinner)
+            presetSpinnerAdapters[kind] = presetAdapter
+            presetSpinnerKind[spinner] = kind
+            reloadPresetSpinner(spinner)
+            return spinner
         }
 
         fun edit(text: String, hint: String): EditText {
@@ -312,7 +394,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
                 setTextColor(android.graphics.Color.parseColor("#1976D2"))
                 setPadding(6.dpToPx(), 0, 0, 0)
                 setOnClickListener {
-                    AlertDialog.Builder(context)
+                    AlertDialog.Builder(requireContext())
                         .setTitle("AI生图重试次数说明")
                         .setMessage("""AI生图失败后的重试次数。
 
@@ -351,7 +433,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
                 setTextColor(android.graphics.Color.parseColor("#1976D2"))
                 setPadding(6.dpToPx(), 0, 0, 0)
                 setOnClickListener {
-                    AlertDialog.Builder(context)
+                    AlertDialog.Builder(requireContext())
                         .setTitle("AI生图请求间隔时间说明")
                         .setMessage("""每次发送生图请求（含首次与重试）前的等待时间。
 
@@ -437,11 +519,27 @@ sk-aaa@@sk-bbb@@sk-ccc
         label("图片尺寸")
         etImageSize = edit("784x1168", "例如 784x1168 / 1024x576")
 
-        label("风格提示词后缀")
+        // 画风选择框挂在标题右边：选中后把该画风的风格描述整段写进下面的输入框
+        val artStyleLabelRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 10.dpToPx(), 0, 4.dpToPx())
+        }
+        artStyleLabelRow.addView(TextView(context).apply {
+            text = "风格提示词后缀"
+            textSize = 14f
+        })
+        root.addView(artStyleLabelRow)
+        attachPresetSpinner(
+            artStyleLabelRow,
+            AiImagePromptPresetStore.KIND_ART_STYLE
+        ) { item ->
+            etImageStyle.setText(item.content)
+        }
         etImageStyle = edit(AiImageGenerator.DEFAULT_STYLE_SUFFIX, "例如 ，中国风插画风格，精美细腻")
 
         // 提示词模板
-        labelWithHelp(
+        val promptTemplateLabelRow = labelWithHelp(
             "提示词模板",
             "提示词模板使用说明",
             """提示词模板会作为生成 AI 图片的指令发送给模型。可使用以下占位符，生成时会自动替换为实际内容：
@@ -456,9 +554,17 @@ sk-aaa@@sk-bbb@@sk-ccc
 2. 某个占位符对应的值若为空，则该占位符替换为空字符串（不占位）；
 3. 可自由删除不需要的占位符，例如不想要书名就去掉 {book}；
 4. 除占位符外的其它文字会原样发送给模型；
-5. 点击“恢复默认提示词”可一键还原为内置默认值。"""
+5. 点击标题右边的下拉框可按题材快速套用整套模板，套用后可继续手动微调；
+6. 点击“恢复默认提示词”可一键还原为内置默认值。"""
         )
-        etPromptTemplate = multiLineEdit(AiImageGenerator.DEFAULT_PROMPT_TEMPLATE, "占位符：{mood} 场景氛围 {text} 内容片段 {book} 书名 {style} 风格后缀")
+        // 题材选择框挂在「提示词模板」标题同一行的右边：选中后把该题材的整套模板写进下面的输入框
+        attachPresetSpinner(
+            promptTemplateLabelRow,
+            AiImagePromptPresetStore.KIND_GENRE
+        ) { item ->
+            etPromptTemplate.setText(item.content)
+        }
+        etPromptTemplate = multiLineEdit(AiImageGenerator.DEFAULT_PROMPT_TEMPLATE, "占位符：{text} 内容片段 {book} 书名 {style} 风格后缀")
 
         // 负面提示词
         label("负面提示词")
@@ -579,7 +685,7 @@ sk-aaa@@sk-bbb@@sk-ccc
             setTextColor(android.graphics.Color.parseColor("#1976D2"))
             setPadding(6.dpToPx(), 0, 0, 0)
             setOnClickListener {
-                AlertDialog.Builder(context)
+                AlertDialog.Builder(requireContext())
                     .setTitle("角色标注说明")
                     .setMessage("""开启后，发给 AI 生图的正文会在每个左双引号“右侧插入角色标注。
 
@@ -617,7 +723,7 @@ sk-aaa@@sk-bbb@@sk-ccc
         val btnResetPrompt = Button(context).apply {
             text = "恢复默认提示词"
             setOnClickListener {
-                AlertDialog.Builder(context)
+                AlertDialog.Builder(requireContext())
                     .setTitle("恢复默认提示词")
                     .setMessage("将提示词模板、负面提示词、风格后缀恢复为内置默认值，确认继续？")
                     .setPositiveButton("恢复") { _, _ ->
@@ -695,6 +801,18 @@ sk-aaa@@sk-bbb@@sk-ccc
         etPromptTemplate.setText(template.promptTemplate)
         etNegativePrompt.setText(template.negativePrompt)
         etFilterWords.setText(template.filterWords)
+        // 让两个预设下拉框的选中项与刚填进来的内容对上，
+        // 否则老模板明明用的是某条预设，下拉框却还停在第 0 项。
+        syncPresetSpinnerSelection(
+            AiImagePromptPresetStore.KIND_ART_STYLE,
+            template.imageStyle,
+            AiImageGenerator.DEFAULT_STYLE_SUFFIX
+        )
+        syncPresetSpinnerSelection(
+            AiImagePromptPresetStore.KIND_GENRE,
+            template.promptTemplate,
+            AiImageGenerator.DEFAULT_PROMPT_TEMPLATE
+        )
         // 同步 base64 开关状态（临时移除 listener 避免触发保存）
         switchBase64.setOnCheckedChangeListener(null)
         switchBase64.isChecked = template.useBase64Response
@@ -868,4 +986,258 @@ sk-aaa@@sk-bbb@@sk-ccc
     }
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) = Unit
+
+    /**
+     * 打开已有模板时，让下拉框选中项与输入框里的实际内容一致。
+     *
+     * 规则：内容等于原始默认值 → 选中第 0 项「默认」；
+     * 否则在预设列表里按内容找同一条，找到就选中它；都找不到说明是纯手工内容，保持原样。
+     * 只改选中项、不重新套用内容（内容已经由调用方填好了）。
+     */
+    private fun syncPresetSpinnerSelection(kind: String, content: String, defaultContent: String) {
+        val adapter = presetSpinnerAdapters[kind] ?: return
+        val spinner = presetSpinnerKind.entries.firstOrNull { it.value == kind }?.key ?: return
+        if (content == defaultContent) {
+            spinner.setSelection(0, false)
+            return
+        }
+        val index = adapter.items.indexOfFirst { it.content == content }
+        spinner.setSelection(if (index >= 0) index + 2 else 0, false)
+    }
+
+    /** 重新从存储读取并刷新下拉列表（增删改置顶后调用）。 */
+    private fun reloadPresetSpinner(spinner: Spinner) {
+        val kind = presetSpinnerKind[spinner] ?: return
+        val ctx = context ?: return
+        presetSpinnerAdapters[kind]?.refresh(AiImagePromptPresetStore.list(ctx, kind))
+    }
+
+    /** 「⋮」菜单：删除 / 修改 / 复制 / 置顶。 */
+    private fun showPresetMoreMenu(
+        item: AiImagePromptPresetStore.Item,
+        anchor: View,
+        onChanged: () -> Unit
+    ) {
+        val pm = PopupMenu(requireContext(), anchor)
+        pm.menu.add(MENU_DELETE)
+        pm.menu.add(MENU_EDIT)
+        pm.menu.add(MENU_DUPLICATE)
+        pm.menu.add(if (item.pinned) MENU_UNPIN else MENU_PIN)
+        pm.setOnMenuItemClickListener {
+            when (it.title.toString()) {
+                MENU_DELETE -> AlertDialog.Builder(requireContext())
+                    .setTitle("删除「${item.name}」？")
+                    .setMessage("删除后该预设将从下拉列表中移除。内置题材/画风删除后不会再自动出现。")
+                    .setPositiveButton("删除") { _, _ ->
+                        AiImagePromptPresetStore.delete(requireContext(), item)
+                        toastOnUi("已删除「${item.name}」")
+                        onChanged()
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+
+                MENU_EDIT -> showPresetEditor(item.kind, item, onChanged)
+
+                MENU_DUPLICATE -> {
+                    AiImagePromptPresetStore.duplicate(requireContext(), item)
+                    toastOnUi("已复制「${item.name}」，副本已置顶")
+                    onChanged()
+                }
+
+                MENU_PIN -> {
+                    AiImagePromptPresetStore.setPinned(requireContext(), item, true)
+                    toastOnUi("已置顶「${item.name}」")
+                    onChanged()
+                }
+
+                MENU_UNPIN -> {
+                    AiImagePromptPresetStore.setPinned(requireContext(), item, false)
+                    toastOnUi("已取消置顶「${item.name}」")
+                    onChanged()
+                }
+            }
+            true
+        }
+        pm.show()
+    }
+
+    /**
+     * 新增 / 修改预设。名称 + 内容（题材填提示词模板，画风填风格描述）。
+     * [existing] 为 null 表示新增，否则为修改。
+     */
+    private fun showPresetEditor(
+        kind: String,
+        existing: AiImagePromptPresetStore.Item?,
+        onChanged: () -> Unit,
+        onCreated: (AiImagePromptPresetStore.Item) -> Unit = {}
+    ) {
+        val isGenre = kind == AiImagePromptPresetStore.KIND_GENRE
+        val box = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24.dpToPx(), 8.dpToPx(), 24.dpToPx(), 0)
+        }
+        val etName = EditText(requireContext()).apply {
+            hint = "名称"
+            setText(existing?.name.orEmpty())
+        }
+        val etContent = EditText(requireContext()).apply {
+            hint = if (isGenre) "提示词模板" else "风格描述"
+            setText(existing?.content.orEmpty())
+            minLines = if (isGenre) 5 else 3
+            maxLines = 12
+            gravity = android.view.Gravity.TOP or android.view.Gravity.START
+        }
+        box.addView(etName)
+        box.addView(etContent)
+
+        AlertDialog.Builder(requireContext())
+            .setTitle(if (existing == null) "新增${if (isGenre) "题材" else "画风"}" else "修改「${existing.name}」")
+            .setView(box)
+            .setPositiveButton("保存") { _, _ ->
+                val name = etName.text?.toString()?.trim().orEmpty()
+                val content = etContent.text?.toString()?.trim().orEmpty()
+                if (content.isBlank()) {
+                    toastOnUi("内容不能为空")
+                    return@setPositiveButton
+                }
+                if (existing == null) {
+                    val created = AiImagePromptPresetStore
+                        .add(requireContext(), kind, name, content)
+                    onChanged()
+                    onCreated(created)
+                } else {
+                    AiImagePromptPresetStore.update(requireContext(), existing, name, content)
+                    toastOnUi("已保存修改")
+                }
+                onChanged()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+    private companion object {
+        /** 下拉框第 0 项：把内容恢复成 AiImageGenerator 里最初的默认值 */
+        const val DEFAULT_ITEM_LABEL = "默认"
+        /** 下拉框第 1 项，点它新建一条预设 */
+        const val ADD_ITEM_LABEL = "＋ 新增"
+        /** 收起态在"没选任何预设"时显示的文案 */
+        const val CUSTOM_ITEM_LABEL = "自定义"
+        const val MENU_DELETE = "删除"
+        const val MENU_EDIT = "修改"
+        const val MENU_DUPLICATE = "复制"
+        const val MENU_PIN = "置顶"
+        const val MENU_UNPIN = "取消置顶"
+    }
+
+    /** kind -> 适配器，供增删改后刷新下拉列表用 */
+    private val presetSpinnerAdapters = mutableMapOf<String, PresetSpinnerAdapter>()
+
+    /** Spinner -> kind，用于反查该刷新哪个适配器 */
+    private val presetSpinnerKind = mutableMapOf<Spinner, String>()
+
+    /**
+     * 题材/画风下拉框适配器。
+     *
+     * 下拉列表的固定结构：
+     * ```
+     * position 0     「默认」      → 写入 AiImageGenerator 的原始默认值（不可改、不带 ⋮）
+     * position 1     「＋ 新增」   → 打开新建弹窗（不可改、不带 ⋮）
+     * position 2..N  预设条目      → 套用；右侧「⋮」可 删除/修改/复制/置顶
+     * ```
+     * 第 0 项必须是「默认」：用户改成别的预设后，需要能一键回到最初那套默认值，
+     * 而原始默认值并不在 AiImagePresets 的题材/画风列表里，只能单独占一个固定项。
+     *
+     * 【关键约束】Spinner 的下拉列表只允许 **1 种 view type**
+     * （Spinner.setAdapter 会校验 adapter.getViewTypeCount() != 1 就抛
+     * IllegalArgumentException: "Spinner adapter view type count must be 1"）。
+     * 所以展开列表里的**所有行必须共用同一个布局**，不能按 position 返回不同布局，
+     * 否则复用池会把不同根节点的类型混着用，导致 inflate 跳过、findViewById 拿到 null 而 NPE。
+     *
+     * 注意：getView（收起态）与 getDropDownView（展开态）可以各用不同布局，
+     * view type 约束只作用于展开列表。
+     */
+    inner class PresetSpinnerAdapter(
+        /** 「默认」项写入的内容：题材是原始提示词模板，画风是原始风格后缀 */
+        private val defaultContent: String,
+        val onAddClick: () -> Unit,
+        val onItemClick: (AiImagePromptPresetStore.Item, Int) -> Unit,
+        val onDefaultClick: (String) -> Unit,
+        val onMoreClick: (AiImagePromptPresetStore.Item, View) -> Unit
+    ) : BaseAdapter() {
+
+        var items: List<AiImagePromptPresetStore.Item> = emptyList()
+            private set
+
+        fun refresh(newItems: List<AiImagePromptPresetStore.Item>) {
+            items = newItems
+            notifyDataSetChanged()
+        }
+
+        /** 实际预设数（不含「默认」和「＋ 新增」两项）。 */
+        val presetCount: Int get() = items.size
+
+        override fun getCount(): Int = items.size + 2
+
+        override fun getItem(position: Int): Any? = when {
+            position == 0 -> null
+            position == 1 -> null
+            else -> items[position - 2]
+        }
+
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        /** 收起态：Spinner 本体显示的单行。 */
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val view = (convertView ?: LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_preset_spinner_selected, parent, false)) as TextView
+            view.text = when {
+                position == 0 -> DEFAULT_ITEM_LABEL
+                position == 1 -> CUSTOM_ITEM_LABEL
+                else -> items[position - 2].name
+            }
+            return view
+        }
+
+        /**
+         * 展开态：所有 position 共用同一个布局。
+         * 复用时必须重置「⋮ 按钮的可见性」和「整行的点击监听」，
+         * 否则从固定项(⋮ 隐藏)复用到预设行时会看不到 ⋮、点了也没反应。
+         */
+        override fun getDropDownView(
+            position: Int,
+            convertView: View?,
+            parent: ViewGroup
+        ): View {
+            val view = convertView ?: LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_preset_spinner_dropdown, parent, false)
+            val nameView = view.findViewById<TextView>(R.id.tv_preset_name)
+            val moreBtn = view.findViewById<ImageButton>(R.id.btn_preset_more)
+            when {
+                position == 0 -> {
+                    // 「默认」：写回 AiImageGenerator 的原始默认值
+                    nameView.text = DEFAULT_ITEM_LABEL
+                    moreBtn.visibility = View.GONE
+                    moreBtn.setOnClickListener(null)
+                    view.setOnClickListener { onDefaultClick(defaultContent) }
+                }
+
+                position == 1 -> {
+                    // 整行点击 = 新增。子 View 吃掉触摸后 Spinner 选中项不变，不会误触发套用
+                    nameView.text = ADD_ITEM_LABEL
+                    moreBtn.visibility = View.GONE
+                    moreBtn.setOnClickListener(null)
+                    view.setOnClickListener { onAddClick() }
+                }
+
+                else -> {
+                    val item = items[position - 2]
+                    nameView.text = if (item.pinned) "📌 ${item.name}" else item.name
+                    moreBtn.visibility = View.VISIBLE
+                    moreBtn.setOnClickListener { onMoreClick(item, moreBtn) }
+                    // 整行点击 = 套用这条预设
+                    view.setOnClickListener { onItemClick(item, position) }
+                }
+            }
+            return view
+        }
+    }
 }

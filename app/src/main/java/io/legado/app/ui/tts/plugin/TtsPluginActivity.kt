@@ -115,6 +115,8 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             // 切换 tab 不改数据内容，直接重建当前列表行即可，无需重新读盘
             override fun onTabSelected(tab: TabLayout.Tab) {
                 currentTab = tab.position
+                // 分组只在配置列表里存在，插件管理 Tab 下要把文件夹图标收起来
+                syncAddGroupMenuVisibility()
                 if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
             }
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit
@@ -131,23 +133,6 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             }
         })
         binding.ivClear.setOnClickListener { binding.etSearch.setText(""); searchQuery = ""; rebuildRows() }
-
-        binding.fabAdd.setOnClickListener {
-            when (currentTab) {
-                TAB_CONFIGS -> {
-                    val options = arrayOf("新增配置", "新增分组")
-                    android.app.AlertDialog.Builder(this)
-                        .setTitle("请选择")
-                        .setItems(options) { _, which ->
-                            when (which) {
-                                0 -> openConfigEditor(null, true)
-                                1 -> showAddGroupDialog()
-                            }
-                        }.show()
-                }
-                TAB_PLUGINS -> showPluginEditor(null)
-            }
-        }
 
         adapter.setCallbacks(
             onConfigClick = { config -> openConfigEditor(config.id, false) },
@@ -451,11 +436,19 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
 
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.tts_plugin, menu)
+        // 「新建分组」只对配置列表有意义，插件管理 Tab 下隐藏
+        menu.findItem(R.id.menu_add_group)?.isVisible = currentTab == TAB_CONFIGS
         return super.onCompatCreateOptionsMenu(menu)
+    }
+
+    /** 配置列表 / 插件管理 两个 Tab 切换时同步「新建分组」图标的显隐 */
+    private fun syncAddGroupMenuVisibility() {
+        invalidateOptionsMenu()
     }
 
     override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            R.id.menu_add_group -> showAddGroupDialog()
             R.id.menu_add -> when (currentTab) {
                 TAB_CONFIGS -> openConfigEditor(null, true)
                 TAB_PLUGINS -> showPluginEditor(null)

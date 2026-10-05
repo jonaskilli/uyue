@@ -79,6 +79,14 @@ object TtsBackup {
     private const val FILE_SP_HUNYUAN = "dsProxy.json"
     private const val FILE_SP_JREAD = "jreadVoiceEngine.json"
 
+    /**
+     * AI 生图「题材/画风」自定义预设的存储。
+     * 名字必须与 [io.legado.app.model.AiImagePromptPresetStore] 里用的完全一致，
+     * 否则备份出来是空的、恢复也读不到。
+     */
+    private const val SP_AI_IMAGE_PRESET = "aiImagePromptPresets"
+    private const val FILE_SP_AI_IMAGE_PRESET = "aiImagePromptPresets.json"
+
     /** 外部引擎数据目录在 zip 内的父目录 */
     private const val DIR_CHAJIAN = "chajian"
 
@@ -107,6 +115,12 @@ object TtsBackup {
     const val K_CHARACTER = "characterProfile"
     const val K_HUNYUAN = "hunyuan"
     const val K_JREAD = "jreadVoice"
+    /**
+     * AI 生图「题材/画风」自定义预设。
+     * 与 [K_AI_IMAGE] 分开：K_AI_IMAGE 备的是 Room 里的模板（模板里已选中的题材/画风内容），
+     * 这里备的是用户自己新增/修改/置顶的那份预设列表，存在 SharedPreferences 里。
+     */
+    const val K_AI_IMAGE_PRESET = "aiImagePromptPreset"
     const val K_EXTERNAL = "externalFiles"
 
     /** 备份里一项可勾选恢复的内容 */
@@ -120,12 +134,13 @@ object TtsBackup {
 
     /** 所有可单独备份/恢复的模块 */
     private fun allModuleKeys() = listOf(
-        K_AI_IMAGE, K_AI_CHAPTER_FIX, K_AI_PROFILE, K_BGM_PROMPT, K_BGM_PROVIDER,
-        K_TTS_SCRIPT, K_CHARACTER, K_HUNYUAN, K_JREAD, K_EXTERNAL
+        K_AI_IMAGE, K_AI_IMAGE_PRESET, K_AI_CHAPTER_FIX, K_AI_PROFILE, K_BGM_PROMPT,
+        K_BGM_PROVIDER, K_TTS_SCRIPT, K_CHARACTER, K_HUNYUAN, K_JREAD, K_EXTERNAL
     )
 
     private fun moduleTitle(key: String): String = when (key) {
         K_AI_IMAGE -> "AI 生图模板"
+        K_AI_IMAGE_PRESET -> "AI 生图题材/画风预设"
         K_AI_CHAPTER_FIX -> "AI 章节修复模板"
         K_AI_PROFILE -> "AI 人设模板"
         K_BGM_PROMPT -> "背景音乐 AI 提示词"
@@ -231,6 +246,9 @@ object TtsBackup {
     private fun writeSharedPrefs(keys: Collection<String>) {
         if (K_HUNYUAN in keys) writeSpEncrypted(FILE_SP_HUNYUAN, SP_HUNYUAN)
         if (K_JREAD in keys) writeSpEncrypted(FILE_SP_JREAD, SP_JREAD)
+        if (K_AI_IMAGE_PRESET in keys) {
+            writeSpEncrypted(FILE_SP_AI_IMAGE_PRESET, SP_AI_IMAGE_PRESET)
+        }
     }
 
     /**
@@ -307,7 +325,7 @@ object TtsBackup {
         listOf(
             FILE_AI_IMAGE, FILE_AI_CHAPTER_FIX, FILE_AI_PROFILE, FILE_BGM_PROMPT,
             FILE_BGM_PROVIDER, FILE_TTS_SCRIPT, FILE_CHARACTER,
-            FILE_SP_HUNYUAN, FILE_SP_JREAD
+            FILE_SP_HUNYUAN, FILE_SP_JREAD, FILE_SP_AI_IMAGE_PRESET
         ).forEach {
             val file = File(backupPath, it)
             if (file.exists()) files.add(file)
@@ -360,6 +378,7 @@ object TtsBackup {
             }
         }
         add(K_AI_IMAGE, moduleTitle(K_AI_IMAGE), FILE_AI_IMAGE)
+        add(K_AI_IMAGE_PRESET, moduleTitle(K_AI_IMAGE_PRESET), FILE_SP_AI_IMAGE_PRESET)
         add(K_AI_CHAPTER_FIX, moduleTitle(K_AI_CHAPTER_FIX), FILE_AI_CHAPTER_FIX)
         add(K_AI_PROFILE, moduleTitle(K_AI_PROFILE), FILE_AI_PROFILE)
         add(K_BGM_PROMPT, moduleTitle(K_BGM_PROMPT), FILE_BGM_PROMPT)
@@ -433,6 +452,11 @@ object TtsBackup {
         val jread = K_JREAD in keys
         if (hunyuan) readSpEncrypted(FILE_SP_HUNYUAN, SP_HUNYUAN)
         if (jread) readSpEncrypted(FILE_SP_JREAD, SP_JREAD)
+        // 旧备份(本功能上线前导出的)里没有这个文件, readSpEncrypted 内部有 exists 判断会直接返回,
+        // 不会影响其余模块恢复, 所以这里可以无条件按 key 调用
+        if (K_AI_IMAGE_PRESET in keys) {
+            readSpEncrypted(FILE_SP_AI_IMAGE_PRESET, SP_AI_IMAGE_PRESET)
+        }
         if (hunyuan || jread) {
             // 两者都有内存缓存, 恢复完必须失效, 否则界面还显示旧数据
             runCatching {
