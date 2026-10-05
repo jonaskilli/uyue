@@ -8,6 +8,11 @@
 
     <color name="background">@color/md_grey_900</color>
     <color name="background_card">@color/md_grey_850</color>
+    <!-- TTS 引擎插件配置列表：条目卡片底色 + 描边色。
+         压缩包只做了日间色，夜间按同样的灰阶思路推导：
+         列表区底色 background_menu 夜间 = #424242，卡片要比它更亮才看得出卡片。 -->
+    <color name="tts_config_card_bg">#4A4A4A</color>
+    <color name="tts_config_card_stroke">#666666</color>
     <color name="background_menu">@color/md_grey_800</color>
     <color name="background_prefs">#10303030</color>
 

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  分组头 / 子分组头：保持改造前的原样（普通行 + 整行按压反馈），不加卡片、不加框。
+  只有配置条目(item_tts_plugin_config)才做成带框卡片。
+  层级缩进由适配器直接加在本视图上。
+-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"

@@ -56,10 +56,22 @@
             android:layout_height="0dp"
             android:layout_weight="1">
 
-            <io.legado.app.ui.widget.recycler.scroller.FastScrollRecyclerView
+            <!--
+              这里刻意用普通 RecyclerView，不用 FastScrollRecyclerView。
+              FastScrollRecyclerView 会把 FastScroller 以 gravity=END、width=wrap_content
+              加到父 FrameLayout 上，24dp 宽(8dp 柄宽 + 8dp paddingStart + 8dp paddingEnd ≈ 84px)
+              的载体常驻盖在列表右缘，正好压住卡片右边框，导致右框看不见。
+              本页只需要上下拖动，不需要快速滚动条，所以直接不用它。
+            -->
+            <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/recycler_view"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent" />
+                android:layout_height="match_parent"
+                android:background="@color/background_menu"
+                android:clipToPadding="false"
+                android:paddingTop="4dp"
+                android:paddingBottom="8dp"
+                android:scrollbars="none" />
 
             <LinearLayout
                 android:id="@+id/layout_empty"

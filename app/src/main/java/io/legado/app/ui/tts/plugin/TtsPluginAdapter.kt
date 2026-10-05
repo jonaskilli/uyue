@@ -437,6 +437,8 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         private val cbEnabled: CheckBox = itemView.findViewById(R.id.cb_enabled)
         private val ivPreview: ImageView = itemView.findViewById(R.id.iv_preview)
         private val ivMore: ImageView = itemView.findViewById(R.id.iv_more)
+        private val contentLayout: View = itemView.findViewById(R.id.layout_content)
+        private val basePaddingStart = contentLayout.paddingStart
 
         fun bind(config: JReadVoiceEngine.VoiceConfig, indentLevel: Int = 0) {
             // 主名称（左上角）：取「显示名称」，即编辑页「显示名称」输入框里的值；
@@ -459,7 +461,14 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
                 raw.toIntOrNull() ?: 24000
             }.getOrDefault(24000)
             tvParams.text = "${config.voice} | ${sampleRate}hz | 音量:${"%.1f".format(config.volume)} | 语速:${"%.1f".format(config.speed)} | 音高:${"%.1f".format(config.pitch)}"
-            itemView.setPadding(dpToPx(itemView.context, indentLevel * 24), itemView.paddingTop, itemView.paddingRight, itemView.paddingBottom)
+            // 层级缩进只加在内层 layout_content 上，外层卡片（含描边）保持完整、不跟着内缩，
+            // 否则缩进层级一深卡片宽度就不对称、明显歪。分组头没有卡片，仍直接改 itemView。
+            contentLayout.setPaddingRelative(
+                basePaddingStart + dpToPx(itemView.context, indentLevel * 24),
+                contentLayout.paddingTop,
+                contentLayout.paddingEnd,
+                contentLayout.paddingBottom
+            )
             cbEnabled.setOnCheckedChangeListener(null)
             cbEnabled.isChecked = config.enabled
             cbEnabled.setOnCheckedChangeListener { _, checked -> onConfigToggle?.invoke(config, checked) }
@@ -493,9 +502,15 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         private val ivMore: ImageView = itemView.findViewById(R.id.iv_more)
 
         fun bind(plugin: JReadVoiceEngine.VoicePlugin) {
-            tvTag.text = plugin.name.ifBlank { "未命名插件" }
+            // 插件名是这行唯一的主信息，放左上角用大字黑字；原先这里显示的 pluginId
+            // 是插件对外部的内部标识（导入来源多是 UUID / 长数字），对用户识别插件没有帮助，
+            // 反而把最显眼的位置占成空白或一串无意义字符，所以不再显示。
+            tvName.text = plugin.name.ifBlank { "未命名插件" }
+            // 名称已经当主标题用了，右上角那个小标签不再重复挂一次
+            tvTag.visibility = View.GONE
+            // 字号只在插件管理页放大，配置列表页仍用布局里的 14sp
+            tvName.textSize = PLUGIN_NAME_TEXT_SIZE
             tvPluginName.text = ""
-            tvName.text = plugin.pluginId.ifBlank { plugin.id }.takeIf { !looksLikeOpaquePluginId(it) }.orEmpty()
             tvParams.text = listOf(plugin.author, plugin.version).filter { it.isNotBlank() }.joinToString(" | ")
             cbEnabled.setOnCheckedChangeListener(null)
             cbEnabled.isChecked = plugin.enabled
@@ -523,6 +538,9 @@ class TtsPluginAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         private const val TYPE_SUB_GROUP_HEADER = 1
         private const val TYPE_CONFIG = 2
         private const val TYPE_PLUGIN = 3
+
+        /** 插件管理页左上角插件名的字号，比配置列表的 14sp 更大更醒目 */
+        private const val PLUGIN_NAME_TEXT_SIZE = 16f
 
         fun looksLikeOpaquePluginId(id: String): Boolean {
             if (id.isBlank()) return true

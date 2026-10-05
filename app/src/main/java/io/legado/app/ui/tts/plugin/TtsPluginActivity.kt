@@ -17,7 +17,6 @@ import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.tabs.TabLayout
 import io.legado.app.R
@@ -82,7 +81,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         binding.recyclerView.setEdgeEffectColor(primaryColor)
         binding.recyclerView.layoutManager = LinearLayoutManager(this)
         binding.recyclerView.adapter = adapter
-        binding.recyclerView.addItemDecoration(DividerItemDecoration(this, DividerItemDecoration.VERTICAL))
+        // 卡片自带描边 + 阴影做条目分隔，不再加横向分隔线（横线叠在卡片上会显得脏）
         // 长按拖拽排序配置项
         adapter.onConfigMoved = { orderedIds ->
             lifecycleScope.launch {
@@ -826,29 +825,87 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         }
     }
 
+    /**
+     * 更换插件的选择弹窗。
+     * 原先直接用系统 [android.app.AlertDialog.Builder.setItems]，它渲染出来就是一行纯文字，
+     * 行与行之间只有空白间距、没有底色也没有边界，插件一多就全糊成一片分不清哪个是哪个。
+     * 这里换成 ListView + 自定义适配器，每行渲染成一张卡片（和配置列表同一套卡片视觉），
+     * 滚动与点击仍由系统 ListView 保证，不额外手写。
+     */
     private fun showReplacePluginDialog(groupName: String, subGroupName: String?) {
         lifecycleScope.launch {
             val plugins = allPlugins
             if (plugins.isEmpty()) { toastOnUi("暂无可用插件"); return@launch }
             val names = plugins.map { TtsPluginAdapter.displayNameForConfigCard(it) }
-            android.app.AlertDialog.Builder(this@TtsPluginActivity)
-                .setTitle("选择新插件").setItems(names.toTypedArray()) { _, which ->
-                    val newPlugin = plugins[which]
-                    lifecycleScope.launch {
-                        withContext(Dispatchers.IO) {
-                            val configs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity)
-                            val toUpdate = configs.filter { c ->
-                                c.groupName.ifBlank { "默认分组" } == groupName &&
+            val listView = android.widget.ListView(this@TtsPluginActivity).apply {
+                divider = null
+                dividerHeight = 0
+                // 卡片自身已有 3dp 上下间距，这里再补一点，让首尾卡片不贴着弹窗边缘
+                val pad = TtsPluginAdapter.dpToPx(context, 4)
+                setPadding(0, pad, 0, pad)
+                clipToPadding = false
+                adapter = PluginPickAdapter(names, plugins)
+            }
+            val dialog = android.app.AlertDialog.Builder(this@TtsPluginActivity)
+                .setTitle("选择新插件")
+                .setView(listView)
+                .setNegativeButton("取消", null)
+                .create()
+            listView.setOnItemClickListener { _, _, which, _ ->
+                val newPlugin = plugins[which]
+                dialog.dismiss()
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) {
+                        val configs = JReadVoiceEngine.listConfigs(this@TtsPluginActivity)
+                        val toUpdate = configs.filter { c ->
+                            c.groupName.ifBlank { "默认分组" } == groupName &&
                                 (subGroupName == null || c.subGroupName.ifBlank { "默认" } == subGroupName)
-                            }.map { it.copy(pluginId = newPlugin.pluginId.ifBlank { newPlugin.id }) }
-                            JReadVoiceEngine.saveConfigsBatch(this@TtsPluginActivity, toUpdate)
-                            val updateIds = toUpdate.map { it.id }.toSet()
-                            allConfigs = configs.map { if (updateIds.contains(it.id)) it.copy(pluginId = newPlugin.pluginId.ifBlank { newPlugin.id }) else it }
-                        }
-                        toastOnUi("已更换插件为 ${newPlugin.name}")
-                        refreshListLight()
+                        }.map { it.copy(pluginId = newPlugin.pluginId.ifBlank { newPlugin.id }) }
+                        JReadVoiceEngine.saveConfigsBatch(this@TtsPluginActivity, toUpdate)
+                        val updateIds = toUpdate.map { it.id }.toSet()
+                        allConfigs = configs.map { if (updateIds.contains(it.id)) it.copy(pluginId = newPlugin.pluginId.ifBlank { newPlugin.id }) else it }
                     }
-                }.show()
+                    toastOnUi("已更换插件为 ${newPlugin.name}")
+                    refreshListLight()
+                }
+            }
+            dialog.show()
+        }
+    }
+
+    /**
+     * "选择新插件"弹窗的每行适配器：主行插件名，副行「作者 | 版本」。
+     * 副行为空时整行隐藏，不留一条只有空白的行。
+     */
+    private inner class PluginPickAdapter(
+        private val names: List<String>,
+        private val plugins: List<JReadVoiceEngine.VoicePlugin>
+    ) : android.widget.BaseAdapter() {
+
+        override fun getCount(): Int = plugins.size
+
+        override fun getItem(position: Int): Any = plugins[position]
+
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(
+            position: Int,
+            convertView: View?,
+            parent: android.view.ViewGroup
+        ): View {
+            val view = convertView
+                ?: layoutInflater.inflate(R.layout.item_select_plugin, parent, false)
+            val plugin = plugins[position]
+            view.findViewById<TextView>(R.id.tv_pick_name).text =
+                names[position].ifBlank { "未命名插件" }
+            val sub = listOf(plugin.author, plugin.version)
+                .filter { it.isNotBlank() }
+                .joinToString(" | ")
+            view.findViewById<TextView>(R.id.tv_pick_sub).apply {
+                text = sub
+                visibility = if (sub.isBlank()) View.GONE else View.VISIBLE
+            }
+            return view
         }
     }
 

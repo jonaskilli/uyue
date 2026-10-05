@@ -52,7 +52,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:layout_marginStart="5dp"
-                    android:text="恢复密钥"
+                    android:text="密钥管理"
                     android:backgroundTint="#FF9800"
                     android:textColor="@android:color/white"/>
 

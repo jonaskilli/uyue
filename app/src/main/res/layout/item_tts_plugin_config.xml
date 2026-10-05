@@ -1,16 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  配置列表的单条卡片。
+  卡片要"圆角 + 描边 + 阴影"三层叠在一起，才能在满屏列表里把每一条单独框出来；
+  光靠一条横线、或只差一点底色是看不出边界的。
+  描边(tts_config_card_stroke)负责"框"，elevation 阴影负责"浮起来"，
+  底色(tts_config_card_bg)比列表区底色更亮，负责"这块是独立的"。
+  根节点必须是普通 LinearLayout：MaterialCardView 构造函数强制要求 App 主题为
+  Theme.MaterialComponents，而本项目用的是 Theme.AppCompat.DayNight.NoActionBar，
+  用了会在 RecyclerView 布局时抛 IllegalArgumentException 直接崩溃。
+  内层 layout_content 单独承担 padding：层级缩进只加在它身上，
+  加在外层卡片上会把卡片本体和描边一起内缩、宽度变得不对称。
+-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:paddingStart="10dp"
-    android:paddingTop="6dp"
-    android:paddingEnd="4dp"
-    android:paddingBottom="6dp"
-    android:gravity="center_vertical"
-    android:background="?attr/selectableItemBackground">
+    android:layout_marginHorizontal="8dp"
+    android:layout_marginTop="4dp"
+    android:layout_marginBottom="4dp"
+    android:elevation="2dp"
+    android:background="@drawable/bg_tts_config_card">
+
+    <LinearLayout
+        android:id="@+id/layout_content"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="4dp"
+        android:paddingBottom="8dp"
+        android:gravity="center_vertical">
 
     <CheckBox
         android:id="@+id/cb_enabled"
@@ -114,5 +135,7 @@
         android:background="?attr/selectableItemBackgroundBorderless"
         android:contentDescription="更多"
         app:tint="@color/primaryText" />
+
+    </LinearLayout>
 
 </LinearLayout>

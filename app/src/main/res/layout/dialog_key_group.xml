@@ -61,7 +61,7 @@
         android:minHeight="30dp"
         android:paddingStart="8dp"
         android:paddingEnd="8dp"
-        android:text="恢复"
+        android:text="使用"
         android:textSize="11sp" 
             android:paddingTop="2dp"
             android:paddingBottom="2dp"

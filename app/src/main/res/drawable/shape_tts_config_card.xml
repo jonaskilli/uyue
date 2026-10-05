@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  单条配置卡片的形状：填充 + 描边，圆角 10dp。
+  不用 MaterialCardView 是因为它构造函数强制要求 App 主题为 Theme.MaterialComponents，
+  而本项目全程使用 Theme.AppCompat.DayNight.NoActionBar，套上去会直接抛
+  IllegalArgumentException("The style on this component requires your app theme to be Theme.MaterialComponents")，
+  在 RecyclerView 布局阶段崩溃。
+  纯 shape 画法不依赖任何主题，任何 Activity 都能用。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 卡片底色：与列表区底色(background_menu)明显不同，保证"这块是独立的" -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/tts_config_card_bg" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+
+    <!--
+      卡片描边：这就是把每一条"框起来"的那根线。
+      必须用 android:left/top/right/bottom 内缩 1dp，不能直接画在视图边界上：
+      描边是居中描在 shape 路径上的，贴着视图边界时外半像素会被视图裁掉，
+      右侧那条边就只剩不到 1px，看起来像"框没闭合、被截断"。
+      内缩 1dp 后描边完整落在视图内部，四条边都能闭合。
+      圆角相应从 10dp 收到 9dp，保持描边与填充轮廓视觉对齐。
+    -->
+    <item
+        android:left="1dp"
+        android:top="1dp"
+        android:right="1dp"
+        android:bottom="1dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/tts_config_card_stroke" />
+            <corners android:radius="9dp" />
+        </shape>
+    </item>
+
+</layer-list>

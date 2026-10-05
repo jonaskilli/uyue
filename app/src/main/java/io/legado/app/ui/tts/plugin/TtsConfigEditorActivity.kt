@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.text.InputType
 import android.text.TextWatcher
 import android.util.TypedValue
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
@@ -265,7 +266,7 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         binding.tvPostVolumeValue.text = if (config.postVolume <= 0f) "跟随" else String.format("%.2f", config.postVolume)
         binding.tvPostPitchValue.text = if (config.postPitch <= 0f) "跟随" else String.format("%.2f", config.postPitch)
         val pluginNames = listOf("单项直连/不使用插件") + plugins.map { TtsPluginAdapter.displayNameForConfigCard(it) }
-        binding.spinnerPlugin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, pluginNames)
+        binding.spinnerPlugin.adapter = PluginSpinnerAdapter(this, pluginNames, plugins)
         val pluginIdx = plugins.indexOfFirst { it.id == config.pluginId || it.pluginId == config.pluginId }
         pluginDataFields = runCatching {
             val obj = JSONObject(config.dataJson.ifBlank { "{}" })
@@ -742,5 +743,38 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         editorSession = null
         super.onDestroy()
         mediaPlayer?.release(); mediaPlayer = null
+    }
+
+    /**
+     * 「声音插件」下拉列表适配器。
+     *
+     * 原来用的是系统 [android.R.layout.simple_spinner_dropdown_item]，展开后每行就是一条纯文字，
+     * 行与行之间没有底色也没有边界，插件一多就全糊成一片分不清哪个是哪个。
+     * 这里只重写 [getDropDownView]：展开时每行渲染成一张卡片，和配置列表、
+     * "更换插件"弹窗保持同一套卡片视觉；收起状态仍走 ArrayAdapter 默认逻辑（单行纯文本），
+     * 因为 Spinner 自身已经有 spinner_border 描边，再套卡片会显得重复且把控件撑高。
+     */
+    private inner class PluginSpinnerAdapter(
+        context: Context,
+        private val labels: List<String>,
+        private val plugins: List<JReadVoiceEngine.VoicePlugin>
+    ) : ArrayAdapter<String>(context, R.layout.item_spinner_plugin_selected, labels) {
+
+        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val view = convertView ?: LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_spinner_plugin_dropdown, parent, false)
+            view.findViewById<TextView>(R.id.tv_spin_plugin_name).text =
+                labels.getOrNull(position).orEmpty()
+            // 第 0 项是"单项直连/不使用插件"，没有对应插件对象，副行留空
+            val plugin = if (position > 0) plugins.getOrNull(position - 1) else null
+            val sub = plugin?.let {
+                listOf(it.author, it.version).filter { v -> v.isNotBlank() }.joinToString(" | ")
+            }.orEmpty()
+            view.findViewById<TextView>(R.id.tv_spin_plugin_sub).apply {
+                text = sub
+                visibility = if (sub.isBlank()) View.GONE else View.VISIBLE
+            }
+            return view
+        }
     }
 }

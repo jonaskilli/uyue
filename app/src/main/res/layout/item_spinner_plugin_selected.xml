@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  「声音插件」Spinner 收起时显示的单行。
+  根节点直接是 TextView，并复用 android.R.id.text1，
+  这样 ArrayAdapter.createViewFromResource 会自动把插件名填进来，不用额外写代码。
+  收起状态刻意保持朴素：Spinner 自身已有 spinner_border 描边，再套卡片会显得重复且把控件撑高。
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@android:id/text1"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="10dp"
+    android:paddingTop="6dp"
+    android:paddingEnd="10dp"
+    android:paddingBottom="6dp"
+    android:textSize="14sp"
+    android:textColor="@color/primaryText"
+    android:maxLines="1"
+    android:ellipsize="end"
+    tools:text="通义千问-精简版" />
