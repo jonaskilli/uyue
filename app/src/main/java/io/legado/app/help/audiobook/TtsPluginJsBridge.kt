@@ -41,6 +41,16 @@ class TtsPluginJsBridge {
             private set
 
         /**
+         * 本次合成实际使用到的配置 id。
+         * 后处理参数必须按这条配置解析：配置表里存在大量同名标签（内置音色池 400+ 条），
+         * 只按 voiceTag 反查会取到别的配置，导致条目/分组/插件级后处理参数失效。
+         */
+        @Volatile
+        @JvmStatic
+        var lastConfigId: String = ""
+            private set
+
+        /**
          * 本次朗读的音频是否已在 synthesize 返回前按各角色自身的后处理参数调节完毕。
          * 为 true 时合并阶段不再做统一调速（各角色参数不同，不能用一套参数调）。
          */
@@ -53,6 +63,7 @@ class TtsPluginJsBridge {
         fun resetSynthesizeFlag() {
             synthesizeCalled = false
             lastVoiceTag = ""
+            lastConfigId = ""
             synthesisPostProcessed = false
         }
 
@@ -104,9 +115,12 @@ class TtsPluginJsBridge {
         }
         val requestId = UUID.randomUUID().toString()
         val pointerJson = JSONObject().put("voiceTag", voiceTag).toString()
+        // 预先按合成口径选定配置，后处理用同一条，避免按标签反查命中同名配置
+        val usedConfig = JReadVoiceEngine.findPlayableConfig(context, voiceTag)
+        lastConfigId = usedConfig?.id.orEmpty()
         return try {
             val bytes = JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
-            applyPostAudioImmediately(bytes, voiceTag)
+            applyPostAudioImmediately(bytes, usedConfig, voiceTag)
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesize 失败: tag=$voiceTag error=${e.message}", e)
             Log.e(TAG, "synthesize failed: tag=$voiceTag", e)
@@ -130,6 +144,7 @@ class TtsPluginJsBridge {
                 return null
             }
         lastVoiceTag = config.voiceTag
+        lastConfigId = config.id
         // 纯符号切片前置拦截：非中文/英文/数字直接返回 0.2 秒静音，不进引擎
         if (isSymbolOnly(text)) {
             AppLog.putDebug("[TtsPluginJsBridge] 纯符号切片，返回0.2秒静音: configId=$configId textLen=${text.length}")
@@ -140,7 +155,7 @@ class TtsPluginJsBridge {
         val pointerJson = JSONObject().put("voiceTag", config.voiceTag).toString()
         return try {
             val bytes = JReadVoiceEngine.synthesizeConfigLineAudio(context, config, text, pointerJson, requestId)
-            applyPostAudioImmediately(bytes, config.voiceTag)
+            applyPostAudioImmediately(bytes, config, config.voiceTag)
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesizeByConfigId 失败: configId=$configId error=${e.message}", e)
             Log.e(TAG, "synthesizeByConfigId failed: configId=$configId", e)
@@ -154,10 +169,15 @@ class TtsPluginJsBridge {
      * 让引擎/脚本后续拿到的就是成品，合并阶段只做纯拼接。
      * 参数全部为默认值时字节原样返回（零转码开销），但同样置位标志以免合并阶段重复调速。
      */
-    private fun applyPostAudioImmediately(bytes: ByteArray?, voiceTag: String): ByteArray? {
+    private fun applyPostAudioImmediately(
+        bytes: ByteArray?,
+        config: JReadVoiceEngine.VoiceConfig?,
+        voiceTag: String,
+    ): ByteArray? {
         if (bytes == null || bytes.isEmpty()) return bytes
         synthesisPostProcessed = true
-        val params = JReadVoiceEngine.resolvePostAudioParams(context, voiceTag)
+        val params = config?.let { JReadVoiceEngine.resolvePostAudioParams(context, it) }
+            ?: JReadVoiceEngine.resolvePostAudioParams(context, voiceTag)
         if (params.resolved().isDefault()) return bytes
         // 输入可能是插件原始格式（mp3 等）或标准 WAV，decodeToStandardWav 统一处理：
         // 解码 → 重采样 24k → Sonic(语速/音量/音高) → 封装 WAV

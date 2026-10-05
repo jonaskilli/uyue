@@ -387,20 +387,48 @@ object JReadVoiceEngine {
         (io.legado.app.help.config.AppConfig.speechRatePlayFine + 50) / 100f
 
     /**
-     * 解析某个 voiceTag 的最终后处理音频参数
-     * 优先级：配置 → 小分组(thirdGroup) → 中分组(subGroup) → 大分组(group) → 全局
-     * 最终语速再乘以朗读界面语速滑块系数与插件级后处理参数。
+     * 解析某个 voiceTag 的最终后处理音频参数。
+     *
+     * 【关键】选配置的口径必须与合成完全一致（复用 [findConfig]：仅启用 + 可用 + 标签别名匹配 + 兜底），
+     * 绝不能直接 `firstOrNull { it.voiceTag == voiceTag }`：配置表里内置音色池有 400+ 条同名标签
+     * （如「旁白」「少女01」），那样取到的大概率是内置那条 post*=0 的配置，
+     * 于是条目级/分组级/插件级后处理参数全部读不到（表现为"配了没效果"），
+     * 而全局参数与配置无关所以照常生效。
      */
     fun resolvePostAudioParams(context: Context, voiceTag: String): PostAudioParams {
         val uiSpeedFactor = readAloudUiSpeedFactor()
-        val config = listConfigs(context, ensureBuiltIns = false)
-            .firstOrNull { it.voiceTag == voiceTag }
+        val config = findConfig(context, voiceTag)
             ?: return PostAudioParams(
-                speed = PostAudioParams.DEFAULT * uiSpeedFactor,
+                speed = (PostAudioParams.DEFAULT * uiSpeedFactor)
+                    .coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
                 volume = PostAudioParams.DEFAULT,
                 pitch = PostAudioParams.DEFAULT,
             )
+        return resolvePostAudioParams(context, config, uiSpeedFactor)
+    }
 
+    /**
+     * 按配置 id 解析最终后处理音频参数。
+     * 供脚本用 `synthesizeByConfigId` 合成时使用：配置已确定，无同名歧义。
+     */
+    fun resolvePostAudioParamsById(context: Context, configId: String): PostAudioParams? {
+        if (configId.isBlank()) return null
+        val config = findConfigById(context, configId) ?: return null
+        return resolvePostAudioParams(context, config, readAloudUiSpeedFactor())
+    }
+
+    /**
+     * 以「已经确定下来的那条配置」解析最终后处理音频参数。
+     * 合成与后处理必须用同一条配置，否则条目/分组/插件级参数会作用到别的配置上。
+     */
+    fun resolvePostAudioParams(context: Context, config: VoiceConfig): PostAudioParams =
+        resolvePostAudioParams(context, config, readAloudUiSpeedFactor())
+
+    private fun resolvePostAudioParams(
+        context: Context,
+        config: VoiceConfig,
+        uiSpeedFactor: Float,
+    ): PostAudioParams {
         val groups = listGroups(context)
         val globalParams = PostAudioParams(
             io.legado.app.help.config.AppConfig.ttsPostSpeed,
@@ -1716,9 +1744,21 @@ object JReadVoiceEngine {
         return requestAudioToFile(context, config, text, voiceTag, pointer, requestId)
     }
 
+    /** 按 id 取配置（不做启用/可用性过滤，配置 id 唯一） */
+    fun findConfigById(context: Context, configId: String): VoiceConfig? {
+        if (configId.isBlank()) return null
+        return listConfigs(context, ensureBuiltIns = false).firstOrNull { it.id == configId }
+    }
+
+    /**
+     * 与合成完全一致地按标签选出实际生效的配置。
+     * 供 JS 桥在合成后对「同一条配置」施加条目/分组/插件级后处理参数。
+     */
+    fun findPlayableConfig(context: Context, voiceTag: String): VoiceConfig? =
+        findConfig(context, voiceTag)
+
     private fun findConfig(context: Context, voiceTag: String): VoiceConfig? {
-        val configs = listConfigs(context).filter { it.enabled }
-        // 预取插件列表一次，传给 isPlayable/resolveRequest，避免每个候选配置都重新 listPlugins
+        val configs = listConfigs(context).filter { it.enabled }        // 预取插件列表一次，传给 isPlayable/resolveRequest，避免每个候选配置都重新 listPlugins
         val plugins = listPlugins(context)
         val normalizedTag = normalizeVoiceTag(voiceTag)
         val exact = findConfigIn(configs, normalizedTag)

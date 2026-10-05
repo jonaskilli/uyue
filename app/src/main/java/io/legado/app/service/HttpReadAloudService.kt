@@ -1214,10 +1214,15 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                     }
                     val ttsUsed = io.legado.app.help.audiobook.TtsPluginJsBridge.synthesizeCalled
                     val postParams = if (ttsUsed && !io.legado.app.help.audiobook.TtsPluginJsBridge.synthesisPostProcessed) {
-                        val tag = io.legado.app.help.audiobook.TtsPluginJsBridge.lastVoiceTag
-                        if (tag.isNotBlank()) {
-                            io.legado.app.help.audiobook.JReadVoiceEngine.resolvePostAudioParams(appCtx, tag)
-                        } else null
+                        // 优先按实际合成所用的配置 id 解析，配置表里同名标签众多，
+                        // 只按 voiceTag 反查会命中别的配置，使条目/分组/插件级后处理参数失效
+                        val bridge = io.legado.app.help.audiobook.TtsPluginJsBridge
+                        io.legado.app.help.audiobook.JReadVoiceEngine
+                            .resolvePostAudioParamsById(appCtx, bridge.lastConfigId)
+                            ?: bridge.lastVoiceTag.takeIf { it.isNotBlank() }
+                                ?.let {
+                                    io.legado.app.help.audiobook.JReadVoiceEngine.resolvePostAudioParams(appCtx, it)
+                                }
                     } else null
                     when (jsResult) {
                         is InputStream -> return TtsSpeakResult.Single(jsResult, forceConvertToWav = ttsUsed, postAudioParams = postParams)
@@ -1277,10 +1282,15 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                     }
                     val ttsUsed = io.legado.app.help.audiobook.TtsPluginJsBridge.synthesizeCalled
                     val postParams = if (ttsUsed && !io.legado.app.help.audiobook.TtsPluginJsBridge.synthesisPostProcessed) {
-                        val tag = io.legado.app.help.audiobook.TtsPluginJsBridge.lastVoiceTag
-                        if (tag.isNotBlank()) {
-                            io.legado.app.help.audiobook.JReadVoiceEngine.resolvePostAudioParams(appCtx, tag)
-                        } else null
+                        // 优先按实际合成所用的配置 id 解析，配置表里同名标签众多，
+                        // 只按 voiceTag 反查会命中别的配置，使条目/分组/插件级后处理参数失效
+                        val bridge = io.legado.app.help.audiobook.TtsPluginJsBridge
+                        io.legado.app.help.audiobook.JReadVoiceEngine
+                            .resolvePostAudioParamsById(appCtx, bridge.lastConfigId)
+                            ?: bridge.lastVoiceTag.takeIf { it.isNotBlank() }
+                                ?.let {
+                                    io.legado.app.help.audiobook.JReadVoiceEngine.resolvePostAudioParams(appCtx, it)
+                                }
                     } else null
                     when (jsResult) {
                         is InputStream -> return TtsSpeakResult.Single(jsResult, forceConvertToWav = ttsUsed, postAudioParams = postParams)

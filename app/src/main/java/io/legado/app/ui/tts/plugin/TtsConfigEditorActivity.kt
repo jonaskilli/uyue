@@ -511,6 +511,32 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
     }
 
     /**
+     * 试听播放：先套用后处理链路（分组 → 插件 → 全局 + 编辑页当前滑块值）再播。
+     * 编辑器里调「后语速/后音量/后音高」后能立刻听出效果，
+     * 也保证与朗读时的听感一致（否则试听走的是原始音频，参数看起来"没反应"）。
+     */
+    private suspend fun playPreviewAudio(
+        audioBytes: ByteArray,
+        config: JReadVoiceEngine.VoiceConfig,
+        requestId: String,
+    ) {
+        val postParams = JReadVoiceEngine.resolvePostAudioParams(this@TtsConfigEditorActivity, config)
+        val playedBytes = if (postParams.isDefault()) {
+            audioBytes
+        } else {
+            withContext(Dispatchers.IO) {
+                io.legado.app.utils.AudioDecodeUtil
+                    .decodeToStandardWav(audioBytes, postParams = postParams)
+            } ?: audioBytes
+        }
+        if (!isWindowUsable) return
+        val tempFile = withContext(Dispatchers.IO) {
+            java.io.File(cacheDir, "preview_${requestId}.wav").apply { writeBytes(playedBytes) }
+        }
+        playAudio(tempFile.absolutePath)
+    }
+
+    /**
      * 试听列表里指定位置的音色。
      *
      * 与 [previewConfig] 的区别：[previewConfig] 试听的是 spinner 当前选中的音色，
@@ -536,10 +562,7 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
                 }
             }
             if (audioBytes == null || audioBytes.isEmpty()) return@launch
-            if (!isWindowUsable) return@launch
-            val tempFile = java.io.File(cacheDir, "preview_${requestId}.wav")
-            tempFile.writeBytes(audioBytes)
-            playAudio(tempFile.absolutePath)
+            playPreviewAudio(audioBytes, tempConfig, requestId)
         }
     }
 
@@ -641,10 +664,7 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
                 }
             }
             if (audioBytes == null || audioBytes.isEmpty()) return@launch
-            if (!isWindowUsable) return@launch
-            val tempFile = java.io.File(cacheDir, "preview_${requestId}.wav")
-            tempFile.writeBytes(audioBytes)
-            playAudio(tempFile.absolutePath)
+            playPreviewAudio(audioBytes, tempConfig, requestId)
         }
     }
 

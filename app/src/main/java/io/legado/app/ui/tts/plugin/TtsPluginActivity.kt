@@ -1151,8 +1151,8 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             val groups = withContext(Dispatchers.IO) { JReadVoiceEngine.listGroups(this@TtsPluginActivity) }
             val group = groups.firstOrNull {
                 it.groupName == groupName &&
-                (subGroupName == null || it.subGroupName == subGroupName) &&
-                it.thirdGroupName.isBlank()
+                    (if (subGroupName == null) it.subGroupName.isBlank() else it.subGroupName == subGroupName) &&
+                    it.thirdGroupName.isBlank()
             }
             val curSpeed = group?.postSpeed ?: PostAudioParams.FOLLOW
             val curVolume = group?.postVolume ?: PostAudioParams.FOLLOW
@@ -1178,7 +1178,11 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     lifecycleScope.launch {
                         withContext(Dispatchers.IO) {
                             val existing = JReadVoiceEngine.listGroups(this@TtsPluginActivity)
-                                .firstOrNull { it.groupName == groupName && (subGroupName == null || it.subGroupName == subGroupName) && it.thirdGroupName.isBlank() }
+                                .firstOrNull {
+                                    it.groupName == groupName &&
+                                        (if (subGroupName == null) it.subGroupName.isBlank() else it.subGroupName == subGroupName) &&
+                                        it.thirdGroupName.isBlank()
+                                }
                             val updated = (existing ?: JReadVoiceEngine.VoiceGroup(groupName = groupName, subGroupName = subGroupName ?: "")).copy(
                                 postSpeed = speed, postVolume = volume, postPitch = pitch
                             )
