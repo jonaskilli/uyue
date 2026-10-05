@@ -383,6 +383,8 @@ object ProxyServer {
                 }
                 get("/v1/models") {
                     // 兜底列表：任何异常时仍返回合法 200 JSON，避免客户端报 500。
+                    // gpt-image-2 / gpt-image-1.5 不进列表：免密钥通道使用者太多会明显变慢，
+                    // 隐藏后仍可在客户端手动填模型名调用（识别靠 isStudioGlobalImageModel）。
                     val fallbackJson = """{"object":"list","data":[
                         {"id":"hy3-preview","object":"model","owned_by":"cnb"},
                         {"id":"longcat","object":"model","owned_by":"longcat"},
@@ -398,8 +400,6 @@ object ProxyServer {
                         {"id":"gml-plus","object":"model","owned_by":"zhipu"},
                         {"id":"glm-image","object":"model","owned_by":"zhipu"},
                         {"id":"glm-image-hd","object":"model","owned_by":"zhipu"},
-                        {"id":"gpt-image-2","object":"model","owned_by":"studioglobal"},
-                        {"id":"gpt-image-1.5","object":"model","owned_by":"studioglobal"},
                         {"id":"qwen","object":"model","owned_by":"qwen"},
                         {"id":"qwen-think","object":"model","owned_by":"qwen"},
                         {"id":"wenxin","object":"model","owned_by":"wenxin"}
@@ -421,8 +421,6 @@ object ProxyServer {
                             "gml-plus" to "zhipu",
                             "glm-image" to "zhipu",
                             "glm-image-hd" to "zhipu",
-                            StudioGlobalClient.MODEL_GPT_IMAGE_2 to "studioglobal",
-                            StudioGlobalClient.MODEL_GPT_IMAGE_15 to "studioglobal",
                             "qwen" to "qwen",
                             "qwen-think" to "qwen",
                             "wenxin" to "wenxin"
@@ -2248,8 +2246,6 @@ object ProxyServer {
             "gml-plus" to "zhipu",
             "glm-image" to "zhipu",
             "glm-image-hd" to "zhipu",
-            StudioGlobalClient.MODEL_GPT_IMAGE_2 to "studioglobal",
-            StudioGlobalClient.MODEL_GPT_IMAGE_15 to "studioglobal",
             "qwen" to "qwen",
             "qwen-think" to "qwen",
             "wenxin" to "wenxin"
