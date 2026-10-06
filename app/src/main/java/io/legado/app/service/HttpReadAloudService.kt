@@ -1754,10 +1754,30 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
     }
 
     private fun createSpeakFile(name: String, inputStream: InputStream) {
-        FileUtils.createFileIfNotExist("${ttsFolderPath}$name.mp3").outputStream().use { out ->
-            inputStream.use { input ->
-                input.copyTo(out)
+        // 合成未完成的音频一律不落盘：先写唯一的临时文件，只有整段合成完成才 rename 成
+        // 正式缓存文件（xxx.mp3）。被切章/手动翻页等操作打断（协程取消）或读流出错时，
+        // 直接删掉临时文件丢弃半截音频，绝不让半截文件留在正式缓存里被后续命中，
+        // 导致「某段每次只播一部分就跳下一段」。
+        // 停止行为与原来完全一致（由 downloadTask?.cancel() 决定），这里只保证
+        // 「没合成完就不落盘、半截的直接放弃」。
+        val target = File("${ttsFolderPath}$name.mp3")
+        // 临时名带时间戳与线程 id：即使主播放与预下载同时合成同一段也不会互相覆盖
+        val tmp = File("${ttsFolderPath}$name.mp3.${System.currentTimeMillis()}_${Thread.currentThread().id}.tmp")
+        try {
+            java.io.FileOutputStream(tmp).use { out ->
+                inputStream.use { input ->
+                    input.copyTo(out)
+                }
             }
+            if (target.exists()) target.delete()
+            if (!tmp.renameTo(target)) {
+                // 极端情况 rename 失败：宁可这次不缓存，也不留下半截文件
+                tmp.delete()
+            }
+        } catch (e: Exception) {
+            // 含协程取消（CancellationException）：合成一半的音频直接放弃
+            runCatching { tmp.delete() }
+            throw e
         }
     }
 
