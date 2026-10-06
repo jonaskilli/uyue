@@ -53,6 +53,13 @@ data class AiImageTemplate(
      */
     @ColumnInfo(defaultValue = "0")
     var strictFormat: Boolean = false,
+    /**
+     * 是否压缩大体积图片。
+     * 开启后：图片字节数超过 500KB 时转成 JPEG 落盘（PNG 生图常达2~3MB，压缩后通常降到十分之一），
+     * 低于 500KB 原样保留，避免小图被无谓重编码。
+     */
+    @ColumnInfo(defaultValue = "0")
+    var compressImage: Boolean = false,
     @ColumnInfo(defaultValue = "0")
     var lastUpdateTime: Long = System.currentTimeMillis(),
     /**

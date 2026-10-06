@@ -30,6 +30,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import splitties.init.appCtx
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -73,6 +74,15 @@ object AiImageGenerator {
 
     /** 每本书最多绑定的模板数量 */
     const val MAX_BOUND_TEMPLATES = 20
+
+    /**
+     * 「图片压缩」开关的阈值：图片字节数超过 500KB 才转 JPEG，
+     * 小于此值原样保存，避免小图被无谓重编码反而变大。
+     */
+    const val COMPRESS_THRESHOLD_BYTES = 500 * 1024
+
+    /** 转 JPEG 使用的质量参数（兼顾清晰度与体积） */
+    const val COMPRESS_JPEG_QUALITY = 88
 
     /** 模板总数上限（新建模板时检查） */
     const val MAX_TEMPLATES = 20
@@ -740,6 +750,51 @@ object AiImageGenerator {
         return File(cacheDir, "${cacheKey.hashCode()}.png")
     }
 
+    /**
+     * 把接口返回的图片字节落盘，按开关决定是否压缩。
+     *
+     * 规则：小于等于 [COMPRESS_THRESHOLD_BYTES] 原样保存（不无谓重编码）；
+     * 超过阈值才解码成 Bitmap 转 JPEG（质量 [COMPRESS_JPEG_QUALITY]），体积通常能降到十分之一。
+     * 解码失败（超大图 OOM 等）或压缩后反而更大时，回退保存原始字节。
+     *
+     * 注意：压缩后的文件**扩展名仍沿用 .png**（内容是 JPEG）。
+     * 因为历史图列表、缓存清理、内部/持久缓存扫描等多处按 `endsWith(".png")` 过滤，
+     * 换成 .jpg 会导致刚生成的图"看不见"、清理不到；图片展示侧按内容嗅探格式，不受影响。
+     */
+    fun saveImageBytes(bytes: ByteArray, target: File, compress: Boolean): File {
+        if (!compress || bytes.size <= COMPRESS_THRESHOLD_BYTES) {
+            target.writeBytes(bytes)
+            return target
+        }
+        val tmpJpeg = File("${target.absolutePath}.jpg.tmp")
+        val compressed = runCatching {
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                ?: return@runCatching 0L
+            val ok = FileOutputStream(tmpJpeg).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, COMPRESS_JPEG_QUALITY, out)
+            }
+            bitmap.recycle()
+            val size = if (ok) tmpJpeg.length() else 0L
+            // 只有确实更小才采用压缩结果，避免小图被"压缩"后反而变大
+            if (size <= 0L || size >= bytes.size) 0L else size
+        }.getOrDefault(0L)
+
+        return if (compressed > 0L) {
+            target.delete()
+            if (!tmpJpeg.renameTo(target)) {
+                // rename 失败则直接用临时文件内容覆盖，保证图片能正常显示
+                tmpJpeg.copyTo(target, overwrite = true)
+            }
+            tmpJpeg.delete()
+            AppLog.putDebug("AI生图压缩: ${bytes.size / 1024}KB -> ${compressed / 1024}KB (${target.name})")
+            target
+        } else {
+            tmpJpeg.delete()
+            target.writeBytes(bytes)
+            target
+        }
+    }
+
     /** 历史图片保留数量上限（可在设置中调整，默认 50） */
     private val maxHistoryImages: Int
         get() = AppConfig.aiImageCacheCount
@@ -1320,7 +1375,7 @@ object AiImageGenerator {
         // 注意：此判断基于模板原始字段，不受多密钥轮换传入的 modelKey 影响，魔搭兜底不会被误判
         if (isGradioFallback(template)) {
             AppLog.put("AI生图: 模板「${template.name}」三字段全空，走魔搭Gradio兜底（无需密钥）")
-            return callGradioApi(prompt, template.imageSize, cacheKey)
+            return callGradioApi(prompt, template.imageSize, cacheKey, template.compressImage)
         }
         val url = normalizeImageApiUrl(template.modelUrl.trim())
         val authHeader = if (modelKey.isNotBlank()) {
@@ -1364,8 +1419,7 @@ object AiImageGenerator {
         // 尝试解析图片数据（支持 base64 / URL 多种格式）
         val imageBytes = extractImageBytes(json) ?: return null
 
-        val imageFile = getCacheFile(cacheKey)
-        imageFile.writeBytes(imageBytes)
+        val imageFile = saveImageBytes(imageBytes, getCacheFile(cacheKey), template.compressImage)
         return imageFile
     }
 
@@ -1455,6 +1509,7 @@ object AiImageGenerator {
         prompt: String,
         imageSize: String,
         cacheKey: String,
+        compress: Boolean = false,
     ): File? {
         val (width, height) = parseImageSizeForGradio(imageSize)
         // 注意：魔搭 Gradio API 的 data 数组中，第7个位置实际是"高度"、第8个位置实际是"宽度"
@@ -1556,8 +1611,7 @@ object AiImageGenerator {
             AppLog.put("AI生图(魔搭) 下载图片失败: $lastImageUrl")
             return null
         }
-        val imageFile = getCacheFile(cacheKey)
-        imageFile.writeBytes(bytes)
+        val imageFile = saveImageBytes(bytes, getCacheFile(cacheKey), compress)
         return imageFile
     }
 
@@ -1813,11 +1867,11 @@ object AiImageGenerator {
 
     // ===================== 角色立绘（气泡头像 / 与角色对话） =====================
 
-    /** 角色立绘缓存目录名（固定 cacheDir/ai_images/ai_avatars/） */
+    /** 旧版立绘目录名（仅用于从 cacheDir 迁移到外部存储） */
     private const val AVATAR_DIR_NAME = "ai_avatars"
 
     /**
-     * 立绘历史目录名：cacheDir/ai_images/ai_avatars/avatar_history/<角色key>/
+     * 立绘历史目录名：AI头像/{书名}/{角色名}/history/
      * 重新生成或切换立绘时，旧图归档到这里而不是删除，供用户在历史里挑回来。
      * 文件名即归档时间戳（毫秒），升序=由旧到新。
      */
@@ -1825,6 +1879,18 @@ object AiImageGenerator {
 
     /** 每个角色保留的历史立绘上限，超出删最旧的（避免长期累积占满缓存） */
     private const val AVATAR_HISTORY_LIMIT = 20
+
+    /**
+     * 角色头像根目录（外部存储 Download 下，用户可见、不会被系统/管家清理）。
+     * 目录结构：{root}/{书名}/{角色名}/avatar.jpg，历史图在 {角色名}/history/ 下。
+     */
+    private const val AVATAR_ROOT_DIR = "/storage/emulated/0/Download/AI头像"
+
+    /** 当前头像文件名（放在角色目录内，角色名已由上级目录区分） */
+    private const val AVATAR_FILE_NAME = "avatar.jpg"
+
+    /** 旧版（cacheDir 内）立绘文件名规则，仅用于升级迁移 */
+    private const val LEGACY_AVATAR_SUFFIX = ".jpg"
 
     /** 立绘专用负面提示词：与场景插图不同，立绘要的是人物半身/全身像 */
     private const val AVATAR_NEGATIVE_PROMPT =
@@ -1838,13 +1904,15 @@ object AiImageGenerator {
     private val avatarInFlight = ConcurrentHashMap<String, Boolean>()
 
     /**
-     * 角色立绘缓存目录（应用私有缓存，懒加载）。
-     * 固定 cacheDir 而不跟随 savePath：savePath 可能是 SAF content:// 路径不可写。
+     * 角色头像（立绘）根目录：**外部存储 /storage/emulated/0/Download/AI头像**。
+     *
+     * 放在 Download 下而不是应用私有 cacheDir，原因：cacheDir 会被系统空间不足回收，
+     * 也会被各家「手机管家/一键清理」扫掉，头像丢了就得重新花钱重新生成。
+     * Download 下的文件用户可见、不会被自动清理。
+     * 目录结构：AI头像/{书名}/{角色名}/avatar.jpg（历史图在同目录 history/ 下）。
      */
     private val avatarDirCache: File by lazy {
-        File(File(appCtx.cacheDir, CACHE_DIR_NAME), AVATAR_DIR_NAME).apply {
-            if (!exists()) mkdirs()
-        }
+        File(AVATAR_ROOT_DIR).apply { if (!exists()) mkdirs() }
     }
 
     private fun avatarCacheDir(): File = avatarCacheDirLazy()
@@ -1858,10 +1926,38 @@ object AiImageGenerator {
     private fun sanitizeFilePart(s: String): String =
         s.replace(Regex("[\\\\/:*?\"<>|\\s]"), "_").take(40)
 
+    /** 某本书的目录：AI头像/{书名} */
+    private fun avatarBookDir(bookName: String): File =
+        File(avatarCacheDir(), sanitizeFilePart(bookName)).apply { if (!exists()) mkdirs() }
+
+    /** 某个角色的目录：AI头像/{书名}/{角色名} */
+    private fun avatarCharacterDir(bookName: String, characterName: String): File =
+        File(avatarBookDir(bookName), sanitizeFilePart(characterName))
+            .apply { if (!exists()) mkdirs() }
+
+    /** 某角色当前头像文件：AI头像/{书名}/{角色名}/avatar.jpg */
+    private fun avatarFile(bookName: String, characterName: String): File =
+        File(avatarCharacterDir(bookName, characterName), AVATAR_FILE_NAME)
+
     /** 取已缓存的角色立绘；未生成过返回 null */
     fun getCachedAvatar(bookName: String, characterName: String): File? {
-        val f = File(avatarCacheDir(), avatarKey(bookName, characterName) + ".jpg")
-        return if (f.isFile && f.length() > 0) f else null
+        val target = avatarFile(bookName, characterName)
+        if (target.isFile && target.length() > 0) return target
+        // 早期版本把立绘放在应用私有 cacheDir，升级后顺手迁移一次，
+        // 避免用户已生成的头像全部变成「没有头像」
+        val legacy = File(
+            File(File(appCtx.cacheDir, CACHE_DIR_NAME), AVATAR_DIR_NAME),
+            avatarKey(bookName, characterName) + LEGACY_AVATAR_SUFFIX
+        )
+        if (legacy.isFile && legacy.length() > 0) {
+            val moved = runCatching {
+                legacy.copyTo(target, overwrite = true)
+                legacy.delete()
+                target
+            }.getOrNull()
+            if (moved != null && moved.length() > 0) return moved
+        }
+        return null
     }
 
     // ------------------------------------------------------------------
@@ -1869,7 +1965,7 @@ object AiImageGenerator {
     // ------------------------------------------------------------------
 
     private fun avatarHistoryDir(bookName: String, characterName: String): File =
-        File(File(avatarCacheDir(), AVATAR_HISTORY_DIR), avatarKey(bookName, characterName))
+        File(avatarCharacterDir(bookName, characterName), AVATAR_HISTORY_DIR)
 
     /**
      * 把当前在用的立绘归档为一条历史。
@@ -1923,7 +2019,7 @@ object AiImageGenerator {
         if (!history.isFile || history.length() <= 0) return false
         return runCatching {
             archiveCurrentAvatar(bookName, characterName)
-            val target = File(avatarCacheDir(), avatarKey(bookName, characterName) + ".jpg")
+            val target = avatarFile(bookName, characterName)
             history.copyTo(target, overwrite = true)
             target.length() > 0
         }.getOrDefault(false)
@@ -2001,6 +2097,33 @@ object AiImageGenerator {
     }.getOrNull()
 
     /**
+     * 用本地图片替换角色头像。
+     *
+     * 写入的是与AI 立绘同一个缓存文件（avatar_{书名}_{角色名}.jpg），
+     * 所以「与角色对话」页、朗读气泡头像等所有读 [getCachedAvatar] 的地方都会立刻换成这张图，
+     * 无需改动其它页面。替换前先把原头像归档进立绘历史，用户可在历史里换回原来那张。
+     *
+     * @param bytes 本地图片字节（PNG/JPEG/WebP 等，交给 [saveImageBytes] 统一转存）
+     * @return 写入后的立绘文件；失败返回 null（原头像保持不变）
+     */
+    fun setLocalAvatar(
+        bookName: String,
+        characterName: String,
+        bytes: ByteArray
+    ): File? {
+        if (bytes.isEmpty()) return null
+        return runCatching {
+            // 旧头像先归档，误选可以随时从立绘历史换回
+            archiveCurrentAvatar(bookName, characterName)
+            val target = avatarFile(bookName, characterName)
+            saveImageBytes(bytes, target, compress = true)
+        }.getOrElse {
+            AppLog.put("设置本地头像失败: ${it.localizedMessage}")
+            null
+        }
+    }
+
+    /**
      * 生成角色立绘。
      *
      * 与段落生图的区别：
@@ -2030,7 +2153,7 @@ object AiImageGenerator {
         if (regenerate) {
             // 旧图先归档为历史再删除：新图不满意可在角色档案「立绘历史」里挑回来
             archiveCurrentAvatar(bookName, characterName)
-            runCatching { File(avatarCacheDir(), "$key.jpg").delete() }
+            runCatching { avatarFile(bookName, characterName).delete() }
         } else {
             getCachedAvatar(bookName, characterName)?.let {
                 AppLog.put("AI立绘: 命中缓存 $characterName")
@@ -2042,7 +2165,7 @@ object AiImageGenerator {
         if (avatarInFlight.putIfAbsent(key, true) != null) {
             if (regenerate) {
                 archiveCurrentAvatar(bookName, characterName)
-                runCatching { File(avatarCacheDir(), "$key.jpg").delete() }
+                runCatching { avatarFile(bookName, characterName).delete() }
                 onFailure(IllegalStateException("旧立绘生成中，稍后重试"))
                 return true
             }
@@ -2084,12 +2207,12 @@ object AiImageGenerator {
                     if (file != null) break
                 }
                 file ?: throw IllegalStateException("生图失败，请稍后重试")
-                // 落到角色专属缓存路径
-                val dir = avatarCacheDir()
+                // 落到角色专属目录：AI头像/{书名}/{角色名}/avatar.jpg
+                val dir = avatarCharacterDir(bookName, characterName)
                 if (!dir.exists() && !dir.mkdirs()) {
-                    throw IllegalStateException("立绘缓存目录不可写: ${dir.absolutePath}")
+                    throw IllegalStateException("头像目录不可写: ${dir.absolutePath}")
                 }
-                val target = File(dir, "$key.jpg")
+                val target = avatarFile(bookName, characterName)
                 if (file.absolutePath != target.absolutePath) {
                     file.copyTo(target, overwrite = true)
                 }

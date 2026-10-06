@@ -23,7 +23,7 @@ object DatabaseMigrations {
             migration_89_90,
             migration_90_91, migration_91_92, migration_92_93, migration_93_94,
             migration_94_95, migration_95_96, migration_96_97, migration_97_98, migration_98_99,
-            migration_99_100, migration_100_101, migration_101_102,
+            migration_99_100, migration_100_101, migration_101_102, migration_102_103,
         )
     }
 
@@ -601,6 +601,14 @@ object DatabaseMigrations {
                     PRIMARY KEY (`id`)
                 )"""
             )
+        }
+    }
+
+    private val migration_102_103 = object : Migration(102, 103) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // AI 生图模板新增「图片压缩」开关字段：
+            // 开启后超过 500KB 的图片转 JPEG 落盘，避免 PNG 生图 2~3MB 占满存储。
+            db.execSQL("ALTER TABLE `aiImageTemplate` ADD `compressImage` INTEGER NOT NULL DEFAULT 0")
         }
     }
 

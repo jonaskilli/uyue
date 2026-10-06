@@ -31,6 +31,13 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
 
     private var profile: CharacterProfile? = null
 
+    /** 选一张本地图片作为角色头像 */
+    private val selectLocalAvatar =
+        registerForActivityResult(io.legado.app.utils.SelectImageContract()) { result ->
+            val uri = result.uri ?: return@registerForActivityResult
+            importLocalAvatar(uri)
+        }
+
     override fun onStart() {
         super.onStart()
         setLayout(0.92f, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -67,6 +74,7 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
         binding.tvEdit.setOnClickListener { showEditDialog() }
         binding.tvRegen.setOnClickListener { regenerate() }
         binding.tvPortrait.setOnClickListener { generatePortrait() }
+        binding.tvLocalAvatar.setOnClickListener { selectLocalAvatar.launch(null) }
         // 点立绘图片 → 立绘历史：重新生成过的旧图都存着，可在这里换回来或删除
         binding.ivPortrait.setOnClickListener { showAvatarHistory() }
         // 历史里换回某张立绘后，刷新本弹窗的预览
@@ -246,6 +254,43 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
     }
 
     /** 按（性别年龄 + 档案人设）生成角色立绘，成功后自动被「与角色对话」和气泡复用 */
+    /**
+     * 选中的本地图片 → 覆盖当前立绘。
+     *
+     * 读字节在后台线程做（图片可能几 MB），期间禁用按钮防重复点击；
+     * 写入复用 AI 立绘的缓存文件，所以对话页/气泡头像会立刻生效。
+     */
+    private fun importLocalAvatar(uri: android.net.Uri) {
+        binding.tvLocalAvatar.isEnabled = false
+        binding.tvStatus.visibility = View.VISIBLE
+        binding.tvStatus.text = "正在导入本地图片…"
+        execute {
+            requireContext().contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.onSuccess(Dispatchers.Main) { bytes ->
+            if (!isAdded || view == null) return@onSuccess
+            binding.tvLocalAvatar.isEnabled = true
+            if (bytes == null || bytes.isEmpty()) {
+                binding.tvStatus.text = "读取图片失败"
+                return@onSuccess
+            }
+            execute {
+                io.legado.app.model.AiImageGenerator
+                    .setLocalAvatar(bookName, characterName, bytes)
+            }.onSuccess(Dispatchers.Main) { file ->
+                // 导入耗时，回调时弹窗可能已关闭：先判 View 存活
+                if (!isAdded || view == null) return@onSuccess
+                if (file == null) {
+                    binding.tvStatus.text = "设置本地头像失败"
+                    toastOnUi("设置本地头像失败")
+                } else {
+                    binding.tvStatus.visibility = View.GONE
+                    loadPortrait()
+                    toastOnUi("已设为本地头像，原头像可在立绘历史里换回")
+                }
+            }
+        }
+    }
+
     /** 点立绘图片：打开立绘历史，可换回旧图或删除历史 */
     private fun showAvatarHistory() {
         AvatarHistoryDialog.newInstance(bookName, characterName)

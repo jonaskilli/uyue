@@ -72,6 +72,7 @@ class AiImageSettingsDialog : BaseDialogFragment(0) {
     private lateinit var switchBase64: SwitchCompat
     private lateinit var switchAnnotate: SwitchCompat
     private lateinit var switchStrictFormat: SwitchCompat
+    private lateinit var switchCompress: SwitchCompat
 
     @SuppressLint("SetTextI18n")
     override fun onCreateView(
@@ -672,6 +673,58 @@ sk-aaa@@sk-bbb@@sk-ccc
         )
         root.addView(testRow)
 
+        // 图片压缩开关：PNG 生图常达 2~3MB，超过 500KB 自动转 JPEG，体积通常降到十分之一
+        switchCompress = SwitchCompat(context)
+        switchCompress.setOnCheckedChangeListener { _, isChecked ->
+            val template = currentTemplate ?: return@setOnCheckedChangeListener
+            currentTemplate = template.copy(compressImage = isChecked)
+            lifecycleScope.launch(Dispatchers.IO) {
+                appDb.aiImageTemplateDao.insert(currentTemplate!!)
+            }
+        }
+        val compressLabel = TextView(context).apply {
+            text = "图片压缩"
+            textSize = 14f
+            setPadding(0, 0, 6.dpToPx(), 0)
+        }
+        val compressHelp = TextView(context).apply {
+            text = "  ?"
+            textSize = 16f
+            setTextColor(android.graphics.Color.parseColor("#1976D2"))
+            setPadding(6.dpToPx(), 0, 0, 0)
+            setOnClickListener {
+                AlertDialog.Builder(requireContext())
+                    .setTitle("图片压缩说明")
+                    .setMessage("""开启后，AI 生成的图片会先判断体积：
+
+【规则】
+1. 小于等于 500KB：原样保存，不做任何处理；
+2. 超过 500KB：自动转成 JPEG 保存，体积通常能降到十分之一左右；
+3. 转成 JPEG 后扩展名仍为 .png（内容是 JPEG），不影响查看与清理。
+
+【说明】
+1. 只压缩新生成的图片，已经生成的旧图不会回溯压缩；
+2. JPEG 不支持透明通道，若模型返回的是带透明背景的 PNG，转成 JPEG 后透明处会变黑底。""")
+                    .setPositiveButton("知道了", null)
+                    .show()
+            }
+        }
+        val compressRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 8.dpToPx(), 0, 0)
+        }
+        val compressLabelWrap = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setOnClickListener { switchCompress.isChecked = !switchCompress.isChecked }
+        }
+        compressLabelWrap.addView(compressLabel)
+        compressLabelWrap.addView(compressHelp)
+        compressRow.addView(compressLabelWrap)
+        compressRow.addView(switchCompress)
+        root.addView(compressRow)
+
         // 角色标注开关 + 测试连接按钮（同一行）
         switchAnnotate = SwitchCompat(context)
         val annotateLabel = TextView(context).apply {
@@ -839,6 +892,16 @@ sk-aaa@@sk-bbb@@sk-ccc
         switchStrictFormat.setOnCheckedChangeListener { _, isChecked ->
             val tmpl = currentTemplate ?: return@setOnCheckedChangeListener
             currentTemplate = tmpl.copy(strictFormat = isChecked)
+            lifecycleScope.launch(Dispatchers.IO) {
+                appDb.aiImageTemplateDao.insert(currentTemplate!!)
+            }
+        }
+        // 同步图片压缩开关状态（临时移除 listener 避免触发保存）
+        switchCompress.setOnCheckedChangeListener(null)
+        switchCompress.isChecked = template.compressImage
+        switchCompress.setOnCheckedChangeListener { _, isChecked ->
+            val tmpl = currentTemplate ?: return@setOnCheckedChangeListener
+            currentTemplate = tmpl.copy(compressImage = isChecked)
             lifecycleScope.launch(Dispatchers.IO) {
                 appDb.aiImageTemplateDao.insert(currentTemplate!!)
             }
