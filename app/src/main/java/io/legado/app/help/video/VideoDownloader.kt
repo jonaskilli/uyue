@@ -457,11 +457,21 @@ object VideoDownloader {
     /** 删除已缓存（分片文件夹 + mp4 成品 + .part/.idx 临时文件），条目保留，再次下载时从头开始 */
     fun deleteCache(state: TaskState) {
         val dir = dirOf(state.task)
-        File(dir, state.title).deleteRecursively() // 分片缓存文件夹
-        File(dir, "${state.title}.mp4").delete()
-        File(dir, "${state.title}.mp4.part").delete()
-        File(dir, "${state.title}.mp4.idx").delete()
+        // 界面状态先落，瞬时完成
         updateState(state.key) { it.copy(progress = 0) }
+        // ===== 文件删除必须放后台 =====
+        // deleteRecursively() 是"递归遍历 + 逐个 unlink"，每个文件一次文件系统调用。
+        // 一集就是 600+ 个分片、一部剧上万 个，全在 /storage（外部存储，比内部慢一个量级），
+        // 跑在主线程上必然 ANR——症状就是"文件小还行、文件一大界面直接崩"。
+        // 这里写法本身没问题，纯粹是线程放错了。
+        scope.launch {
+            runCatching {
+                File(dir, state.title).deleteRecursively() // 分片缓存文件夹
+                File(dir, "${state.title}.mp4").delete()
+                File(dir, "${state.title}.mp4.part").delete()
+                File(dir, "${state.title}.mp4.idx").delete()
+            }.onFailure { AppLog.put("删除缓存失败：${state.title}", it) }
+        }
     }
 
     /** 删除已生成的 mp4 成品，并从下载列表移除该条目（分片文件夹缓存保留） */
@@ -566,20 +576,34 @@ object VideoDownloader {
      * @return 实际删除的条数
      */
     fun deleteTasks(keys: Set<String>): Int {
-        var n = 0
-        keys.forEach { key ->
-            val st = synchronized(statesMap) { statesMap[key] } ?: return@forEach
-            val dir = dirOf(st.task)
-            File(dir, "${st.title}.mp4").delete()
-            File(dir, "${st.title}.mp4.part").delete()
-            File(dir, "${st.title}.mp4.idx").delete()
-            File(dir, st.title).deleteRecursively() // 分片缓存文件夹
+        if (keys.isEmpty()) return 0
+        // 先把条目摘掉：状态操作只在内存里做（removeState 内部 synchronized），瞬时完成，
+        // 界面立刻少掉这些项，删除在后台慢慢进行。
+        val targets = synchronized(statesMap) {
+            keys.mapNotNull { key -> statesMap[key]?.let { key to it } }
+        }
+        if (targets.isEmpty()) return 0
+        targets.forEach { (key, _) ->
             pausedKeys.remove(key)
             removeState(key)
-            n++
         }
-        if (n > 0) refreshVideoGroups()
-        return n
+        refreshVideoGroups()
+        // 真正的删除放后台，且**串行**：多个目录同时删会互相抢外部存储的 IO，
+        // 并发反而更慢，还容易把 ANR 拖得更长。
+        scope.launch {
+            targets.forEach { (_, st) ->
+                val dir = dirOf(st.task)
+                runCatching {
+                    File(dir, "${st.title}.mp4").delete()
+                    File(dir, "${st.title}.mp4.part").delete()
+                    File(dir, "${st.title}.mp4.idx").delete()
+                    File(dir, st.title).deleteRecursively() // 分片缓存文件夹
+                }.onFailure { AppLog.put("删除缓存失败：${st.title}", it) }
+            }
+            // 文件真的删完了再刷新一次统计，避免把"还没删完"的目录算进已缓存大小
+            refreshVideoGroups()
+        }
+        return targets.size
     }
 
     /**
@@ -589,19 +613,27 @@ object VideoDownloader {
     fun deleteVideos(keys: Set<String>): Int {
         if (keys.isEmpty()) return 0
         val groups = _videoGroups.value
-        keys.forEach { key ->
-            val dirName = groups.firstOrNull { it.key == key }?.dirName
-                ?: key.removePrefix("dir:")
-            runCatching { File(rootDir(), dirName).deleteRecursively() }
-            val toRemove = synchronized(statesMap) {
-                statesMap.values.filter { dirOf(it.task).name == dirName }.map { it.key }
-            }
-            toRemove.forEach {
-                pausedKeys.remove(it)
-                removeState(it)
-            }
+        val dirNames = keys.map { key ->
+            groups.firstOrNull { it.key == key }?.dirName ?: key.removePrefix("dir:")
+        }.distinct()
+        // 先摘记录（内存操作，瞬间完成）
+        val toRemove = synchronized(statesMap) {
+            statesMap.values.filter { dirOf(it.task).name in dirNames }.map { it.key }
+        }
+        toRemove.forEach {
+            pausedKeys.remove(it)
+            removeState(it)
         }
         refreshVideoGroups()
+        // 整部视频的目录是最大的（全部集数的分片都在里面），删除同样必须放后台。
+        // 原来的 runCatching { } 只吞异常，并不能让主线程不阻塞——这是关键误解点。
+        scope.launch {
+            dirNames.forEach { dirName ->
+                runCatching { File(rootDir(), dirName).deleteRecursively() }
+                    .onFailure { AppLog.put("删除视频缓存失败：$dirName", it) }
+            }
+            refreshVideoGroups()
+        }
         return keys.size
     }
 

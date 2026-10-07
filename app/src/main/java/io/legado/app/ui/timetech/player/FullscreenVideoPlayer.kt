@@ -927,30 +927,63 @@ internal fun VideoPlayerPage(
     // 不会被每 200ms 强行拽走
     var skipEdgeChecked by remember(video.uri) { mutableStateOf(false) }
 
-    val player = remember(video.uri, index, headers) {
-        // 起播位置：有续播记录就用它（用户看到一半了，别拽走）；
-        // 没有记录且设了跳过片头，才从片头之后起播。
-        val from = when {
-            startPosition > 0 -> startPosition
-            skipIntro > 0 -> skipIntro.toLong()
-            else -> 0L
-        }
+    // 起播位置：有续播记录就用它（用户看到一半了，别拽走）；
+    // 没有记录且设了跳过片头，才从片头之后起播。
+    val startFrom = when {
+        startPosition > 0 -> startPosition
+        skipIntro > 0 -> skipIntro.toLong()
+        else -> 0L
+    }
+
+    /**
+     * 播放器实例的 remember **key 里刻意不含 video.uri**。
+     *
+     * 播放源会在「网络 ↔ 本地缓存」之间切换（边看边存下完，episodes 的 uri 被
+     * refreshLocalUri 换成 file:// 的 local.m3u8）。早先把 uri 放进 key，于是每换一次源
+     * 就重建实例，而 Compose 的执行顺序是「先算新的 remember、后跑旧的 onDispose」：
+     * 新实例创建时旧实例还活着，并且仍占着硬件解码器（keep 只 pause 不 release），
+     * 新实例抢不到解码器就报 MediaCodecVideoRenderer error（format_supported=YES）。
+     * 更糟的是报错的实例会以同一个 key 被 keep 进 [SharedPlayer]，
+     * 之后每次切回这一集都复用它 —— 这一集从此一直报错，只有退出重进才恢复。
+     *
+     * 不含 uri 后，换源只换 MediaItem（见下面的 LaunchedEffect），实例始终只有一个，
+     * 既不会抢解码器，也不会把坏实例留在交接池里。
+     *
+     * 数据源完全没动，仍是 buildMediaSourceFactory → [VideoCache]，
+     * 所以「边看边存靠播放/下载共用缓存、不产生双倍流量」这条不受任何影响。
+     */
+    val player = remember(bookUrl, index, headers) {
         // 1) 无缝切换：接管大屏↔首页保留的实例（进度原样保留，不重新加载、不重新解析）
-        // 2) 预缓冲：接管下一集/下一部已缓冲的实例（从头缓冲的，需回到起始位置）
+        // 2) 预缓冲：接管下一集/下一部已缓冲的实例
         // 3) 都没有：新建
         SharedPlayer.take(bookUrl, index, headers)
-            ?: PreloadCache.take(video.uri, headers)?.also {
-                if (from > 0) it.seekTo(from)
-            }
+            ?: PreloadCache.take(video.uri, headers)
             ?: ExoPlayer.Builder(context)
                 .setMediaSourceFactory(buildMediaSourceFactory(context, headers))
                 .build()
-                .apply {
-                    setMediaItem(buildMediaItem(video.uri))
-                    if (from > 0) seekTo(from)
-                    prepare()
-                    playWhenReady = true
-                }
+                .apply { playWhenReady = true }
+    }
+
+    /**
+     * 片源与起播位置统一在这里处理。
+     *
+     * 之前这段逻辑分散在 remember 的三个分支里，且不一致：`SharedPlayer.take` 分支既不
+     * seek 也不 prepare，只有新建分支做——同一个 startPosition 在两条路径下行为不同。
+     * 收拢到一处后：换源才 setMediaItem（同一个 key 下 currentMediaItem 已相同则不重复设置），
+     * 其余情况只是就地校正起播位置，不会重建解码器。
+     */
+    LaunchedEffect(player, video.uri, startFrom) {
+        val target = video.uri.toString()
+        val current = player.currentMediaItem?.localConfiguration?.uri?.toString()
+        if (current != target) {
+            player.setMediaItem(buildMediaItem(video.uri))
+        }
+        // 起播位置：只在"确实在它前面"时才推，避免覆盖用户已经拖到的位置
+        if (startFrom > 0 && player.currentPosition < startFrom) {
+            player.seekTo(startFrom)
+        }
+        player.prepare()
+        player.playWhenReady = true
     }
 
     var duration by remember { mutableLongStateOf(0L) }
@@ -981,9 +1014,12 @@ internal fun VideoPlayerPage(
         adCtrl.attach(player, headers)
         onDispose { adCtrl.detach() }
     }
-    DisposableEffect(video.uri) {
+    // key 用 player + index 而不是 video.uri：
+    // 「网络 → 本地」换源时 uri 会变，但那**还是同一集**，广告跳过区间必须留着；
+    // 真正该清空的是换集（index 变）或换播放器实例。
+    DisposableEffect(player, index) {
         onDispose {
-            // 时间轴按集独立：切视频后上一集的跳过区间全部作废
+            // 时间轴按集独立：切集/切视频后上一集的跳过区间全部作废
             adCtrl.resetForNewVideo()
         }
     }
@@ -1063,7 +1099,12 @@ internal fun VideoPlayerPage(
         }
     }
 
-    DisposableEffect(video.uri) {
+    // key 用 **player** 而不是 video.uri。
+    // player 现在不随 uri 重建了（见上方注释），若这里仍挂 video.uri，
+    // 那么「网络 → 本地」换源时这个 effect 会被误触发：把一个**正在使用中**的
+    // player 暂停并塞进交接池，还会顺手上报一次进度——画面当场卡住，状态也错乱。
+    // 挂 player 就只在真正换实例/页面销毁时才执行，符合原意。
+    DisposableEffect(player) {
         onDispose {
             // 已经播完的必须记成 0，否则这里是片尾位置：下次切回来会 seekTo(片尾)，
             // 立刻 STATE_ENDED → 触发「播完跳下一个」，表现为回来放不了还自动翻页。
@@ -1124,12 +1165,20 @@ internal fun VideoPlayerPage(
     }
 
     // 固定频率把播放器状态同步到 Compose：进度条与播放中状态
-    LaunchedEffect(player) {
+    //
+    // key 必须带上 video.uri：本循环会写 [started] 与 skipEdgeChecked，而这两个状态是
+    // remember(video.uri) 创建的。若 key 只有 player，播放源变化（网络→本地缓存）时
+    // remember 换成了**新的** MutableState(false)，循环却还握着旧对象，
+    // 于是"旧对象被写 true、新对象一直 false"——封面状态永远为"未出画"，
+    // 表现就是声音和进度都正常、唯独画面被封面盖住，直到切集重进才恢复。
+    LaunchedEffect(player, video.uri) {
         while (true) {
             duration = player.duration.takeIf { it > 0 } ?: 0L
             position = player.currentPosition.coerceAtLeast(0)
             playing = player.isPlaying
-            if (playing) started.value = true
+            // 出画判定：isPlaying 为 true 即可；但播放中被暂停时它会是 false，
+            // 而画面其实已经出来了，所以再补一个"已解出画面尺寸"的判据。
+            if (playing || player.videoSize != VideoSize.UNKNOWN) started.value = true
             buffering = player.playbackState == Player.STATE_BUFFERING
             // 广告跳过：播放位置进入已登记的广告区间时 seek 到区间末尾。
             // 这里只做一次 seek 判断，真正的指纹比对早在分片缓冲完成时就由后台跑完了。
