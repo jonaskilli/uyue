@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -72,7 +73,9 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
@@ -82,10 +85,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.MutableState
@@ -139,8 +144,12 @@ import io.legado.app.help.glide.ImageLoader
 import io.legado.app.help.glide.OkHttpModelLoader
 import io.legado.app.base.BaseComposeActivity
 import io.legado.app.constant.AppLog
+import io.legado.app.help.video.AdFilter
+import io.legado.app.help.video.AdPlaybackController
+import io.legado.app.help.video.SkipEdge
 import io.legado.app.help.video.VideoCache
 import io.legado.app.utils.isWifiConnect
+import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -268,6 +277,12 @@ fun FullscreenVideoPlayer(
     // 播放顺序（显示顺序）：由外层 Activity 持有并传给「选集面板」与「主页下方目录」共用，
     // 点「倒序」/切循环模式时整条顺序一起变，主页目录也跟着反。分页第 page 页播 videos[playOrder[page]]。
     playOrderState: MutableState<List<Int>>,
+    // 分页器当前页码对外可见：**选中态的唯一数据源**。
+    //
+    // 外部（主页选集方块）用它做高亮，和选集面板同源，因此"点一下就变色"，
+    // 既不会被 saveProgress 的上报抢走，也不需要任何加锁/超时来协调——
+    // 高亮本来就是"分页器在哪"，没有第二份状态需要对齐。
+    currentPageState: MutableState<Int>,
     // 播放顺序是否为「倒序」（持久化标记）：true 时整条剧集列表反转，
     // 与小说「反转目录」同效，下次打开该视频自动沿用。
     reverseOrder: Boolean = false,
@@ -304,6 +319,13 @@ fun FullscreenVideoPlayer(
     var showSwitchHint by remember { mutableStateOf(true) }
     /** 选集面板 */
     var showEpisodes by remember { mutableStateOf(false) }
+    /**
+     * 跳过片头/片尾（毫秒）。初值从 [SkipEdge] 按 bookUrl 读，
+     * 用户在选集面板里保存后就地更新——只对当前这部剧的全部集生效。
+     */
+    var skipEdge by remember(bookUrl) {
+        mutableStateOf(SkipEdge.introMs(bookUrl) to SkipEdge.outroMs(bookUrl))
+    }
 
     // 播放顺序：**一组原始视频下标**，分页里第 page 页播的是 videos[playOrder[page]]。
     //
@@ -350,6 +372,14 @@ fun FullscreenVideoPlayer(
         ) {
             onResolveEpisode.invoke(next, true)
         }
+    }
+
+    // 把分页页码同步给外部（主页选集方块据此显示"当前选中"）。
+    // currentPage 在 scrollToPage/animateScrollToPage 调用后**立即**变成目标页，
+    // 所以点选集时高亮是瞬时的，不受解析、缓冲、进度上报影响。
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.currentPage }
+            .collect { currentPageState.value = it }
     }
 
     // 选集方块/外部跳集：startIndex 变化时把分页滚到对应集。
@@ -581,7 +611,15 @@ fun FullscreenVideoPlayer(
                 showEpisodes = false
                 val page = playOrder.indexOf(index)
                 if (page >= 0) scope.launch { pagerState.animateScrollToPage(page) }
-            }
+            },
+            // 跳过片头/片尾：与倒序一样按 bookUrl 存，只影响当前这部剧的全部集
+            skipIntroMs = skipEdge.first,
+            skipOutroMs = skipEdge.second,
+            onSkipEdgeChange = { intro, outro ->
+                SkipEdge.save(bookUrl, intro, outro)
+                // 立即写回本地 state，按钮上的数值立刻更新
+                skipEdge = intro to outro
+            },
         )
     }
 }
@@ -828,6 +866,12 @@ private fun PendingVideoPage(
     }
 }
 
+/**
+ * 单个分片的播放页。
+ *
+ * 用了 [Modifier.combinedClickable]（长按标记广告），它是实验性 API，必须显式 opt-in。
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun VideoPlayerPage(
     video: LocalVideo,
@@ -867,25 +911,43 @@ internal fun VideoPlayerPage(
     onPlaybackError: ((PlaybackException) -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     // 播放器的监听在整个页面存活期间只注册一次，用 updatedState 保证它读到的是最新的回调，
     // 否则用户中途改了循环模式后，回调仍停留在首次组合时的版本
     val currentAutoOrientation = rememberUpdatedState(onAutoOrientation)
     val currentPlayEnded = rememberUpdatedState(onPlayEnded)
     val currentProgressChange = rememberUpdatedState(onProgressChange)
+
+    // ===== 跳过片头 / 片尾（按 bookUrl 存，只对本剧全部集生效）=====
+    // 直接从存储读而不走参数传递：VideoPlayerPage 本来就拿得到 bookUrl，
+    // 切集、竖滑切下一个视频时各自会读到自己的设置。
+    val skipIntro = remember(bookUrl) { SkipEdge.introMs(bookUrl) }
+    val skipOutro = remember(bookUrl) { SkipEdge.outroMs(bookUrl) }
+    // 片头只在**播放器创建时**用一次：用户手动拖回 0 仍能正常看片头，
+    // 不会被每 200ms 强行拽走
+    var skipEdgeChecked by remember(video.uri) { mutableStateOf(false) }
+
     val player = remember(video.uri, index, headers) {
+        // 起播位置：有续播记录就用它（用户看到一半了，别拽走）；
+        // 没有记录且设了跳过片头，才从片头之后起播。
+        val from = when {
+            startPosition > 0 -> startPosition
+            skipIntro > 0 -> skipIntro.toLong()
+            else -> 0L
+        }
         // 1) 无缝切换：接管大屏↔首页保留的实例（进度原样保留，不重新加载、不重新解析）
         // 2) 预缓冲：接管下一集/下一部已缓冲的实例（从头缓冲的，需回到起始位置）
         // 3) 都没有：新建
         SharedPlayer.take(bookUrl, index, headers)
             ?: PreloadCache.take(video.uri, headers)?.also {
-                if (startPosition > 0) it.seekTo(startPosition)
+                if (from > 0) it.seekTo(from)
             }
             ?: ExoPlayer.Builder(context)
                 .setMediaSourceFactory(buildMediaSourceFactory(context, headers))
                 .build()
                 .apply {
                     setMediaItem(buildMediaItem(video.uri))
-                    if (startPosition > 0) seekTo(startPosition)
+                    if (from > 0) seekTo(from)
                     prepare()
                     playWhenReady = true
                 }
@@ -898,6 +960,36 @@ internal fun VideoPlayerPage(
     // 是否已经开播出过画面：出画后不再显示封面铺底
     val started = remember(video.uri) { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
+
+    // ===== 广告识别与跳过 =====
+    // 由 AdPlaybackController 承担：监听分片下载完成 → 后台比对指纹 → 登记跳过区间。
+    // 详细原理见 AdFilter / AdPlaybackController 的类注释。
+    val adCtrl = remember { AdPlaybackController() }
+    /** 「标记为广告」确认面板 */
+    var showAdMark by remember { mutableStateOf(false) }
+    /** 标记进行中（读整个分片并保存样本，需要一点时间） */
+    var adMarking by remember { mutableStateOf(false) }
+    /** 连带标记的相邻片数：一条广告常是连续 3 片，只标一片的话另外两片查不到指纹 */
+    var adMarkNeighbor by remember { mutableIntStateOf(1) }
+    LaunchedEffect(Unit) {
+        // 首次播放前把指纹库扫一遍，避免第一片判定时同步读盘造成卡顿
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            AdFilter.warmUp()
+        }
+    }
+    DisposableEffect(player, headers) {
+        adCtrl.attach(player, headers)
+        onDispose { adCtrl.detach() }
+    }
+    DisposableEffect(video.uri) {
+        onDispose {
+            // 时间轴按集独立：切视频后上一集的跳过区间全部作废
+            adCtrl.resetForNewVideo()
+        }
+    }
+    DisposableEffect(adCtrl) {
+        onDispose { adCtrl.release() }
+    }
 
     // 切到新视频 / 正在缓冲准备播放时，顶部标题显示 6 秒，方便确认当前看的是哪个视频
     var showTitleHint by remember { mutableStateOf(false) }
@@ -1039,6 +1131,28 @@ internal fun VideoPlayerPage(
             playing = player.isPlaying
             if (playing) started.value = true
             buffering = player.playbackState == Player.STATE_BUFFERING
+            // 广告跳过：播放位置进入已登记的广告区间时 seek 到区间末尾。
+            // 这里只做一次 seek 判断，真正的指纹比对早在分片缓冲完成时就由后台跑完了。
+            val skipped = adCtrl.checkSkip(player, position, duration)
+            if (skipped != null) position = skipped
+            // 跳过片尾：剩余不足设定时长时直接seek 到片尾，
+            // ExoPlayer 会随即 STATE_ENDED，于是自动翻到下一集
+            if (skipOutro > 0 && duration > 0) {
+                val remain = duration - position
+                if (remain in 1..skipOutro.toLong()) {
+                    player.seekTo(duration)
+                    position = duration
+                }
+            }
+            // 自愈：片头/片尾设得比整集还长（换了一部很短的剧）会让起播位置直接落到
+            // 片尾，一开播就判定"播完了"。这里等时长首次可用时检查一次并拉回 0。
+            if (!skipEdgeChecked && duration > 0) {
+                skipEdgeChecked = true
+                if (skipIntro > 0 && position >= duration) {
+                    player.seekTo(0)
+                    position = 0
+                }
+            }
             delay(200)
         }
     }
@@ -1333,9 +1447,20 @@ internal fun VideoPlayerPage(
                     .size(72.dp)
                     .clip(RoundedCornerShape(14.dp))
                     .background(Color.Black.copy(alpha = 0.4f))
-                    .clickable {
-                        if (player.isPlaying) player.pause() else player.play()
-                    },
+                    // 暂停时长按 = 标记为广告。播放中刻意保持纯 clickable：
+                    // combinedClickable 会吃掉长按事件，那样屏幕中央就再也没法触发 2× 倍速了。
+                    .then(
+                        if (!playing) {
+                            Modifier.combinedClickable(
+                                onClick = { if (player.isPlaying) player.pause() else player.play() },
+                                onLongClick = { showAdMark = true },
+                            )
+                        } else {
+                            Modifier.clickable {
+                                if (player.isPlaying) player.pause() else player.play()
+                            }
+                        }
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
@@ -1347,6 +1472,41 @@ internal fun VideoPlayerPage(
             }
         }
 
+        // 「标记为广告」确认面板：必须二次确认，标错就是把正片删了
+        if (showAdMark) {
+            val chunk = remember(position) { adCtrl.currentChunk(position) }
+            AdMarkSheet(
+                size = chunk?.size ?: 0L,
+                known = chunk != null,
+                marking = adMarking,
+                neighbor = adMarkNeighbor,
+                onNeighborChange = { adMarkNeighbor = it },
+                onDismiss = { if (!adMarking) showAdMark = false },
+                onConfirm = {
+                    adMarking = true
+                    scope.launch {
+                        val saved = runCatching {
+                            adCtrl.markAsAd(
+                                position, headers, adMarkNeighbor,
+                                player.currentMediaItem?.localConfiguration?.uri?.toString(),
+                            )
+                        }.getOrNull().orEmpty()
+                        adMarking = false
+                        showAdMark = false
+                        if (saved.isNotEmpty()) {
+                            val total = saved.sumOf { it.second }
+                            context.toastOnUi(
+                                "已标记 ${saved.size} 个广告分片（${formatFileSize(total)}）\n" +
+                                    "已存进 保存视频/AI识别广告/，以后自动跳过"
+                            )
+                        } else {
+                            context.toastOnUi("标记失败：未能读取该分片，请稍候重试")
+                        }
+                    }
+                },
+            )
+        }
+
         if (locked) {
             IconButton(
                 onClick = { locked = false },
@@ -1356,6 +1516,120 @@ internal fun VideoPlayerPage(
                     .padding(start = 4.dp, top = 4.dp)
             ) {
                 Icon(Icons.Filled.Lock, contentDescription = "解锁", tint = Color.White)
+            }
+        }
+    }
+}
+
+/**
+ * 「标记为广告」确认面板。
+ *
+ * 长按中间播放键呼出。必须二次确认——标记的结果是把整段内容从以后的播放里永久剔除，
+ * 标错就等于删了正片（尽管可以进文件夹删样本撤销，但多数人不会立刻发现）。
+ *
+ * 面板上如实显示这一片的字节数：这是以后判定用的**一级判据**，让用户在按下按钮前
+ * 至少能确认"这一片的规模是不是像广告"。
+ *
+ * 「连带片数」是解决"标记了却还看到广告"的关键：一条广告常常是连续几个分片，
+ * 只登记停住的那一片，其余分片在指纹库里依然查不到，从头播放时照旧会播出来。
+ * 默认取 1（前后各一片），实测正好覆盖 ffzy 那种 3 片广告。
+ */
+@Composable
+private fun AdMarkSheet(
+    size: Long,
+    known: Boolean,
+    marking: Boolean,
+    neighbor: Int,
+    onNeighborChange: (Int) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                .wrapContentHeight(),
+            shape = RoundedCornerShape(18.dp),
+            color = Color(0xFF1C1C1E)
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text(
+                    "标记为广告？",
+                    color = Color.White,
+                    fontSize = 17.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    if (known) {
+                        "当前分片：${formatFileSize(size)}\n" +
+                            "原始字节会原样存进 保存视频/AI识别广告/（后缀改为 .mp4），" +
+                            "以后遇到相同内容的分片自动跳过。"
+                    } else {
+                        "还没读到当前分片的信息（可能仍在缓冲）。\n" +
+                            "请稍等画面缓冲完成后再试。"
+                    },
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                Text("连带标记的相邻分片", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Row {
+                    listOf(0 to "仅当前片", 1 to "前后各1片", 2 to "前后各2片").forEach { (n, label) ->
+                        val active = neighbor == n
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (active) MaterialTheme.colorScheme.primary
+                                    else Color.White.copy(alpha = 0.12f)
+                                )
+                                .clickable { onNeighborChange(n) }
+                                .padding(horizontal = 12.dp, vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                label,
+                                color = if (active) Color.Black else Color.White.copy(alpha = 0.85f),
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "一条广告通常是连续几个分片，建议选「前后各1片」；" +
+                        "选多了可能把正片也标进去（可在文件夹里删掉多余的）。",
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
+                Spacer(Modifier.height(18.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onDismiss, enabled = !marking) {
+                        Text("取消", color = Color.White, fontSize = 14.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = onConfirm, enabled = known && !marking) {
+                        Text(
+                            if (marking) "保存中…" else "标记为广告",
+                            color = if (known && !marking) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.White.copy(alpha = 0.4f)
+                            },
+                            fontSize = 14.sp
+                        )
+                    }
+                }
             }
         }
     }
@@ -1864,8 +2138,13 @@ private fun EpisodePickerSheet(
     onDismiss: () -> Unit,
     onReverse: () -> Unit,
     onPick: (Int) -> Unit,
+    // 跳过片头/片尾（仅本剧生效，与倒序同样按 bookUrl 持久化）
+    skipIntroMs: Int = 0,
+    skipOutroMs: Int = 0,
+    onSkipEdgeChange: (introMs: Int, outroMs: Int) -> Unit = { _, _ -> },
 ) {
     val gridState = rememberLazyGridState()
+    var showSkipEdge by remember { mutableStateOf(false) }
     LaunchedEffect(order, currentIndex) {
         val pos = order.indexOf(currentIndex)
         if (pos >= 0) gridState.scrollToItem(pos)
@@ -1894,6 +2173,24 @@ private fun EpisodePickerSheet(
                         fontSize = 16.sp,
                         modifier = Modifier.weight(1f)
                     )
+                    // 跳过片头/片尾：只对当前这部剧的全部集生效
+                    TextButton(onClick = { showSkipEdge = true }) {
+                        Text(
+                            // 已启用时标出当前设置，省得点进去才知道设过
+                            if (skipIntroMs > 0 || skipOutroMs > 0) {
+                                "跳过 ${formatDuration(skipIntroMs.toLong())}/" +
+                                    formatDuration(skipOutroMs.toLong())
+                            } else {
+                                "跳过片头尾"
+                            },
+                            color = if (skipIntroMs > 0 || skipOutroMs > 0) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.White
+                            },
+                            fontSize = 14.sp,
+                        )
+                    }
                     // 倒序：一键反转本视频全部集的播放顺序，便于修正顺序错乱的剧集
                     TextButton(onClick = onReverse) {
                         Text("倒序", color = Color.White, fontSize = 14.sp)
@@ -1922,6 +2219,101 @@ private fun EpisodePickerSheet(
                 }
             }
         }
+        if (showSkipEdge) {
+            SkipEdgeDialog(
+                introMs = skipIntroMs,
+                outroMs = skipOutroMs,
+                onDismiss = { showSkipEdge = false },
+                onConfirm = { intro, outro ->
+                    onSkipEdgeChange(intro, outro)
+                    showSkipEdge = false
+                },
+            )
+        }
+    }
+}
+
+/**
+ * 跳过片头 / 片尾 的设置弹窗。
+ *
+ * 两个滑块，单位秒（显示成 mm:ss 更直观）。改动先落在本地 state，
+ * 只有按下「保存」才回调持久化——拖滑块的过程不该写盘，也不该半途生效。
+ */
+@Composable
+private fun SkipEdgeDialog(
+    introMs: Int,
+    outroMs: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (introMs: Int, outroMs: Int) -> Unit,
+) {
+    val maxSec = (SkipEdge.MAX_MS / 1000).toFloat()
+    var introSec by remember { mutableFloatStateOf((introMs / 1000f).coerceIn(0f, maxSec)) }
+    var outroSec by remember { mutableFloatStateOf((outroMs / 1000f).coerceIn(0f, maxSec)) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.86f).wrapContentHeight(),
+            shape = RoundedCornerShape(18.dp),
+            color = Color(0xFF1C1C1E)
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("跳过片头 / 片尾", color = Color.White, fontSize = 17.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "只对当前这部剧的全部集生效，与其它剧互不影响。",
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 12.sp
+                )
+
+                Spacer(Modifier.height(18.dp))
+                EdgeSlider("片头", introSec, maxSec) { introSec = it }
+                Spacer(Modifier.height(16.dp))
+                EdgeSlider("片尾", outroSec, maxSec) { outroSec = it }
+
+                Spacer(Modifier.height(18.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) {
+                        Text("取消", color = Color.White, fontSize = 14.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = { onConfirm((introSec * 1000).toInt(), (outroSec * 1000).toInt()) }) {
+                        Text("保存", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 弹窗里的一行滑块：标题 + 当前值 + 轨道 */
+@Composable
+private fun EdgeSlider(
+    label: String,
+    valueSec: Float,
+    maxSec: Float,
+    onChange: (Float) -> Unit,
+) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(
+                // 0 秒时显示"关闭"，比显示 00:00 更能说明"不跳"
+                if (valueSec < 0.5f) "关闭" else formatDuration((valueSec * 1000).toLong()),
+                color = Color.White.copy(alpha = if (valueSec < 0.5f) 0.45f else 1f),
+                fontSize = 14.sp
+            )
+        }
+        Slider(
+            value = valueSec,
+            onValueChange = onChange,
+            valueRange = 0f..maxSec,
+            steps = (maxSec.toInt() / SkipEdge.STEP_SEC) - 1,
+            colors = SliderDefaults.colors(
+                thumbColor = MaterialTheme.colorScheme.primary,
+                activeTrackColor = MaterialTheme.colorScheme.primary,
+                inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+            )
+        )
     }
 }
 

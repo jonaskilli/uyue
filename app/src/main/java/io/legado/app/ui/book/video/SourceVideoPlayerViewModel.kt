@@ -229,9 +229,15 @@ object SourceVideoPlayerSession {
         }
     }
 
-    /** 把所有已下载完的集刷新为本地地址（重新进入页面时兜底一次） */
-    private fun refreshLocalUris() {
-        for (i in _uiState.value.episodes.indices) refreshLocalUri(i, includeCurrent = false)
+    /**
+     * 把所有已下载完的集刷新为本地地址（重新进入页面时兜底一次）。
+     *
+     * @param includeCurrent 是否连带正在播的那一集一起换。
+     *   播放**中**必须传 false——换 uri 会让播放器重建、把正在看的这一集打断；
+     *   但「刚进入页面」这一刻还没开始播，可以放心传 true。
+     */
+    private fun refreshLocalUris(includeCurrent: Boolean = false) {
+        for (i in _uiState.value.episodes.indices) refreshLocalUri(i, includeCurrent)
     }
 
     /**
@@ -340,8 +346,13 @@ object SourceVideoPlayerSession {
                 if (ep.uri.toString().startsWith("file:")) ep else ep.copy(uri = Uri.EMPTY)
             }
             _uiState.update { s -> s.copy(episodes = resetEpisodes) }
-            // 期间可能又有几集下载完了，补一次本地地址
-            refreshLocalUris()
+            // 期间可能又有几集下载完了，补一次本地地址。
+            // 这里必须 includeCurrent=true：上面刚把网络地址清空成 Uri.EMPTY，
+            // 而此刻 currentIndex 还是上一次留下的值，当前集会被 refreshLocalUri 跳过，
+            // 于是它的 uri 一直是空的、只能靠重新解析——而带时效 token 的直链此时
+            // 多半已失效，表现为「同一集退出重进就好、点播放却播不了」。
+            // 本分支是页面刚进入、还没开始播，换 uri 不会打断任何东西。
+            refreshLocalUris(includeCurrent = true)
             // 清掉上一轮可能残留的"解析中"标记，否则会被误判为正在解析而跳过重新解析
             resolving.clear()
             prefetching.clear()
@@ -891,11 +902,26 @@ object SourceVideoPlayerSession {
     /** 首页选集方块点击：切到指定集（未解析的先解析），并保证后续列表已加载 */
     fun selectEpisode(index: Int) {
         if (index !in _uiState.value.episodes.indices) return
-        // 已下载完的集直接播本地文件：先换成 file:// 再切，避免先用 http 起播又重建一次
-        refreshLocalUri(index, includeCurrent = true)
-        if (_uiState.value.episodes[index].uri == Uri.EMPTY) resolveEpisode(index)
+        // ===== 顺序很重要 =====
+        //
+        // 1) 先更新 currentIndex：首页那排选集方块的选中色完全依赖它，
+        //    放在前面才能点一下就变色。
+        // 2) 本地地址探测丢到后台：refreshLocalUri → findLocalFile → buildLocalPlaylist
+        //    会读整份播放清单（该源 600+ 行）并对每一片做 exists()，纯磁盘 IO。
+        //    它原本排在 currentIndex 之前、还跑在主线程，于是主线程被卡住几百毫秒到数秒，
+        //    而 ExoPlayer 在自己的线程上照常解码 —— 表现为「视频已经播了 3 秒，
+        //    那一格的选中色才姗姗来迟地变过来」。
         _uiState.update {
             it.copy(currentIndex = index, startIndex = index, startPositionMs = 0)
+        }
+        scope.launch {
+            // 已下载完的集直接播本地文件：先换成 file:// 再切，避免先用 http 起播又重建一次。
+            // 这里 currentIndex 已经是 index 了，但传的是 includeCurrent=true，
+            // refreshLocalUri 不会因此跳过它。
+            refreshLocalUri(index, includeCurrent = true)
+            if (_uiState.value.episodes.getOrNull(index)?.uri == Uri.EMPTY) {
+                resolveEpisode(index)
+            }
         }
         ensureMore()
     }

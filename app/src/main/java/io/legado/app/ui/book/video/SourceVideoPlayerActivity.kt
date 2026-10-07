@@ -266,6 +266,13 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             mutableStateOf(state.episodes.indices.toList())
         }
         var playOrder by playOrderState
+        /**
+         * 分页器当前页码。主页那排选集方块的高亮直接用它，
+         * 与选集面板同源——点一下就变色，不需要和进度上报抢状态。
+         */
+        val currentPageState = remember(state.bookUrl, state.episodes.size) {
+            mutableStateOf(state.startIndex.coerceAtLeast(0))
+        }
 
         LaunchedEffect(intent.getStringExtra("bookUrl")) {
             SourceVideoPlayerSession.load(
@@ -588,6 +595,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                             coverDrawable = coverDrawable,
                             compactMode = homeMode,
                             playOrderState = playOrderState,
+                            currentPageState = currentPageState,
                             reverseOrder = state.reverseOrder,
                             onReversePersist = { reversed ->
                                 SourceVideoPlayerSession.setReverseOrder(state.bookUrl, reversed)
@@ -616,6 +624,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 HomePanel(
                     state = state,
                     playOrder = playOrder,
+                    currentPage = currentPageState.value,
                     onExpand = { homeMode = false },
                 )
             }
@@ -763,6 +772,8 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
 private fun HomePanel(
     state: SourceVideoPlayerUiState,
     playOrder: List<Int>,
+    /** 分页器当前页码——高亮的唯一数据源，与选集面板同源 */
+    currentPage: Int,
     onExpand: () -> Unit,
 ) {
     val episodes = state.episodes
@@ -771,7 +782,11 @@ private fun HomePanel(
     // 打开弹窗时：已有下载任务则直接进下载进度页，否则进选集勾选页
     var downloadShowManage by remember { mutableStateOf(false) }
     var watchSave by remember { mutableStateOf(VideoDownloader.isWatchSaveEnabled()) }
-    val currentIndex = state.currentIndex.coerceIn(0, (episodes.lastIndex).coerceAtLeast(0))
+    // 当前正在播的那一集的**原始下标**：由分页页码经 playOrder 映射而来。
+    // 不用 state.currentIndex —— 那个字段同时被「用户选中」和 saveProgress 的
+    // 「正在播放」两拨人写，切集过程中会被抢回旧集，高亮要等好几秒才变。
+    val currentOrigIndex = playOrder.getOrNull(currentPage)
+        ?: state.currentIndex.coerceIn(0, episodes.lastIndex.coerceAtLeast(0))
 
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFF101010))) {
         // 标题行：剧名 + 集数 + 边看边存 + 下载 + 放大
@@ -800,8 +815,9 @@ private fun HomePanel(
                 VideoDownloader.setWatchSaveEnabled(watchSave)
                 // 刚打开：把正在播的这一集也存下来，不必等切到下一集才生效
                 if (watchSave) {
-                    SourceVideoPlayerSession.onEpisodeActivated(currentIndex)
-                }
+                                        // 用高亮那一集（与方块显示一致），而不是 state.currentIndex
+                                        SourceVideoPlayerSession.onEpisodeActivated(currentOrigIndex)
+                                    }
             }) {
                 Text(
                     if (watchSave) "边看边存·开" else "边看边存·关",
@@ -848,7 +864,7 @@ private fun HomePanel(
                 val ep = episodes.getOrNull(origIndex) ?: return@itemsIndexed
                 EpisodeItem(
                     label = if (ep.name.length <= 7) ep.name else "第${origIndex + 1}集",
-                    selected = origIndex == currentIndex,
+                    selected = origIndex == currentOrigIndex,
                     ready = ep.uri != Uri.EMPTY,
                     onClick = { SourceVideoPlayerSession.selectEpisode(origIndex) }
                 )

@@ -207,6 +207,19 @@ object VideoCache {
         get().getCachedSpans(url).isNotEmpty()
     }.getOrDefault(false)
 
+    /**
+     * 该地址在缓存里已占的字节数（未缓存返回 0）。**纯内存查询，不发网络请求。**
+     *
+     * 给 [AdFilter] 用：判断"这个分片是不是已知广告"时，先拿字节数做一级判据，
+     * 命中才值得去读内容算哈希。分片没下完时得到的是部分长度，与指纹库匹配不上，
+     * 自然就放行了，不会误判。
+     *
+     * 注意这里**只读不写、也不碰 open() 里的分流逻辑**，播放链路的���为完全没变。
+     */
+    fun cachedLength(url: String): Long = runCatching {
+        get().getCachedSpans(url).sumOf { it.length }
+    }.getOrDefault(0L)
+
     /** 清空缓存（释放空间；mp4 成品不受影响） */
     fun clear() {
         runCatching { get().release() }

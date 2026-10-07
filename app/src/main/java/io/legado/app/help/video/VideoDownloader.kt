@@ -981,9 +981,14 @@ object VideoDownloader {
             put("encrypted", keyUri != null)
         }.let { File(epFolder, "meta.json").writeText(it.toString()) }
 
+        // 已判定为广告的分片序号（上次下载留下来的记录）：既不再下载，
+        // 也不写进 local.m3u8——否则缺失会回退成原始 http 地址，广告等于又回来了
+        val adSkipped = loadSkippedAds(epFolder).toMutableMap()
+
         // 断点续传：已存在的非空分片直接跳过（best-effort，避免重下几十 MB 的分片）
         val need = (0 until total).filter {
-            !(segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0)
+            it !in adSkipped &&
+                !(segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0)
         }
         if (need.isEmpty()) return total to total
         // 边播边存收集阶段：只搬缓存里已有的分片，缺口留给收尾
@@ -1015,6 +1020,22 @@ object VideoDownloader {
                                 playlistUrl, headers, mediaSequence + k,
                                 keyCache, segFile(epFolder, k), raw = true
                             )
+                            // 落盘后立刻比对广告指纹：数据已经在硬盘上，
+                            // 只读前 192KB 就能判定，不额外联网也不牵扯 SimpleCache 的锁。
+                            // 局部变量刻意不叫 segFile——那会遮蔽同名的 segFile() 方法。
+                            val writtenSeg = segFile(epFolder, k)
+                            val fp = if (writtenSeg.exists() && writtenSeg.length() > 0) {
+                                AdFilter.matchedFingerprint(writtenSeg, hostOfUrl(segUrls[k]))
+                            } else {
+                                null
+                            }
+                            if (fp != null) {
+                                // 剔除并记下依据：把命中的指纹写进 skipped-ads.json，
+                                // 这样用户事后撤销标记（删样本）时，剔除能跟着一起失效
+                                writtenSeg.delete()
+                                synchronized(adSkipped) { adSkipped[k] = fp }
+                                AppLog.putDebug("下载已剔除广告分片：#$k ${segUrls[k]}")
+                            }
                             val done = writtenCount.incrementAndGet()
                             // 每落盘一个分片就回报一次进度（含断点续传已存在的），按百分比变化节流
                             val pct = ((done + total - need.size) * 100 / total).coerceIn(0, 99)
@@ -1042,16 +1063,94 @@ object VideoDownloader {
         }
         errorRef.get()?.let { throw it }
         onProgress(100)
+        saveSkippedAds(epFolder, adSkipped)
         // 全部补齐：临时索引清掉（playlist/meta 保留供播放与合并）
-        if ((0 until total).all { segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0 }) {
+        if ((0 until total).all {
+                it in adSkipped ||
+                    (segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0)
+            }
+        ) {
             File(epFolder, "index.idx").delete()
+            // ===== 补齐后必须重写 local.m3u8 =====
+            //
+            // 下载过程写的是 playlist.m3u8（原始 http 地址），而**播放读的是
+            // local.m3u8**（分片指向本地文件），后者只在 findLocalFile() 里生成，
+            // 也就是"打开播放页加载剧集列表"时才会刷一次。
+            // 边看边存期间它很容易被生成成一份只含部分分片的残缺版本，完成后没人再更新，
+            // 于是缓存完立刻点播放会照那份残缺清单走（缺的分片回填成网络地址、
+            // 广告片也还在里面），表现为必须重启 APP 才能播——重启后重新 load
+            // 才会再生成一份完整的。
+            runCatching { buildLocalPlaylist(epFolder) }
+                .onFailure { AppLog.putDebug("重建 local.m3u8 失败：${epFolder.name}", it) }
         }
-        // 完成数以磁盘实际落盘为准（不依赖 writtenCount 计数），避免并发/超时造成的漏算
+        // 完成数以磁盘实际落盘为准（不依赖 writtenCount 计数），避免并发/超时造成的漏算。
+        // 被判广告而剔除的片段算"已完成"——它本来就不该出现在成品里。
         val written = (0 until total).count {
-            segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0
+            it in adSkipped ||
+                (segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0)
         }
         return total to written
     }
+
+    // ------------------------------------------------------------------ 广告剔除记录
+
+    /** 被判定为广告、已从本次下载里剔除的分片序号 */
+    private fun skippedAdsFile(epFolder: File): File = File(epFolder, "skipped-ads.json")
+
+    private fun loadSkippedAds(epFolder: File): Map<Int, AdFilter.Fingerprint?> =
+        runCatching<Map<Int, AdFilter.Fingerprint?>> {
+        val f = skippedAdsFile(epFolder)
+        if (!f.exists()) return@runCatching emptyMap()
+        val obj = org.json.JSONObject(f.readText())
+        // 兼容早期只记序号的格式：这类没有指纹依据，值给 null
+        obj.optJSONArray("indexes")?.let { legacy ->
+            return@runCatching (0 until legacy.length())
+                .map { legacy.optInt(it, -1) }
+                .filter { it >= 0 }
+                .associateWith { null as AdFilter.Fingerprint? }
+        }
+        val arr = obj.optJSONArray("items") ?: return@runCatching emptyMap()
+        buildMap {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val index = o.optInt("index", -1)
+                if (index < 0) continue
+                val size = o.optLong("size", -1L)
+                val hash = o.optString("hash")
+                // 指纹已被撤销（用户删了样本）→ 这条剔除自动失效
+                if (!AdFilter.isFingerprintAlive(size, hash)) continue
+                put(
+                    index,
+                    AdFilter.Fingerprint(
+                        file = "",
+                        size = size,
+                        hash = hash,
+                        host = null,
+                    )
+                )
+            }
+        }
+    }.getOrDefault(emptyMap())
+
+    private fun saveSkippedAds(epFolder: File, skipped: Map<Int, AdFilter.Fingerprint?>) {
+        runCatching {
+            val arr = org.json.JSONArray()
+            skipped.toSortedMap().forEach { (index, fp) ->
+                if (fp == null) return@forEach
+                arr.put(org.json.JSONObject().apply {
+                    put("index", index)
+                    put("size", fp.size)
+                    put("hash", fp.hash)
+                })
+            }
+            skippedAdsFile(epFolder).writeText(
+                org.json.JSONObject().apply { put("items", arr) }.toString()
+            )
+        }.onFailure { AppLog.putDebug("广告剔除记录写入失败") }
+    }
+
+    private fun hostOfUrl(url: String): String? =
+        runCatching { java.net.URI(url).host }.getOrNull()
 
     /**
      * 把一个分片**流式**落到临时文件：命中缓存读缓存，否则联网（不写缓存）。
@@ -1150,7 +1249,12 @@ object VideoDownloader {
         val initFile = File(epFolder, "init.bin").takeIf { it.exists() }
         FileOutputStream(mp4).use { out ->
             initFile?.inputStream()?.use { ins -> ins.copyTo(out) }
-            segs.forEachIndexed { k, seg ->
+            segs.forEach { seg ->
+                // 序号必须取**文件名里记录的原始分片序号**，不能用"第几个存在的文件"。
+                // 广告分片被剔除后中间会留下空洞（seg_1 没了、seg_2 还在），
+                // 用 forEachIndexed 的下标会让 AES 解密序号整体错位，
+                // 而 AES/CBC/PKCS5Padding 的强制 padding 会让错位之后的每一段都解成乱码。
+                val k = seg.name.removePrefix("seg_").removeSuffix(".ts").toIntOrNull() ?: 0
                 val cipher = if (keyBytes != null) aesCipher(keyBytes, iv, seq + k) else null
                 seg.inputStream().use { ins ->
                     val decoded = cipher?.let { CipherInputStream(ins, it) } ?: ins
@@ -1179,8 +1283,19 @@ object VideoDownloader {
         val out = File(epFolder, "local.m3u8")
         val playlist = runCatching { File(epFolder, "playlist.m3u8").readText() }.getOrNull()
             ?: return File(epFolder, "playlist.m3u8")
+
+        // 被判广告剔除的分片必须**连同它的 #EXTINF / #EXT-X-BYTERANGE 一起摘掉**，
+        // 不能留在清单里：少一步就会走到最后的 else 分支回填成原始 http 地址，
+        // 播本地时广告照样联网回来。
+        var skipped = loadSkippedAds(epFolder).keys
+        val totalSegs = playlist.lines().count { !it.startsWith("#") && it.isNotBlank() }
+        // 兜底：万一指纹把整片判成了广告，宁可原样播也不要出一个空清单
+        if (skipped.size >= totalSegs) skipped = emptySet()
+
         val sb = StringBuilder()
         var k = 0
+        /** 分片的描述标签：先扣住，等看到分片地址再决定这一整组是留还是丢 */
+        var pendingTags: MutableList<String>? = null
         playlist.lines().forEach { line ->
             val l = line
             when {
@@ -1196,12 +1311,37 @@ object VideoDownloader {
                         .append('\n')
                     else sb.append(l).append('\n')
                 }
+                // #EXTINF 与 #EXT-X-BYTERANGE 都属于"即将到来的那一片"，必须和地址行同生共死。
+                // 早先只扣住 EXTINF、让 BYTERANGE 原样输出，删掉分片后这个 range 就
+                // 挂到了下一个分片头上，清单直接错乱。
+                l.startsWith("#EXTINF") || l.startsWith("#EXT-X-BYTERANGE") -> {
+                    val tags = pendingTags ?: ArrayList<String>(2).also { pendingTags = it }
+                    tags.add(l)
+                }
+                // #EXT-X-DISCONTINUITY **原样透传**。
+                // 曾经在这里做过"连续标记压成一个"的去重，那是错的：去重标志只在输出分片时
+                // 才复位，而 #EXT-X-KEY / #EXTINF 分支都不复位，于是原本合法的连续标记
+                // （加密流换密钥、转码流切换处很常见）会被吞掉一个，清单结构变化导致
+                // 播放时解码器配置出错，无广告的视频也一律播不了。
+                // 删掉中间分片后留下两个连续 DISCONTINUITY 是合法的，而且语义更正确：
+                // 它本就是用来标记广告块边界的。
                 l.startsWith("#") -> sb.append(l).append('\n')
                 l.isBlank() -> Unit
                 else -> {
-                    val localSeg = segFile(epFolder, k)
-                    if (localSeg.exists()) sb.append(Uri.fromFile(localSeg).toString()).append('\n')
-                    else sb.append(l).append('\n')
+                    val tags = pendingTags
+                    pendingTags = null
+                    if (k in skipped) {
+                        // 广告分片：描述标签和地址行一起丢掉
+                    } else {
+                        tags?.forEach { sb.append(it).append('\n') }
+                        val localSeg = segFile(epFolder, k)
+                        if (localSeg.exists()) {
+                            sb.append(Uri.fromFile(localSeg).toString()).append('\n')
+                        } else {
+                            // 这一片没下到本地 → 回填原始网络地址，播放时去网上取
+                            sb.append(l).append('\n')
+                        }
+                    }
                     k++
                 }
             }
