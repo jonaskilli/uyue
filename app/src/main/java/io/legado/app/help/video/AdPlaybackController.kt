@@ -1,5 +1,6 @@
 package io.legado.app.help.video
 
+import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -144,14 +145,24 @@ class AdPlaybackController {
     ) {
         val url = loadEventInfo.dataSpec.uri.toString()
         if (isPlaylistLike(url)) return // 清单/密钥/初始化段不是分片
-        // 本地分片不参与判定：它们是下载时已剔过广告的产物，再判一遍毫无意义；
-        // 而且判定会去打开缓存（CacheDataSource 只认 http/https），对 file:// 只会抛异常。
-        if (url.startsWith("file:") || url.startsWith("content:")) return
         val size = loadEventInfo.bytesLoaded
         if (size <= 0) return
         val startMs = mediaLoadData.mediaStartTimeMs
         val endMs = mediaLoadData.mediaEndTimeMs
         val timed = startMs != C.TIME_UNSET && endMs != C.TIME_UNSET && endMs > startMs
+
+        // 本地分片不参与指纹判定：它们是下载时已剔过广告的产物，再判一遍毫无意义；
+        // 而且判定会去打开缓存（CacheDataSource 只认 http/https），对 file:// 只会抛异常。
+        // 但**必须登记进 chunks**：播放本地缓存时长按也要能弹出分片列表——
+        // 下载时指纹库还没有的漏网广告，正是要用户在这里挑出来标掉的。
+        if (url.startsWith("file:") || url.startsWith("content:")) {
+            if (timed) synchronized(chunks) {
+                if (chunks.none { it.url == url }) {
+                    chunks.add(ChunkInfo(url, size, startMs, endMs))
+                }
+            }
+            return
+        }
 
         synchronized(chunks) {
             if (chunks.none { it.url == url }) {
@@ -283,6 +294,28 @@ class AdPlaybackController {
     }
 
     /**
+     * 以 [positionMs] 为中心，返回前后各 [count] 个分片（含自身），按时间轴升序。
+     *
+     * 供"标记广告"列表用：用户暂停后长按播放键，弹出的列表就以当前位置为锚，
+     * 把前后若干个分片都列出来，靠缩略图把一条连续广告的每一片都挑出来。
+     * 没有时间信息的分片（startMs<0）不参与窗口计算——它既没法定位、也没法登记跳过区间。
+     */
+    fun chunksAround(positionMs: Long, count: Int): List<ChunkInfo> = synchronized(chunks) {
+        val sorted = chunks.filter { it.startMs >= 0 && it.endMs > it.startMs }
+            .sortedBy { it.startMs }
+        if (sorted.isEmpty()) return@synchronized emptyList()
+        val centerIdx = sorted.indexOfFirst { positionMs >= it.startMs && positionMs < it.endMs }
+            .let { if (it >= 0) it else sorted.indexOfLast { c -> c.endMs <= positionMs + 2_000L } }
+            .let { if (it < 0) sorted.size / 2 else it }
+        val from = (centerIdx - count).coerceAtLeast(0)
+        val to = (centerIdx + count).coerceAtMost(sorted.lastIndex)
+        sorted.subList(from, to + 1)
+    }
+
+    /** 该分片是否已被标记为广告（供列表预勾选用） */
+    fun isMarkedAd(url: String): Boolean = verdicts[url] == true
+
+    /**
  * 把当前分片登记为广告（会保存样本文件，必须后台调用）。
  *
  * @param includeNeighbors 连带标记的相邻片数。**这一项很关键**：一条广告通常是连续
@@ -327,6 +360,87 @@ class AdPlaybackController {
             AppLog.put("已标记 ${saved.size} 个广告分片：${saved.joinToString { it.first }}")
         }
         saved
+    }
+
+    /**
+     * 把用户**手动勾选**的若干分片逐个登记为广告。
+     *
+     * 与 [markAsAd] 的固定相邻窗口不同：列表界面里用户是看着缩略图逐片勾选的，
+     * 勾了哪些就标哪些，不预设"连续几片"。[centerUrl] 仅用于推算 EXTINF 序列的登记半径，
+     * 让"第一集标记完，第二集直接无广告"仍生效（半径取选中片里离中心最远的距离）。
+     *
+     * @return 保存出的样本文件列表（文件名, 字节数），失败返回空列表
+     */
+    suspend fun markChunksAsAd(
+        urls: List<String>,
+        headers: Map<String, String>,
+        playlistUrl: String?,
+        centerUrl: String?,
+    ): List<kotlin.Pair<String, Long>> = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        if (urls.isEmpty()) return@withContext emptyList()
+        val snapshot = synchronized(chunks) { chunks.toList() }
+        val urlSet = urls.toSet()
+        val centerIdx = centerUrl?.let { u -> snapshot.indexOfFirst { it.url == u } } ?: -1
+        // 播放本地缓存（playlistUrl 是 file:// 的 local.m3u8）时：标记结果还要写进
+        // 分片文件夹的 skipped-ads.json，否则下次播放重建 local.m3u8 时广告原样回来
+        val epFolder = localPlaylistFolder(playlistUrl)
+        val localIndices = HashMap<Int, AdFilter.Fingerprint>()
+        val saved = ArrayList<kotlin.Pair<String, Long>>()
+        var maxRadius = 0
+        for ((i, c) in snapshot.withIndex()) {
+            if (c.url !in urlSet) continue
+            // 没有时间信息的不处理：既无法登记跳过区间，也无法确认它是否相邻
+            if (c.startMs < 0 || c.endMs <= c.startMs) continue
+            val isLocal = c.url.startsWith("file:") || c.url.startsWith("content:")
+            val file = if (isLocal) {
+                // 本地分片：直接读文件登记（VideoCache 只认 http/https）
+                val f = Uri.parse(c.url).path?.let { java.io.File(it) }
+                if (f != null && f.exists()) AdFilter.registerFile(f, null) else null
+            } else {
+                AdFilter.register(c.url, headers, c.size)
+            } ?: continue
+            verdicts[c.url] = true
+            registerRange(c.startMs, c.endMs)
+            saved.add(file.name to c.size)
+            // 把这次标记记进本地剔除记录（序号 + 指纹依据）
+            if (epFolder != null) {
+                val fp = if (isLocal) {
+                    Uri.parse(c.url).path
+                        ?.let { AdFilter.matchedFingerprint(java.io.File(it), null) }
+                } else {
+                    AdFilter.matchedFingerprintFor(c.url, c.size, headers)
+                }
+                val idx = VideoDownloader.indexOfSegmentInPlaylist(epFolder, c.url)
+                if (fp != null && idx >= 0) localIndices[idx] = fp
+            }
+            if (centerIdx >= 0) maxRadius = kotlin.math.max(maxRadius, kotlin.math.abs(i - centerIdx))
+        }
+        if (saved.isNotEmpty() && centerUrl != null && !playlistUrl.isNullOrBlank() &&
+            !playlistUrl.startsWith("file:")
+        ) {
+            // 远程播放才登记 EXTINF 序列指纹；本地清单的 EXTINF 已被剔除过，序列对不上
+            registerExtInfSequence(playlistUrl, centerUrl, maxRadius.coerceAtLeast(1))
+        }
+        if (localIndices.isNotEmpty() && epFolder != null) {
+            VideoDownloader.applyLocalAdMarks(epFolder, localIndices)
+        }
+        // 指纹库刚多了一条，立刻回头重判此前挂起的分片
+        recheckPending(headers)
+        if (saved.isNotEmpty()) {
+            AppLog.put("已标记 ${saved.size} 个广告分片：${saved.joinToString { it.first }}")
+        }
+        saved
+    }
+
+    /**
+     * 播放的是本地缓存时，从 local.m3u8 的 file:// 地址反推分片文件夹。
+     * 认不出（不是本地播放 / 文件夹里没有 playlist.m3u8）返回 null。
+     */
+    private fun localPlaylistFolder(playlistUrl: String?): java.io.File? {
+        if (playlistUrl.isNullOrBlank() || !playlistUrl.startsWith("file:")) return null
+        val parent = Uri.parse(playlistUrl).path
+            ?.let { java.io.File(it).parentFile } ?: return null
+        return parent.takeIf { java.io.File(it, "playlist.m3u8").exists() }
     }
 
     /**

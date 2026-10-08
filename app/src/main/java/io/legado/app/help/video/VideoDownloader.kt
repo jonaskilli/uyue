@@ -1181,6 +1181,52 @@ object VideoDownloader {
         }.onFailure { AppLog.putDebug("广告剔除记录写入失败") }
     }
 
+    // ------------------------------------------------------ 播放本地缓存时的广告标记
+
+    /**
+     * 求一个分片在**原始 playlist.m3u8** 里的序号（skipped-ads.json 用原始序号）。
+     * 本地分片直接从文件名 `seg_%06d.ts` 取；未下载回填的 http 分片按地址行匹配
+     * （playlist.m3u8 存的就是绝对地址）。
+     */
+    fun indexOfSegmentInPlaylist(epFolder: File, url: String): Int {
+        if (url.startsWith("file:")) {
+            return Regex("""seg_(\d+)\.ts$""").find(Uri.parse(url).path ?: "")
+                ?.groupValues?.get(1)?.toIntOrNull() ?: -1
+        }
+        val playlist = runCatching { File(epFolder, "playlist.m3u8").readText() }.getOrNull()
+            ?: return -1
+        var k = 0
+        for (line in playlist.lines()) {
+            val t = line.trim()
+            if (t.isEmpty() || t.startsWith("#")) continue
+            if (t == url) return k
+            k++
+        }
+        return -1
+    }
+
+    /**
+     * 播放本地缓存时手动标记广告后的落盘动作。
+     *
+     * 1) 把新标记的分片序号连同指纹依据并进 skipped-ads.json——
+     *    [buildLocalPlaylist] 每次播放都会按它重建 local.m3u8，**不记在这里，
+     *    下次播放这些广告分片会原样回来**（播放器不会对本地清单做指纹过滤）；
+     * 2) 立刻重生成 local.m3u8，把这次标记的分片连同 #EXTINF 一起摘掉。
+     *
+     * 注意：**不删除本地分片文件**——当前会话的 ExoPlayer 还握着旧清单，
+     * 删了文件 seek 到附近会直接报错；文件留着，反正清单里已经不引用它。
+     */
+    fun applyLocalAdMarks(epFolder: File, indices: Map<Int, AdFilter.Fingerprint>) {
+        if (indices.isEmpty()) return
+        runCatching {
+            val merged = loadSkippedAds(epFolder).toMutableMap()
+            merged.putAll(indices)
+            saveSkippedAds(epFolder, merged)
+            buildLocalPlaylist(epFolder)
+            AppLog.put("本地标记广告：剔除 ${indices.size} 个分片并重建 ${epFolder.name}/local.m3u8")
+        }.onFailure { AppLog.putDebug("本地广告标记落盘失败：${epFolder.name}", it) }
+    }
+
     private fun hostOfUrl(url: String): String? =
         runCatching { java.net.URI(url).host }.getOrNull()
 

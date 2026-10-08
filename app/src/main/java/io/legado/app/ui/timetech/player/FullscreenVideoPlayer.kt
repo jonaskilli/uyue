@@ -8,8 +8,10 @@ import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
+import java.io.File
 import android.net.Uri
 import android.os.BatteryManager
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -62,6 +64,7 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -80,6 +83,9 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -152,6 +158,8 @@ import io.legado.app.utils.isWifiConnect
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -998,12 +1006,12 @@ internal fun VideoPlayerPage(
     // 由 AdPlaybackController 承担：监听分片下载完成 → 后台比对指纹 → 登记跳过区间。
     // 详细原理见 AdFilter / AdPlaybackController 的类注释。
     val adCtrl = remember { AdPlaybackController() }
-    /** 「标记为广告」确认面板 */
+    /** 「标记为广告」分片列表面板 */
     var showAdMark by remember { mutableStateOf(false) }
     /** 标记进行中（读整个分片并保存样本，需要一点时间） */
     var adMarking by remember { mutableStateOf(false) }
-    /** 连带标记的相邻片数：一条广告常是连续 3 片，只标一片的话另外两片查不到指纹 */
-    var adMarkNeighbor by remember { mutableIntStateOf(1) }
+    /** 列表里被选中的分片 url 集合（跨重开保留；已标为广告的默认选中） */
+    val adSelected = remember { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(Unit) {
         // 首次播放前把指纹库扫一遍，避免第一片判定时同步读盘造成卡顿
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -1521,27 +1529,50 @@ internal fun VideoPlayerPage(
             }
         }
 
-        // 「标记为广告」确认面板：必须二次确认，标错就是把正片删了
+        // 「标记为广告」分片列表：以暂停位置为中心，前后各 6 片，可逐个勾选
         if (showAdMark) {
-            val chunk = remember(position) { adCtrl.currentChunk(position) }
-            AdMarkSheet(
-                size = chunk?.size ?: 0L,
-                known = chunk != null,
+            val window = remember(position) { adCtrl.chunksAround(position, 6) }
+            val centerUrl = window.firstOrNull { position >= it.startMs && position < it.endMs }
+                ?: window.firstOrNull { it.endMs <= position + 2_000L }
+                ?: window.lastOrNull()
+            // 已标为广告的默认勾选；并保留此前手动勾选的，关面板预览再回来不丢
+            LaunchedEffect(showAdMark) {
+                val marked = window.filter { adCtrl.isMarkedAd(it.url) }.map { it.url }.toSet()
+                adSelected.value = adSelected.value + marked
+            }
+            AdMarkList(
+                chunks = window,
+                centerUrl = centerUrl?.url,
+                selected = adSelected.value,
                 marking = adMarking,
-                neighbor = adMarkNeighbor,
-                onNeighborChange = { adMarkNeighbor = it },
+                onToggle = { url ->
+                    adSelected.value = if (url in adSelected.value)
+                        adSelected.value - url else adSelected.value + url
+                },
                 onDismiss = { if (!adMarking) showAdMark = false },
+                onPreview = { chunk ->
+                    // 单独播放这一片：关掉面板、跳到该片起点，勾选状态保留以便回来继续勾
+                    showAdMark = false
+                    scope.launch {
+                        if (chunk.startMs >= 0) player.seekTo(chunk.startMs)
+                        player.play()
+                    }
+                },
                 onConfirm = {
+                    val urls = adSelected.value.toList()
+                    if (urls.isEmpty()) { showAdMark = false; return@AdMarkList }
                     adMarking = true
                     scope.launch {
                         val saved = runCatching {
-                            adCtrl.markAsAd(
-                                position, headers, adMarkNeighbor,
+                            adCtrl.markChunksAsAd(
+                                urls, headers,
                                 player.currentMediaItem?.localConfiguration?.uri?.toString(),
+                                centerUrl?.url,
                             )
                         }.getOrNull().orEmpty()
                         adMarking = false
                         showAdMark = false
+                        adSelected.value = emptySet()
                         if (saved.isNotEmpty()) {
                             val total = saved.sumOf { it.second }
                             context.toastOnUi(
@@ -1549,7 +1580,7 @@ internal fun VideoPlayerPage(
                                     "已存进 保存视频/AI识别广告/，以后自动跳过"
                             )
                         } else {
-                            context.toastOnUi("标记失败：未能读取该分片，请稍候重试")
+                            context.toastOnUi("标记失败：未能读取分片，请稍候重试")
                         }
                     }
                 },
@@ -1571,26 +1602,25 @@ internal fun VideoPlayerPage(
 }
 
 /**
- * 「标记为广告」确认面板。
+ * 「标记为广告」分片列表。
  *
- * 长按中间播放键呼出。必须二次确认——标记的结果是把整段内容从以后的播放里永久剔除，
- * 标错就等于删了正片（尽管可以进文件夹删样本撤销，但多数人不会立刻发现）。
+ * 长按中间播放键（暂停状态）呼出。以暂停位置为锚，把**前后各 6 片**都列出来：
+ * 每行左侧是该片的缩略图（本地缓存抽帧，零流量；还没缓存 / 抽不出来的用「时长+字节」占位），
+ * 中间一个播放按钮可单独跳到这一片看一眼，右侧是勾选框。
+ * 这样用户靠肉眼就能把一条连续广告的每一片都挑出来——比原先"只确认当前一片"直观得多。
  *
- * 面板上如实显示这一片的字节数：这是以后判定用的**一级判据**，让用户在按下按钮前
- * 至少能确认"这一片的规模是不是像广告"。
- *
- * 「连带片数」是解决"标记了却还看到广告"的关键：一条广告常常是连续几个分片，
- * 只登记停住的那一片，其余分片在指纹库里依然查不到，从头播放时照旧会播出来。
- * 默认取 1（前后各一片），实测正好覆盖 ffzy 那种 3 片广告。
+ * 已标为广告的分片默认就是勾选状态（[AdPlaybackController.isMarkedAd]），
+ * 底部「标记为广告」会把所有勾选的分片逐个登记进指纹库。
  */
 @Composable
-private fun AdMarkSheet(
-    size: Long,
-    known: Boolean,
+private fun AdMarkList(
+    chunks: List<AdPlaybackController.ChunkInfo>,
+    centerUrl: String?,
+    selected: Set<String>,
     marking: Boolean,
-    neighbor: Int,
-    onNeighborChange: (Int) -> Unit,
+    onToggle: (String) -> Unit,
     onDismiss: () -> Unit,
+    onPreview: (AdPlaybackController.ChunkInfo) -> Unit,
     onConfirm: () -> Unit,
 ) {
     Dialog(
@@ -1599,78 +1629,57 @@ private fun AdMarkSheet(
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.86f)
-                .wrapContentHeight(),
+                .fillMaxWidth(0.92f)
+                .fillMaxHeight(0.82f),
             shape = RoundedCornerShape(18.dp),
             color = Color(0xFF1C1C1E)
         ) {
-            Column(modifier = Modifier.padding(20.dp)) {
-                Text(
-                    "标记为广告？",
-                    color = Color.White,
-                    fontSize = 17.sp,
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    if (known) {
-                        "当前分片：${formatFileSize(size)}\n" +
-                            "原始字节会原样存进 保存视频/AI识别广告/（后缀改为 .mp4），" +
-                            "以后遇到相同内容的分片自动跳过。"
-                    } else {
-                        "还没读到当前分片的信息（可能仍在缓冲）。\n" +
-                            "请稍等画面缓冲完成后再试。"
-                    },
-                    color = Color.White.copy(alpha = 0.7f),
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp,
-                )
-                Spacer(Modifier.height(14.dp))
-                Text("连带标记的相邻分片", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
-                Spacer(Modifier.height(6.dp))
-                Row {
-                    listOf(0 to "仅当前片", 1 to "前后各1片", 2 to "前后各2片").forEach { (n, label) ->
-                        val active = neighbor == n
-                        Box(
-                            modifier = Modifier
-                                .padding(end = 8.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (active) MaterialTheme.colorScheme.primary
-                                    else Color.White.copy(alpha = 0.12f)
-                                )
-                                .clickable { onNeighborChange(n) }
-                                .padding(horizontal = 12.dp, vertical = 7.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                label,
-                                color = if (active) Color.Black else Color.White.copy(alpha = 0.85f),
-                                fontSize = 13.sp
-                            )
-                        }
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("标记广告分片", color = Color.White, fontSize = 17.sp)
+                    Text(
+                        if (selected.isNotEmpty()) "已选 ${selected.size} 个" else "勾选要跳过的分片",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp
+                    )
+                }
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    items(chunks, key = { it.url }) { chunk ->
+                        AdMarkRow(
+                            chunk = chunk,
+                            isCenter = chunk.url == centerUrl,
+                            checked = chunk.url in selected,
+                            onToggle = { onToggle(chunk.url) },
+                            onPreview = { onPreview(chunk) },
+                        )
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "一条广告通常是连续几个分片，建议选「前后各1片」；" +
-                        "选多了可能把正片也标进去（可在文件夹里删掉多余的）。",
-                    color = Color.White.copy(alpha = 0.45f),
-                    fontSize = 11.sp,
-                    lineHeight = 16.sp,
-                )
-                Spacer(Modifier.height(18.dp))
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
                     horizontalArrangement = Arrangement.End,
                 ) {
                     TextButton(onClick = onDismiss, enabled = !marking) {
                         Text("取消", color = Color.White, fontSize = 14.sp)
                     }
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = onConfirm, enabled = known && !marking) {
+                    TextButton(
+                        onClick = onConfirm,
+                        enabled = selected.isNotEmpty() && !marking,
+                    ) {
                         Text(
                             if (marking) "保存中…" else "标记为广告",
-                            color = if (known && !marking) {
+                            color = if (selected.isNotEmpty() && !marking) {
                                 MaterialTheme.colorScheme.primary
                             } else {
                                 Color.White.copy(alpha = 0.4f)
@@ -1681,6 +1690,160 @@ private fun AdMarkSheet(
                 }
             }
         }
+    }
+}
+
+/**
+ * 列表里的单行：缩略图 + 单独播放按钮 + 勾选框。
+ */
+@Composable
+private fun AdMarkRow(
+    chunk: AdPlaybackController.ChunkInfo,
+    isCenter: Boolean,
+    checked: Boolean,
+    onToggle: () -> Unit,
+    onPreview: () -> Unit,
+) {
+    val context = LocalContext.current
+    var thumb by remember(chunk.url) { mutableStateOf<Bitmap?>(null) }
+    var thumbLoading by remember(chunk.url) { mutableStateOf(false) }
+    LaunchedEffect(chunk.url) {
+        thumbLoading = true
+        thumb = loadChunkThumbnail(context, chunk.url)
+        thumbLoading = false
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp)
+            .background(
+                if (isCenter) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                else Color.Transparent,
+                RoundedCornerShape(10.dp)
+            )
+            .padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // 左侧：缩略图（或时长+字节占位）
+        Box(
+            modifier = Modifier
+                .size(width = 108.dp, height = 60.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color.Black),
+            contentAlignment = Alignment.Center,
+        ) {
+            when {
+                thumb != null -> Image(
+                    bitmap = thumb!!.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                thumbLoading -> CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    color = Color.White.copy(alpha = 0.7f),
+                    strokeWidth = 2.dp
+                )
+                else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        formatDuration((chunk.endMs - chunk.startMs).coerceAtLeast(0L)),
+                        color = Color.White.copy(alpha = 0.8f),
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        formatFileSize(chunk.size),
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontSize = 10.sp
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        // 中间：时间 + 单独播放按钮
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                if (isCenter) "当前位置" else formatDuration(chunk.startMs),
+                color = if (isCenter) MaterialTheme.colorScheme.primary
+                else Color.White.copy(alpha = 0.75f),
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.White.copy(alpha = 0.12f))
+                    .clickable(enabled = chunk.startMs >= 0) { onPreview() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = "单独播放此分片",
+                    tint = if (chunk.startMs >= 0) Color.White
+                    else Color.White.copy(alpha = 0.3f),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+        // 右侧：勾选框
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(
+                    if (checked) MaterialTheme.colorScheme.primary
+                    else Color.White.copy(alpha = 0.12f)
+                )
+                .clickable { onToggle() },
+            contentAlignment = Alignment.Center
+        ) {
+            if (checked) {
+                Icon(
+                    Icons.Filled.Check,
+                    contentDescription = "已选",
+                    tint = Color.Black,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 抽一帧当缩略图。
+ *
+ * - 本地分片（file://）：直接对着分片文件抽帧，连临时文件都省了；
+ * - 远程分片：从**本地缓存**读出分片字节（零流量，只取已缓存的，
+ *   暂停位置前后的那一批基本都已下完），写到临时文件再抽帧。
+ *
+ * 拿不到（未缓存 / 抽帧失败）返回 null，由 [AdMarkRow] 回退到「时长+字节」占位，
+ * 用户再用播放按钮单独看。
+ */
+private suspend fun loadChunkThumbnail(
+    context: Context,
+    url: String,
+): Bitmap? = withContext(Dispatchers.IO) {
+    var retriever: MediaMetadataRetriever? = null
+    var tmp: File? = null
+    try {
+        retriever = MediaMetadataRetriever()
+        if (url.startsWith("file:")) {
+            val path = Uri.parse(url).path ?: return@withContext null
+            retriever.setDataSource(path)
+        } else {
+            val bytes = AdFilter.readFullCached(url) ?: return@withContext null
+            tmp = File(context.cacheDir, "ad_thumb_${url.hashCode().toString(36)}.tmp")
+            tmp.writeBytes(bytes)
+            retriever.setDataSource(tmp.absolutePath)
+        }
+        // 取靠近片头的同步帧；拿不到就退到 0 处
+        retriever.getFrameAtTime(800_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            ?: retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+    } catch (_: Exception) {
+        null
+    } finally {
+        runCatching { retriever?.release() }
+        tmp?.let { runCatching { it.delete() } }
     }
 }
 

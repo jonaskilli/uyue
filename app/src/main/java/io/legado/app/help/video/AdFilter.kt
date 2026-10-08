@@ -410,6 +410,27 @@ object AdFilter {
     fun isAdFile(file: File, host: String?): Boolean = matchedFingerprint(file, host) != null
 
     /**
+     * [isAd] 的孪生：判定之外还给出命中的那条指纹。
+     * 播放本地缓存时手动标记 http 回填分片用——写 skipped-ads.json 需要指纹依据。
+     * **必须在后台线程调用**（命中 size 后要从缓存读数并哈希）。
+     */
+    fun matchedFingerprintFor(
+        url: String,
+        bytesLoaded: Long,
+        headers: Map<String, String> = emptyMap(),
+    ): Fingerprint? {
+        if (!enabled) return null
+        if (!loaded) refresh()
+        val host = runCatching { java.net.URI(url).host }.getOrNull()
+        val actual = if (bytesLoaded > 0) bytesLoaded else contentLengthOf(url, headers)
+        val candidates = (bySize[actual] ?: return null).filter { matchAllows(it, host) }
+        if (candidates.isEmpty()) return null
+        if (confidence == AdFilterConfidence.SIZE_ONLY) return candidates.first()
+        val hash = sampleHashFromCache(url, headers) ?: return null
+        return candidates.firstOrNull { it.hash == hash }
+    }
+
+    /**
      * 这条指纹是否**仍在库**里。
      *
      * 用户在样本文件夹里删掉某个 mp4 = 撤销这条规则；此前据此做的下载剔除
@@ -463,6 +484,33 @@ object AdFilter {
         knownFiles[file.name] = file.length() to file.lastModified()
         persist()
         return file
+    }
+
+    /**
+     * 把一个**本地分片文件**登记为广告（播放本地缓存时标记用）。
+     *
+     * 与 [register] 的 http 路径不同：字节直接来自本地文件，不走 [VideoCache]
+     * （CacheDataSource 只认 http/https，对 file:// 只会抛异常）。
+     * 若该文件已命中现有指纹（size+哈希），说明库里已有这条，直接复用样本文件不重复存。
+     */
+    fun registerFile(file: File, host: String?): File? {
+        if (!loaded) refresh()
+        if (!file.exists() || file.length() <= 0L) return null
+        matchedFingerprint(file, host)?.let { fp ->
+            if (fp.file.isNotEmpty()) return File(dir(), fp.file)
+        }
+        val actualSize = file.length()
+        val hash = sha256Of(file) ?: return null
+        val f = newSampleFile(host, actualSize)
+        runCatching { file.copyTo(f, overwrite = true) }.onFailure {
+            AppLog.put("广告样本保存失败", it)
+            return null
+        }
+        bySize.getOrPut(actualSize) { ArrayList() }
+            .add(Fingerprint(f.name, actualSize, hash, host))
+        knownFiles[f.name] = f.length() to f.lastModified()
+        persist()
+        return f
     }
 
     private fun newSampleFile(host: String?, size: Long): File {
@@ -521,6 +569,30 @@ object AdFilter {
             runCatching { s.source.close() }
         }
     }.getOrDefault(ByteArray(0))
+
+    /**
+     * 读取**已缓存分片**的完整字节（供缩略图抽帧用）。
+     *
+     * 与 [readSampleFor] 同口径：只走本地 [VideoCache] 且 write=false，未缓存返回空，
+     * 因此缩略图抽取零流量——已播放过的分片（暂停位置前后的那一批）本地都有。
+     */
+    fun readFullCached(url: String): ByteArray? = runCatching {
+        if (!VideoCache.isCached(url)) return@runCatching null
+        val s = VideoCache.open(url, emptyMap(), write = false)
+        try {
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(READ_BUF)
+            while (true) {
+                val r = s.source.read(buf, 0, buf.size)
+                if (r == C.RESULT_END_OF_INPUT) break
+                if (r <= 0) break
+                out.write(buf, 0, r)
+            }
+            out.toByteArray()
+        } finally {
+            runCatching { s.source.close() }
+        }
+    }.getOrNull()
 
     // ---------------------------------------------------------------- 读取工具
 
