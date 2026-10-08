@@ -1758,9 +1758,12 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         // 正式缓存文件（xxx.mp3）。被切章/手动翻页等操作打断（协程取消）或读流出错时，
         // 直接删掉临时文件丢弃半截音频，绝不让半截文件留在正式缓存里被后续命中，
         // 导致「某段每次只播一部分就跳下一段」。
-        // 停止行为与原来完全一致（由 downloadTask?.cancel() 决定），这里只保证
-        // 「没合成完就不落盘、半截的直接放弃」。
+        // 注意：旧实现走 FileUtils.createFileIfNotExist，会顺带创建父目录；
+        // 这里必须自己 mkdirs，否则缓存目录不存在时（清过应用数据/新装后首次朗读）
+        // FileOutputStream 会直接抛 FileNotFoundException，整个朗读协程当场死亡，
+        // 表现为「合成跑完了却什么都不播」。
         val target = File("${ttsFolderPath}$name.mp3")
+        target.parentFile?.let { if (!it.isDirectory) it.mkdirs() }
         // 临时名带时间戳与线程 id：即使主播放与预下载同时合成同一段也不会互相覆盖
         val tmp = File("${ttsFolderPath}$name.mp3.${System.currentTimeMillis()}_${Thread.currentThread().id}.tmp")
         try {
@@ -1771,8 +1774,13 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
             }
             if (target.exists()) target.delete()
             if (!tmp.renameTo(target)) {
-                // 极端情况 rename 失败：宁可这次不缓存，也不留下半截文件
-                tmp.delete()
+                // 极端情况 rename 失败：退回直接拷贝，宁可多一次 IO 也不丢这次缓存
+                runCatching {
+                    tmp.copyTo(target, overwrite = true)
+                    tmp.delete()
+                }.onFailure {
+                    tmp.delete()
+                }
             }
         } catch (e: Exception) {
             // 含协程取消（CancellationException）：合成一半的音频直接放弃
