@@ -485,7 +485,7 @@ class AdPlaybackController {
         private const val MAX_SKIP_MS = 90_000L
 
         /** 同一区间最多尝试跳过的次数 */
-        private const val MAX_ATTEMPTS = 2
+        private const val MAX_ATTEMPTS = 5
     }
 }
 
