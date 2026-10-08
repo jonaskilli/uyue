@@ -24,6 +24,7 @@ object DatabaseMigrations {
             migration_90_91, migration_91_92, migration_92_93, migration_93_94,
             migration_94_95, migration_95_96, migration_96_97, migration_97_98, migration_98_99,
             migration_99_100, migration_100_101, migration_101_102, migration_102_103,
+            migration_103_104,
         )
     }
 
@@ -609,6 +610,14 @@ object DatabaseMigrations {
             // AI 生图模板新增「图片压缩」开关字段：
             // 开启后超过 500KB 的图片转 JPEG 落盘，避免 PNG 生图 2~3MB 占满存储。
             db.execSQL("ALTER TABLE `aiImageTemplate` ADD `compressImage` INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
+    private val migration_103_104 = object : Migration(103, 104) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // AI 角色档案模板新增「生图提示词」字段：
+            // 非空时直接覆盖内置立绘提示词，便于用户自定义头像/立绘构图（如改为半身）。
+            db.execSQL("ALTER TABLE `aiProfileTemplate` ADD `imagePrompt` TEXT NOT NULL DEFAULT ''")
         }
     }
 

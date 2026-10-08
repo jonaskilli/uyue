@@ -4,12 +4,15 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
+    <!-- 原标题「角色档案总览」已去掉，位置让给生图模型下拉框 + 档案设置按钮 -->
     <io.legado.app.ui.widget.TitleBar
         android:id="@+id/title_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:layout_constraintTop_toTopOf="parent"
-        app:title="@string/character_profile_manage" />
+        app:contentInsetEndWithActions="0dp"
+        app:contentInsetStartWithNavigation="0dp"
+        app:contentLayout="@layout/view_character_profile_manage_bar"
+        app:layout_constraintTop_toTopOf="parent" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recycler_view"

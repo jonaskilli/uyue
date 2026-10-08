@@ -159,6 +159,10 @@ object AiProfileService {
 
     /** 按档案内容生成立绘（回调静默，仅写日志） */
     private fun generateAvatarFor(bookName: String, name: String, profile: CharacterProfile) {
+        // 角色档案设置里的「生图提示词」，非空时覆盖内置立绘提示词
+        val customPrompt = runCatching {
+            io.legado.app.model.CharacterProfileManager.getTemplate()?.imagePrompt?.trim().orEmpty()
+        }.getOrDefault("")
         AiImageGenerator.generateCharacterAvatar(
             characterName = name,
             genderAge = listOf(profile.gender, profile.age)
@@ -169,6 +173,7 @@ object AiProfileService {
             background = profile.background,
             regenerate = false,
             templateId = AppConfig.aiPortraitTemplateId,
+            customPrompt = customPrompt,
             onSuccess = { AppLog.put("角色档案: 已自动生成「$name」立绘") },
             onFailure = { e ->
                 AppLog.put("角色档案: 「$name」立绘自动生成失败: ${e.message}")
