@@ -62,6 +62,7 @@ class AppLogDialog : BaseDialogFragment(R.layout.dialog_app_log),
         LogFilter(R.string.log_filter_sound_effect, listOf("音效")),
         LogFilter(R.string.log_filter_bgm, listOf("bgm", "背景音乐")),
         LogFilter(R.string.log_filter_ai, listOf("ai")),
+        LogFilter(R.string.log_filter_ai_image, listOf("生图")),
         LogFilter(R.string.log_filter_tts, listOf("tts")),
         LogFilter(
             R.string.log_filter_network,
