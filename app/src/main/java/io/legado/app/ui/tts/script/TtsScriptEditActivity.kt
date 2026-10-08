@@ -2,31 +2,33 @@ package io.legado.app.ui.tts.script
 
 import android.content.Context
 import android.content.Intent
-import android.os.Bundle
-import android.view.Menu
 import android.view.MenuItem
-import android.widget.EditText
-import androidx.activity.result.contract.ActivityResultContracts
+import android.view.View
 import androidx.activity.viewModels
-import androidx.lifecycle.lifecycleScope
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import io.legado.app.R
-import io.legado.app.base.VMBaseActivity
 import io.legado.app.data.entities.TtsScript
-import io.legado.app.databinding.ActivityTtsScriptEditBinding
-import io.legado.app.lib.dialogs.SelectItem
-import io.legado.app.ui.code.CodeEditActivity
-import io.legado.app.ui.widget.keyboard.KeyboardToolPop
+import io.legado.app.ui.code.BaseCodeEditorActivity
 import io.legado.app.utils.GSON
-import io.legado.app.utils.imeHeight
 import io.legado.app.utils.sendToClip
-import io.legado.app.utils.setOnApplyWindowInsetsListenerCompat
-import io.legado.app.utils.showHelp
 import io.legado.app.utils.toastOnUi
-import io.legado.app.utils.viewbindingdelegate.viewBinding
 
-class TtsScriptEditActivity :
-    VMBaseActivity<ActivityTtsScriptEditBinding, TtsScriptEditViewModel>(),
-    KeyboardToolPop.CallBack {
+/**
+ * 朗读脚本编辑器。
+ *
+ * 原先是「名称输入框 + 一个几百行的 EditText」，要编辑代码还得再点「全屏编辑」
+ * 跳到 CodeEditActivity，编辑完再把整段文本塞回 EditText——两套编辑体验。
+ * 现在改用与 TTS 插件编辑器同一套外壳（[BaseCodeEditorActivity]）：
+ * 内联 sora 编辑器 + 语法高亮 + 搜索替换 + 代码折叠 + 格式化 + 主题。
+ */
+class TtsScriptEditActivity : BaseCodeEditorActivity() {
+
+    private val scriptViewModel by viewModels<TtsScriptEditViewModel>()
+
+    private lateinit var etName: TextInputEditText
+
+    private var scriptId: Long = -1
 
     companion object {
         fun startIntent(context: Context, id: Long = -1): Intent {
@@ -36,137 +38,64 @@ class TtsScriptEditActivity :
         }
     }
 
-    override val binding by viewBinding(ActivityTtsScriptEditBinding::inflate)
-    override val viewModel by viewModels<TtsScriptEditViewModel>()
+    // ---------------------------------------------------------------- 基类钩子
 
-    private val softKeyboardTool by lazy {
-        KeyboardToolPop(this, lifecycleScope, binding.root, this)
+    override fun editorTitle(): String = getString(R.string.tts_script_edit)
+
+    override fun foldStateKey(): String = "ttsScript_$scriptId"
+
+    override fun saveAsFileName(): String =
+        "ttsrv-script-${etName.text?.toString()?.trim().orEmpty().ifBlank { "script" }}.js"
+
+    override val extraMenuRes: Int = R.menu.tts_script_edit
+
+    override fun createHeaderView(): View {
+        val til = TextInputLayout(this).apply {
+            hint = getString(R.string.tts_script_name)
+            setPadding(24, 12, 24, 8)
+        }
+        etName = TextInputEditText(this)
+        til.addView(etName)
+        return til
     }
 
-    private val textEditLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == RESULT_OK) {
-            val editedText = result.data?.getStringExtra("text")
-            editedText?.let {
-                val view = window.decorView.findFocus()
-                if (view is EditText) {
-                    view.setText(it)
-                    view.setSelection(result.data!!.getIntExtra("cursorPosition", 0))
-                } else {
-                    toastOnUi(R.string.focus_lost_on_textbox)
-                }
-            }
+    override fun onEditorReady() {
+        scriptId = intent.getLongExtra("id", -1)
+        scriptViewModel.initData(intent) { upScriptView(it) }
+    }
+
+    override fun onSaveClick(code: String) {
+        val script = buildTtsScript(code)
+        if (script.name.isBlank()) {
+            toastOnUi("脚本名称不能为空")
+            return
+        }
+        scriptViewModel.save(script) {
+            setResult(RESULT_OK)
+            finishDirectly()
         }
     }
 
-    override fun onActivityCreated(savedInstanceState: Bundle?) {
-        softKeyboardTool.attachToWindow(window)
-        initView()
-        viewModel.initData(intent) {
-            upScriptView(it)
-        }
-    }
-
-    override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
-        menuInflater.inflate(R.menu.tts_script_edit, menu)
-        return super.onCompatCreateOptionsMenu(menu)
-    }
-
-    private fun onFullEditClicked() {
-        val view = window.decorView.findFocus()
-        if (view is EditText) {
-            val intent = Intent(this, CodeEditActivity::class.java).apply {
-                putExtra("text", view.text.toString())
-                putExtra("title", getString(R.string.tts_script_code))
-                putExtra("cursorPosition", view.selectionStart)
-            }
-            textEditLauncher.launch(intent)
-        } else {
-            toastOnUi(R.string.please_focus_cursor_on_textbox)
-        }
-    }
-
-    override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
+    override fun onExtraMenuSelected(item: MenuItem): Boolean {
         when (item.itemId) {
-            R.id.menu_fullscreen_edit -> onFullEditClicked()
-            R.id.menu_save -> viewModel.save(getTtsScript()) {
-                setResult(RESULT_OK)
-                finish()
-            }
-            R.id.menu_copy_rule -> sendToClip(GSON.toJson(getTtsScript()))
-            R.id.menu_paste_rule -> viewModel.pasteScript {
-                upScriptView(it)
-            }
+            R.id.menu_copy_rule -> sendToClip(GSON.toJson(buildTtsScript(currentCode())))
+            R.id.menu_paste_rule -> scriptViewModel.pasteScript { upScriptView(it) }
+            else -> return false
         }
         return true
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        softKeyboardTool.dismiss()
-    }
+    // ---------------------------------------------------------------- 数据
 
-    private fun initView() {
-        binding.root.setOnApplyWindowInsetsListenerCompat { _, windowInsets ->
-            softKeyboardTool.initialPadding = windowInsets.imeHeight
-            windowInsets
-        }
-    }
-
-    private fun upScriptView(script: TtsScript) = binding.run {
+    private fun upScriptView(script: TtsScript) {
         etName.setText(script.name)
-        etCode.setText(script.code)
+        setCode(script.code)
     }
 
-    private fun getTtsScript(): TtsScript = binding.run {
-        val script: TtsScript = viewModel.ttsScript ?: TtsScript()
-        script.name = etName.text.toString()
-        script.code = etCode.text.toString()
+    private fun buildTtsScript(code: String): TtsScript {
+        val script = scriptViewModel.ttsScript ?: TtsScript(name = "")
+        script.name = etName.text?.toString()?.trim().orEmpty()
+        script.code = code
         return script
-    }
-
-    override fun helpActions(): List<SelectItem<String>> {
-        return arrayListOf(
-            SelectItem("JS教程", "jsHelp")
-        )
-    }
-
-    override fun onHelpActionSelect(action: String) {
-        when (action) {
-            "jsHelp" -> showHelp("jsHelp")
-        }
-    }
-
-    override fun sendText(text: String) {
-        if (text.isEmpty()) return
-        val view = window?.decorView?.findFocus()
-        if (view is EditText) {
-            var start = view.selectionStart
-            var end = view.selectionEnd
-            if (start > end) {
-                val temp = start
-                start = end
-                end = temp
-            }
-            val edit = view.editableText
-            if (start < 0 || start >= edit.length) {
-                edit.append(text)
-            } else {
-                edit.replace(start, end, text)
-            }
-        }
-    }
-
-    override fun onUndoClicked() {
-        val editText = window.decorView.findFocus()
-        if (editText is EditText) {
-            editText.onTextContextMenuItem(android.R.id.undo)
-        }
-    }
-
-    override fun onRedoClicked() {
-        val editText = window.decorView.findFocus()
-        if (editText is EditText) {
-            editText.onTextContextMenuItem(android.R.id.redo)
-        }
     }
 }

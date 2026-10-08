@@ -704,6 +704,7 @@
     <string name="log_filter_sound_effect">音效</string>
     <string name="log_filter_bgm">BGM</string>
     <string name="log_filter_ai">AI</string>
+    <string name="log_filter_ai_image">生图</string>
     <string name="log_filter_tts">TTS</string>
     <string name="log_filter_network">网络</string>
     <string name="log_filter_book_source">书源</string>

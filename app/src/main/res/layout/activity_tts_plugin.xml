@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
@@ -97,6 +98,111 @@
                     android:text="点击右下角按钮或右上角菜单添加"
                     android:textSize="12sp"
                     android:textColor="@color/secondaryText" />
+            </LinearLayout>
+
+            <!-- 日志 Tab：默认只显示应用正常日志，打开「插件日志」开关后合并显示插件脚本日志 -->
+            <LinearLayout
+                android:id="@+id/log_container"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:visibility="gone"
+                tools:visibility="visible">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:paddingStart="10dp"
+                    android:paddingTop="6dp"
+                    android:paddingEnd="6dp"
+                    android:paddingBottom="6dp">
+
+                    <Switch
+                        android:id="@+id/sw_plugin_log"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="插件日志"
+                        android:textSize="13sp"
+                        tools:ignore="UseSwitchCompatOrMaterialXml" />
+
+                    <Space
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_weight="1" />
+
+                    <Button
+                        android:id="@+id/btn_copy_log"
+                        style="?android:attr/buttonBarButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:paddingStart="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="复制"
+                        android:textColor="@color/primaryText"
+                        android:textSize="13sp" />
+
+                    <Button
+                        android:id="@+id/btn_clear_log"
+                        style="?android:attr/buttonBarButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:paddingStart="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="清空"
+                        android:textColor="@color/primaryText"
+                        android:textSize="13sp" />
+                </LinearLayout>
+
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1">
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/rv_log"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:background="@color/background_menu"
+                        android:clipToPadding="false"
+                        android:paddingStart="4dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="4dp"
+                        android:paddingBottom="8dp"
+                        android:scrollbars="vertical" />
+
+                    <TextView
+                        android:id="@+id/tv_log_empty"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center"
+                        android:text="暂无日志，播放一段试试"
+                        android:textColor="@color/secondaryText"
+                        android:textSize="13sp"
+                        android:visibility="gone" />
+
+                    <!-- 回到底部：日志新条目在底部追加，向上翻阅历史时出现（对齐 TTS_Server_Android） -->
+                    <com.google.android.material.floatingactionbutton.FloatingActionButton
+                        android:id="@+id/fab_log_bottom"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="bottom|end"
+                        android:layout_margin="16dp"
+                        android:contentDescription="回到底部"
+                        android:src="@drawable/ic_arrow_down"
+                        android:visibility="gone"
+                        app:fabSize="mini"
+                        xmlns:app="http://schemas.android.com/apk/res-auto" />
+                </FrameLayout>
+
             </LinearLayout>
 
         </FrameLayout>

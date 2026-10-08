@@ -35,6 +35,12 @@ import java.net.InetAddress
 @Suppress("MemberVisibilityCanBePrivate", "ConstPropertyName")
 object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
+    /**
+     * 代码编辑器默认主题：素影清晖（themeFileNames 里的 l_quiet）。
+     * 索引与 CodeEditViewModel.themeFileNames 一一对应。
+     */
+    const val EDIT_THEME_QUIET_LIGHT = 7
+
     // 迁移：部分 key 在旧版本中以 Int 形式存储，但对应 Preference（EditTextPreference）
     // 初始化时调用 getString() 会触发 ClassCastException 导致打开设置界面崩溃。
     // 在对象初始化时将这些残留 Int 值转为 String，确保后续读取安全。
@@ -69,7 +75,10 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     var useAntiAlias = appCtx.getPrefBoolean(PreferKey.antiAlias)
     var userAgent: String = getPrefUserAgent()
     var customHosts = appCtx.getPrefString(PreferKey.customHosts)
-    var editTheme = appCtx.getPrefInt(PreferKey.editTheme, 0)
+    // 代码编辑器主题索引，与 CodeEditViewModel.themeFileNames 一一对应：
+    // 0=d_monokai_dimmed 1=d_monokai 2=d_modern 3=l_modern 4=d_solarized 5=l_solarized 6=d_abyss 7=l_quiet
+    // 默认用 7（素影清晖）：原先默认 0（暗色）在浅色界面下显得发黑
+    var editTheme = appCtx.getPrefInt(PreferKey.editTheme, EDIT_THEME_QUIET_LIGHT)
     var editThemeDark = appCtx.getPrefInt(PreferKey.editThemeDark, 0)
     var editTemeAuto = appCtx.getPrefBoolean(PreferKey.editTemeAuto)
     var isEInkMode = appCtx.getPrefString(PreferKey.themeMode) == "3"
@@ -170,7 +179,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
                 _addressCache = null
             }
 
-            PreferKey.editTheme -> editTheme = appCtx.getPrefInt(PreferKey.editTheme, 0)
+            PreferKey.editTheme -> editTheme = appCtx.getPrefInt(PreferKey.editTheme, EDIT_THEME_QUIET_LIGHT)
 
             PreferKey.editThemeDark -> editThemeDark = appCtx.getPrefInt(PreferKey.editThemeDark, 0)
 

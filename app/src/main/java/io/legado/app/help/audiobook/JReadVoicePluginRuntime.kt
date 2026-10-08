@@ -1897,20 +1897,29 @@ object JReadVoicePluginRuntime {
 
     @Keep
     class LoggerFacade {
+        // 除了写 logcat，再往内存日志里存一份，供「TTS 引擎插件 → 日志」页显示
         fun i(message: Any?) {
-            Log.i(TAG, message?.toString().orEmpty())
+            val msg = message?.toString().orEmpty()
+            Log.i(TAG, msg)
+            PluginLog.put(PluginLog.Level.INFO, msg)
         }
 
         fun d(message: Any?) {
-            Log.d(TAG, message?.toString().orEmpty())
+            val msg = message?.toString().orEmpty()
+            Log.d(TAG, msg)
+            PluginLog.put(PluginLog.Level.DEBUG, msg)
         }
 
         fun w(message: Any?) {
-            Log.w(TAG, message?.toString().orEmpty())
+            val msg = message?.toString().orEmpty()
+            Log.w(TAG, msg)
+            PluginLog.put(PluginLog.Level.WARN, msg)
         }
 
         fun e(message: Any?) {
-            Log.e(TAG, message?.toString().orEmpty())
+            val msg = message?.toString().orEmpty()
+            Log.e(TAG, msg)
+            PluginLog.put(PluginLog.Level.ERROR, msg)
         }
     }
 

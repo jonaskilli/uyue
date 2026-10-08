@@ -271,6 +271,12 @@
             android:name=".ui.tts.plugin.TtsPluginActivity"
             android:launchMode="singleTop"
             android:screenOrientation="behind" />
+        <!-- TTS 引擎插件：代码编辑器（新增/编辑共用） -->
+        <activity
+            android:name=".ui.tts.plugin.PluginEditorActivity"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind"
+            android:windowSoftInputMode="adjustResize" />
         <!-- 与角色对话（galgame 式） -->
         <activity
             android:name=".ui.book.read.config.RoleChatActivity"

@@ -1,7 +1,11 @@
 package io.legado.app.ui.tts.plugin
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Color
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.os.Bundle
@@ -18,18 +22,22 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.tabs.TabLayout
 import io.legado.app.R
 import io.legado.app.base.BaseActivity
 import io.legado.app.databinding.ActivityTtsPluginBinding
 import io.legado.app.help.audiobook.JReadVoiceEngine
-import io.legado.app.help.audiobook.JReadVoicePluginRuntime
+import io.legado.app.help.audiobook.PluginLog
 import io.legado.app.help.audiobook.PostAudioParams
+import io.legado.app.help.audiobook.TtsSynthLog
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.primaryColor
+import io.legado.app.utils.LogUtils
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.showHelp
+import io.legado.app.utils.GSON
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.Dispatchers
@@ -37,13 +45,24 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.util.Date
 import java.util.UUID
 
 class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
 
     override val binding by viewBinding(ActivityTtsPluginBinding::inflate)
     private val adapter by lazy { TtsPluginAdapter() }
+    private val logAdapter by lazy { PluginLogAdapter(this) }
     private var currentTab = TAB_CONFIGS
+    /** 上次装载日志时的指纹（AppLog 条数 + PluginLog 版本 + 开关状态），用于跳过无变化的轮询 */
+    private var logSignature = -1
+    /** 日志 Tab 可见时的自动刷新轮询：AppLog / PluginLog 都在内存里，没有监听器，只能轮询 */
+    private val logPollRunnable = object : Runnable {
+        override fun run() {
+            refreshLogs()
+            binding.logContainer.postDelayed(this, LOG_POLL_INTERVAL_MS)
+        }
+    }
     private var allConfigs: List<JReadVoiceEngine.VoiceConfig> = emptyList()
     private var allPlugins: List<JReadVoiceEngine.VoicePlugin> = emptyList()
     private var allGroups: List<JReadVoiceEngine.VoiceGroup> = emptyList()
@@ -59,22 +78,22 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     private val configEditorLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) invalidateEnabledTagsCache()
     }
-    // 插件变量登录页结果回填
-    private var currentLoginHolder: JReadVoicePluginRuntime.VarLoginRequestHolder? = null
-    private var currentLoginKey: String? = null
-    private val loginLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == PluginLoginActivity.OK) {
-            val value = result.data?.getStringExtra(PluginLoginActivity.RESULT).orEmpty()
-            val holder = currentLoginHolder
-            val key = currentLoginKey
-            if (holder != null && key != null && value.isNotBlank()) {
-                holder.values[key] = value
-                holder.editViews[key]?.setText(value)
-                toastOnUi("已获取登录信息")
-            }
+    // 变量设置 / 预览UI / 音频参数 / 清空数据：与插件代码编辑器共用同一套对话框实现，
+    // 避免列表页和编辑器各写一份
+    private val pluginDialogs = PluginEditDialogs(this)
+    // 新增/编辑插件统一走 PluginEditorActivity（同一个界面，只以插件 JSON 区分）
+    private val pluginEditorLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != RESULT_OK) return@registerForActivityResult
+        val json = result.data?.getStringExtra(PluginEditorActivity.RESULT_PLUGIN_JSON)
+        if (json.isNullOrBlank()) {
+            reloadListsLight()
+            return@registerForActivityResult
         }
-        currentLoginHolder = null
-        currentLoginKey = null
+        runCatching { GSON.fromJson(json, JReadVoiceEngine.VoicePlugin::class.java) }
+            .getOrNull()?.let { toastOnUi("已保存插件: ${it.name}") }
+        reloadListsLight()
     }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
@@ -110,6 +129,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         adapter.createItemTouchHelper().attachToRecyclerView(binding.recyclerView)
 
         binding.tabLayout.addTab(binding.tabLayout.newTab().setText("配置列表"))
+        binding.tabLayout.addTab(binding.tabLayout.newTab().setText("日志"))
         binding.tabLayout.addTab(binding.tabLayout.newTab().setText("插件管理"))
         binding.tabLayout.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             // 切换 tab 不改数据内容，直接重建当前列表行即可，无需重新读盘
@@ -117,11 +137,35 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 currentTab = tab.position
                 // 分组只在配置列表里存在，插件管理 Tab 下要把文件夹图标收起来
                 syncAddGroupMenuVisibility()
-                if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
+                refreshCurrentTab()
             }
             override fun onTabUnselected(tab: TabLayout.Tab) = Unit
             override fun onTabReselected(tab: TabLayout.Tab) = Unit
         })
+
+        // ---- 日志 Tab ----
+        binding.rvLog.layoutManager = LinearLayoutManager(this)
+        binding.rvLog.adapter = logAdapter
+        // 对齐 TTS_Server_Android：不在底部时显示「回到底部」按钮，点击跳到最新日志
+        binding.fabLogBottom.setOnClickListener {
+            val last = logAdapter.itemCount - 1
+            if (last >= 0) binding.rvLog.smoothScrollToPosition(last)
+        }
+        binding.rvLog.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                updateFabLogBottom()
+            }
+
+            override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                updateFabLogBottom()
+            }
+        })
+        binding.swPluginLog.setOnCheckedChangeListener { _, _ ->
+            // 开关变化必须强制重建：日志条数没变，但显示内容变了
+            refreshLogs(force = true)
+        }
+        binding.btnCopyLog.setOnClickListener { copyLogs() }
+        binding.btnClearLog.setOnClickListener { clearLogs() }
 
         binding.etSearch.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -181,7 +225,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 loadData()
             } else {
                 // 无变化（如从对话框返回）→ 只重建列表行，不读盘
-                if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
+                refreshCurrentTab()
             }
         }
     }
@@ -302,6 +346,10 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     android.util.Log.d("TtsPluginActivity", "loadData: configs=${allConfigs.size} groups=${allGroups.size} plugins=${allPlugins.size}")
                     binding.searchBar.visibility = View.VISIBLE
                     rebuildRows()
+                }
+                TAB_LOGS -> {
+                    binding.searchBar.visibility = View.GONE
+                    refreshLogs(force = true)
                 }
                 TAB_PLUGINS -> {
                     binding.searchBar.visibility = View.GONE
@@ -434,14 +482,180 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         }
     }
 
+    // ------------------------------------------------------------------ 日志 Tab
+
+    /** 按当前 Tab 刷新内容：日志页走日志装载，另外两页重建列表行 */
+    private fun refreshCurrentTab() {
+        when (currentTab) {
+            TAB_LOGS -> showLogTab()
+            TAB_PLUGINS -> {
+                hideLogTab()
+                binding.searchBar.visibility = View.GONE
+                rebuildPluginRows()
+            }
+            else -> {
+                hideLogTab()
+                binding.searchBar.visibility = View.VISIBLE
+                rebuildRows()
+            }
+        }
+    }
+
+    private fun showLogTab() {
+        binding.searchBar.visibility = View.GONE
+        binding.layoutEmpty.visibility = View.GONE
+        binding.recyclerView.visibility = View.GONE
+        binding.logContainer.visibility = View.VISIBLE
+        refreshLogs(force = true)
+        startLogPolling()
+    }
+
+    private fun hideLogTab() {
+        binding.logContainer.visibility = View.GONE
+        stopLogPolling()
+    }
+
+    private fun startLogPolling() {
+        binding.logContainer.removeCallbacks(logPollRunnable)
+        binding.logContainer.postDelayed(logPollRunnable, LOG_POLL_INTERVAL_MS)
+    }
+
+    private fun stopLogPolling() {
+        binding.logContainer.removeCallbacks(logPollRunnable)
+    }
+
+    /**
+     * 装载日志。
+     *
+     * 默认只显示「合成日志」（TtsSynthLog）：合成了哪段文本、成功还是失败、失败的原因——
+     * 对齐 TTS_Server_Android 默认日志只看合成结果的习惯，**不会**把整个 App 的 AppLog 倒进来。
+     * 打开「插件日志」开关后，再把插件脚本自己 console.log 的内容（PluginLog）合并显示，
+     * 便于排查插件内部逻辑，按时间倒序混排。
+     */
+    private fun refreshLogs(force: Boolean = false) {
+        val showPluginLog = binding.swPluginLog.isChecked
+        val signature = TtsSynthLog.version * 1_000_003 + PluginLog.version * 7 + if (showPluginLog) 1 else 0
+        if (!force && signature == logSignature) return
+        logSignature = signature
+
+        val wasAtBottom = isLogAtBottom()
+
+        val rows = ArrayList<LogRow>()
+        // 合成日志（默认显示）。级别对齐 TTS_Server_Android：
+        // 合成开始=D(蓝)、合成成功=S(跟随主题)、重试=W(黄)、失败=E(红)、普通信息=I(绿)
+        TtsSynthLog.list().forEach { entry ->
+            val (levelChar, color) = when (entry.level) {
+                TtsSynthLog.Level.DEBUG -> "D" to colorDebug
+                TtsSynthLog.Level.INFO -> "I" to colorInfo
+                TtsSynthLog.Level.SUCCESS -> "S" to colorNormal
+                TtsSynthLog.Level.WARN -> "W" to colorWarn
+                TtsSynthLog.Level.ERROR -> "E" to colorError
+            }
+            rows.add(
+                LogRow(
+                    entry.time,
+                    LogUtils.logTimeFormat.format(Date(entry.time)),
+                    levelChar,
+                    entry.message,
+                    color
+                )
+            )
+        }
+        // 插件脚本日志（开关打开时才显示）
+        if (showPluginLog) {
+            PluginLog.list().forEach { entry ->
+                val (levelChar, color) = when (entry.level) {
+                    PluginLog.Level.DEBUG -> "D" to colorDebug
+                    PluginLog.Level.INFO -> "I" to colorInfo
+                    PluginLog.Level.WARN -> "W" to colorWarn
+                    PluginLog.Level.ERROR -> "E" to colorError
+                }
+                rows.add(
+                    LogRow(
+                        entry.time,
+                        LogUtils.logTimeFormat.format(Date(entry.time)),
+                        levelChar,
+                        "[插件] ${entry.message}",
+                        color
+                    )
+                )
+            }
+        }
+        // 新日志从底部追加（对齐 TTS_Server_Android），所以按时间**升序**排列
+        rows.sortBy { it.time }
+        logAdapter.setItems(rows)
+        binding.tvLogEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        // 只有本来就停在底部（在看最新内容）时才自动滚到底，向上翻历史时不打扰
+        if (wasAtBottom) scrollToLogBottom()
+        updateFabLogBottom()
+    }
+
+    /** 是否停在列表底部附近（对齐参考实现：最后可见条目进入末尾 5 条以内即算在底部） */
+    private fun isLogAtBottom(): Boolean {
+        val lm = binding.rvLog.layoutManager as? LinearLayoutManager ?: return true
+        val last = lm.findLastVisibleItemPosition()
+        return last < 0 || last >= logAdapter.itemCount - 5
+    }
+
+    private fun scrollToLogBottom() {
+        val last = logAdapter.itemCount - 1
+        if (last < 0) return
+        binding.rvLog.post {
+            (binding.rvLog.layoutManager as? LinearLayoutManager)
+                ?.scrollToPositionWithOffset(last, 0)
+        }
+    }
+
+    private fun updateFabLogBottom() {
+        binding.fabLogBottom.visibility =
+            if (logAdapter.itemCount > 0 && !isLogAtBottom()) View.VISIBLE else View.GONE
+    }
+
+    private fun copyLogs() {
+        val text = logAdapter.getItems().joinToString("\n") { it.text }
+        if (text.isBlank()) {
+            toastOnUi("暂无日志")
+            return
+        }
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("TtsPluginLog", text))
+        toastOnUi("已复制 ${logAdapter.getItems().size} 条日志")
+    }
+
+    private fun clearLogs() {
+        // 只清本页显示的两类日志，不动 AppLog（那是应用日志界面的事）
+        TtsSynthLog.clear()
+        PluginLog.clear()
+        refreshLogs(force = true)
+        toastOnUi("已清空日志")
+    }
+
+    // ------------------------------------------------------------------ 日志配色
+    // 对齐 TTS_Server_Android 的 LogLevel.toArgb()：请求中(D)蓝、信息(I)绿、
+    // 成功(S)跟随主题、警告(W)黄、错误(E)红，浅色/深色主题各一套（同一色相，深色更亮）。
+    private val isDarkTheme by lazy {
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+    }
+    private val colorNormal by lazy {
+        resources.getColor(R.color.primaryText, theme) // SUCCESS / 默认：跟随主题
+    }
+    // D（合成开始/请求中）：墨绿，取自 TTS_Server_Android 绿色主题的 primary（Color2.kt 0xFF006D3A）
+    private val colorDebug by lazy { Color.parseColor(if (isDarkTheme) "#4CAF50" else "#006D3A") }
+    private val colorInfo by lazy { Color.parseColor(if (isDarkTheme) "#81C784" else "#4CAF50") }
+    private val colorWarn by lazy { Color.parseColor(if (isDarkTheme) "#FFD54F" else "#FFC107") }
+    private val colorError by lazy { Color.parseColor(if (isDarkTheme) "#E57373" else "#F44336") }
+
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.tts_plugin, menu)
         // 「新建分组」只对配置列表有意义，插件管理 Tab 下隐藏
         menu.findItem(R.id.menu_add_group)?.isVisible = currentTab == TAB_CONFIGS
+        // 日志页没有可新增的东西，收起加号
+        menu.findItem(R.id.menu_add)?.isVisible = currentTab != TAB_LOGS
         return super.onCompatCreateOptionsMenu(menu)
     }
 
-    /** 配置列表 / 插件管理 两个 Tab 切换时同步「新建分组」图标的显隐 */
+    /** 三个 Tab 切换时同步「新建分组 / 新增」图标的显隐 */
     private fun syncAddGroupMenuVisibility() {
         invalidateOptionsMenu()
     }
@@ -452,6 +666,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             R.id.menu_add -> when (currentTab) {
                 TAB_CONFIGS -> openConfigEditor(null, true)
                 TAB_PLUGINS -> showPluginEditor(null)
+                else -> Unit
             }
             R.id.menu_init_builtins -> lifecycleScope.launch {
                 withContext(Dispatchers.IO) { JReadVoiceEngine.ensureBuiltInVoicePresets(this@TtsPluginActivity) }
@@ -584,7 +799,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
      * 不再走 loadData()（不读盘、不解析整表、不做内置预设/迁移）。
      */
     private fun refreshListLight() {
-        if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
+        refreshCurrentTab()
         invalidateEnabledTagsCache()
     }
 
@@ -631,7 +846,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 pluginsMap = buildPluginsIndex(allPlugins)
             }
             adapter.setPluginsMap(pluginsMap)
-            if (currentTab == TAB_PLUGINS) rebuildPluginRows() else rebuildRows()
+            refreshCurrentTab()
         }
     }
 
@@ -1184,16 +1399,16 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 text = "音频后处理调节（合成后生效）\n0 = 跟随上级，1.0 = 不调整"
                 textSize = 12f; setPadding(4, 4, 4, 12)
             })
-            val (sbSpeed, _, _) = buildSliderRow("语速", if (curSpeed <= 0f) 0 else (curSpeed * 100).toInt(), true)
-            val (sbVol, _, _) = buildSliderRow("音量", if (curVolume <= 0f) 0 else (curVolume * 100).toInt(), true)
-            val (sbPitch, _, _) = buildSliderRow("音高", if (curPitch <= 0f) 0 else (curPitch * 100).toInt(), true)
-            listOf(sbSpeed, sbVol, sbPitch).forEach { container.addView(it.tag as android.view.View) }
+            val sbSpeed = buildSliderRow("语速", if (curSpeed <= 0f) 0 else (curSpeed * 100).toInt(), true)
+            val sbVol = buildSliderRow("音量", if (curVolume <= 0f) 0 else (curVolume * 100).toInt(), true)
+            val sbPitch = buildSliderRow("音高", if (curPitch <= 0f) 0 else (curPitch * 100).toInt(), true)
+            listOf(sbSpeed, sbVol, sbPitch).forEach { container.addView(it.second) }
             alert("音频调节 - ${subGroupName ?: groupName}") {
                 customView { container }
                 okButton {
-                    val speed = sbSpeed.progress / 100f
-                    val volume = sbVol.progress / 100f
-                    val pitch = sbPitch.progress / 100f
+                    val speed = sbSpeed.first.progress / 100f
+                    val volume = sbVol.first.progress / 100f
+                    val pitch = sbPitch.first.progress / 100f
                     lifecycleScope.launch {
                         withContext(Dispatchers.IO) {
                             val existing = JReadVoiceEngine.listGroups(this@TtsPluginActivity)
@@ -1227,16 +1442,16 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             text = "全局音频后处理调节（合成后生效）\n1.0 = 不调整，范围 0.1~3.0"
             textSize = 12f; setPadding(4, 4, 4, 12)
         })
-        val (sbSpeed, _, _) = buildSliderRow("语速", (curSpeed * 100).toInt().coerceIn(1, 300), false)
-        val (sbVol, _, _) = buildSliderRow("音量", (curVolume * 100).toInt().coerceIn(1, 300), false)
-        val (sbPitch, _, _) = buildSliderRow("音高", (curPitch * 100).toInt().coerceIn(1, 300), false)
-        listOf(sbSpeed, sbVol, sbPitch).forEach { container.addView(it.tag as android.view.View) }
+        val sbSpeed = buildSliderRow("语速", (curSpeed * 100).toInt().coerceIn(1, 300), false)
+        val sbVol = buildSliderRow("音量", (curVolume * 100).toInt().coerceIn(1, 300), false)
+        val sbPitch = buildSliderRow("音高", (curPitch * 100).toInt().coerceIn(1, 300), false)
+        listOf(sbSpeed, sbVol, sbPitch).forEach { container.addView(it.second) }
         alert("全局音频调节") {
             customView { container }
             okButton {
-                AppConfig.ttsPostSpeed = sbSpeed.progress / 100f
-                AppConfig.ttsPostVolume = sbVol.progress / 100f
-                AppConfig.ttsPostPitch = sbPitch.progress / 100f
+                AppConfig.ttsPostSpeed = sbSpeed.first.progress / 100f
+                AppConfig.ttsPostVolume = sbVol.first.progress / 100f
+                AppConfig.ttsPostPitch = sbPitch.first.progress / 100f
                 toastOnUi("已更新全局音频调节")
             }
             cancelButton()
@@ -1322,16 +1537,17 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     }
 
     private fun showPluginOptions(plugin: JReadVoiceEngine.VoicePlugin) {
-        val options = arrayOf("编辑插件", "设置变量", "音频参数", "清空数据", "删除插件")
+        val options = arrayOf("编辑插件", "设置变量", "预览界面", "音频参数", "清空数据", "删除插件")
         android.app.AlertDialog.Builder(this)
             .setTitle(plugin.name)
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> showPluginEditor(plugin)
                     1 -> showPluginVarsDialog(plugin)
-                    2 -> showPluginAudioParams(plugin)
-                    3 -> clearPluginData(plugin)
-                    4 -> deletePlugin(plugin)
+                    2 -> showPluginPreviewUi(plugin)
+                    3 -> showPluginAudioParams(plugin)
+                    4 -> clearPluginData(plugin)
+                    5 -> deletePlugin(plugin)
                 }
             }.show()
     }
@@ -1342,224 +1558,33 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
      * 合成时脚本通过 ttsrv.data 读取。插件未实现 onLoadUI 时提示无可设置变量。
      */
     private fun showPluginVarsDialog(plugin: JReadVoiceEngine.VoicePlugin) {
-        lifecycleScope.launch {
-            // 自绘控件(onLoadUI/ttsrv.data)用 dataMap 承载
-            val dataMap: MutableMap<String, String> = runCatching {
-                val obj = JSONObject(plugin.userVarsJson.ifBlank { "{}" })
-                buildMap { obj.keys().forEach { put(it, obj.optString(it)) } }.toMutableMap()
-            }.getOrDefault(mutableMapOf())
-            // 声明式变量(PluginJS.vars / ttsrv.userVars)用 userVarsMap 承载，
-            // 预填：已保存值 > defVarsJson 默认值 > 空
-            val userVarsMap: MutableMap<String, String> = dataMap.toMutableMap()
-            runCatching { JSONObject(plugin.defVarsJson.ifBlank { "{}" }) }.getOrNull()?.let { dv ->
-                dv.keys().forEach { k ->
-                    if (!userVarsMap.containsKey(k)) {
-                        val v = dv.opt(k)
-                        userVarsMap[k] = when (v) {
-                            is JSONObject -> v.optString("value", v.optString("default", v.optString("def", "")))
-                            null -> ""
-                            else -> v.toString()
-                        }
-                    }
-                }
-            }
-            val container = withContext(Dispatchers.IO) {
-                JReadVoicePluginRuntime.loadPluginEditorUI(
-                    this@TtsPluginActivity, plugin, dataMap, userVarsMap,
-                )
-            }
-            if (container == null || container.childCount == 0) {
-                toastOnUi("该插件没有可设置的变量")
-                return@launch
-            }
-            // 声明式变量带 loginUrl/binding → 给"登录"按钮绑定回调：
-            // 启动 PluginLoginActivity，返回的值回填输入框与 userVarsMap
-            val loginHolder = container.tag as? JReadVoicePluginRuntime.VarLoginRequestHolder
-            loginHolder?.infos?.forEach { info ->
-                loginHolder.buttons[info.key]?.setOnClickListener {
-                    currentLoginKey = info.key
-                    currentLoginHolder = loginHolder
-                    loginLauncher.launch(Intent(this@TtsPluginActivity, PluginLoginActivity::class.java).apply {
-                        putExtra(PluginLoginActivity.ARG_LOGIN_URL, info.loginUrl)
-                        putExtra(PluginLoginActivity.ARG_BINDING, info.binding)
-                        putExtra(PluginLoginActivity.ARG_DESC, info.desc)
-                        putExtra(PluginLoginActivity.ARG_UA, info.ua)
-                    })
-                }
-            }
-            val scrollView = android.widget.ScrollView(this@TtsPluginActivity).apply { addView(container) }
-            alert("设置变量 - ${plugin.name}") {
-                customView { scrollView }
-                okButton {
-                    lifecycleScope.launch {
-                        withContext(Dispatchers.IO) {
-                            val json = JSONObject()
-                            userVarsMap.forEach { (k, v) -> json.put(k, v ?: "") }
-                            JReadVoiceEngine.savePlugin(
-                                this@TtsPluginActivity,
-                                plugin.copy(userVarsJson = json.toString()),
-                            )
-                        }
-                        toastOnUi("变量已保存: ${plugin.name}")
-                        reloadListsLight()
-                    }
-                }
-                cancelButton()
-            }
-        }
+        pluginDialogs.showVars(plugin) { reloadListsLight() }
     }
 
     private fun clearPluginData(plugin: JReadVoiceEngine.VoicePlugin) {
-        android.app.AlertDialog.Builder(this)
-            .setTitle("清空数据")
-            .setMessage("确定清空 ${plugin.name} 的所有缓存数据？")
-            .setPositiveButton("清空") { _, _ ->
-                lifecycleScope.launch {
-                    withContext(Dispatchers.IO) {
-                        val storageId = plugin.pluginId.ifBlank { plugin.id }
-                        val dir = java.io.File(this@TtsPluginActivity.filesDir, "jread_voice_engine/plugin_files/$storageId")
-                        if (dir.exists()) {
-                            dir.listFiles()?.forEach { it.delete() }
-                            dir.delete()
-                        }
-                    }
-                    toastOnUi("已清空 ${plugin.name} 的数据")
-                }
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        pluginDialogs.clearData(plugin) { reloadListsLight() }
+    }
+
+    /** 预览插件自绘界面（列表页直接预览，不必先进入编辑器） */
+    private fun showPluginPreviewUi(plugin: JReadVoiceEngine.VoicePlugin) {
+        pluginDialogs.showPreviewUi(plugin)
     }
 
     /**
-     * 从插件 JS 代码中提取 PluginJS 声明对象里的 name / id 字段。
-     * 匹配 `PluginJS = {` 声明块开头范围内的 `name: "xxx"` 与 `id: "xxx"`（兼容单双引号）。
+     * 新增 / 编辑插件：统一打开 [PluginEditorActivity]，界面完全共用。
+     *
+     * 对齐 TTS_Server_Android 的做法——新增只是传一个空的 VoicePlugin，
+     * 两者的唯一差别是「代码为空时由编辑器填入内置模板」
+     * （见 PluginEditorActivity.loadTemplateCode）。
+     * 之前这里是 if (plugin == null) 两套 EditText 对话框，
+     * 既没有语法高亮/搜索/折叠，又要把几千行 JS 塞进 ScrollView 里的 EditText，
+     * 输入时还要跑全文正则，越输越卡。
      */
-    private fun extractPluginMeta(code: String): Pair<String?, String?> {
-        val idx = code.indexOf("PluginJS")
-        if (idx < 0) return null to null
-        val scope = code.substring(idx, minOf(code.length, idx + 2000))
-        // 兼容三种键名写法：name: "x" / 'name': 'x' / "name": "x"
-        // (?<![\w$]) 防止匹配到 roleName/userId 等复合词内部
-        val name = Regex("(?<![\\w$])[\"']?name[\"']?\\s*:\\s*[\"']([^\"']+)[\"']").find(scope)?.groupValues?.get(1)?.trim()
-        val id = Regex("(?<![\\w$])[\"']?id[\"']?\\s*:\\s*[\"']([^\"']+)[\"']").find(scope)?.groupValues?.get(1)?.trim()
-        return name?.takeIf { it.isNotBlank() } to id?.takeIf { it.isNotBlank() }
-    }
-
     private fun showPluginEditor(plugin: JReadVoiceEngine.VoicePlugin?) {
-        if (plugin == null) {
-            // 新增插件：提供完整的代码输入框
-            val etName = EditText(this).apply { hint = "插件名称（粘贴代码后自动识别）"; setPadding(4, 8, 4, 8) }
-            val etPluginId = EditText(this).apply { hint = "插件 ID（自动识别，可修改，留空用名称）"; setPadding(4, 8, 4, 8) }
-            val tvCodeLabel = TextView(this).apply { text = "插件 JS 代码"; textSize = 12f; setPadding(4, 12, 4, 4) }
-            val etCode = EditText(this).apply {
-                hint = "在此粘贴完整的插件 JS 代码..."
-                setPadding(8, 8, 8, 8)
-                minLines = 15
-                setHorizontallyScrolling(true)
-                setOnTouchListener { v, event ->
-                    if (event.action == android.view.MotionEvent.ACTION_UP) {
-                        v.parent.requestDisallowInterceptTouchEvent(true)
-                    }
-                    false
-                }
-                // 粘贴代码后自动识别 PluginJS 声明里的 name/id，仅在对应输入框为空时填充（不覆盖手动输入）
-                addTextChangedListener(object : TextWatcher {
-                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                    override fun afterTextChanged(s: Editable?) {
-                        val code = s?.toString().orEmpty()
-                        if (code.length < 10) return
-                        val (metaName, metaId) = extractPluginMeta(code)
-                        if (etName.text.isNullOrBlank() && !metaName.isNullOrBlank()) etName.setText(metaName)
-                        if (etPluginId.text.isNullOrBlank() && !metaId.isNullOrBlank()) etPluginId.setText(metaId)
-                    }
-                })
-            }
-            val tvHint = TextView(this).apply {
-                text = "也可从右上角菜单「导入」J.TTS 插件 JSON 文件。"
-                textSize = 11f; setPadding(4, 8, 4, 4)
-            }
-            val container = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; setPadding(48, 24, 48, 0)
-                addView(etName); addView(etPluginId); addView(tvCodeLabel); addView(etCode); addView(tvHint)
-            }
-            val scrollView = android.widget.ScrollView(this).apply { addView(container) }
-            alert("新增声音插件") {
-                customView { scrollView }
-                okButton {
-                    val code = etCode.text.toString().trim()
-                    val (metaName, metaId) = extractPluginMeta(code)
-                    val name = etName.text.toString().trim().ifBlank { metaName.orEmpty() }
-                    if (name.isBlank()) { toastOnUi("插件名称不能为空（且代码中未识别到 PluginJS.name）"); return@okButton }
-                    if (code.isBlank()) { toastOnUi("插件代码不能为空"); return@okButton }
-                    val newPlugin = JReadVoiceEngine.VoicePlugin(
-                        id = UUID.randomUUID().toString(),
-                        name = name,
-                        // ID 优先级：手动输入 > JS 声明的 id > 插件名称
-                        pluginId = etPluginId.text.toString().trim()
-                            .ifBlank { metaId ?: name },
-                        code = code,
-                        enabled = true,
-                    )
-                    lifecycleScope.launch {
-                        withContext(Dispatchers.IO) { JReadVoiceEngine.savePlugin(this@TtsPluginActivity, newPlugin) }
-                        toastOnUi("已新增插件: $name"); reloadListsLight()
-                    }
-                }
-                cancelButton()
-            }
-            return
-        }
-        // 编辑插件：名称 + ID + API 密钥 + JS 代码编辑
-        val userVars = runCatching { JSONObject(plugin.userVarsJson.ifBlank { "{}" }) }.getOrNull() ?: JSONObject()
-        val apiValue = listOf("api", "apiKey", "api_key", "key", "token", "accessToken", "secret")
-            .firstNotNullOfOrNull { key -> userVars.optString(key).takeIf { it.isNotBlank() } }.orEmpty()
-        val etName = EditText(this).apply { setText(plugin.name); textSize = 13f; hint = "插件名称" }
-        val etPluginId = EditText(this).apply { setText(plugin.pluginId); textSize = 13f; hint = "插件 ID" }
-        val etApi = EditText(this).apply { setText(apiValue); textSize = 13f; hint = "API 密钥" }
-        val tvCodeLabel = TextView(this).apply { text = "插件 JS 代码"; textSize = 12f; setPadding(4, 12, 4, 4) }
-        val etCode = EditText(this).apply {
-            setText(plugin.code); textSize = 11f; setPadding(8, 8, 8, 8)
-            minLines = 10; setHorizontallyScrolling(true)
-            setOnTouchListener { v, event ->
-                if (event.action == android.view.MotionEvent.ACTION_UP) v.parent.requestDisallowInterceptTouchEvent(true)
-                false
-            }
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(48, 24, 48, 0)
-            addView(TextView(this@TtsPluginActivity).apply { text = "插件名称"; textSize = 12f; setPadding(4, 6, 4, 2) })
-            addView(etName)
-            addView(TextView(this@TtsPluginActivity).apply { text = "插件 ID"; textSize = 12f; setPadding(4, 8, 4, 2) })
-            addView(etPluginId)
-            addView(TextView(this@TtsPluginActivity).apply { text = "API 密钥"; textSize = 12f; setPadding(4, 8, 4, 2) })
-            addView(etApi)
-            addView(tvCodeLabel)
-            addView(etCode)
-        }
-        val scrollView = android.widget.ScrollView(this).apply { addView(container) }
-        alert("编辑插件") {
-            customView { scrollView }
-            okButton {
-                val newName = etName.text.toString().trim().ifBlank { plugin.name }
-                val newPluginId = etPluginId.text.toString().trim().ifBlank { plugin.pluginId }
-                val api = etApi.text.toString().trim()
-                val code = etCode.text.toString().trim()
-                val merged = JSONObject(plugin.userVarsJson.ifBlank { "{}" })
-                listOf("api", "apiKey", "api_key", "key", "token", "accessToken", "secret").forEach { merged.put(it, api) }
-                val updated = plugin.copy(
-                    name = newName,
-                    pluginId = newPluginId,
-                    userVarsJson = merged.toString(),
-                    code = code,
-                )
-                lifecycleScope.launch {
-                    withContext(Dispatchers.IO) { JReadVoiceEngine.savePlugin(this@TtsPluginActivity, updated) }
-                    toastOnUi("已保存插件: $newName"); reloadListsLight()
-                }
-            }
-            cancelButton()
-        }
+        val target = plugin ?: JReadVoiceEngine.VoicePlugin()
+        pluginEditorLauncher.launch(Intent(this, PluginEditorActivity::class.java).apply {
+            putExtra(PluginEditorActivity.EXTRA_PLUGIN_JSON, GSON.toJson(target))
+        })
     }
 
     private fun togglePlugin(plugin: JReadVoiceEngine.VoicePlugin, enabled: Boolean) {
@@ -1580,102 +1605,17 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
      * @param allowFollow 是否支持"跟随"（progress=0 时显示"跟随"）
      * @return Triple(SeekBar, TextView, 更新显示的函数)
      */
-    private fun buildSliderRow(
-        label: String, initialProgress: Int, allowFollow: Boolean
-    ): Triple<SeekBar, TextView, () -> Unit> {
-        val ctx = this
-        val density = resources.displayMetrics.density
-        val sb = SeekBar(ctx).apply { max = 300; progress = initialProgress }
-        val tvVal = TextView(ctx).apply {
-            textSize = 13f
-            text = if (allowFollow && initialProgress == 0) "跟随" else String.format("%.2f", initialProgress / 100f)
-        }
-        val updateText: () -> Unit = {
-            val p = sb.progress
-            tvVal.text = if (allowFollow && p == 0) "跟随" else String.format("%.2f", p / 100f)
-        }
-        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) = updateText()
-            override fun onStartTrackingTouch(s: SeekBar?) = Unit
-            override fun onStopTrackingTouch(s: SeekBar?) = Unit
-        })
-        // 标签+数值行（居中）
-        val labelRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER
-            addView(TextView(ctx).apply { text = label; textSize = 13f; setTextColor(android.graphics.Color.parseColor("#FF333333")) })
-            addView(TextView(ctx).apply { text = "  "; textSize = 13f })
-            addView(tvVal)
-        }
-        // 滑块行（减号 + 滑块 + 加号）
-        val sliderRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
-            val btnMinus = android.widget.Button(ctx).apply {
-                text = "−"; textSize = 18f; layoutParams = LinearLayout.LayoutParams((40 * density).toInt(), (36 * density).toInt())
-                minWidth = 0; minHeight = 0; setPadding(0, 0, 0, 0)
-                setOnClickListener { sb.progress = (sb.progress - 1).coerceAtLeast(0) }
-            }
-            val sbParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            val btnPlus = android.widget.Button(ctx).apply {
-                text = "+"; textSize = 18f; layoutParams = LinearLayout.LayoutParams((40 * density).toInt(), (36 * density).toInt())
-                minWidth = 0; minHeight = 0; setPadding(0, 0, 0, 0)
-                setOnClickListener { sb.progress = (sb.progress + 1).coerceAtMost(300) }
-            }
-            addView(btnMinus); addView(sb, sbParams); addView(btnPlus)
-        }
-        // 外层垂直布局
-        val outer = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(labelRow); addView(sliderRow)
-        }
-        // 用 tag 存 outer，调用方 addView(outer) 即可
-        sb.tag = outer
-        return Triple(sb, tvVal, updateText)
+    private fun showPluginAudioParams(plugin: JReadVoiceEngine.VoicePlugin) {
+        pluginDialogs.showAudioParams(plugin) { reloadListsLight() }
     }
 
-    private fun showPluginAudioParams(plugin: JReadVoiceEngine.VoicePlugin) {
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 24, 48, 0) }
-        container.addView(TextView(this).apply { text = plugin.name; textSize = 14f; setPadding(4, 4, 4, 4) })
-        container.addView(TextView(this).apply {
-            text = "合成参数：与每个音色配置里的参数相乘，不会覆盖配置本身的值"
-            textSize = 12f; setPadding(4, 4, 4, 12)
-        })
-        val pluginSpeed = if (plugin.speed <= 0f) 1f else plugin.speed
-        val pluginVolume = if (plugin.volume <= 0f) 1f else plugin.volume
-        val pluginPitch = if (plugin.pitch <= 0f) 1f else plugin.pitch
-        val (sbSpeed, _, _) = buildSliderRow("语速", (pluginSpeed * 100).toInt(), false)
-        val (sbVol, _, _) = buildSliderRow("音量", (pluginVolume * 100).toInt(), false)
-        val (sbPitch, _, _) = buildSliderRow("音调", (pluginPitch * 100).toInt(), false)
-        listOf(sbSpeed, sbVol, sbPitch).forEach { container.addView(it.tag as android.view.View) }
-        container.addView(TextView(this).apply {
-            text = "合成完毕后（后处理）：与分组/全局后处理参数相乘\n跟随 = 不干预"
-            textSize = 12f; setPadding(4, 16, 4, 12)
-        })
-        val (sbPostSpeed, _, _) = buildSliderRow("后语速", if (plugin.postSpeed <= 0f) 0 else (plugin.postSpeed * 100).toInt(), true)
-        val (sbPostVol, _, _) = buildSliderRow("后音量", if (plugin.postVolume <= 0f) 0 else (plugin.postVolume * 100).toInt(), true)
-        val (sbPostPitch, _, _) = buildSliderRow("后音高", if (plugin.postPitch <= 0f) 0 else (plugin.postPitch * 100).toInt(), true)
-        listOf(sbPostSpeed, sbPostVol, sbPostPitch).forEach { container.addView(it.tag as android.view.View) }
-        alert("音频参数") {
-            customView { container }
-            okButton {
-                val speed = sbSpeed.progress / 100f
-                val volume = sbVol.progress / 100f
-                val pitch = sbPitch.progress / 100f
-                val postSpeed = sbPostSpeed.progress / 100f
-                val postVolume = sbPostVol.progress / 100f
-                val postPitch = sbPostPitch.progress / 100f
-                lifecycleScope.launch {
-                    withContext(Dispatchers.IO) {
-                        JReadVoiceEngine.updatePluginAudioParams(
-                            this@TtsPluginActivity, plugin,
-                            speed, volume, pitch, postSpeed, postVolume, postPitch,
-                        )
-                    }
-                    toastOnUi("已更新音频参数"); reloadListsLight()
-                }
-            }
-            cancelButton()
-        }
-    }
+    /** 滑块行统一由 [PluginEditDialogs] 提供，分组/全局音频调节复用同一套控件 */
+    private fun buildSliderRow(
+        label: String,
+        initialProgress: Int,
+        allowFollow: Boolean,
+    ): Pair<SeekBar, android.view.View> =
+        PluginEditDialogs.buildSliderRow(this, label, initialProgress, allowFollow)
 
     private fun doImport(uri: android.net.Uri) {
         lifecycleScope.launch {
@@ -1723,13 +1663,17 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     }
 
     override fun onDestroy() {
+        stopLogPolling()
         super.onDestroy()
         mediaPlayer?.release(); mediaPlayer = null
     }
 
     companion object {
         private const val TAB_CONFIGS = 0
-        private const val TAB_PLUGINS = 1
+        private const val TAB_LOGS = 1
+        private const val TAB_PLUGINS = 2
+        /** 日志页自动刷新间隔：内存日志没有监听器，靠轮询把新日志刷出来 */
+        private const val LOG_POLL_INTERVAL_MS = 500L
         /** 空分组名在列表中的展示名，落盘匹配时沿用同一口径 */
         private const val DEFAULT_GROUP_NAME = "默认分组"
         private const val DEFAULT_SUB_GROUP_NAME = "默认"

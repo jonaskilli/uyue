@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- sora 代码编辑器的共用菜单（插件代码编辑器、朗读脚本编辑器共用）。
+     各页面独有的菜单项放在自己的 extra 菜单里，由 BaseCodeEditorActivity 一起 inflate。 -->
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="AlwaysShowAction">
+
+    <item
+        android:id="@+id/menu_save"
+        android:icon="@drawable/ic_save"
+        android:title="@string/action_save"
+        app:showAsAction="always" />
+
+    <item
+        android:id="@+id/menu_search"
+        android:icon="@drawable/ic_search"
+        android:title="@string/search"
+        app:showAsAction="always" />
+
+    <item
+        android:id="@+id/menu_undo"
+        android:title="@string/undo"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_redo"
+        android:title="@string/redo"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_fold_current"
+        android:title="@string/fold_toggle_current"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_fold_all"
+        android:title="@string/fold_all"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_unfold_all"
+        android:title="@string/unfold_all"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_copy_code"
+        android:title="@string/copy_code"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_format_code"
+        android:title="@string/format_code"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_save_as_file"
+        android:title="@string/save_as_file"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_change_theme"
+        android:title="@string/change_theme"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_config_settings"
+        android:title="@string/config_settings"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_auto_wrap"
+        android:checkable="true"
+        android:title="@string/auto_wrap"
+        app:showAsAction="never" />
+
+</menu>

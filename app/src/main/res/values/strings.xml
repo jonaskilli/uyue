@@ -696,6 +696,7 @@
     <string name="log_filter_sound_effect">Sound effect</string>
     <string name="log_filter_bgm">BGM</string>
     <string name="log_filter_ai">AI</string>
+    <string name="log_filter_ai_image">AI image</string>
     <string name="log_filter_tts">TTS</string>
     <string name="log_filter_network">Network</string>
     <string name="log_filter_book_source">Book source</string>
@@ -1539,4 +1540,38 @@
     <string name="replace_domain_done">已替换 %1$d 处，确认无误后点右上角保存</string>
     <string name="pt_source_toast">书源提示（java.toast）</string>
     <string name="ps_source_toast">书源规则里 java.toast 弹的提示（形如「源名: 正在加载第N集」）。关掉后只写日志，不再弹窗</string>
+
+    <!-- TTS 引擎插件：插件代码编辑器 -->
+    <string name="undo">撤销</string>
+    <string name="redo">重做</string>
+    <string name="nav_back">返回</string>
+    <string name="more_options">更多选项</string>
+    <string name="save_as_file">另存为文件</string>
+    <string name="word_wrap">自动换行</string>
+    <string name="plugin_editor_title">插件代码</string>
+    <string name="plugin_meta">插件信息</string>
+    <string name="plugin_name_hint">插件名称</string>
+    <string name="plugin_id_hint">插件 ID（留空用名称）</string>
+    <string name="plugin_api_key_hint">API 密钥</string>
+    <string name="plugin_vars">设置变量</string>
+    <string name="plugin_preview_ui">预览插件界面</string>
+    <string name="plugin_audio_params">音频参数</string>
+    <string name="plugin_clear_data">清空数据</string>
+    <string name="plugin_debug">运行调试</string>
+    <string name="plugin_debug_log">调试日志</string>
+    <string name="plugin_debug_text_param">调试示例文本</string>
+    <string name="plugin_no_vars">该插件没有可设置的变量</string>
+    <string name="fold_all">折叠全部代码</string>
+    <string name="unfold_all">展开全部代码</string>
+    <string name="fold_toggle_current">折叠/展开光标处</string>
+    <string name="copy_code">复制代码</string>
+    <string name="function_mode_hint">输入关键词，或粘贴整个函数代码来定位并替换</string>
+    <string name="replace_function">替换此函数</string>
+    <string name="function_match_count">匹配 %1$d/%2$d（第 %3$d 行）</string>
+    <string name="function_not_found">未找到匹配的函数</string>
+    <string name="function_replaced">已替换</string>
+    <string name="please_select_code">请先选择要复制的代码</string>
+    <string name="copied_lines">已复制 %1$d 行</string>
+    <string name="plugin_editor_exit">退出</string>
+    <string name="plugin_editor_exit_no_save">有修改尚未保存，确定退出吗？</string>
 </resources>

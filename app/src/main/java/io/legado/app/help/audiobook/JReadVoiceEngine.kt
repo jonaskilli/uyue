@@ -1716,6 +1716,10 @@ object JReadVoiceEngine {
             .trim()
         val config = findConfig(context, voiceTag) ?: run {
             AppLog.putDebug("[J阅读声音引擎] 未找到可用配置: voiceTag=$voiceTag")
+            TtsSynthLog.put(
+                TtsSynthLog.Level.ERROR,
+                "合成失败 [$voiceTag] 未找到可用配置｜文本：${text.takeTextForLog()}"
+            )
             return null
         }
         val resolvedVoiceTag = config.voiceTag.ifBlank { voiceTag }
@@ -1816,6 +1820,12 @@ object JReadVoiceEngine {
             "[声音合成][J阅读引擎] 音频合成开始 requestId=$requestId " +
                 "tag=$voiceTag text=${text.take(36)}"
         )
+        // 同时写进「TTS 引擎插件 → 日志」页：只记合成相关的关键节点，
+        // 不把 AppLog 里那些与应用无关的日志混进来
+        TtsSynthLog.put(
+            TtsSynthLog.Level.DEBUG,
+            "合成开始 [$voiceTag] ${text.takeTextForLog()}"
+        )
         repeat(SYNTHESIS_RETRY_COUNT) { attempt ->
             try {
                 val attemptStartedAt = android.os.SystemClock.elapsedRealtime()
@@ -1825,24 +1835,34 @@ object JReadVoiceEngine {
                 )
                 val bytes = requestAudioToFileOnce(context, config, text, voiceTag, pointer, requestId)
                 if (bytes.isNotEmpty()) {
+                    val cost = android.os.SystemClock.elapsedRealtime() - startedAt
                     AppLog.putDebug(
                         "[声音合成][J阅读引擎] 音频合成成功 requestId=$requestId " +
                             "attempt=${attempt + 1}/$SYNTHESIS_RETRY_COUNT " +
-                            "cost=${android.os.SystemClock.elapsedRealtime() - startedAt}ms " +
+                            "cost=${cost}ms " +
                             "thisCost=${android.os.SystemClock.elapsedRealtime() - attemptStartedAt}ms " +
                             "size=${bytes.size} tag=$voiceTag"
+                    )
+                    TtsSynthLog.put(
+                        TtsSynthLog.Level.SUCCESS,
+                        "合成成功 [$voiceTag] ${TtsSynthLog.sizeToReadable(bytes.size)} / ${cost}ms"
                     )
                     return bytes
                 }
                 throw IllegalStateException("J阅读声音合成后音频为空")
             } catch (e: Exception) {
                 lastError = e
+                val reason = e.localizedMessage ?: e.javaClass.simpleName
                 if (attempt >= SYNTHESIS_RETRY_COUNT - 1) {
                     AppLog.putDebug(
                         "[声音合成][J阅读引擎] 音频合成最终失败，已达到 $SYNTHESIS_RETRY_COUNT 次 " +
                             "requestId=$requestId cost=${android.os.SystemClock.elapsedRealtime() - startedAt}ms " +
-                            "tag=$voiceTag error=${e.localizedMessage ?: e.javaClass.simpleName} " +
+                            "tag=$voiceTag error=${reason} " +
                             "text=${text.take(36)}"
+                    )
+                    TtsSynthLog.put(
+                        TtsSynthLog.Level.ERROR,
+                        "合成失败 [$voiceTag] $reason｜文本：${text.takeTextForLog()}"
                     )
                     throw e
                 }
@@ -1855,13 +1875,23 @@ object JReadVoiceEngine {
                 )
                 AppLog.putDebug(
                     "[声音合成][J阅读引擎] 合成失败，准备重试 $nextAttempt/$SYNTHESIS_RETRY_COUNT " +
-                        "tag=$voiceTag error=${e.localizedMessage ?: e.javaClass.simpleName} " +
+                        "tag=$voiceTag error=${reason} " +
                         "text=${text.take(36)}"
+                )
+                TtsSynthLog.put(
+                    TtsSynthLog.Level.WARN,
+                    "合成失败，重试 $nextAttempt/$SYNTHESIS_RETRY_COUNT [$voiceTag] $reason"
                 )
                 Thread.sleep(800L * (attempt + 1))
             }
         }
         throw lastError ?: IllegalStateException("J阅读声音合成失败")
+    }
+
+    /** 日志里展示的文本片段：过长截断，换行压成空格，避免一条日志占好几行 */
+    private fun String.takeTextForLog(): String {
+        val singleLine = replace(Regex("\\s+"), " ").trim()
+        return if (singleLine.length > 40) "${singleLine.take(40)}…" else singleLine
     }
 
     private fun requestAudioToFileOnce(
