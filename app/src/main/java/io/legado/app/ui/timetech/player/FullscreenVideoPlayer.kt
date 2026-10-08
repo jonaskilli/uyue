@@ -131,6 +131,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.common.VideoSize
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
@@ -154,6 +155,7 @@ import io.legado.app.help.video.AdFilter
 import io.legado.app.help.video.AdPlaybackController
 import io.legado.app.help.video.SkipEdge
 import io.legado.app.help.video.VideoCache
+import io.legado.app.help.video.VideoDownloader
 import io.legado.app.utils.isWifiConnect
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.delay
@@ -735,6 +737,45 @@ private fun VideoPage(
     )
 }
 
+/** ExoPlayer 的 IO 类错误码区间（2000-2999：连接失败 / 超时 / 403 / 404 / 读位置越界等） */
+private val ERROR_CODE_IO_RANGE = 2000..2999
+
+/** 播放瞬时 IO 错误的自动重试次数上限（与 BehindLiveWindow 的无限重试区分开） */
+private const val MAX_PLAYBACK_IO_RETRY = 5
+
+/** 一集里最多摘掉多少个坏分片：超了说明不是个别分片的问题，别再摘 */
+private const val MAX_SKIP_SEGMENTS = 20
+
+/** 每次重试前的退避间隔：给源站限流 / CDN 抖动留出恢复时间 */
+private const val PLAYBACK_IO_RETRY_DELAY_MS = 1200L
+
+/** 值得重试的 HTTP 状态码：请求超时 / 过早关闭 / 限流 / 服务端错误 */
+private val RETRYABLE_HTTP_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
+
+/**
+ * 判断这个播放错误是不是「重试多少次都一样」的永久错误。
+ *
+ * 取自 N_m3u8DL-RE 的 `RetryUtil.IsTransientNetworkError`：只对 408 / 429 / 5xx /
+ * 超时 / 套接字错误重试，401 / 403 / 404 / 410 这类鉴权失败与资源下线直接放弃。
+ * 少了这一步，一个 403 也要走满 5 次退避（约 6 秒）才判死，用户只觉得卡在转圈。
+ *
+ * @return true 表示**不该**再重试
+ */
+private fun isPermanentPlaybackError(error: PlaybackException): Boolean {
+    // ExoPlayer 把 HTTP 状态码藏在 cause（这里是 InvalidResponseCodeException）里，
+    // PlaybackException.errorCode 只能看出「是个 IO 错」，分不出 403 还是 503
+    val cause = error.cause
+    val code = (cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+        ?: (cause?.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+        ?: return false // 拿不到状态码 = 连接/超时类，按可重试处理
+    return code !in RETRYABLE_HTTP_CODES
+}
+
+/** 从播放异常里取出错的那一片地址：ExoPlayer 把它藏在 cause 的 dataSpec 里 */
+private fun badSegmentUrlOf(error: PlaybackException): String? =
+    (error.cause as? HttpDataSource.HttpDataSourceException)?.dataSpec?.uri?.toString()
+        ?: (error.cause?.cause as? HttpDataSource.HttpDataSourceException)?.dataSpec?.uri?.toString()
+
 /**
  * 按整个 URL 推断流类型并显式声明。
  *
@@ -980,11 +1021,19 @@ internal fun VideoPlayerPage(
      * 收拢到一处后：换源才 setMediaItem（同一个 key 下 currentMediaItem 已相同则不重复设置），
      * 其余情况只是就地校正起播位置，不会重建解码器。
      */
-    LaunchedEffect(player, video.uri, startFrom) {
-        val target = video.uri.toString()
+    // 坏分片被剔除后改播的"跳过版"清单；非空时优先于 video.uri。
+    // key 用 video.uri：换集 / 换视频即归零，回到原始清单重新来过。
+    var skipUri by remember(video.uri) { mutableStateOf<String?>(null) }
+    // 本次播放里已确认取不到的分片。只活在当前这一集，换集/换视频即清空，**不落盘**：
+    // 分片取不到常常是临时的，下次播到那儿要重新试一次，好了就正常播。
+    val badSegments = remember(video.uri) { mutableSetOf<String>() }
+    val playUri = skipUri?.let { Uri.parse(it) } ?: video.uri
+
+    LaunchedEffect(player, playUri, startFrom) {
+        val target = playUri.toString()
         val current = player.currentMediaItem?.localConfiguration?.uri?.toString()
         if (current != target) {
-            player.setMediaItem(buildMediaItem(video.uri))
+            player.setMediaItem(buildMediaItem(playUri))
         }
         // 起播位置：只在"确实在它前面"时才推，避免覆盖用户已经拖到的位置
         if (startFrom > 0 && player.currentPosition < startFrom) {
@@ -1001,6 +1050,9 @@ internal fun VideoPlayerPage(
     // 是否已经开播出过画面：出画后不再显示封面铺底
     val started = remember(video.uri) { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    // 瞬时 IO 错误的自动重试次数。key 用 video.uri：换源/换集即归零，
+    // 不会把上一片的重试次数带到下一片身上。
+    var ioRetryCount by remember(video.uri) { mutableIntStateOf(0) }
 
     // ===== 广告识别与跳过 =====
     // 由 AdPlaybackController 承担：监听分片下载完成 → 后台比对指纹 → 登记跳过区间。
@@ -1074,10 +1126,79 @@ internal fun VideoPlayerPage(
                     player.playWhenReady = true
                     return
                 }
-                errorText = error.message ?: "播放失败"
-                AppLog.put("视频播放失败：${video.name}", error)
-                // 上报播放错误，交由上层在有列表可切时自动跳到下一个视频
-                onPlaybackError?.invoke(error)
+                // IO 类错误（errorCode 2000-2999：连接失败 / 超时 / 403 / 404 / 读位置越界等）
+                // 绝大多数是**瞬时**的：源站限流、短时效 token 刚好过期、网络抖动，
+                // 都会让它偶发地冒一次，而同一条地址稍后重试往往就能正常播。
+                //
+                // 下载链路之所以"断断续续但最后总能下完"，正是因为它具备播放这边没有的两件事：
+                //   1. 断点续传——downloadHls 每次续传只补缺口，已落盘的分片不再重下；
+                //   2. 可以反复重来——每次 resume 都重新解析直链再发起请求。
+                // 于是"能下载完"恰恰证明这条链是通的、视频是好的。
+                // 而播放这边原先是**一次失败就判死**：立刻弹「无法播放该视频」并自动切下一个，
+                // 把能看的视频当成坏链跳过（无限刷模式下还会被永久拉黑）。
+                // 这里补上重试，重试都用尽了才认定它真的坏了。
+                if (error.errorCode in ERROR_CODE_IO_RANGE
+                    && !isPermanentPlaybackError(error)
+                    && ioRetryCount < MAX_PLAYBACK_IO_RETRY
+                ) {
+                    ioRetryCount++
+                    errorText = null
+                    AppLog.put(
+                        "视频播放 IO 错误，重试 $ioRetryCount/$MAX_PLAYBACK_IO_RETRY：${video.name}",
+                        error
+                    )
+                    scope.launch {
+                        delay(PLAYBACK_IO_RETRY_DELAY_MS)
+                        // 退避期间页面可能已经切走、播放器已释放
+                        runCatching {
+                            player.prepare()
+                            player.playWhenReady = true
+                        }.onFailure { AppLog.putDebug("播放重试已取消：${video.name}") }
+                    }
+                    return
+                }
+                // 认定这一集真的坏了
+                fun giveUp() {
+                    errorText = error.message ?: "播放失败"
+                    AppLog.put("视频播放失败：${video.name}", error)
+                    // 上报播放错误，交由上层在有列表可切时自动跳到下一个视频
+                    onPlaybackError?.invoke(error)
+                }
+
+                // ===== 最后一道兜底：摘掉坏分片，从下一片继续播 =====
+                //
+                // ExoPlayer 对 HLS 是「分片加载失败 → 重试 → 仍失败就抛到 onPlayerError」，
+                // **不会自动跳过**坏分片。于是一集几百片里只要有一片 404 / 403 / 内容损坏，
+                // 整段视频就再也播不了——而后面几百片其实都是好的。
+                //
+                // 视频不像普通文件：HLS 每个分片自带关键帧，天然可切段，少一片只丢它那几秒，
+                // 后面的照常能播（downloadHls 的注释里也是这么设计分片缓存的）。
+                // 所以"摘掉这一片"是安全且唯一能救回这一集的办法。
+                //
+                // 坏片累积在 [badSegments] 里，每次生成的清单把**所有**已知坏片一起摘掉
+                // （只摘最新那一片会在两片坏片之间来回反复），上限 [MAX_SKIP_SEGMENTS]。
+                val badUrl = badSegmentUrlOf(error)
+                // 摘到这个数就别再摘了：剩下的多半不是个别分片坏了，而是整条链不可用
+                if (badUrl == null || badSegments.size >= MAX_SKIP_SEGMENTS) {
+                    giveUp()
+                    return
+                }
+                badSegments.add(badUrl)
+                errorText = null
+                scope.launch {
+                    val newUri = VideoDownloader.skipSegmentAndRebuildPlaylist(
+                        video.uri.toString(), badSegments.toSet(), headers
+                    )
+                    if (newUri != null) {
+                        skipUri = newUri
+                        AppLog.put("已剔除坏分片，重新起播：$badUrl")
+                        player.setMediaItem(buildMediaItem(Uri.parse(newUri)))
+                        player.prepare()
+                        player.playWhenReady = true
+                    } else {
+                        giveUp() // 摘不动了：可能是清单本身有问题，或这片早已摘过
+                    }
+                }
             }
 
             override fun onVideoSizeChanged(size: VideoSize) {
@@ -1099,6 +1220,8 @@ internal fun VideoPlayerPage(
                 if (playbackState == Player.STATE_ENDED) {
                     currentPlayEnded.value()
                 }
+                // 起播成功就清掉重试计数：之后的报错才算新的一次故障
+                if (playbackState == Player.STATE_READY) ioRetryCount = 0
             }
         }
         player.addListener(listener)
