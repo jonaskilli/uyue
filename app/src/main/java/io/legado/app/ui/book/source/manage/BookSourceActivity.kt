@@ -170,6 +170,8 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
         // 勾选态从配置里回读：菜单每次打开都会重建，不回显的话看着像没生效
         menu.findItem(R.id.menu_disable_verification).isChecked =
             AppConfig.disableSourceVerification
+        menu.findItem(R.id.menu_source_toast).isChecked =
+            AppConfig.sourceToast
         upGroupMenu()
         return super.onPrepareOptionsMenu(menu)
     }
@@ -270,6 +272,13 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
             R.id.menu_disable_verification -> {
                 item.isChecked = !item.isChecked
                 AppConfig.disableSourceVerification = item.isChecked
+            }
+
+            // 书源提示（java.toast 弹气泡）：勾选后书源运行期 java.toast / java.longToast
+            // 真的弹出提示，不勾选则只写日志不弹窗。与「其它设置 → 书源提示」同一开关。
+            R.id.menu_source_toast -> {
+                item.isChecked = !item.isChecked
+                AppConfig.sourceToast = item.isChecked
             }
 
             R.id.menu_help -> showHelp("SourceMBookHelp")

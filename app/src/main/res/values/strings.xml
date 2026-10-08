@@ -1442,6 +1442,7 @@
     <string name="show_bookname">显示书名</string>
     <string name="float_permission_rationale">阅读需要悬浮窗权限来显示播放窗口</string>
     <string name="video">视频</string>
+    <string name="show_video">显示视频源</string>
     <string name="infinite_swipe">抖音</string>
     <string name="infinite_swipe_no_source">没有可用的视频源</string>
     <string name="infinite_swipe_no_source_selected">还没选择视频源，长按「抖音」按钮选择要刷的书源</string>

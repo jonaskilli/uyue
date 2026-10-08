@@ -417,6 +417,10 @@ class MainActivity : VMBaseActivity<ActivityMainBinding, MainViewModel>(),
                 binding.viewPagerMain.setCurrentItem(realPositions.indexOf(idExplore), false)
             }
 
+            "video" -> if (AppConfig.showVideo) {
+                binding.viewPagerMain.setCurrentItem(realPositions.indexOf(idVideo), false)
+            }
+
             "rss" -> if (AppConfig.showRSS) {
                 binding.viewPagerMain.setCurrentItem(realPositions.indexOf(idRss), false)
             }

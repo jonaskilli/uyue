@@ -103,7 +103,11 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
      * 在设置页改完开关后这里仍是旧值。默认 false——不少视频源在正文规则里 toast
      * "正在加载第N集"，播放/切集时反复弹窗很碍眼，关掉后只写日志。
      */
-    val sourceToast: Boolean get() = appCtx.getPrefBoolean(PreferKey.sourceToast, false)
+    var sourceToast: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.sourceToast, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.sourceToast, value)
+        }
 
     /**
      * 禁止书源弹出任何验证：图片验证码对话框（`java.getVerificationCode`）与验证网页
