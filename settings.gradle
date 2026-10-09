@@ -1,15 +1,17 @@
 pluginManagement {
     repositories {
-        // 镜像仓库优先
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/public' }
-        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
-        maven { url 'https://maven.aliyun.com/repository/central' }
-        maven { url 'https://repo.huaweicloud.com/repository/maven/' }
-        
-        google()
+        // 官方源优先：GitHub runner 在境外，国内镜像（阿里云/华为云）反而慢或超时，
+        // 会让依赖在镜像上「等不到」而被判缺失（KSP 2.3.4 插件曾因此解析失败）。
+        // KSP 等 plugin marker 的权威源是 Gradle Plugin Portal / Maven Central，故它们最先。
         gradlePluginPortal()
         mavenCentral()
+        google()
+        // 国内镜像兜底（境外 runner 上通常用不到）
+        maven { url = 'https://maven.aliyun.com/repository/google' }
+        maven { url = 'https://maven.aliyun.com/repository/public' }
+        maven { url = 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url = 'https://maven.aliyun.com/repository/central' }
+        maven { url = 'https://repo.huaweicloud.com/repository/maven/' }
     }
 }
 
@@ -24,13 +26,8 @@ dependencyResolutionManagement {
                 includeGroupByRegex("com\\.github.*")
             }
         }
-        //镜像仓库（作为 com.github.* 回退及非 GitHub 依赖的主源）
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/public' }
-        maven { url 'https://maven.aliyun.com/repository/central' }
-        maven { url 'https://repo.huaweicloud.com/repository/maven/' }
-        //maven { url "https://maven-central-asia.storage-download.googleapis.com/maven2/" }
-
+        // 官方源优先：GitHub runner 在境外，国内镜像（阿里云/华为云）反而慢或超时，
+        // 会让依赖在镜像上「等不到」而被判缺失。镜像移到末尾兜底。
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -40,8 +37,13 @@ dependencyResolutionManagement {
                 includeGroup("org.chromium.net")
             }
         }
-        //原仓库（备用）
         mavenCentral()
+        gradlePluginPortal()
+        // 国内镜像兜底（境外 runner 上通常用不到）
+        maven { url = 'https://maven.aliyun.com/repository/google' }
+        maven { url = 'https://maven.aliyun.com/repository/public' }
+        maven { url = 'https://maven.aliyun.com/repository/central' }
+        maven { url = 'https://repo.huaweicloud.com/repository/maven/' }
     }
 }
 rootProject.name = 'legado'
