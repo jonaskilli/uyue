@@ -12,6 +12,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import java.util.UUID
@@ -181,7 +182,12 @@ object JReadVoiceEngine {
         val sortOrder: Int = 0,
     )
 
-    fun listConfigs(context: Context, ensureBuiltIns: Boolean = true): List<VoiceConfig> {
+    fun listConfigs(
+        context: Context,
+        ensureBuiltIns: Boolean = true,
+        /** 损坏恢复的重入保护：true 时不允许再次走恢复分支，防止备份也损坏时无限递归 */
+        recovering: Boolean = false,
+    ): List<VoiceConfig> {
         cachedConfigs?.let { return it }
         val appContext = context.applicationContext
         if (ensureBuiltIns && !seedingBuiltInConfigs) {
@@ -192,10 +198,26 @@ object JReadVoiceEngine {
             .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .getString(KEY_CONFIGS, "[]")
             .orEmpty()
-        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        val array = runCatching { JSONArray(raw) }.getOrNull()
+        // 主数据损坏（不合法 JSON，典型成因：数 MB 的大 JSON 落盘中途进程被杀、磁盘满）。
+        // 这里绝不能静默当空列表——空列表一旦被任何写操作（改开关、拖排序）全量写回
+        // 磁盘，用户导入的全部配置就永久清零、只剩内置预置重新种入，表现正是
+        // 「用着用着所有配置和插件都恢复成内置」。先从备份把主文件恢复，再重新读取。
+        if (array == null && raw.isNotBlank() && raw != "[]" && !recovering) {
+            val backup = readBackup(context, KEY_CONFIGS)
+            if (backup != null) {
+                AppLog.put("[J阅读声音引擎] 配置数据损坏（JSON 解析失败），已从备份恢复")
+                appContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    .edit().putString(KEY_CONFIGS, backup).commit()
+                invalidateConfigCache()
+                cachedConfigs = null
+                return listConfigs(context, ensureBuiltIns = false, recovering = true)
+            }
+            AppLog.put("[J阅读声音引擎] 配置数据损坏且无可用备份，只能返回空列表")
+        }
         val result = buildList {
-            for (index in 0 until array.length()) {
-                val obj = array.optJSONObject(index) ?: continue
+            for (index in 0 until (array?.length() ?: 0)) {
+                val obj = array?.optJSONObject(index) ?: continue
                 parseVoiceConfig(obj)?.let { add(it) }
             }
         }
@@ -1127,7 +1149,7 @@ object JReadVoiceEngine {
             .apply()
     }
 
-    fun listPlugins(context: Context): List<VoicePlugin> {
+    fun listPlugins(context: Context, recovering: Boolean = false): List<VoicePlugin> {
         cachedPlugins?.let { return it }
         val appContext = context.applicationContext
         if (!seedingBuiltInPlugins) {
@@ -1137,10 +1159,24 @@ object JReadVoiceEngine {
             .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .getString(KEY_PLUGINS, "[]")
             .orEmpty()
-        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        val array = runCatching { JSONArray(raw) }.getOrNull()
+        // 主数据损坏：与 listConfigs 同一套恢复策略，先从备份恢复主文件再重读。
+        // 不恢复的话，后续任何一次写操作会把空列表写回磁盘，全部插件永久清零。
+        if (array == null && raw.isNotBlank() && raw != "[]" && !recovering) {
+            val backup = readBackup(context, KEY_PLUGINS)
+            if (backup != null) {
+                AppLog.put("[J阅读声音引擎] 插件数据损坏（JSON 解析失败），已从备份恢复")
+                appContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    .edit().putString(KEY_PLUGINS, backup).commit()
+                invalidatePluginCache()
+                cachedPlugins = null
+                return listPlugins(context, recovering = true)
+            }
+            AppLog.put("[J阅读声音引擎] 插件数据损坏且无可用备份，只能返回空列表")
+        }
         val result = buildList {
-            for (index in 0 until array.length()) {
-                val obj = array.optJSONObject(index) ?: continue
+            for (index in 0 until (array?.length() ?: 0)) {
+                val obj = array?.optJSONObject(index) ?: continue
                 val pluginBody = importedPluginBody(obj)
                 val urlTemplate = pluginBody.first
                 val code = pluginBody.second
@@ -2105,16 +2141,19 @@ object JReadVoiceEngine {
     }
 
     fun saveGroups(context: Context, groups: List<VoiceGroup>) {
-        val array = JSONArray()
-        groups.distinctBy { Triple(it.groupName, it.subGroupName, it.thirdGroupName) }.forEach {
-            if (it.groupName.isBlank()) return@forEach
-            array.put(voiceGroupToJson(it))
-        }
+        val json = JSONArray().apply {
+            groups.distinctBy { Triple(it.groupName, it.subGroupName, it.thirdGroupName) }.forEach {
+                if (it.groupName.isBlank()) return@forEach
+                put(voiceGroupToJson(it))
+            }
+        }.toString()
+        // commit 而非 apply，理由同 saveConfigs
         context.applicationContext
             .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_GROUPS, array.toString())
-            .apply()
+            .putString(KEY_GROUPS, json)
+            .commit()
+        writeBackup(context, KEY_GROUPS, json)
         invalidateGroupCache()
     }
 
@@ -2300,6 +2339,37 @@ object JReadVoiceEngine {
      */
     private val configWriteLock = Any()
 
+    // ===== 数据备份 =====
+    // 配置/插件以单条大 JSON 存在 SharedPreferences 里。这个文件一旦损坏
+    // （大 JSON 落盘中途被杀、磁盘满等），读取会拿到不合法的 JSON——如果不做处理，
+    // 后续任何一次写操作都会把「空列表」全量写回磁盘，用户导入的全部插件与配置
+    // 就此永久清零，只剩内置预置重新种入，表现正是「用着用着全部恢复成内置」。
+    // 因此每次成功落盘后同步写一份备份（应用私有目录、临时文件+rename 原子写），
+    // 读取发现损坏时自动从备份恢复并写回主文件。
+
+    private fun backupFile(context: Context, key: String): File =
+        File(File(context.applicationContext.filesDir, "jread_voice_backup"), "$key.json")
+
+    private fun writeBackup(context: Context, key: String, json: String) {
+        runCatching {
+            val dst = backupFile(context, key)
+            dst.parentFile?.mkdirs()
+            val tmp = File(dst.parentFile, "${dst.name}.tmp")
+            tmp.writeText(json)
+            if (!tmp.renameTo(dst)) {
+                dst.writeText(json)
+                tmp.delete()
+            }
+        }.onFailure {
+            AppLog.putDebug("[J阅读声音引擎] 备份写入失败：$key ${it.message}")
+        }
+    }
+
+    private fun readBackup(context: Context, key: String): String? =
+        runCatching {
+            backupFile(context, key).takeIf { it.isFile && it.length() > 0 }?.readText()
+        }.getOrNull()
+
     private fun saveConfigs(context: Context, configs: List<VoiceConfig>) {
         synchronized(configWriteLock) {
             // 防御：不允许存储里出现多条相同 id 的配置（例如历史导入产生的重复副本、
@@ -2309,15 +2379,19 @@ object JReadVoiceEngine {
                 keySelector = { if (it.value.id.isBlank()) "blank_${it.index}" else it.value.id },
                 valueTransform = { it.value }
             ).map { (_, list) -> list.last() }
-            val array = JSONArray()
-            deduped.forEach {
-                array.put(voiceConfigToJson(it))
-            }
-            context.applicationContext
+            val json = JSONArray().apply { deduped.forEach { put(voiceConfigToJson(it)) } }.toString()
+            // commit 而非 apply：本文件所有调用方都在 Dispatchers.IO，同步落盘的代价
+            // 可接受；而 apply 是异步的，配置列表越大（大插件 + 数千项音色 = 数 MB 的
+            // JSON，每次小改动都全量重写）落盘越慢，「操作完成 → 真正落盘」之间的
+            // 丢失窗口就越大——进程在这个窗口被杀，本次改动静默丢失，数据回滚到
+            // 上一次成功落盘的状态，用户看到的正是「用着用着恢复成内置」。
+            val ok = context.applicationContext
                 .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
                 .edit()
-                .putString(KEY_CONFIGS, array.toString())
-                .apply()
+                .putString(KEY_CONFIGS, json)
+                .commit()
+            if (!ok) AppLog.put("[J阅读声音引擎] 配置写盘失败（commit 返回 false）")
+            writeBackup(context, KEY_CONFIGS, json)
             invalidateConfigCache()
             // 预热：磁盘内容与 deduped 一致，后续读取直接命中缓存，跳过全量重解析
             cachedConfigs = deduped
@@ -2363,15 +2437,17 @@ object JReadVoiceEngine {
     }
 
     private fun savePlugins(context: Context, plugins: List<VoicePlugin>) {
-        val array = JSONArray()
-        plugins.forEach {
-            array.put(pluginToJson(it, includeUserVars = true))
-        }
-        context.applicationContext
+        val json = JSONArray().apply {
+            plugins.forEach { put(pluginToJson(it, includeUserVars = true)) }
+        }.toString()
+        // commit 而非 apply，理由同 saveConfigs：消除大 JSON 异步落盘的丢失窗口
+        val ok = context.applicationContext
             .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_PLUGINS, array.toString())
-            .apply()
+            .putString(KEY_PLUGINS, json)
+            .commit()
+        if (!ok) AppLog.put("[J阅读声音引擎] 插件写盘失败（commit 返回 false）")
+        writeBackup(context, KEY_PLUGINS, json)
         invalidatePluginCache()
     }
 
