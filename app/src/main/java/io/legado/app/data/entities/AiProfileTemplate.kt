@@ -19,6 +19,9 @@ data class AiProfileTemplate(
     var apiConfig: String = "",
     /** 建档/增量分析用的附加提示词（附加在内置分析指令之后，可为空） */
     var prompt: String = "",
+    /** 生图提示词（立绘），非空时直接覆盖内置立绘提示词，可为空 */
+    @ColumnInfo(defaultValue = "")
+    var imagePrompt: String = "",
     /** 增量更新频率：每 N 章至少更新一次（档案不完整时每章都补全） */
     @ColumnInfo(defaultValue = "5")
     var chapterGap: Int = 5,

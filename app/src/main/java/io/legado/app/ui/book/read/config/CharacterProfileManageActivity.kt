@@ -2,6 +2,9 @@ package io.legado.app.ui.book.read.config
 
 import android.os.Bundle
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Spinner
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.RecyclerView
 import io.legado.app.R
@@ -12,13 +15,16 @@ import io.legado.app.data.entities.CharacterProfile
 import io.legado.app.databinding.ActivityCharacterProfileManageBinding
 import io.legado.app.databinding.ItemCharacterProfileBinding
 import io.legado.app.databinding.ItemCharacterProfileGroupBinding
+import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.CharacterProfileManager
+import io.legado.app.ui.book.read.config.AiProfileDialog
 import io.legado.app.utils.applyNavigationBarPadding
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -68,6 +74,7 @@ class CharacterProfileManageActivity :
         binding.tvEmpty.setOnClickListener { loadData() }
         savedInstanceState?.getStringArrayList(STATE_COLLAPSED)?.let { collapsedBooks.addAll(it) }
         adapter.setCollapsedBooks(collapsedBooks)
+        setupTopBar()
     }
 
     override fun onResume() {
@@ -84,6 +91,51 @@ class CharacterProfileManageActivity :
     private fun toggleBook(bookName: String) {
         if (!collapsedBooks.add(bookName)) collapsedBooks.remove(bookName)
         adapter.setCollapsedBooks(collapsedBooks)
+    }
+
+    /**
+     * 顶部 contentLayout 控件：生图模型下拉框（与角色档案弹窗共用同一选择，
+     * 持久化到 AppConfig.aiPortraitTemplateId）+ 档案设置按钮（打开档案设置界面）。
+     */
+    private fun setupTopBar() {
+        val spTemplate = binding.titleBar.findViewById<Spinner>(R.id.sp_template) ?: return
+        binding.titleBar.findViewById<View>(R.id.btn_profile_settings)
+            ?.setOnClickListener { showDialogFragment(AiProfileDialog()) }
+        lifecycleScope.launch(IO) {
+            val templates = runCatching { appDb.aiImageTemplateDao.getAllList() }
+                .getOrDefault(emptyList())
+            withContext(Dispatchers.Main) {
+                val items = mutableListOf("默认模板（跟随 AI 生图设置）")
+                items.addAll(templates.map { it.name.ifBlank { "未命名模板" } })
+                val adapter = ArrayAdapter(
+                    this@CharacterProfileManageActivity,
+                    android.R.layout.simple_spinner_item,
+                    items
+                ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+                spTemplate.adapter = adapter
+                // 回显已保存的选择（重启后保持）
+                val savedId = AppConfig.aiPortraitTemplateId
+                val savedIndex = if (savedId == 0L) 0
+                else templates.indexOfFirst { it.id == savedId } + 1
+                spTemplate.setSelection(if (savedIndex in 1..templates.size) savedIndex else 0)
+                spTemplate.onItemSelectedListener =
+                    object : AdapterView.OnItemSelectedListener {
+                        override fun onItemSelected(
+                            parent: AdapterView<*>?,
+                            view: View?,
+                            position: Int,
+                            id: Long
+                        ) {
+                            val templateId =
+                                if (position <= 0) 0L
+                                else templates.getOrNull(position - 1)?.id ?: 0L
+                            AppConfig.aiPortraitTemplateId = templateId
+                        }
+
+                        override fun onNothingSelected(parent: AdapterView<*>?) {}
+                    }
+            }
+        }
     }
 
     private fun loadData() {
@@ -167,6 +219,9 @@ class CharacterProfileManageActivity :
 
     private fun generateAvatar(bookName: String, name: String) {
         val profile = CharacterProfileManager.getProfile(bookName, name)
+        val customPrompt = runCatching {
+            CharacterProfileManager.getTemplate()?.imagePrompt?.trim().orEmpty()
+        }.getOrDefault("")
         toastOnUi("正在生成立绘…")
         AiImageGenerator.generateCharacterAvatar(
             characterName = name,
@@ -178,6 +233,7 @@ class CharacterProfileManageActivity :
             personality = profile?.personality.orEmpty(),
             background = profile?.background.orEmpty(),
             regenerate = true,
+            customPrompt = customPrompt,
             onSuccess = {
                 toastOnUi("立绘已生成")
                 loadData()

@@ -22,6 +22,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import splitties.init.appCtx
 import java.io.File
 import java.io.FileOutputStream
@@ -93,6 +94,16 @@ object VideoDownloader {
     private class BusyException : Exception()
 
     /**
+     * 手动下载撞上"这一集正被边看边存占用"。
+     *
+     * **不是失败**：边看边存每 20 秒就要跑一轮收集（`collectCurrentEpisode`），
+     * 用户在缓冲时点下载极易正好撞上，原来直接判 FAILED 并弹
+     * 「下载失败：该选集正在下载中」，用户只看到"下载总是中断"。
+     * 现在交给 [download] 重排队尾等一会儿再试，收集那一轮跑完就能接上。
+     */
+    private class SegmentBusyException : Exception()
+
+    /**
      * @param collectOnly true = **只收集缓存里已有的分片**（播放缓冲留下的），
      * 不产生任何网络流量；缺的部分留给收尾时全速补齐。边播边存阶段用它，
      * 播放与下载因此不再抢带宽——这是"开着边播边存会卡"的根治办法。
@@ -115,6 +126,12 @@ object VideoDownloader {
     private var workerBusy = false
     /** 暂停中的下载 key（watchKey） */
     private val pausedKeys: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** 撞上"该集正忙"的重排次数（key = watchKey）：只用来给重排设上限，避免空转 */
+    private val busyRetries = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** 重排上限：边看边存若长期占着这一集，超过就按失败处理，不再无限重排 */
+    private const val MAX_BUSY_REQUEUE = 10
+    /** 重排前的等待：边看边存一轮收集通常几秒内就跑完 */
+    private const val BUSY_REQUEUE_DELAY_MS = 1500L
 
     /**
      * 播放页是否还在播。
@@ -228,15 +245,22 @@ object VideoDownloader {
             val title = titleOf(task)
             val dir = dirOf(task)
             val savedProgress = o.optInt("progress", 0).coerceIn(0, 99)
-            // 以磁盘实际文件为准：mp4 成品在 = 已完成；分片文件夹有分片也算已缓存（可播）；
-            // 只有 .part = 中断，可续传
+            // 以磁盘实际文件为准判定状态，但**绝不能只看"有没有文件"**：
+            // - mp4 成品在 = 已完成（直链下载先写 .part、写满才改名，成品必是完整的）；
+            // - m3u8 分片目录必须**逐片核对**总数与已落盘数：下载到一半被杀进程后，
+            //   文件夹里照样躺着一堆 seg_ 文件，只看"有分片"会把它误判成已完成 100%，
+            //   于是它再也不会被继续下载——表现就是"列表显示已下载，播放却还在边播边下"；
+            //   缺了的分片要按暂停处理，续传时只补缺口。
+            // - 只有 .part = 中断，可续传
+            val hls = hlsSegProgress(File(dir, title))
             val state = when {
                 File(dir, "$title.mp4").exists() ->
                     DlStatus.COMPLETED to 100
-                File(dir, title).isDirectory &&
-                    File(dir, title).listFiles().orEmpty()
-                        .any { it.name.startsWith("seg_") } ->
+                hls != null && hls.second >= hls.first ->
                     DlStatus.COMPLETED to 100
+                hls != null && hls.second > 0 ->
+                    // 下了一半：按已落盘分片数给出真实百分比，方便一眼看出缺多少
+                    DlStatus.PAUSED to (hls.second * 100 / hls.first).coerceIn(0, 99)
                 File(dir, "$title.mp4.part").exists() ->
                     DlStatus.PAUSED to savedProgress
                 else -> DlStatus.FAILED to savedProgress
@@ -752,8 +776,10 @@ object VideoDownloader {
     private suspend fun download(task: Task) {
         val key = watchKey(task)
         val title = titleOf(task)
+        // 重排导致的二次进入不算"新开始"，不重复弹「开始下载」
+        val isRetry = busyRetries.containsKey(key)
         ensureState(task)
-        appCtx.toastOnUi("开始下载：${task.chapter.title}")
+        if (!isRetry) appCtx.toastOnUi("开始下载：${task.chapter.title}")
         runCatching {
             downloadCore(
                 task, dirOf(task), title, knownUrl = null, key = key, collectOnly = false,
@@ -762,6 +788,7 @@ object VideoDownloader {
             }
         }
             .onSuccess { file ->
+                busyRetries.remove(key)
                 if (file == null) {
                     updateState(key) { it.copy(status = DlStatus.QUEUED) }
                     return@onSuccess
@@ -772,9 +799,29 @@ object VideoDownloader {
             }
             .onFailure { e ->
                 when (e) {
-                    is PausedException ->
+                    is PausedException -> {
+                        busyRetries.remove(key)
                         updateState(key) { it.copy(status = DlStatus.PAUSED) }
+                    }
+                    // 撞上边看边存的占用：不是失败，等这一轮收集跑完再来。
+                    // 放队首而不是队尾——它已经排过一次队了，不该被后来的任务压到后面。
+                    is SegmentBusyException -> {
+                        val n = (busyRetries[key] ?: 0) + 1
+                        if (n > MAX_BUSY_REQUEUE) {
+                            busyRetries.remove(key)
+                            AppLog.put("下载失败（该集长期被占用）：${task.chapter.title}", e)
+                            updateState(key) { it.copy(status = DlStatus.FAILED) }
+                            appCtx.toastOnUi("下载失败：${task.chapter.title}\n该选集正在下载中")
+                        } else {
+                            busyRetries[key] = n
+                            updateState(key) { it.copy(status = DlStatus.QUEUED) }
+                            AppLog.putDebug("该集正忙，${BUSY_REQUEUE_DELAY_MS}ms 后重试（第 $n 次）：$title")
+                            delay(BUSY_REQUEUE_DELAY_MS)
+                            synchronized(manualQueue) { manualQueue.addFirst(task) }
+                        }
+                    }
                     else -> {
+                        busyRetries.remove(key)
                         AppLog.put("下载失败：${task.chapter.title}", e)
                         updateState(key) { it.copy(status = DlStatus.FAILED) }
                         appCtx.toastOnUi("下载失败：${task.chapter.title}\n${e.localizedMessage}")
@@ -818,8 +865,11 @@ object VideoDownloader {
         // 同一集正在被别的任务写入（收尾补齐中）：这一轮收集直接跳过，不算失败
         synchronized(activePaths) {
             if (!activePaths.add(epFolder.path)) {
+                // collectOnly（边播边存收集）撞车：静默跳过，本轮不收集就是了；
+                // 手动下载撞车：抛 [SegmentBusyException]，由 download() 重排队尾再试
+                // ——它不是失败，只是这一集正被边看边存占用。
                 if (collectOnly) throw BusyException()
-                throw IllegalStateException("该选集正在下载中")
+                throw SegmentBusyException()
             }
         }
         try {
@@ -836,9 +886,20 @@ object VideoDownloader {
                 notifyCompleted(task) // 分片已全部落盘：播放走本地分片，无需合并
                 return epFolder
             } else {
-                // 单文件直链：直接存成 <标题>.mp4
-                val (total, written) = downloadDirect(url, headers, mp4, key = key, collectOnly, onProgress)
+                // 单文件直链：先写 <标题>.mp4.part，写满再改名成 <标题>.mp4。
+                //
+                // 早先直接往成品名上写，下载到一半被杀进程就会留下一个半截的 .mp4；
+                // 而恢复逻辑（以及 downloadCore 开头的快速返回）都以"mp4 存在"当作
+                // 已完成，于是这一集被永久判定成下完了——和 m3u8 只下了一半
+                // 却被判完成是同一类错误。改名是原子的，成品出现即代表完整。
+                val part = File(dir, "$title.mp4.part")
+                val (total, written) = downloadDirect(url, headers, part, key = key, collectOnly, onProgress)
                 if (total <= 0 || written < total) return null
+                if (!part.renameTo(mp4)) {
+                    // 跨存储/改名失败时兜底复制，复制成功才删临时文件
+                    runCatching { part.copyTo(mp4, overwrite = true); part.delete() }
+                        .onFailure { AppLog.put("直链下载改名失败：$title", it) }
+                }
                 notifyCompleted(task)
                 return mp4
             }
@@ -1047,10 +1108,10 @@ object VideoDownloader {
                         inFlight.acquire()
                         try {
                             checkPaused(key)
-                            fetchSegmentToFile(
+                            fetchSegmentWithRetry(
                                 Triple(segUrls[k], ivHex, keyUri),
                                 playlistUrl, headers, mediaSequence + k,
-                                keyCache, segFile(epFolder, k), raw = true
+                                keyCache, segFile(epFolder, k), key = key
                             )
                             // 落盘后立刻比对广告指纹：数据已经在硬盘上，
                             // 只读前 192KB 就能判定，不额外联网也不牵扯 SimpleCache 的锁。
@@ -1087,10 +1148,15 @@ object VideoDownloader {
             // 但 worker 线程还在后台写盘——表现就是"分片其实下完了，状态却停在等待中"。
             workers.forEach { it.join() }
         } finally {
-            // 中断/异常时清掉没下完的半截分片，别在文件夹里留坏文件
+            // 中断/异常时清掉没下完的半截分片，别在文件夹里留坏文件。
+            // 正常路径下分片是「写 .part 再改名」，不会留下 0 字节的 seg_；
+            // 这里真正要清的是进程被杀时来不及删掉的 .part 临时文件——
+            // 它们不影响续传判据（名字带 .part，匹配不上 seg_%06d.ts），
+            // 但会白占磁盘，一集几百片时累积可观。
             for (k in todo) {
                 val f = segFile(epFolder, k)
                 if (f.exists() && f.length() == 0L) f.delete()
+                File(epFolder, "${f.name}.part").delete()
             }
         }
         errorRef.get()?.let { throw it }
@@ -1128,6 +1194,70 @@ object VideoDownloader {
 
     /** 被判定为广告、已从本次下载里剔除的分片序号 */
     private fun skippedAdsFile(epFolder: File): File = File(epFolder, "skipped-ads.json")
+
+    /**
+     * 播放遇到坏分片时的兜底：返回一份「少了那一片」的清单给播放器，让它从下一片继续。
+     *
+     * **不落任何记录**：坏片既不写进分片目录、也不进任何名单，每次都是现场剔除。
+     * 这是刻意的——分片取不到常常是临时的（CDN 节点故障、限流、token 过期），
+     * 记下来反而会让"其实已经好了"的分片被永久跳过。下次播到那儿再试一次，
+     * 好了就正常播，还坏就再跳一次。
+     *
+     * 生成的清单放在 cacheDir（临时目录，24 小时后自动清），不动 `Download/保存视频/`
+     * 里的任何东西。清单内容仍由 [buildLocalPlaylist] 产出：已缓存的分片走本地文件，
+     * 其余保留原始 http 地址由播放器实时取，只是少了那一片。
+     *
+     * @param playlistUri 当前播放的清单地址（file:// 或 http://）
+     * @param badSegmentUrl 出错的分片地址
+     * @return 跳过版清单的 `file://` 地址；null 表示这条路走不通（调用方照旧报错）
+     */
+    suspend fun skipSegmentAndRebuildPlaylist(
+        playlistUri: String,
+        badSegmentUrls: Set<String>,
+        headers: Map<String, String>,
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            runCatching {
+                val root = File(appCtx.cacheDir, "video_skipfix")
+                val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+                root.listFiles()?.forEach { if (it.lastModified() < cutoff) it.deleteRecursively() }
+            }
+            val dir = File(appCtx.cacheDir, "video_skipfix/${playlistUri.hashCode()}")
+            // 清单文本从哪来：
+            // - 播在线清单 → 用 downloadHls 的 collectOnly 模式把它（连同密钥/初始化段）
+            //   落到临时目录。collectOnly 只搬缓存里已有的分片，这步不产生下载流量。
+            // - 播本地清单 → 它的分片目录里本来就有下载时落下的 playlist.m3u8，
+            //   直接拿来用即可（indexOfSegmentInPlaylist 与本地地址都要靠它）。
+            if (!playlistUri.startsWith("file:") && !File(dir, "playlist.m3u8").exists()) {
+                if (!playlistUri.startsWith("http", true)) return@withContext null
+                // key 传空串：这只是一个临时目录，不存在"暂停"这回事
+                downloadHls(playlistUri, headers, dir, resume = true, key = "", collectOnly = true) { }
+            }
+            if (playlistUri.startsWith("file:")) {
+                // 播的是本地清单：把原始清单复制到临时目录，下面的剔除只在副本上做，
+                // 绝不能改 Download/保存视频/ 里的原件
+                val src = Uri.parse(playlistUri).path?.let { File(it).parentFile }
+                    ?: return@withContext null
+                val srcPlaylist = File(src, "playlist.m3u8")
+                if (!srcPlaylist.exists()) return@withContext null
+                dir.mkdirs()
+                srcPlaylist.copyTo(File(dir, "playlist.m3u8"), overwrite = true)
+            }
+            // 一次把所有已知坏片都摘掉。只摘最新那一片会在两片坏片之间来回反复：
+            // 摘掉 A 后播到 B 失败，再生成的清单只摘 B、把 A 放回来了，于是死循环。
+            val indices = badSegmentUrls.mapNotNull {
+                indexOfSegmentInPlaylist(dir, it).takeIf { i -> i >= 0 }
+            }.toSet()
+            if (indices.isEmpty()) return@withContext null
+            val out = File(dir, "skip.m3u8")
+            buildLocalPlaylist(dir, extraSkip = indices, out = out)
+            if (!out.exists() || out.length() == 0L) return@withContext null
+            Uri.fromFile(out).toString()
+        } catch (e: Exception) {
+            AppLog.putDebug("坏分片跳过失败：${e.localizedMessage}")
+            null
+        }
+    }
 
     private fun loadSkippedAds(epFolder: File): Map<Int, AdFilter.Fingerprint?> =
         runCatching<Map<Int, AdFilter.Fingerprint?>> {
@@ -1257,8 +1387,18 @@ object VideoDownloader {
         } else {
             null
         }
+        // 先写临时文件，写满再**原子改名**成 seg_XXXXXX.ts。
+        //
+        // 直接往成品名上写的话，进程被杀 / 网络中断会留下一个**半截分片**；
+        // 而断点续传的判据只看 `exists() && length > 0`（downloadHls 的 need 计算），
+        // 半截分片会被当成"已经下过了"直接跳过，缺口永远补不上，
+        // 最后合并出一个花屏 / 后半段卡死的坏视频——而且它无从察觉，
+        // 因为文件确实存在、长度也不为 0。
+        // 改名在同一目录内是原子的：seg_XXXXXX.ts 一出现就代表这一片是完整的。
+        val tmp = File(segFile.parentFile, "${segFile.name}.part")
+        var renamed = false
         try {
-            FileOutputStream(segFile).use { fos ->
+            FileOutputStream(tmp).use { fos ->
                 val sink: OutputStream = cipher?.let { CipherOutputStream(fos, it) } ?: fos
                 sink.use { out ->
                     val buf = ByteArray(64 * 1024)
@@ -1269,10 +1409,78 @@ object VideoDownloader {
                     }
                 }
             }
+            renamed = tmp.renameTo(segFile) || runCatching {
+                // 极少数文件系统改名失败：复制兜底
+                tmp.copyTo(segFile, overwrite = true)
+                true
+            }.getOrDefault(false)
         } finally {
             runCatching { source.source.close() }
+            // 没成功改名 = 这一片没写完整，绝不能留一个会被误认为已下载的半成品
+            if (!renamed) tmp.delete()
         }
     }
+
+    /** 单个分片的最大尝试次数（含首次） */
+    private const val SEGMENT_MAX_ATTEMPT = 3
+
+    /** 分片重试的退避基数：第 n 次重试等 500 * n 毫秒（500 / 1000，线性退避） */
+    private const val SEGMENT_RETRY_BACKOFF_MS = 500L
+
+    /**
+     * 带重试的单分片下载。
+     *
+     * 原来 worker 里任何一个分片抛异常就写进 `errorRef`，整集立刻判失败——
+     * 源站限流一下、网络抖一下，前面几百片全白下，只能整集重来。这正是
+     * "下载断断续续、半天也下不完"的直接原因（手动下载尤其明显：失败后停在
+     * FAILED，得用户自己点继续才再跑一轮）。
+     *
+     * 参照 N_m3u8DL-RE 的 `SimpleDownloader`：分片级重试 3 次 + 线性退避，
+     * 并且**只对瞬时错误重试**——4xx 鉴权/资源不存在（403/404/410）重试多少次都一样，
+     * 在坏链上空耗几秒没有任何意义，直接抛出让这一集快速失败。
+     */
+    private fun fetchSegmentWithRetry(
+        segment: Triple<String, String?, String?>,
+        playlistUrl: String,
+        headers: Map<String, String>,
+        sequence: Long,
+        keyCache: HashMap<String, ByteArray>,
+        segFile: File,
+        key: String,
+    ) {
+        for (attempt in 1..SEGMENT_MAX_ATTEMPT) {
+            try {
+                fetchSegmentToFile(segment, playlistUrl, headers, sequence, keyCache, segFile, raw = true)
+                return
+            } catch (e: Exception) {
+                // 暂停必须立刻透传：不能等退避，否则"全部停止"要卡好几秒才生效
+                if (e is PausedException) throw e
+                if (attempt == SEGMENT_MAX_ATTEMPT || !isTransientSegmentError(e)) throw e
+                Thread.sleep(SEGMENT_RETRY_BACKOFF_MS * attempt)
+                // 退避期间可能已被暂停，醒来先确认一次
+                checkPaused(key)
+            }
+        }
+    }
+
+    /**
+     * 分片下载错误是否值得重试。
+     *
+     * 判据与 N_m3u8DL-RE 的 `RetryUtil.IsTransientNetworkError` 同一套思路：
+     * 408 / 425 / 429 / 5xx / 超时 / 套接字错误重试，其余 4xx 与重定向超限直接放弃。
+     * 拿不到状态码的一律按瞬时处理（连接失败、读超时都属于这一类）。
+     */
+    private fun isTransientSegmentError(e: Exception): Boolean {
+        val code = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)
+            ?.responseCode
+            ?: (e.cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)
+                ?.responseCode
+            ?: return true
+        return code in RETRYABLE_HTTP_CODES
+    }
+
+    /** 值得重试的 HTTP 状态码：请求超时 / 过早关闭 / 限流 / 服务端错误 */
+    private val RETRYABLE_HTTP_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
 
     /** 某一集的分片缓存目录：Download/保存视频/<dir>/<标题>/ */
     private fun epFolderOf(dir: File, title: String): File = File(dir, title)
@@ -1280,6 +1488,41 @@ object VideoDownloader {
     /** 第 k 个分片文件（按播放列表顺序，0 基），原始字节（加密则保持加密） */
     private fun segFile(epFolder: File, index: Int): File =
         File(epFolder, "seg_%06d.ts".format(index))
+
+    /**
+     * 统计一个 m3u8 分片目录的**真实**完成情况：`(分片总数, 已落盘数)`。
+     *
+     * 总数取自 playlist.m3u8 里的分片行数（与 [buildLocalPlaylist] 同一套数法），
+     * 已落盘数逐片核对磁盘上 `seg_%06d.ts` 是否存在且非空；被判广告剔除的分片
+     * （skipped-ads.json）本来就不该出现在成品里，按"已处理"计入。
+     *
+     * 返回 null = 这不是一个可用的 HLS 分片目录（没有 playlist.m3u8 或里面没有分片），
+     * 调用方应退回其它判据。
+     *
+     * 存在的意义：`downloadHls` 内部（返回值计算）一直是逐片核对的，但**重启恢复时
+     * 只看"目录里有没有 seg_ 文件"**，下了一半的目录因此被当成已完成。这里把同一套
+     * 判据抽出来，让恢复路径与下载路径用一致的口径。
+     */
+    private fun hlsSegProgress(epFolder: File): Pair<Int, Int>? {
+        if (!epFolder.isDirectory) return null
+        val playlist = runCatching { File(epFolder, "playlist.m3u8").readText() }.getOrNull()
+            ?: return null
+        val total = playlist.lines().count { it.isNotBlank() && !it.trim().startsWith("#") }
+        if (total <= 0) return null
+        // 广告片算"已处理"：它本来就不该出现在成品里，
+        // 否则这一集会永远停在"下了一半"，明明只剩一个被剔除的广告片
+        val skipped = loadSkippedAds(epFolder).keys
+        var done = 0
+        for (k in 0 until total) {
+            if (k in skipped) {
+                done++
+                continue
+            }
+            val f = segFile(epFolder, k)
+            if (f.exists() && f.length() > 0) done++
+        }
+        return total to done
+    }
 
     /**
      * 把已缓存的分片文件夹合并成单个 MP4（多选后由 UI 触发）。
@@ -1357,15 +1600,19 @@ object VideoDownloader {
      * 未下载的保持原始 http(s) 地址由播放器实时补齐——这就是"分片文件夹里有一个分片就算缓存"。
      * 加密流的密钥/初始化段也优先用本地副本。
      */
-    private fun buildLocalPlaylist(epFolder: File): File {
-        val out = File(epFolder, "local.m3u8")
+    private fun buildLocalPlaylist(
+        epFolder: File,
+        /** 额外要摘掉的分片序号（播放时遇到坏片的现场剔除，不落盘、不进名单） */
+        extraSkip: Set<Int> = emptySet(),
+        out: File = File(epFolder, "local.m3u8"),
+    ): File {
         val playlist = runCatching { File(epFolder, "playlist.m3u8").readText() }.getOrNull()
             ?: return File(epFolder, "playlist.m3u8")
 
         // 被判广告剔除的分片必须**连同它的 #EXTINF / #EXT-X-BYTERANGE 一起摘掉**，
         // 不能留在清单里：少一步就会走到最后的 else 分支回填成原始 http 地址，
         // 播本地时广告照样联网回来。
-        var skipped = loadSkippedAds(epFolder).keys
+        var skipped = loadSkippedAds(epFolder).keys + extraSkip
         val totalSegs = playlist.lines().count { !it.startsWith("#") && it.isNotBlank() }
         // 兜底：万一指纹把整片判成了广告，宁可原样播也不要出一个空清单
         if (skipped.size >= totalSegs) skipped = emptySet()

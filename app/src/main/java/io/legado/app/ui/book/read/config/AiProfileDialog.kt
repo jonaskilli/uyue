@@ -7,6 +7,7 @@ import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.data.appDb
 import io.legado.app.databinding.DialogAiProfileBinding
+import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.CharacterProfileManager
 import io.legado.app.utils.setLayout
 import io.legado.app.utils.toastOnUi
@@ -35,6 +36,9 @@ class AiProfileDialog : BaseDialogFragment(R.layout.dialog_ai_profile) {
         }.onSuccess(Dispatchers.Main) { template ->
             binding.etApi.setText(template.apiConfig)
             binding.etPrompt.setText(template.prompt)
+            binding.etImagePrompt.setText(
+                template.imagePrompt.ifBlank { AiImageGenerator.DEFAULT_AVATAR_IMAGE_PROMPT }
+            )
             binding.etChapterGap.setText(template.chapterGap.toString())
             binding.etRetry.setText(template.retryCount.toString())
             binding.etTimeout.setText(template.timeoutSeconds.toString())
@@ -60,6 +64,7 @@ class AiProfileDialog : BaseDialogFragment(R.layout.dialog_ai_profile) {
             id = id,
             apiConfig = api,
             prompt = binding.etPrompt.text?.toString()?.trim().orEmpty(),
+            imagePrompt = binding.etImagePrompt.text?.toString()?.trim().orEmpty(),
             chapterGap = binding.etChapterGap.text?.toString()?.trim()?.toIntOrNull()
                 ?: 5,
             retryCount = binding.etRetry.text?.toString()?.trim()?.toIntOrNull() ?: 1,

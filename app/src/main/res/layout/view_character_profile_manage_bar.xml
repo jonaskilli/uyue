@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  角色档案总览顶部：生图模型下拉框 + 档案设置按钮。
+  通过 TitleBar 的 app:contentLayout 挂进标题栏，替代原来的「角色档案总览」标题。
+
+  右上角菜单图标会挤占标题区，所以按钮尽量紧凑（minWidth=0、窄 padding），
+  把宽度都让给下拉框，让它能多显示几个字。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal">
+
+    <Spinner
+        android:id="@+id/sp_template"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:minWidth="90dp"
+        android:spinnerMode="dropdown" />
+
+    <Button
+        android:id="@+id/btn_profile_settings"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:minWidth="0dp"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:text="档案设置"
+        android:textSize="12sp" />
+
+</LinearLayout>

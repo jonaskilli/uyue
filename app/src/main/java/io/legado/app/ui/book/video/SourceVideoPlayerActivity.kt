@@ -257,6 +257,14 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         var consecutiveFails by remember { mutableIntStateOf(0) }
         // 失败切换冷却：避免解析/播放失败时瞬间狂跳，把一整批视频在零点几秒内全跳过
         var lastSkipMs by remember { mutableStateOf(0L) }
+        /** 弹窗与自动跳过共用：两者的切换动作都带冷却与计数，需要跑在协程里 */
+        val errorScope = rememberCoroutineScope()
+        /** 非空 = 正在询问"这个出错的视频要不要跳过" */
+        var errorChoice by remember { mutableStateOf<ErrorChoice?>(null) }
+        // 用户已经手动切走了（竖滑/返回）就没必要再问了
+        LaunchedEffect(state.playbackError) {
+            if (state.playbackError == null) errorChoice = null
+        }
 
         // 播放顺序（显示顺序）：videos 的下标序列，分页第 page 页播 videos[playOrder[page]]。
         // 提升到 Activity 层，让「选集面板」与「主页下方目录」共用同一份顺序，
@@ -323,8 +331,45 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 }
             }
         }
-        // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）：只要处在有列表可切的
-        // 场景（无限刷、发现页/搜索竖滑等），就自动切到下一个视频，而不是卡在坏链上。
+        /**
+         * 播放出错后"切到下一个视频"的统一出口。
+         *
+         * 抽出来是因为它现在有两个触发点：弹窗里的「自动跳过」「跳过」，以及
+         * 已经选过自动跳过时的静默切换。两处行为必须完全一致。
+         *
+         * `markFailed` 也挪进来了：它是"永久拉黑"，只有**确定要跳过**时才该执行。
+         * 放在弹窗之前的话，用户点「取消」这个视频也已经被拉黑了。
+         */
+        fun switchToNextVideo(failedUrl: String) {
+            errorScope.launch {
+                // 只有无限刷才把坏视频永久拉黑：发现页/搜索页竖滑只是临时看看，
+                // 一次偶发 403/超时就把人家永久屏蔽，以后正常浏览再也刷不到（且换网络也回不来）
+                if (infiniteSwipe && failedUrl.isNotBlank()) InfiniteSwipeFeed.markFailed(failedUrl)
+                consecutiveFails++
+                if (consecutiveFails > 10) {
+                    SourceVideoPlayerSession.clearError()
+                    SourceVideoPlayerSession.skipFallback()
+                    toastOnUi(getString(R.string.infinite_swipe_too_many_failed))
+                    finish()
+                    return@launch
+                }
+                // 冷却：避免零点几秒内狂跳
+                val wait = (800L - (System.currentTimeMillis() - lastSkipMs)).coerceAtLeast(0)
+                if (wait > 0) delay(wait)
+                lastSkipMs = System.currentTimeMillis()
+                SourceVideoPlayerSession.clearError()
+                SourceVideoPlayerSession.skipFallback()
+                toastOnUi(getString(R.string.infinite_swipe_skip_failed))
+                val ok = SourceVideoPlayerSession.feedSwitch(1)
+                if (!ok && !SourceVideoPlayerSession.feedSwitch(-1)) {
+                    finish()
+                }
+            }
+        }
+
+        // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）：处在有列表可切的
+        // 场景（无限刷、发现页/搜索竖滑等）时，先问一句再决定要不要切下一个——
+        // 之前是无条件直接切，用户连选择的机会都没有。
         LaunchedEffect(state.playbackError, state.feedEnabled, infiniteSwipe) {
             val msg = state.playbackError ?: return@LaunchedEffect
             if (!state.feedEnabled) {
@@ -332,29 +377,35 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                 SourceVideoPlayerSession.clearError()
                 return@LaunchedEffect
             }
-            val failedUrl = state.bookUrl
-            // 只有无限刷才把坏视频永久拉黑：发现页/搜索页竖滑只是临时看看，
-            // 一次偶发 403/超时就把人家永久屏蔽，以后正常浏览再也刷不到（且换网络也回不来）
-            if (infiniteSwipe && failedUrl.isNotBlank()) InfiniteSwipeFeed.markFailed(failedUrl)
-            consecutiveFails++
-            if (consecutiveFails > 10) {
-                SourceVideoPlayerSession.clearError()
-                SourceVideoPlayerSession.skipFallback()
-                toastOnUi(this@SourceVideoPlayerActivity.getString(R.string.infinite_swipe_too_many_failed))
-                finish()
+            if (isAutoSkipFailedVideo()) {
+                // 本次运行内已经选过"自动跳过"，不再打扰
+                switchToNextVideo(state.bookUrl)
             } else {
-                // 冷却：避免零点几秒内狂跳
-                val wait = (800L - (System.currentTimeMillis() - lastSkipMs)).coerceAtLeast(0)
-                if (wait > 0) delay(wait)
-                lastSkipMs = System.currentTimeMillis()
-                SourceVideoPlayerSession.clearError()
-                SourceVideoPlayerSession.skipFallback()
-                toastOnUi(this@SourceVideoPlayerActivity.getString(R.string.infinite_swipe_skip_failed))
-                val ok = SourceVideoPlayerSession.feedSwitch(1)
-                if (!ok && !SourceVideoPlayerSession.feedSwitch(-1)) {
-                    finish()
-                }
+                errorChoice = ErrorChoice(msg, state.bookUrl)
             }
+        }
+
+        // 出错视频的选择弹窗：自动跳过 / 跳过 / 取消
+        errorChoice?.let { choice ->
+            PlaybackErrorChoiceDialog(
+                videoName = state.bookName,
+                message = choice.message,
+                onAutoSkip = {
+                    setAutoSkipFailedVideo(true)
+                    errorChoice = null
+                    switchToNextVideo(choice.bookUrl)
+                },
+                onSkip = {
+                    errorChoice = null
+                    switchToNextVideo(choice.bookUrl)
+                },
+                onCancel = {
+                    // 停在当前的错误界面，什么都不动：
+                    // state.playbackError 没被清掉，而 LaunchedEffect 的 key 没变就不会重跑，
+                    // 所以不会又弹一次
+                    errorChoice = null
+                },
+            )
         }
         // 成功加载出可播的视频（无错误、有剧集）时，重置连续失败计数
         LaunchedEffect(state.error, state.episodes.size, state.fallbackIndex) {
@@ -750,6 +801,23 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
 
         /** 通知栏播放/暂停按钮广播 action（仅本应用内部动态接收） */
         const val ACTION_TOGGLE_VIDEO_PLAYBACK = "io.legado.app.action.TOGGLE_VIDEO_PLAYBACK"
+
+        /**
+         * 播放出错时是否"自动跳过"：用户在弹窗里点过「自动跳过」后为 true，
+         * 之后本次运行内再遇到出错的视频就不再打扰，直接切下一个。
+         *
+         * **刻意只放在内存里**（static 字段）：重启 APP 即恢复成每次都询问。
+         * 视频出错常常是临时的（CDN 抽风、限流、token 过期），要是把这个选择
+         * 持久化下来，用户很可能忘了自己点过什么，以后视频悄悄被跳过还不知道原因。
+         */
+        @Volatile
+        private var autoSkipFailedVideo = false
+
+        fun isAutoSkipFailedVideo(): Boolean = autoSkipFailedVideo
+
+        fun setAutoSkipFailedVideo(on: Boolean) {
+            autoSkipFailedVideo = on
+        }
 
         fun createIntent(
             context: Context,
@@ -1360,6 +1428,77 @@ internal fun DownloadDialog(
                 shape = RoundedCornerShape(16.dp),
                 color = Color(0xFF1C1C1E)
             ) { body() }
+        }
+    }
+}
+
+/** 出错视频的待决选择：错误消息 + 出错视频的 bookUrl（确定要跳过后才拿它拉黑） */
+private data class ErrorChoice(
+    val message: String,
+    val bookUrl: String,
+)
+
+/**
+ * 播放出错后的三选一弹窗。
+ *
+ * 之前出错就无条件切下一个：用户既不知道为什么被切走，也没法留下来看一眼——
+ * 而很多出错只是某个分片临时抽风，重进一次就好了，却被直接跳过去了。
+ *
+ * - **自动跳过**：本次运行内后续出错的视频都不再询问，直接切（重启 APP 恢复询问）；
+ * - **跳过**：只跳过这一个，之后再遇到出错的视频照样弹窗；
+ * - **取消**：什么都不做，停在当前的错误界面。
+ */
+@Composable
+private fun PlaybackErrorChoiceDialog(
+    videoName: String,
+    message: String,
+    onAutoSkip: () -> Unit,
+    onSkip: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Dialog(onDismissRequest = onCancel) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.92f),
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xFF1C1C1E)
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("播放出错", color = Color.White, fontSize = 17.sp)
+                Spacer(Modifier.height(10.dp))
+                if (videoName.isNotBlank()) {
+                    Text(
+                        videoName,
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = 14.sp,
+                        maxLines = 2
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+                Text(
+                    message,
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 12.sp,
+                    maxLines = 4
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "自动跳过＝本次之后不再询问；跳过＝只跳过这一个；取消＝停在当前视频",
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onAutoSkip) {
+                        Text("自动跳过", color = MaterialTheme.colorScheme.primary)
+                    }
+                    TextButton(onClick = onSkip) {
+                        Text("跳过", color = Color.White)
+                    }
+                    TextButton(onClick = onCancel) {
+                        Text("取消", color = Color.White.copy(alpha = 0.6f))
+                    }
+                }
+            }
         }
     }
 }

@@ -1900,6 +1900,11 @@ object AiImageGenerator {
     private const val AVATAR_NEUTRAL_STYLE =
         "高质量数字绘画, 细腻光影, 写实与插画结合的人物立绘风格"
 
+    /** 角色档案「生图提示词」输入框的默认示例（模板 imagePrompt 为空时预填）。
+     *  含 {画风} 占位符，生成时会替换为生图模板的画风（未配置则用中性兜底）。 */
+    const val DEFAULT_AVATAR_IMAGE_PROMPT =
+        "要求：单人上半身立绘（不含双腿，从头到腰），居中构图，面部清晰完整，表情自然，姿态放松。画面风格：{画风}。纯色简洁背景，不要文字，不要水印，不要边框，不要多余人物，不要残缺肢体，不要手部特写。"
+
     /** 同一角色的立绘只生成一次 */
     private val avatarInFlight = ConcurrentHashMap<String, Boolean>()
 
@@ -2142,6 +2147,9 @@ object AiImageGenerator {
         background: String = "",
         regenerate: Boolean = false,
         templateId: Long = 0L,
+        /** 来自角色档案「生图提示词」输入框的构图要求；仅替换提示词尾部，
+         *  角色信息（书名/角色名/人设）仍由代码自动拼在前面。为空时用内置默认要求。 */
+        customPrompt: String = "",
         onSuccess: (File) -> Unit,
         onFailure: (Throwable) -> Unit
     ): Boolean {
@@ -2190,7 +2198,10 @@ object AiImageGenerator {
                 }
                 val prompt = buildAvatarPrompt(
                     characterName, genderAge, bookName,
-                    template.imageStyle, identity, personality, background
+                    template.imageStyle, identity, personality, background,
+                    // 输入框文本仅作为「构图要求」尾部，{画风} 在 buildAvatarPrompt 内替换；
+                    // 上半部分的小说/人物介绍始终自动拼装，不会因填写而被丢弃
+                    customPrompt
                 )
                 AppLog.put("AI立绘: 提示词 $prompt")
                 val slot = slots[nextSlotIndex(slots.size)]
@@ -2234,6 +2245,13 @@ object AiImageGenerator {
     /**
      * 角色立绘提示词：强调「人物立绘」与纯背景，避免肢体残缺、多人物或带文字。
      *
+     * 结构固定为「头部（角色信息，始终自动拼装）+ 尾部（构图要求）」：
+     * - 头部：小说《书名》+ 角色名/性别年龄 + 人物设定（身份/性格/背景），
+     *   这部分**永远自动拼在前面**，不依赖输入框；
+     * - 尾部：构图要求。[requirementOverride] 为空时用内置默认要求，
+     *   非空时（来自角色档案「生图提示词」输入框）用输入框内容替换默认要求，
+     *   同时把其中的 {画风} 占位符替换为生图模板画风。
+     *
      * 画风来源：生图模板的 [AiImageTemplate.imageStyle]；未配置时用中性兜底，
      * 避免默认国风把任何题材都带成古装仙侠。
      * 人设依据（身份/性格/背景）来自 AI 角色档案，没有则仅用姓名+性别年龄。
@@ -2245,7 +2263,9 @@ object AiImageGenerator {
         imageStyle: String,
         identity: String = "",
         personality: String = "",
-        background: String = ""
+        background: String = "",
+        /** 来自角色档案「生图提示词」输入框的构图要求（含 {画风} 占位符），为空时用内置默认 */
+        requirementOverride: String = ""
     ): String {
         val who = if (genderAge.isBlank()) characterName else "${genderAge}角色「${characterName}」"
         val style = imageStyle.trim().takeIf { it.isNotBlank() } ?: AVATAR_NEUTRAL_STYLE
@@ -2254,6 +2274,10 @@ object AiImageGenerator {
             if (personality.isNotBlank()) add("性格：${personality.take(40)}")
             if (background.isNotBlank()) add("背景履历：${background.take(80)}")
         }
+        // 尾部要求：输入框内容优先，{画风} 替换为模板画风；为空则用内置默认要求
+        val requirement = requirementOverride.takeIf { it.isNotBlank() }
+            ?.replace("{画风}", style)
+            ?: "要求：单人上半身立绘（不含双腿，从头到腰），居中构图，面部清晰完整，表情自然，姿态放松。画面风格：${style}。纯色简洁背景，不要文字，不要水印，不要边框，不要多余人物，不要残缺肢体，不要手部特写。"
         return buildString {
             if (bookName.isNotBlank()) append("小说《${bookName}》")
             append("中的${who}的人物立绘。")
@@ -2261,11 +2285,7 @@ object AiImageGenerator {
                 append("人物设定：").append(personaCues.joinToString("；")).append("。")
                 append("请据此表现其气质、神态与服饰。")
             }
-            append("要求：单人全身或大半身立绘，居中构图，面部清晰完整，")
-            append("表情自然，姿态放松。")
-            append("画面风格：${style}。")
-            append("纯色简洁背景，不要文字，不要水印，不要边框，")
-            append("不要多余人物，不要残缺肢体，不要手部特写。")
+            append(requirement)
         }
     }
 }

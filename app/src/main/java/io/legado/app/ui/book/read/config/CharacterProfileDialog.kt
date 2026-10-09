@@ -323,6 +323,9 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
             "正在生成角色立绘…（可能需要几十秒）"
         }
         binding.tvPortrait.isEnabled = false
+        val customPrompt = runCatching {
+            io.legado.app.model.CharacterProfileManager.getTemplate()?.imagePrompt?.trim().orEmpty()
+        }.getOrDefault("")
         io.legado.app.model.AiImageGenerator.generateCharacterAvatar(
             characterName = characterName,
             genderAge = listOf(p?.gender.orEmpty(), p?.age.orEmpty())
@@ -333,6 +336,7 @@ class CharacterProfileDialog : BaseDialogFragment(R.layout.dialog_character_prof
             background = p?.background.orEmpty(),
             regenerate = regenerate,
             templateId = io.legado.app.help.config.AppConfig.aiPortraitTemplateId,
+            customPrompt = customPrompt,
             onSuccess = { file ->
                 // 生成耗时几十秒，回调时弹窗可能已关闭（View 已销毁）：
                 // 访问 binding 会抛 IllegalStateException，必须先判 View 存活
