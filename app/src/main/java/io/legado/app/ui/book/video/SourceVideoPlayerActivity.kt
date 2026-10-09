@@ -7,6 +7,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -997,6 +998,20 @@ internal fun DownloadDialog(
     val itemChecked = remember { mutableStateListOf<String>() }
     val videoChecked = remember { mutableStateListOf<String>() }
 
+    // 下载管理页（standalone）：已从「全部视频」进入某一部视频的详情时，
+    // 系统返回键先退回视频列表，而不是直接退出整个页面——
+    // 用户点进一部视频看完分集，按返回的预期是回去挑下一部，
+    // 原先这里没拦，返回键直接把页面关了，只能重新进来。
+    // 正在看视频列表时（selectorOpen=true）不拦，返回键照常退出页面。
+    if (standalone && !selectorOpen) {
+        BackHandler {
+            selectedDir = null
+            selectorOpen = true
+            tab = 1
+            itemChecked.clear()
+        }
+    }
+
     LaunchedEffect(Unit) { VideoDownloader.refreshVideoGroups() }
 
     val currentBook = if (standalone) null else SourceVideoPlayerSession.getBook()
@@ -1010,12 +1025,31 @@ internal fun DownloadDialog(
         isCurrentVideo -> bookName.ifBlank { currentDir }
         else -> groups.firstOrNull { it.dirName == selectedDir }?.name ?: selectedDir.orEmpty()
     }
+    // 当前视图对应的视频 bookUrl（用来查它自己的倒序标记）：
+    // - 播放页弹窗的「当前视频」→ 会话的 book；
+    // - 选中了别的视频（下载管理页 / 播放页里切换）→ 视频列表 group 的 key（bookUrl）。
+    // 不能套用播放会话的 playOrder：独立页面没有会话，而且查看别的视频时
+    // 那是另一部剧的顺序，套上来就是错的。
+    val viewBookUrl = when {
+        !standalone && selectedDir == null -> SourceVideoPlayerSession.getBook()?.bookUrl
+        else -> groups.firstOrNull { it.dirName == selectedDir }?.key
+            ?.takeUnless { it.startsWith("dir:") }
+    }
+    // 该视频是否设过倒序修正。是的话分集按修正后的顺序（原始集号降序）展示——
+    // 「倒序」的本意就是原始第 n 集其实是第 1 集，所以降序即修正序。
+    val viewReversed = viewBookUrl
+        ?.let { SourceVideoPlayerSession.isReverseOrder(it) } == true
+
     // 只显示当前所选视频的条目
     // 永远按目录里的集数顺序展示：先下第 3 集再下第 1 集时，第 1 集也要排在前面，
-    // 而不是按下单先后堆在后面（statesMap 是插入序，这里显式按集序号排一次）
+    // 而不是按下单先后堆在后面（statesMap 是插入序，这里显式按集序号排一次）。
+    // 该视频设了倒序则反过来——修正后的第 1 集（原始最后一集）排在最上面。
     val shownStates = dlStates
         .filter { it.dirName == currentDir }
-        .sortedBy { it.task.index }
+        .sortedWith(
+            if (viewReversed) compareByDescending<VideoDownloader.TaskState> { it.task.index }
+            else compareBy { it.task.index }
+        )
 
     // 已下载完的一集：点播放按钮直接播这一集。
     // - 播放页里（当前这部剧）：切集并关掉弹窗，播放器瞬间换成本地文件；
@@ -1298,11 +1332,15 @@ internal fun DownloadDialog(
                                 .weight(1f)
                                 .padding(top = 8.dp)
                         ) {
-                            listItemsIndexed(episodes) { i, ep ->
-                                // 显示集号按倒序修正后的顺序走（与播放器顶栏/目录面板一致），
-                                // 下载任务本身仍用原始下标 i——保存目录与进度记录都基于它
-                                val no = episodeOrder?.indexOf(i)
-                                    ?.takeIf { it >= 0 }?.plus(1) ?: (i + 1)
+                            // 勾选列表的排列也跟随倒序：修正后的第 1 集排在最上面，
+                            // 与播放顺序/目录面板一致；未倒序按原始顺序。
+                            // 勾选与下载任务本身仍用原始下标 i——保存目录与进度记录都基于它
+                            val displayOrder = episodeOrder ?: episodes.indices.toList()
+                            items(displayOrder.size) { pos ->
+                                val i = displayOrder[pos]
+                                val ep = episodes.getOrNull(i) ?: return@items
+                                // 显示集号按倒序修正后的顺序走（与播放器顶栏/目录面板一致）
+                                val no = if (episodeOrder != null) pos + 1 else i + 1
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.fillMaxWidth()
