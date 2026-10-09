@@ -530,12 +530,16 @@ fun FullscreenVideoPlayer(
             beyondViewportPageCount = 0,
         ) { page ->
             // page 是**播放位置**，i 才是它在原始剧集列表里的序号：
-            // 随机播放时两者不同，编号与标题要显示原始集号。
+            // 随机播放时两者不同，编号与标题显示原始集号。
+            // 倒序例外——倒序是用户对「网站集数排反了」的**修正**，此时原始编号
+            // 本身就是错的，显示的集号必须跟着播放顺序走（播放位置+1），
+            // 否则顶栏/标题的「第N集」与目录面板（按播放顺序编号）对不上。
             val i = playOrder[page]
             VideoPage(
                 video = videos[i],
                 index = i,
                 total = videos.size,
+                displayNo = if (reverseOrder) page + 1 else i + 1,
                 active = page == pagerState.currentPage,
                 startPosition = positions[positionKey(i, videos[i])]
                     ?: if (i == initialIndex) initialPositionMs else 0L,
@@ -662,6 +666,8 @@ private fun VideoPage(
     video: LocalVideo,
     index: Int,
     total: Int,
+    /** 界面上显示的集号：倒序修正后与播放顺序一致，其余模式等于 index+1 */
+    displayNo: Int,
     active: Boolean,
     startPosition: Long,
     onPositionSave: (Long) -> Unit,
@@ -699,13 +705,14 @@ private fun VideoPage(
     // 地址尚未解析出来（需要跑书源规则的源）：先占位，等外层补齐 uri 后这里会重新组合；
     // 但若交接池里有该集的播放器实例（大屏↔首页无缝切换），直接接管，不显示占位
     if (video.uri == Uri.EMPTY && !SharedPlayer.has(bookUrl, index)) {
-        PendingVideoPage(video = video, index = index, total = total, seriesTitle = seriesTitle, coverUrl = coverUrl, sourceOrigin = sourceOrigin)
+        PendingVideoPage(video = video, index = index, total = total, displayNo = displayNo, seriesTitle = seriesTitle, coverUrl = coverUrl, sourceOrigin = sourceOrigin)
         return
     }
     VideoPlayerPage(
         video = video,
         index = index,
         total = total,
+        displayNo = displayNo,
         active = active,
         startPosition = startPosition,
         onPositionSave = onPositionSave,
@@ -879,10 +886,10 @@ private fun buildMediaSourceFactory(
     return DefaultMediaSourceFactory(dataSourceFactory)
 }
 
-/** 标题栏文案：剧集模式显示「剧名 · 第N集」，普通视频直接显示文件名 */
-private fun episodeTitle(seriesTitle: String?, name: String, index: Int, total: Int): String {
+/** 标题栏文案：剧集模式显示「剧名 · 第N集」（N 为倒序修正后的显示集号），普通视频直接显示文件名 */
+private fun episodeTitle(seriesTitle: String?, name: String, displayNo: Int, total: Int): String {
     if (seriesTitle.isNullOrBlank()) return name
-    return if (total > 1) "$seriesTitle · 第${index + 1}集" else seriesTitle
+    return if (total > 1) "$seriesTitle · 第${displayNo}集" else seriesTitle
 }
 
 /** 等待解析出播放地址的占位页 */
@@ -891,6 +898,7 @@ private fun PendingVideoPage(
     video: LocalVideo,
     index: Int,
     total: Int,
+    displayNo: Int,
     seriesTitle: String?,
     coverUrl: String = "",
     sourceOrigin: String = "",
@@ -905,7 +913,7 @@ private fun PendingVideoPage(
             CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp)
             Spacer(Modifier.height(12.dp))
             Text(
-                text = episodeTitle(seriesTitle, video.name, index, total),
+                text = episodeTitle(seriesTitle, video.name, displayNo, total),
                 color = Color.White.copy(alpha = 0.8f),
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center,
@@ -926,6 +934,8 @@ internal fun VideoPlayerPage(
     video: LocalVideo,
     index: Int,
     total: Int,
+    /** 界面上显示的集号：倒序修正后与播放顺序一致，其余模式等于 index+1 */
+    displayNo: Int,
     active: Boolean,
     noPrevEpisode: Boolean = false,
     noNextEpisode: Boolean = false,
@@ -1479,7 +1489,9 @@ internal fun VideoPlayerPage(
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text(
-                    episodeTitle(seriesTitle, video.name, index, total),
+                    // 切集时的顶部提示：集号同样要用倒序修正后的显示集号，
+                    // 否则提示说「第N集」而顶栏按钮与目录面板说的是另一个数
+                    episodeTitle(seriesTitle, video.name, displayNo, total),
                     color = Color.White,
                     fontSize = 15.sp,
                     maxLines = 2,
@@ -1575,7 +1587,7 @@ internal fun VideoPlayerPage(
             modifier = Modifier.fillMaxSize()
         ) {
             PlayerControls(
-                title = episodeTitle(seriesTitle, video.name, index, total),
+                title = episodeTitle(seriesTitle, video.name, displayNo, total),
                 playing = playing,
                 position = position,
                 duration = duration,
@@ -1583,7 +1595,7 @@ internal fun VideoPlayerPage(
                 dragging = dragging,
                 showEpisodeButton = total > 1,
                 onOpenEpisodes = onOpenEpisodes,
-                episodeNo = index + 1,
+                episodeNo = displayNo,
                 episodeTotal = total,
                 onAddShelf = onAddShelf,
                 sliderValue = sliderValue,

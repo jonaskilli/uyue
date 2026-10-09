@@ -676,6 +676,9 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                     state = state,
                     playOrder = playOrder,
                     currentPage = currentPageState.value,
+                    // 倒序是用户对「网站集数排反了」的修正，下载弹窗里的「第N集」
+                    // 也要按修正后的顺序编号，与播放器顶栏/目录面板一致
+                    episodeOrder = if (state.reverseOrder) playOrder else null,
                     onExpand = { homeMode = false },
                 )
             }
@@ -842,6 +845,8 @@ private fun HomePanel(
     playOrder: List<Int>,
     /** 分页器当前页码——高亮的唯一数据源，与选集面板同源 */
     currentPage: Int,
+    /** 倒序修正后的显示顺序；null = 未倒序，按原始编号显示 */
+    episodeOrder: List<Int>?,
     onExpand: () -> Unit,
 ) {
     val episodes = state.episodes
@@ -917,8 +922,10 @@ private fun HomePanel(
             }
         }
 
-        // 选集方块网格：按 playOrder（显示顺序，倒序/随机后整体反转）排列，
-        // 但标签「第 N 集」、高亮、跳转都用原始下标，因此顺序变了编号与播放进度不变。
+        // 选集方块网格：按 playOrder（显示顺序，倒序/随机后整体反转）排列。
+        // 高亮、跳转仍用原始下标（进度记录基于它）；标签「第 N 集」在倒序时
+        // 改按修正后的顺序编号，与播放器顶栏/标题栏/目录面板一致——
+        // 否则顶栏说「第1集」、这里同一个视频却标着「第n集」，用户会当又错了。
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = 86.dp),
             modifier = Modifier
@@ -928,10 +935,12 @@ private fun HomePanel(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            itemsIndexed(playOrder) { _, origIndex ->
+            itemsIndexed(playOrder) { pos, origIndex ->
                 val ep = episodes.getOrNull(origIndex) ?: return@itemsIndexed
+                val no = episodeOrder?.indexOf(origIndex)
+                    ?.takeIf { it >= 0 }?.plus(1) ?: (origIndex + 1)
                 EpisodeItem(
-                    label = if (ep.name.length <= 7) ep.name else "第${origIndex + 1}集",
+                    label = if (ep.name.length <= 7) ep.name else "第${no}集",
                     selected = origIndex == currentOrigIndex,
                     ready = ep.uri != Uri.EMPTY,
                     onClick = { SourceVideoPlayerSession.selectEpisode(origIndex) }
@@ -945,6 +954,7 @@ private fun HomePanel(
             episodes = episodes,
             bookName = state.bookName,
             showManageFirst = downloadShowManage,
+            episodeOrder = if (state.reverseOrder) playOrder else null,
             onDismiss = { showDownload = false }
         )
     }
@@ -966,6 +976,8 @@ internal fun DownloadDialog(
     episodes: List<LocalVideo>,
     bookName: String,
     showManageFirst: Boolean,
+    /** 倒序修正后的显示顺序（原始下标 → 显示集号的映射来源）；null = 未倒序，按原始编号 */
+    episodeOrder: List<Int>? = null,
     standalone: Boolean = false,
     onDismiss: () -> Unit,
 ) {
@@ -1287,6 +1299,10 @@ internal fun DownloadDialog(
                                 .padding(top = 8.dp)
                         ) {
                             listItemsIndexed(episodes) { i, ep ->
+                                // 显示集号按倒序修正后的顺序走（与播放器顶栏/目录面板一致），
+                                // 下载任务本身仍用原始下标 i——保存目录与进度记录都基于它
+                                val no = episodeOrder?.indexOf(i)
+                                    ?.takeIf { it >= 0 }?.plus(1) ?: (i + 1)
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.fillMaxWidth()
@@ -1296,7 +1312,7 @@ internal fun DownloadDialog(
                                         onCheckedChange = { checked[i] = it }
                                     )
                                     Text(
-                                        "第${i + 1}集 ${ep.name}",
+                                        "第${no}集 ${ep.name}",
                                         color = Color.White.copy(alpha = 0.9f),
                                         fontSize = 13.sp,
                                         maxLines = 1
