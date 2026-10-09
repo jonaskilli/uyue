@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:paddingHorizontal="12dp"
+    android:paddingVertical="4dp"
+    android:minHeight="50dp"
+    android:gravity="center_vertical"
+    android:background="@android:color/transparent">
+
+    <!-- 角色名称和别名 -->
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tv_character_name"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="15sp"
+            android:textColor="@color/primaryText"
+            android:textStyle="bold"
+            android:padding="2dp"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"/>
+
+        <TextView
+            android:id="@+id/tv_character_aliases"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="@color/secondaryText"
+            android:visibility="gone"/>
+
+    </LinearLayout>
+
+    <!-- 发音人信息：上行标签（如「男青年01」），下行为该标签在配置列表里的显示名字 -->
+    <LinearLayout
+        android:id="@+id/ll_voice_info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="center_vertical|end"
+        android:layout_marginEnd="8dp"
+        android:padding="2dp"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true">
+
+        <TextView
+            android:id="@+id/tv_voice_info"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:textSize="12sp"
+            android:textColor="@color/secondaryText"/>
+
+        <!-- 配置名：与上方标签的间距保持当前样子（marginTop 5dp + paddingTop 3dp） -->
+        <TextView
+            android:id="@+id/tv_voice_name"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="5dp"
+            android:gravity="end"
+            android:maxWidth="110dp"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:textSize="10sp"
+            android:textColor="@color/secondaryText"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:paddingTop="3dp"
+            android:visibility="gone"/>
+
+    </LinearLayout>
+
+    <!-- 固定标记 -->
+    <ImageView
+        android:id="@+id/iv_fixed_mark"
+        android:layout_width="16dp"
+        android:layout_height="16dp"
+        android:src="@drawable/ic_check"
+        android:visibility="gone"/>
+
+</LinearLayout>

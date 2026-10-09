@@ -1,0 +1,14 @@
+{
+ "category": "F05",
+ "name": "水声",
+ "domain": "F",
+ "effectCount": 21,
+ "paragraphs": 3436,
+ "blocked_common": 1,
+ "blocked_classify": 2181,
+ "blocked_block": 123,
+ "matched": 7,
+ "no_effect": 1124,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 某个接口上的可用模型列表：顶部搜索框 + 列表，点击条目即复制模型名 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/tv_model_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:text="可用模型"
+        android:textSize="17sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tv_model_tip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:gravity="center"
+        android:text="加载中…"
+        android:textSize="12sp"
+        android:alpha="0.7" />
+
+    <EditText
+        android:id="@+id/et_model_search"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="搜索模型名"
+        android:imeOptions="actionSearch"
+        android:inputType="text"
+        android:singleLine="true"
+        android:textSize="14sp" />
+
+    <ListView
+        android:id="@+id/lv_models"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="6dp"
+        android:divider="@color/divider"
+        android:dividerHeight="1dp"
+        android:minHeight="240dp" />
+
+    <Button
+        android:id="@+id/btn_model_close"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="关闭"
+        android:textSize="13sp" />
+
+</LinearLayout>

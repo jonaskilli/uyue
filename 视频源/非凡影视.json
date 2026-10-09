@@ -1,0 +1,53 @@
+[
+  {
+    "bookSourceUrl": "https://api.ffzyapi.com",
+    "bookSourceName": "非凡影视(视频源)",
+    "bookSourceGroup": "视频·影视",
+    "bookSourceType": 4,
+    "enabled": true,
+    "enabledExplore": true,
+    "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36\",\"Referer\":\"https://vip.ffzy-plays.com/\"}",
+    "comment": "基于非凡资源(苹果CMS)API的视频书源 v3。要点：bookUrl 用 {$.字段} 内嵌规则(JSON模式下由AnalyzeByJSonPath解析)；目录JS返回JSON字符串条目(避免Rhino对象上$.规则失效)；正文JS提取m3u8并用字符串拼接补全域名(Rhino无URL API)。",
+    "searchUrl": "https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&wd={{key}}&pg={{page}}",
+    "exploreUrl": "国产动漫::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=29&pg={{page}}\n日韩动漫::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=30&pg={{page}}\n欧美动漫::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=31&pg={{page}}\n短剧::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=36&pg={{page}}\n国产剧::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=13&pg={{page}}\n香港剧::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=14&pg={{page}}\n韩国剧::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=15&pg={{page}}\n欧美剧::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=16&pg={{page}}\n日本剧::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=22&pg={{page}}\n动作片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=6&pg={{page}}\n喜剧片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=7&pg={{page}}\n爱情片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=8&pg={{page}}\n科幻片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=9&pg={{page}}\n恐怖片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=10&pg={{page}}\n剧情片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=11&pg={{page}}\n战争片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=12&pg={{page}}\n大陆综艺::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=25&pg={{page}}\n港台综艺::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=26&pg={{page}}\n日韩综艺::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=27&pg={{page}}\n纪录片::https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&t=20&pg={{page}}",
+    "ruleSearch": {
+      "bookList": "$.list[*]",
+      "name": "$.vod_name",
+      "author": "$.vod_actor",
+      "kind": "$.type_name",
+      "wordCount": "$.vod_remarks",
+      "lastChapter": "$.vod_remarks",
+      "intro": "$.vod_blurb",
+      "coverUrl": "$.vod_pic",
+      "bookUrl": "https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&ids={$.vod_id}"
+    },
+    "ruleExplore": {
+      "bookList": "$.list[*]",
+      "name": "$.vod_name",
+      "author": "$.vod_actor",
+      "kind": "$.type_name",
+      "wordCount": "$.vod_remarks",
+      "lastChapter": "$.vod_remarks",
+      "intro": "$.vod_blurb",
+      "coverUrl": "$.vod_pic",
+      "bookUrl": "https://api.ffzyapi.com/api.php/provide/vod/?ac=detail&ids={$.vod_id}"
+    },
+    "ruleBookInfo": {
+      "name": "$.vod_name",
+      "author": "$.vod_actor",
+      "kind": "$.type_name",
+      "lastChapter": "$.vod_remarks",
+      "intro": "$.vod_content##<[^>]*>##",
+      "coverUrl": "$.vod_pic"
+    },
+    "ruleToc": {
+      "chapterList": "<js>\nvar v = JSON.parse(result).list[0];\nvar lines = (v.vod_play_url || '').split('$$$');\nvar line = lines[0] || '';\nfor (var i = 0; i < lines.length; i++) {\n  if (lines[i].indexOf('m3u8') >= 0 || lines[i].indexOf('plays.com') >= 0) { line = lines[i]; break; }\n}\nvar eps = line.split('#');\nvar out = [];\nfor (var j = 0; j < eps.length; j++) {\n  var e = eps[j];\n  var p = e.lastIndexOf('$');\n  if (p < 0) continue;\n  var nm = e.substring(0, p).replace(/^\\s+|\\s+$/g, '');\n  var ul = e.substring(p + 1).replace(/^\\s+|\\s+$/g, '');\n  if (nm && ul) out.push(JSON.stringify({ name: nm, url: ul }));\n}\nout;\n</js>",
+      "chapterName": "$.name",
+      "chapterUrl": "$.url"
+    },
+    "ruleContent": {
+      "content": "<js>\nvar html = String(result);\nvar m = html.match(/url\\s*=\\s*[\"']([^\"']+\\.m3u8[^\"']*)[\"']/)\n     || html.match(/[\"'](https?:\\/\\/[^\"']+\\.m3u8[^\"']*)[\"']/)\n     || html.match(/https?:\\/\\/[^\\s\"'<>]+\\.m3u8[^\\s\"'<>]*/);\nif (!m) { throw new Error('未找到播放地址'); }\nvar u = m[1] || m[0];\nif (u.indexOf('http') !== 0) {\n  var base = String(baseUrl);\n  var cut = base.indexOf('/', 8);\n  var root = cut > 0 ? base.substring(0, cut) : base;\n  u = root + u;\n}\nu;\n</js>",
+      "sourceRegex": ".*\\.(m3u8|mp4|flv).*"
+    }
+  }
+]

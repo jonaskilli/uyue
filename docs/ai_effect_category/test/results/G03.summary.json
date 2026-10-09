@@ -1,0 +1,14 @@
+{
+ "category": "G03",
+ "name": "马匹",
+ "domain": "G",
+ "effectCount": 40,
+ "paragraphs": 5562,
+ "blocked_common": 0,
+ "blocked_classify": 3911,
+ "blocked_block": 126,
+ "matched": 0,
+ "no_effect": 1525,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:36"
+}

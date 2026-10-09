@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 角色对话页背景：深色纵向渐变（galgame 风格固定深色，不随日/夜主题切换） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient
+        android:angle="270"
+        android:startColor="#FF1B1E27"
+        android:centerColor="#FF14161D"
+        android:endColor="#FF0C0E12"
+        android:type="linear" />
+</shape>

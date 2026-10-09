@@ -1,0 +1,14 @@
+{
+ "category": "E08",
+ "name": "记忆回忆",
+ "domain": "E",
+ "effectCount": 19,
+ "paragraphs": 1909,
+ "blocked_common": 2,
+ "blocked_classify": 1805,
+ "blocked_block": 1,
+ "matched": 0,
+ "no_effect": 101,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

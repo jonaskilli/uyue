@@ -1,0 +1,26 @@
+<resources>
+
+    <style name="Spinner" parent="android:Theme.Holo" />
+
+    <!-- 带边框的 Spinner，描边跟随字体色（浅色/深色自动切换），保留右侧下拉三角 -->
+    <style name="SpinnerBorder" parent="Spinner">
+        <item name="android:background">@drawable/spinner_border</item>
+    </style>
+
+    <style name="AppTheme.PopupOverlay" parent="ThemeOverlay.AppCompat.Dark">
+        <item name="overlapAnchor">false</item>
+        <item name="colorAccent">@color/md_grey_100</item>
+    </style>
+
+    <style name="Style.Shadow.Top" parent="android:Widget">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">@dimen/shadow_height</item>
+        <item name="android:background">@drawable/bg_shadow_top_night</item>
+    </style>
+
+    <style name="Style.Shadow.Bottom" parent="android:Widget">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">@dimen/shadow_height</item>
+        <item name="android:background">@drawable/bg_shadow_bottom_night</item>
+    </style>
+</resources>

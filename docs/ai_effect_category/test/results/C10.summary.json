@@ -1,0 +1,14 @@
+{
+ "category": "C10",
+ "name": "召唤亡灵",
+ "domain": "C",
+ "effectCount": 8,
+ "paragraphs": 2733,
+ "blocked_common": 0,
+ "blocked_classify": 1964,
+ "blocked_block": 23,
+ "matched": 0,
+ "no_effect": 746,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

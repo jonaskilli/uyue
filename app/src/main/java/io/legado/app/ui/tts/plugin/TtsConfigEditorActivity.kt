@@ -1,0 +1,815 @@
+package io.legado.app.ui.tts.plugin
+
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.os.Bundle
+import android.text.InputType
+import android.text.TextWatcher
+import android.util.TypedValue
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import java.io.File
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.SeekBar
+import android.widget.TextView
+import androidx.lifecycle.lifecycleScope
+import io.legado.app.R
+import io.legado.app.base.BaseActivity
+import io.legado.app.databinding.ActivityTtsConfigEditorBinding
+import io.legado.app.help.audiobook.JReadVoiceEngine
+import io.legado.app.help.audiobook.JReadVoicePluginRuntime
+import io.legado.app.help.audiobook.PluginEditorSession
+import io.legado.app.utils.runOnUI
+import io.legado.app.utils.toastOnUi
+import io.legado.app.utils.viewbindingdelegate.viewBinding
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.util.UUID
+
+class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
+
+    override val binding by viewBinding(ActivityTtsConfigEditorBinding::inflate)
+    private var config: JReadVoiceEngine.VoiceConfig = JReadVoiceEngine.VoiceConfig(voiceTag = "")
+    private var plugins: List<JReadVoiceEngine.VoicePlugin> = emptyList()
+    /** 恢复表单期间为 true：此时音色下拉的选中回调不得改写「显示名称」 */
+    private var restoringVoiceSelection = false
+    private var mediaPlayer: MediaPlayer? = null
+    private var localeOptions: List<JReadVoicePluginRuntime.LocaleOption> = emptyList()
+    private var voiceOptions: List<JReadVoicePluginRuntime.VoiceOption> = emptyList()
+    private var pluginDataFields = mutableMapOf<String, String>()
+    private var editorSession: PluginEditorSession? = null
+    // onDestroy 后置位。runOnUI 用的是全局 mainHandler，其 Runnable 不会被 lifecycleScope
+    // 的取消一并取消，因此必须自己记录 Activity 是否还可用于弹窗。
+    private var activityDestroyed = false
+    private val shownDialogs = mutableListOf<android.app.Dialog>()
+    // 程序化回填试听文本时不触发 TextWatcher，避免把本条配置的文本写成全局默认
+    private var settingPreviewText = false
+
+    companion object {
+        const val EXTRA_CONFIG_ID = "configId"
+        const val EXTRA_IS_NEW = "isNew"
+        private const val MENU_SAVE = 1
+        private const val KEY_PREVIEW_TEXT = "tts_preview_text"
+    }
+
+    /**
+     * Activity 窗口是否仍然有效（可用于弹窗）。
+     * 异步加载（插件 eval / 网络请求）返回时 Activity 可能已被销毁，
+     * 此时 show() 会抛 BadTokenException。
+     */
+    private val isWindowUsable: Boolean
+        get() = !activityDestroyed && !isFinishing && !isDestroyed
+
+    /**
+     * 在主线程执行，且仅在 Activity 窗口仍有效时执行。
+     */
+    private fun runOnUiSafe(block: () -> Unit) {
+        runOnUI {
+            if (!isWindowUsable) return@runOnUI
+            block()
+        }
+    }
+
+    /**
+     * 安全弹窗：窗口无效时不弹，show 失败（BadTokenException 等）时只记日志不崩。
+     */
+    private fun AlertDialog.Builder.showSafely(): android.app.Dialog? {
+        if (!isWindowUsable) return null
+        val dialog = runCatching { show() }.getOrElse {
+            android.util.Log.w("TtsConfigEditor", "show dialog failed", it)
+            return null
+        }
+        shownDialogs.add(dialog)
+        dialog.setOnDismissListener { shownDialogs.remove(dialog) }
+        return dialog
+    }
+
+    /**
+     * 执行可能抛异常的插件加载逻辑。
+     * - CancellationException 必须原样抛出，否则 Activity 销毁导致的协程取消
+     *   会被误判为「插件加载失败」并触发弹窗（崩溃根因）。
+     * - 其他异常统一弹窗报错后返回 null。
+     */
+    private suspend fun <T> loadOrShowError(errorTitle: String, block: suspend () -> T): T? {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.e("TtsConfigEditor", errorTitle, e)
+            displayErrorDialog(e, errorTitle)
+            null
+        }
+    }
+
+    /**
+     * 统一报错弹窗。移植自 TTS_Server_Android (Itts 分支) 的报错机制：
+     * 当插件加载不出内容，或分类(locales)、音色(voices)加载不出来，或遇到其他错误
+     * 导致无法加载时，提前弹出对话框展示完整异常信息，而不是静默降级。
+     * 调用方需在主线程/协程中调用，内部自行切回 UI 线程显示。
+     */
+    private fun displayErrorDialog(t: Throwable, title: String = "加载失败") {
+        // 协程取消不是真正的错误，不应弹窗
+        if (t is CancellationException) return
+        runOnUiSafe {
+            val sb = StringBuilder()
+            sb.append(t.localizedMessage ?: t.message ?: t.toString())
+            sb.append("\n\n")
+            val stack = t.stackTraceToString()
+            sb.append(if (stack.length > 3000) stack.take(3000) + "\n..." else stack)
+            val errorText = sb.toString()
+            AlertDialog.Builder(this@TtsConfigEditorActivity)
+                .setTitle(title)
+                .setMessage(errorText)
+                .setPositiveButton(android.R.string.ok, null)
+                .setNeutralButton("复制") { _, _ ->
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText(title, errorText))
+                    toastOnUi("报错内容已复制到剪贴板")
+                }
+                .setNegativeButton("保存") { _, _ ->
+                    runCatching {
+                        val dir = File(getExternalFilesDir(null), "error_logs").apply { mkdirs() }
+                        val file = File(dir, "tts_error_${System.currentTimeMillis()}.txt")
+                        file.writeText("[$title]\n$errorText")
+                        file.absolutePath
+                    }.onSuccess { path ->
+                        toastOnUi("报错已保存: $path")
+                    }.onFailure {
+                        toastOnUi("保存失败: ${it.message}")
+                    }
+                }
+                .showSafely()
+        }
+    }
+
+    override fun onActivityCreated(savedInstanceState: Bundle?) {
+        title = if (intent.getBooleanExtra(EXTRA_IS_NEW, false)) "新增 TTS 配置" else "编辑 TTS 配置"
+        initViews()
+        loadData()
+    }
+
+    private fun initViews() {
+        binding.spinnerGender.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("男", "女"))
+        binding.spinnerAge.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("童", "少年", "青年", "中年", "老年", "男主", "女主"))
+        binding.btnGenerateTag.setOnClickListener { generateTimbreTag() }
+        binding.ivTagSearch.setOnClickListener { showTagSearchDialog() }
+        binding.btnPreview.setOnClickListener { previewConfig() }
+        // 试听文本：本条配置已设置的优先，否则用全局默认文案
+        setPreviewText(config.previewText.ifBlank { globalPreviewText() })
+        binding.etPreviewText.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (settingPreviewText) return
+                // 记住为全局默认，新建配置与未单独设置的条目试听沿用
+                getPreferences(Context.MODE_PRIVATE).edit()
+                    .putString(KEY_PREVIEW_TEXT, s?.toString().orEmpty())
+                    .apply()
+            }
+        })
+        binding.ivGroupPicker.setOnClickListener { showGroupPicker() }
+        binding.ivSubGroupPicker.setOnClickListener { showSubGroupPicker() }
+        // 旧格式不需要风格，隐藏
+        binding.etStyle.visibility = View.GONE
+        setupSlider(binding.seekbarSpeed, binding.tvSpeedValue, binding.btnSpeedMinus, binding.btnSpeedPlus)
+        setupSlider(binding.seekbarVolume, binding.tvVolumeValue, binding.btnVolumeMinus, binding.btnVolumePlus)
+        setupSlider(binding.seekbarPitch, binding.tvPitchValue, binding.btnPitchMinus, binding.btnPitchPlus)
+        setupPostSlider(binding.seekbarPostSpeed, binding.tvPostSpeedValue, binding.btnPostSpeedMinus, binding.btnPostSpeedPlus)
+        setupPostSlider(binding.seekbarPostVolume, binding.tvPostVolumeValue, binding.btnPostVolumeMinus, binding.btnPostVolumePlus)
+        setupPostSlider(binding.seekbarPostPitch, binding.tvPostPitchValue, binding.btnPostPitchMinus, binding.btnPostPitchPlus)
+        binding.spinnerPlugin.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, v: View?, position: Int, id: Long) { onPluginSelected(position) }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+        }
+        binding.spinnerLocale.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, v: View?, position: Int, id: Long) { onLocaleSelected(position) }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+        }
+        binding.spinnerVoice.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, v: View?, position: Int, id: Long) { onVoiceSelected(position) }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+        }
+        // 接管音色下拉：直接点选择框弹出带搜索框的弹窗，而不是原生下拉
+        binding.spinnerVoice.setOnTouchListener { _, event ->
+            if (event.action == android.view.MotionEvent.ACTION_UP) showVoiceSearchDialog()
+            true
+        }
+    }
+
+    private fun setupSlider(seekbar: SeekBar, tvValue: TextView, btnMinus: Button, btnPlus: Button) {
+        seekbar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) { tvValue.text = String.format("%.2f", progress / 100f) }
+            override fun onStartTrackingTouch(sb: SeekBar?) = Unit
+            override fun onStopTrackingTouch(sb: SeekBar?) = Unit
+        })
+        btnMinus.setOnClickListener { seekbar.progress = (seekbar.progress - 1).coerceAtLeast(0) }
+        btnPlus.setOnClickListener { seekbar.progress = (seekbar.progress + 1).coerceAtMost(300) }
+    }
+
+    private fun setupPostSlider(seekbar: SeekBar, tvValue: TextView, btnMinus: Button, btnPlus: Button) {
+        seekbar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                tvValue.text = if (progress == 0) "跟随" else String.format("%.2f", progress / 100f)
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) = Unit
+            override fun onStopTrackingTouch(sb: SeekBar?) = Unit
+        })
+        btnMinus.setOnClickListener { seekbar.progress = (seekbar.progress - 1).coerceAtLeast(0) }
+        btnPlus.setOnClickListener { seekbar.progress = (seekbar.progress + 1).coerceAtMost(300) }
+    }
+
+    private fun loadData() {
+        lifecycleScope.launch {
+            val configId = intent.getStringExtra(EXTRA_CONFIG_ID)
+            val isNew = intent.getBooleanExtra(EXTRA_IS_NEW, false)
+            if (!isNew && configId != null) {
+                val configs = withContext(Dispatchers.IO) { JReadVoiceEngine.listConfigs(this@TtsConfigEditorActivity) }
+                config = configs.firstOrNull { it.id == configId } ?: JReadVoiceEngine.VoiceConfig(voiceTag = "")
+            }
+            plugins = withContext(Dispatchers.IO) { JReadVoiceEngine.listPlugins(this@TtsConfigEditorActivity) }
+            fillForm()
+        }
+    }
+
+    private fun fillForm() {
+        binding.swEnabled.isChecked = config.enabled
+        binding.etDisplayName.setText(config.displayName)
+        binding.etVoiceTag.setText(config.voiceTag)
+        binding.etGroup.setText(config.groupName)
+        binding.etSubGroup.setText(config.subGroupName)
+        binding.etLocale.setText(config.locale)
+        setPreviewText(config.previewText.ifBlank { globalPreviewText() })
+        binding.seekbarSpeed.progress = (config.speed * 100).toInt().coerceIn(0, 300)
+        binding.seekbarVolume.progress = (config.volume * 100).toInt().coerceIn(0, 300)
+        binding.seekbarPitch.progress = (config.pitch * 100).toInt().coerceIn(0, 300)
+        binding.tvSpeedValue.text = String.format("%.2f", config.speed)
+        binding.tvVolumeValue.text = String.format("%.2f", config.volume)
+        binding.tvPitchValue.text = String.format("%.2f", config.pitch)
+        // 后处理参数
+        binding.seekbarPostSpeed.progress = if (config.postSpeed <= 0f) 0 else (config.postSpeed * 100).toInt().coerceIn(0, 300)
+        binding.seekbarPostVolume.progress = if (config.postVolume <= 0f) 0 else (config.postVolume * 100).toInt().coerceIn(0, 300)
+        binding.seekbarPostPitch.progress = if (config.postPitch <= 0f) 0 else (config.postPitch * 100).toInt().coerceIn(0, 300)
+        binding.tvPostSpeedValue.text = if (config.postSpeed <= 0f) "跟随" else String.format("%.2f", config.postSpeed)
+        binding.tvPostVolumeValue.text = if (config.postVolume <= 0f) "跟随" else String.format("%.2f", config.postVolume)
+        binding.tvPostPitchValue.text = if (config.postPitch <= 0f) "跟随" else String.format("%.2f", config.postPitch)
+        val pluginNames = listOf("单项直连/不使用插件") + plugins.map { TtsPluginAdapter.displayNameForConfigCard(it) }
+        binding.spinnerPlugin.adapter = PluginSpinnerAdapter(this, pluginNames, plugins)
+        val pluginIdx = plugins.indexOfFirst { it.id == config.pluginId || it.pluginId == config.pluginId }
+        pluginDataFields = runCatching {
+            val obj = JSONObject(config.dataJson.ifBlank { "{}" })
+            mutableMapOf<String, String>().apply { obj.keys().forEach { put(it, obj.optString(it)) } }
+        }.getOrDefault(mutableMapOf())
+        if (pluginIdx >= 0) {
+            binding.spinnerPlugin.setSelection(pluginIdx + 1)
+            // onPluginSelected 会被 setSelection 异步触发，不需要再手动调用 renderPluginUi
+        }
+    }
+
+    private fun onPluginSelected(position: Int) {
+        val plugin = if (position > 0) plugins.getOrNull(position - 1) else null
+        if (plugin == null || plugin.code.isBlank()) {
+            editorSession?.close()
+            editorSession = null
+            binding.layoutPluginUi.removeAllViews()
+            binding.layoutPluginUi.visibility = View.GONE
+            binding.spinnerLocale.visibility = View.GONE
+            binding.etLocale.visibility = View.VISIBLE
+            localeOptions = emptyList(); voiceOptions = emptyList()
+            return
+        }
+        binding.spinnerLocale.visibility = View.VISIBLE
+        binding.etLocale.visibility = View.GONE
+        lifecycleScope.launch {
+            // 先渲染插件 UI（创建 session），等 session 初始化完成后再查询 locales
+            renderPluginUi(plugin)
+            val session = editorSession
+            localeOptions = withContext(Dispatchers.IO) {
+                if (session != null && session.isInitialized) {
+                    loadOrShowError("分类加载失败") { session.listLocales() }
+                } else {
+                    loadOrShowError("分类加载失败") { JReadVoicePluginRuntime.listLocales(this@TtsConfigEditorActivity, plugin) }
+                }
+            } ?: emptyList()
+            if (localeOptions.isEmpty()) {
+                binding.spinnerLocale.visibility = View.GONE
+                binding.etLocale.visibility = View.VISIBLE
+            } else {
+                val localeNames = localeOptions.map { it.name.ifBlank { it.id } }
+                binding.spinnerLocale.adapter = ArrayAdapter(this@TtsConfigEditorActivity, android.R.layout.simple_spinner_dropdown_item, localeNames)
+                val currentLocale = config.locale.ifBlank { "zh-CN" }
+                val localeIdx = localeOptions.indexOfFirst { it.id == currentLocale || it.name == currentLocale }
+                if (localeIdx >= 0) binding.spinnerLocale.setSelection(localeIdx)
+            }
+        }
+    }
+
+    private suspend fun renderPluginUi(plugin: JReadVoiceEngine.VoicePlugin) {
+        // 关闭旧 session
+        editorSession?.close()
+        editorSession = null
+        binding.layoutPluginUi.removeAllViews()
+        val session = PluginEditorSession(this@TtsConfigEditorActivity, plugin, pluginDataFields)
+        val container = try {
+            withContext(Dispatchers.IO) { session.init() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.e("TtsConfigEditor", "renderPluginUi init failed: ${plugin.name}", e)
+            displayErrorDialog(e, "插件加载失败")
+            null
+        }
+        if (container != null) {
+            editorSession = session
+            binding.layoutPluginUi.addView(container)
+            binding.layoutPluginUi.visibility = View.VISIBLE
+            android.util.Log.d("TtsConfigEditor", "renderPluginUi ok: ${plugin.name}, childCount=${container.childCount}")
+            // 初始加载后触发 onVoiceChanged，让插件根据当前音色更新 UI
+            val currentVoice = config.voice
+            if (currentVoice.isNotBlank()) {
+                val locale = if (localeOptions.isNotEmpty() && binding.spinnerLocale.selectedItemPosition < localeOptions.size) {
+                    localeOptions[binding.spinnerLocale.selectedItemPosition].id
+                } else config.locale.ifBlank { "zh-CN" }
+                session.onVoiceChanged(locale, currentVoice)
+            }
+        } else {
+            binding.layoutPluginUi.visibility = View.GONE
+        }
+    }
+
+    private fun onLocaleSelected(position: Int) {
+        if (localeOptions.isEmpty() || position >= localeOptions.size) return
+        val locale = localeOptions[position].id
+        val session = editorSession
+        voiceOptions = emptyList()
+        binding.spinnerVoice.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("加载中..."))
+        lifecycleScope.launch {
+            voiceOptions = withContext(Dispatchers.IO) {
+                if (session != null && session.isInitialized) {
+                    loadOrShowError("音色加载失败") { session.listVoices(locale) }
+                } else {
+                    val pluginIdx = binding.spinnerPlugin.selectedItemPosition
+                    if (pluginIdx <= 0) emptyList()
+                    else {
+                        val plugin = plugins.getOrNull(pluginIdx - 1) ?: return@withContext emptyList()
+                        loadOrShowError("音色加载失败") { JReadVoicePluginRuntime.listVoices(this@TtsConfigEditorActivity, plugin, locale) }
+                    }
+                }
+            } ?: emptyList()
+            if (voiceOptions.isEmpty()) {
+                binding.spinnerVoice.adapter = ArrayAdapter(this@TtsConfigEditorActivity, android.R.layout.simple_spinner_dropdown_item, listOf("无可用音色"))
+                toastOnUi("该分类无可用音色")
+            } else {
+                val voiceNames = voiceOptions.map { it.name.ifBlank { it.id } }
+                binding.spinnerVoice.adapter = ArrayAdapter(this@TtsConfigEditorActivity, android.R.layout.simple_spinner_dropdown_item, voiceNames)
+                // 恢复当前选中的音色
+                val currentVoice = config.voice
+                val voiceIdx = voiceOptions.indexOfFirst { it.id == currentVoice }
+                // setSelection 会同步触发 onVoiceSelected，而那里会把「显示名称」覆盖成音色名。
+                // 恢复表单期间必须屏蔽，否则打开页面就悄悄改掉用户已保存的显示名，
+                // 与配置列表、角色管理里显示的 displayName 对不上。
+                restoringVoiceSelection = true
+                if (voiceIdx >= 0) binding.spinnerVoice.setSelection(voiceIdx)
+                restoringVoiceSelection = false
+            }
+        }
+    }
+
+    private fun onVoiceSelected(position: Int) {
+        if (voiceOptions.isEmpty() || position >= voiceOptions.size) return
+        val voice = voiceOptions[position]
+        // 仅用户主动切换音色时，才用音色名同步「显示名称」；之后用户可随意手改，
+        // 直到下次切换发音人才再覆盖。恢复表单（打开页面）时不覆盖，保持已保存的名字。
+        if (!restoringVoiceSelection) {
+            binding.etDisplayName.setText(voice.name.ifBlank { voice.id })
+        }
+        notifyVoiceChanged(voice.id)
+    }
+
+    // 通用：带搜索框的单行列表弹窗。items 为显示文本（顺序即原始索引）。
+    // 点击时 onPick 收到的 position 即 items 中的原始索引。
+    //
+    // onPreview 非空时每行右侧多一个「试听」按钮：点它只试听、不关闭弹窗，
+    // 便于逐个试听后再决定选哪个。传 null 则维持原样（如选择标签，无需试听）。
+    // 该参数放在 onPick 之前，末尾仍是 onPick，因此既有调用点的尾随 lambda 不受影响。
+    private fun showSearchListDialog(
+        title: String,
+        hint: String,
+        items: List<String>,
+        onPreview: ((originalIndex: Int) -> Unit)? = null,
+        onPick: (originalIndex: Int) -> Unit,
+    ) {
+        if (!isWindowUsable) return
+        val context = this@TtsConfigEditorActivity
+        val container = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 24, 32, 8)
+        }
+        val searchInput = EditText(context).apply {
+            this.hint = hint
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            setSingleLine(true)
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
+        }
+        val listView = ListView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                resources.displayMetrics.heightPixels / 2,
+            )
+        }
+        container.addView(searchInput)
+        container.addView(listView)
+
+        val shown = mutableListOf<Int>() // 当前显示的原始索引
+        val adapter = object : android.widget.BaseAdapter() {
+            override fun getCount(): Int = shown.size
+            override fun getItem(position: Int): Any = shown[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val originalIndex = shown[position]
+                val preview = onPreview
+                if (preview == null) {
+                    // 复用系统 simple_list_item_1，自动跟随主题文字颜色（深/浅色）
+                    val textView = if (convertView is android.widget.TextView) convertView
+                    else android.view.LayoutInflater.from(context)
+                        .inflate(android.R.layout.simple_list_item_1, parent, false) as android.widget.TextView
+                    textView.setSingleLine(true)
+                    textView.ellipsize = null
+                    textView.setHorizontallyScrolling(false)
+                    textView.text = items[originalIndex]
+                    return textView
+                }
+                // 带试听按钮的行。convertView 可能是上面那种纯 TextView，
+                // 用 btn_preview_voice 是否存在来判断能否复用，避免类型错配。
+                val view = convertView?.takeIf { it.findViewById<View>(R.id.btn_preview_voice) != null }
+                    ?: android.view.LayoutInflater.from(context)
+                        .inflate(R.layout.item_voice_preview, parent, false)
+                view.findViewById<android.widget.TextView>(R.id.tv_voice_name).text = items[originalIndex]
+                view.findViewById<android.widget.TextView>(R.id.btn_preview_voice).setOnClickListener {
+                    preview.invoke(originalIndex)
+                }
+                return view
+            }
+        }
+        listView.adapter = adapter
+
+        fun applyFilter(keyword: String) {
+            val kw = keyword.trim()
+            shown.clear()
+            items.forEachIndexed { idx, name ->
+                if (kw.isEmpty() || name.contains(kw, ignoreCase = true)) shown.add(idx)
+            }
+            adapter.notifyDataSetChanged()
+        }
+        applyFilter("")
+
+        val dialog = android.app.AlertDialog.Builder(context)
+            .setTitle("$title (${items.size})")
+            .setView(container)
+            .setNegativeButton("取消", null)
+            .showSafely() ?: return
+
+        listView.setOnItemClickListener { _, _, position, _ ->
+            val originalIndex = shown.getOrNull(position) ?: return@setOnItemClickListener
+            onPick(originalIndex)
+            dialog.dismiss()
+        }
+
+        searchInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                applyFilter(s?.toString() ?: "")
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+    }
+
+    private fun showVoiceSearchDialog() {
+        if (voiceOptions.isEmpty()) { toastOnUi("请先选择插件和分类"); return }
+        val voiceNames = voiceOptions.map { it.name.ifBlank { it.id } }
+        showSearchListDialog(
+            "选择音色",
+            "搜索音色",
+            voiceNames,
+            onPreview = { originalIndex -> previewVoiceAt(originalIndex) }
+        ) { originalIndex ->
+            onVoiceSelected(originalIndex)
+            binding.spinnerVoice.setSelection(originalIndex)
+        }
+    }
+
+    /**
+     * 试听播放：先套用后处理链路（分组 → 插件 → 全局 + 编辑页当前滑块值）再播。
+     * 编辑器里调「后语速/后音量/后音高」后能立刻听出效果，
+     * 也保证与朗读时的听感一致（否则试听走的是原始音频，参数看起来"没反应"）。
+     */
+    private suspend fun playPreviewAudio(
+        audioBytes: ByteArray,
+        config: JReadVoiceEngine.VoiceConfig,
+        requestId: String,
+    ) {
+        val postParams = JReadVoiceEngine.resolvePostAudioParams(this@TtsConfigEditorActivity, config)
+        val playedBytes = if (postParams.isDefault()) {
+            audioBytes
+        } else {
+            withContext(Dispatchers.IO) {
+                io.legado.app.utils.AudioDecodeUtil
+                    .decodeToStandardWav(audioBytes, postParams = postParams)
+            } ?: audioBytes
+        }
+        if (!isWindowUsable) return
+        val tempFile = withContext(Dispatchers.IO) {
+            java.io.File(cacheDir, "preview_${requestId}.wav").apply { writeBytes(playedBytes) }
+        }
+        playAudio(tempFile.absolutePath)
+    }
+
+    /**
+     * 试听列表里指定位置的音色。
+     *
+     * 与 [previewConfig] 的区别：[previewConfig] 试听的是 spinner 当前选中的音色，
+     * 而这里是用户刚点试听按钮的那一项 —— 此时用户尚未选定音色，
+     * 因此走 [buildConfig] 的 voiceOverride 直接注入音色 id，不动 spinner 选中态，
+     * 也不要求「先选音色」的前置校验。
+     */
+    private fun previewVoiceAt(voiceIndex: Int) {
+        val option = voiceOptions.getOrNull(voiceIndex) ?: return
+        val voiceName = option.name.ifBlank { option.id }
+        // 试听文本留空时退回默认文案，不打断试听流程（与预览按钮不同，这里无需强制输入）
+        val previewText = binding.etPreviewText.text.toString().trim().ifBlank { JReadVoiceEngine.DEFAULT_PREVIEW_TEXT }
+        val tempConfig = buildConfig(requireTag = false, voiceOverride = option.id) ?: return
+        toastOnUi("正在试听: $voiceName")
+        lifecycleScope.launch {
+            val requestId = UUID.randomUUID().toString()
+            val pointerJson = JSONObject().put("voiceTag", tempConfig.voiceTag).toString()
+            val audioBytes = withContext(Dispatchers.IO) {
+                loadOrShowError("试听失败") {
+                    JReadVoiceEngine.synthesizeConfigLineAudio(
+                        this@TtsConfigEditorActivity, tempConfig, previewText, pointerJson, requestId
+                    )
+                }
+            }
+            if (audioBytes == null || audioBytes.isEmpty()) return@launch
+            playPreviewAudio(audioBytes, tempConfig, requestId)
+        }
+    }
+
+    private fun notifyVoiceChanged(voiceId: String) {
+        val session = editorSession ?: return
+        val locale = if (localeOptions.isNotEmpty() && binding.spinnerLocale.selectedItemPosition < localeOptions.size) {
+            localeOptions[binding.spinnerLocale.selectedItemPosition].id
+        } else { binding.etLocale.text.toString().trim().ifBlank { "zh-CN" } }
+        lifecycleScope.launch {
+            session.onVoiceChanged(locale, voiceId)
+        }
+    }
+
+    private fun showGroupPicker() {
+        lifecycleScope.launch {
+            val groups = withContext(Dispatchers.IO) {
+                val voiceGroups = JReadVoiceEngine.listGroups(this@TtsConfigEditorActivity)
+                val groupNames = voiceGroups.map { it.groupName }.filter { it.isNotBlank() }.distinct().sorted()
+                if (groupNames.isEmpty()) {
+                    JReadVoiceEngine.listConfigs(this@TtsConfigEditorActivity)
+                        .map { it.groupName.ifBlank { "默认分组" } }.distinct().sorted()
+                } else groupNames
+            }
+            if (!isWindowUsable) return@launch
+            if (groups.isEmpty()) { toastOnUi("暂无分组"); return@launch }
+            android.app.AlertDialog.Builder(this@TtsConfigEditorActivity)
+                .setTitle("选择一级分组 (${groups.size})")
+                .setItems(groups.toTypedArray()) { _, which -> binding.etGroup.setText(groups[which]) }
+                .showSafely()
+        }
+    }
+
+    private fun showSubGroupPicker() {
+        val currentGroup = binding.etGroup.text.toString().trim()
+        lifecycleScope.launch {
+            val subGroups = withContext(Dispatchers.IO) {
+                val voiceGroups = JReadVoiceEngine.listGroups(this@TtsConfigEditorActivity)
+                val subNames = voiceGroups
+                    .filter { it.groupName == currentGroup && it.subGroupName.isNotBlank() }
+                    .map { it.subGroupName }.distinct().sorted()
+                if (subNames.isEmpty()) {
+                    JReadVoiceEngine.listConfigs(this@TtsConfigEditorActivity)
+                        .filter { it.groupName.ifBlank { "默认分组" } == currentGroup.ifBlank { "默认分组" } }
+                        .map { it.subGroupName.ifBlank { "默认" } }.distinct().sorted()
+                } else subNames
+            }
+            if (!isWindowUsable) return@launch
+            if (subGroups.isEmpty()) { toastOnUi("该分组下暂无子分组"); return@launch }
+            android.app.AlertDialog.Builder(this@TtsConfigEditorActivity)
+                .setTitle("选择二级分组 (${subGroups.size})")
+                .setItems(subGroups.toTypedArray()) { _, which -> binding.etSubGroup.setText(subGroups[which]) }
+                .showSafely()
+        }
+    }
+
+    private fun generateTimbreTag() {
+        val gender = binding.spinnerGender.selectedItem?.toString() ?: "男"
+        val age = binding.spinnerAge.selectedItem?.toString() ?: "青年"
+        val number = binding.etTagNumber.text.toString().trim().ifBlank { "01" }.padStart(2, '0')
+        // 男主/女主直接生成对应标签，忽略性别维度
+        val tag = when (age) {
+            "男主" -> "男主$number"
+            "女主" -> "女主$number"
+            "少年" -> if (gender == "女") "少女$number" else "少年$number"
+            else -> "$gender$age$number"
+        }
+        binding.etVoiceTag.setText(tag)
+        toastOnUi("已生成标签: $tag")
+    }
+
+    private fun showTagSearchDialog() {
+        lifecycleScope.launch {
+            val allTags = withContext(Dispatchers.IO) { JReadVoiceEngine.listConfigs(this@TtsConfigEditorActivity).map { it.voiceTag }.distinct().sorted() }
+            if (allTags.isEmpty()) { toastOnUi("暂无可用标签"); return@launch }
+            showSearchListDialog("选择标签", "搜索标签", allTags) { originalIndex ->
+                binding.etVoiceTag.setText(allTags[originalIndex])
+            }
+        }
+    }
+
+    private fun previewConfig() {
+        val previewText = binding.etPreviewText.text.toString().trim().ifBlank { toastOnUi("请输入试听文本"); return }
+        val tempConfig = buildConfig(requireTag = false) ?: return
+        // 试听的是音色，提示应展示音色名称而非标签
+        val voiceName = if (voiceOptions.isNotEmpty() && binding.spinnerVoice.selectedItemPosition in voiceOptions.indices) {
+            voiceOptions[binding.spinnerVoice.selectedItemPosition].name.ifBlank { voiceOptions[binding.spinnerVoice.selectedItemPosition].id }
+        } else {
+            binding.etDisplayName.text.toString().trim().ifBlank { tempConfig.voice.ifBlank { "当前音色" } }
+        }
+        toastOnUi("正在试听: $voiceName")
+        lifecycleScope.launch {
+            val requestId = UUID.randomUUID().toString()
+            val pointerJson = JSONObject().put("voiceTag", tempConfig.voiceTag).toString()
+            val audioBytes = withContext(Dispatchers.IO) {
+                loadOrShowError("试听失败") {
+                    JReadVoiceEngine.synthesizeConfigLineAudio(
+                        this@TtsConfigEditorActivity, tempConfig, previewText, pointerJson, requestId
+                    )
+                }
+            }
+            if (audioBytes == null || audioBytes.isEmpty()) return@launch
+            playPreviewAudio(audioBytes, tempConfig, requestId)
+        }
+    }
+
+    private fun playAudio(path: String) {
+        mediaPlayer?.release()
+        mediaPlayer = MediaPlayer().apply {
+            setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            setDataSource(path); prepare()
+            setOnCompletionListener { it.release(); mediaPlayer = null }
+            start()
+        }
+    }
+
+    private fun setPreviewText(text: String) {
+        settingPreviewText = true
+        binding.etPreviewText.setText(text)
+        settingPreviewText = false
+    }
+
+    /** 全局默认试听文本：新建配置与未单独设置试听文本的条目沿用它 */
+    private fun globalPreviewText(): String =
+        getPreferences(Context.MODE_PRIVATE)
+            .getString(KEY_PREVIEW_TEXT, JReadVoiceEngine.DEFAULT_PREVIEW_TEXT)
+            .orEmpty()
+            .ifBlank { JReadVoiceEngine.DEFAULT_PREVIEW_TEXT }
+
+    private fun buildDataJson(): String {
+        val obj = JSONObject()
+        pluginDataFields.forEach { (k, v) -> obj.put(k, v) }
+        return obj.toString()
+    }
+
+    /**
+     * @param requireTag 为 true 时强制校验 voiceTag 非空（保存场景）。
+     * @param voiceOverride 非空时用它作为音色 id，忽略 spinner 选中项。
+     *   用于音色列表里的行内试听：用户此时尚未选定音色，spinner 可能没选或无有效项。
+     */
+    private fun buildConfig(requireTag: Boolean = true, voiceOverride: String? = null): JReadVoiceEngine.VoiceConfig? {
+        val voiceTag = binding.etVoiceTag.text.toString().trim()
+        // 试听时不需要强制填写标签（标签用于分组标识，与试听音色无关）；
+        // 标签为空时用一个占位，避免下游合成因 voiceTag 为空出问题。
+        if (requireTag && voiceTag.isBlank()) { toastOnUi("voiceTag 不能为空"); return null }
+        val pluginIdx = binding.spinnerPlugin.selectedItemPosition
+        val selectedPlugin = if (pluginIdx > 0) plugins.getOrNull(pluginIdx - 1) else null
+        if (selectedPlugin == null) { toastOnUi("请选择一个插件"); return null }
+        // 行内试听由 voiceOverride 提供音色，跳过「先选音色」校验
+        if (voiceOverride == null && selectedPlugin.code.isNotBlank()
+            && voiceOptions.isNotEmpty() && binding.spinnerVoice.selectedItemPosition < 0
+        ) { toastOnUi("请先选择一个音色"); return null }
+        val voice = voiceOverride ?: if (voiceOptions.isNotEmpty() && binding.spinnerVoice.selectedItemPosition in voiceOptions.indices) {
+            voiceOptions[binding.spinnerVoice.selectedItemPosition].id
+        } else { config.voice }
+        val locale = if (localeOptions.isNotEmpty() && binding.spinnerLocale.selectedItemPosition < localeOptions.size && binding.spinnerLocale.visibility == View.VISIBLE) {
+            localeOptions[binding.spinnerLocale.selectedItemPosition].id
+        } else { binding.etLocale.text.toString().trim() }
+        // 试听模式且不填标签时，用音色 id 作为占位，保证下游合成可用
+        val effectiveTag = if (voiceTag.isBlank()) (voice.ifBlank { "preview" }) else voiceTag
+        return config.copy(
+            id = config.id.ifBlank { UUID.randomUUID().toString() },
+            enabled = binding.swEnabled.isChecked,
+            voiceTag = effectiveTag,
+            displayName = binding.etDisplayName.text.toString().trim(),
+            groupName = binding.etGroup.text.toString().trim(),
+            subGroupName = binding.etSubGroup.text.toString().trim(),
+            // 绑定键用业务 pluginId（重导入/重粘贴后不变），无 pluginId 才退回内部 id；
+            // findPlugin/归属判断均双匹配，存量 UUID 绑定不受影响
+            pluginId = selectedPlugin.pluginId.ifBlank { selectedPlugin.id },
+            voice = voice,
+            locale = locale,
+            // 试听文本随配置保存，配置列表的条目试听与插件脚本预览都用它
+            previewText = binding.etPreviewText.text.toString().trim(),
+            speed = binding.seekbarSpeed.progress / 100f,
+            volume = binding.seekbarVolume.progress / 100f,
+            pitch = binding.seekbarPitch.progress / 100f,
+            postSpeed = binding.seekbarPostSpeed.progress / 100f,
+            postVolume = binding.seekbarPostVolume.progress / 100f,
+            postPitch = binding.seekbarPostPitch.progress / 100f,
+            dataJson = buildDataJson(),
+        )
+    }
+
+    override fun onCompatCreateOptionsMenu(menu: android.view.Menu): Boolean {
+        menu.add(0, MENU_SAVE, 0, "保存").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+        return super.onCompatCreateOptionsMenu(menu)
+    }
+
+    override fun onCompatOptionsItemSelected(item: android.view.MenuItem): Boolean {
+        when (item.itemId) {
+            MENU_SAVE -> {
+                val saved = buildConfig()
+                if (saved != null) {
+                    lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { JReadVoiceEngine.saveConfig(this@TtsConfigEditorActivity, saved) }
+                        toastOnUi("已保存: ${saved.voiceTag}")
+                        setResult(RESULT_OK)
+                        finish()
+                    }
+                }
+            }
+            android.R.id.home -> finish()
+        }
+        return super.onCompatOptionsItemSelected(item)
+    }
+
+    override fun onDestroy() {
+        activityDestroyed = true
+        // 先关掉所有已弹窗，避免 WindowLeaked
+        shownDialogs.toList().forEach { runCatching { it.dismiss() } }
+        shownDialogs.clear()
+        editorSession?.close()
+        editorSession = null
+        super.onDestroy()
+        mediaPlayer?.release(); mediaPlayer = null
+    }
+
+    /**
+     * 「声音插件」下拉列表适配器。
+     *
+     * 原来用的是系统 [android.R.layout.simple_spinner_dropdown_item]，展开后每行就是一条纯文字，
+     * 行与行之间没有底色也没有边界，插件一多就全糊成一片分不清哪个是哪个。
+     * 这里只重写 [getDropDownView]：展开时每行渲染成一张卡片，和配置列表、
+     * "更换插件"弹窗保持同一套卡片视觉；收起状态仍走 ArrayAdapter 默认逻辑（单行纯文本），
+     * 因为 Spinner 自身已经有 spinner_border 描边，再套卡片会显得重复且把控件撑高。
+     */
+    private inner class PluginSpinnerAdapter(
+        context: Context,
+        private val labels: List<String>,
+        private val plugins: List<JReadVoiceEngine.VoicePlugin>
+    ) : ArrayAdapter<String>(context, R.layout.item_spinner_plugin_selected, labels) {
+
+        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val view = convertView ?: LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_spinner_plugin_dropdown, parent, false)
+            view.findViewById<TextView>(R.id.tv_spin_plugin_name).text =
+                labels.getOrNull(position).orEmpty()
+            // 第 0 项是"单项直连/不使用插件"，没有对应插件对象，副行留空
+            val plugin = if (position > 0) plugins.getOrNull(position - 1) else null
+            val sub = plugin?.let {
+                listOf(it.author, it.version).filter { v -> v.isNotBlank() }.joinToString(" | ")
+            }.orEmpty()
+            view.findViewById<TextView>(R.id.tv_spin_plugin_sub).apply {
+                text = sub
+                visibility = if (sub.isBlank()) View.GONE else View.VISIBLE
+            }
+            return view
+        }
+    }
+}

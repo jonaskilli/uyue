@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item
+        android:id="@+id/menu_group_top"
+        android:title="@string/to_top" />
+
+    <item
+        android:id="@+id/menu_group_up"
+        android:title="上移一组" />
+
+    <item
+        android:id="@+id/menu_group_down"
+        android:title="下移一组" />
+
+    <item
+        android:id="@+id/menu_group_bottom"
+        android:title="@string/to_bottom" />
+
+    <item
+        android:id="@+id/menu_group_rename"
+        android:title="重命名分组" />
+
+    <item
+        android:id="@+id/menu_group_add_rule"
+        android:title="在此分组新建规则" />
+
+    <item
+        android:id="@+id/menu_group_del"
+        android:title="删除分组及组内规则" />
+
+</menu>

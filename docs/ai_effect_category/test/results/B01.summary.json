@@ -1,0 +1,14 @@
+{
+ "category": "B01",
+ "name": "枪械操作",
+ "domain": "B",
+ "effectCount": 101,
+ "paragraphs": 3708,
+ "blocked_common": 1,
+ "blocked_classify": 2978,
+ "blocked_block": 47,
+ "matched": 2,
+ "no_effect": 680,
+ "seconds": 0.1,
+ "finishedAt": "2026-09-08 10:23:35"
+}

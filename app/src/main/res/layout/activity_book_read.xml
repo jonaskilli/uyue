@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!-- 正文区域：顶部为可选的 AI 图片（与朗读界面同源），下方为正常阅读正文 -->
+    <LinearLayout
+        android:id="@+id/ll_read_content"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <!-- 尺寸由代码按朗读界面的「图片宽度」设置计算，宽高比 240:340 -->
+        <androidx.appcompat.widget.AppCompatImageView
+            android:id="@+id/read_ai_image"
+            android:layout_width="240dp"
+            android:layout_height="340dp"
+            android:layout_gravity="center_horizontal"
+            android:adjustViewBounds="false"
+            android:contentDescription="@string/read_aloud_image_in_read_page"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
+
+        <io.legado.app.ui.book.read.page.ReadView
+            android:id="@+id/read_view"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+
+    <View
+        android:id="@+id/text_menu_position"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="invisible" />
+
+    <ImageView
+        android:id="@+id/cursor_left"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:contentDescription="@string/select_start"
+        android:src="@drawable/ic_cursor_left"
+        android:visibility="invisible" />
+
+    <ImageView
+        android:id="@+id/cursor_right"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:contentDescription="@string/select_end"
+        android:src="@drawable/ic_cursor_right"
+        android:visibility="invisible" />
+
+    <io.legado.app.ui.book.read.ReadMenu
+        android:id="@+id/read_menu"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <io.legado.app.ui.book.read.SearchMenu
+        android:id="@+id/search_menu"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <View
+        android:id="@+id/navigation_bar"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:background="@color/background_menu"
+        android:layout_gravity="bottom" />
+
+</FrameLayout>

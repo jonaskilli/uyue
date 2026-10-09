@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 插件编辑器独有的菜单项；保存/搜索/折叠/格式化等共用项在 menu/code_editor.xml -->
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/menu_run"
+        android:title="@string/plugin_debug"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_plugin_meta"
+        android:title="@string/plugin_meta"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_plugin_vars"
+        android:title="@string/plugin_vars"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_plugin_preview_ui"
+        android:title="@string/plugin_preview_ui"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_plugin_audio_params"
+        android:title="@string/plugin_audio_params"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_clear_data"
+        android:title="@string/plugin_clear_data"
+        app:showAsAction="never" />
+
+</menu>

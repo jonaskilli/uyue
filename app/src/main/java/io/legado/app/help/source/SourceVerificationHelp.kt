@@ -1,0 +1,140 @@
+package io.legado.app.help.source
+
+import io.legado.app.constant.AppLog
+import io.legado.app.data.entities.BaseSource
+import io.legado.app.exception.NoStackTraceException
+import io.legado.app.help.CacheManager
+import io.legado.app.help.IntentData
+import io.legado.app.help.config.AppConfig
+import io.legado.app.ui.association.VerificationCodeActivity
+import io.legado.app.ui.browser.WebViewActivity
+import io.legado.app.utils.isMainThread
+import io.legado.app.utils.startActivity
+import splitties.init.appCtx
+import java.util.concurrent.locks.LockSupport
+import kotlin.time.Duration.Companion.minutes
+
+/**
+ * 源验证
+ */
+object SourceVerificationHelp {
+
+    private val waitTime = 1.minutes.inWholeNanoseconds
+
+    private fun getVerificationResultKey(source: BaseSource) =
+        getVerificationResultKey(source.getKey())
+
+    private fun getVerificationResultKey(sourceKey: String) = "${sourceKey}_verificationResult"
+
+    /**
+     * 获取书源验证结果
+     * 图片验证码 防爬 滑动验证码 点击字符 等等
+     */
+    @Synchronized
+    fun getVerificationResult(
+        source: BaseSource?,
+        url: String,
+        title: String,
+        useBrowser: Boolean,
+        refetchAfterSuccess: Boolean = true,
+        html: String? = null
+    ): Pair<String, String> {
+        source
+            ?: throw NoStackTraceException("getVerificationResult parameter source cannot be null")
+        require(url.length < 64 * 1024) { "getVerificationResult parameter url too long" }
+        check(!isMainThread) { "getVerificationResult must be called on a background thread" }
+        // 总开关（书源管理右上角「禁止弹出验证」）：开了就一个都不弹，
+        // 让需要验证码的源直接失败，而不是弹窗打断搜索/阅读。
+        if (AppConfig.disableSourceVerification) {
+            throw NoStackTraceException("已开启「禁止弹出验证」，跳过书源验证")
+        }
+
+        clearResult(source.getKey())
+
+        if (!useBrowser) {
+            appCtx.startActivity<VerificationCodeActivity> {
+                putExtra("imageUrl", url)
+                putExtra("sourceOrigin", source.getKey())
+                putExtra("sourceName", source.getTag())
+                putExtra("sourceType", source.getSourceType())
+                IntentData.put(getVerificationResultKey(source), Thread.currentThread())
+            }
+        } else {
+            startBrowser(source, url, title, true, refetchAfterSuccess, html)
+        }
+
+        var waitUserInput = false
+        while (getResult(source.getKey()) == null) {
+            if (!waitUserInput && html == null) {
+                AppLog.putDebug("等待返回验证结果...")
+                waitUserInput = true
+            }
+            LockSupport.parkNanos(this, waitTime)
+        }
+        val result = getResult(source.getKey()) ?: throw NoStackTraceException("验证结果为空")
+        clearResult(source.getKey())
+        if (result.second.isEmpty()) throw NoStackTraceException("验证结果为空")
+        return result
+    }
+
+    /**
+     * 启动内置浏览器
+     * @param saveResult 保存网页源代码到数据库
+     */
+    fun startBrowser(
+        source: BaseSource?,
+        url: String,
+        title: String,
+        saveResult: Boolean? = false,
+        refetchAfterSuccess: Boolean? = true,
+        html: String? = null,
+        videoMode: Boolean = false,
+        /** 视频模式会话预热地址：先加载它把源站会话 cookie 种进全局 WebView CookieManager，再加载真正的播放页 */
+        preloadUrl: String? = null
+    ) {
+        source ?: throw NoStackTraceException("startBrowser parameter source cannot be null")
+        require(url.length < 64 * 1024) { "startBrowser parameter url too long" }
+        // 只有「验证用途」的调用会被总开关拦下（saveResult=true 表示要把网页结果回传给书源）。
+        // 视频播放走的是 videoMode=true 且 saveResult=false，属于播放而非验证，必须放行。
+        if (saveResult == true && AppConfig.disableSourceVerification) {
+            throw NoStackTraceException("已开启「禁止弹出验证」，跳过书源验证")
+        }
+        appCtx.startActivity<WebViewActivity> {
+            putExtra("title", title)
+            putExtra("url", url)
+            putExtra("sourceOrigin", source.getKey())
+            putExtra("sourceName", source.getTag())
+            putExtra("sourceType", source.getSourceType())
+            putExtra("sourceVerificationEnable", saveResult)
+            putExtra("refetchAfterSuccess", refetchAfterSuccess)
+            putExtra("html", html)
+            putExtra("videoMode", videoMode)
+            putExtra("preloadUrl", preloadUrl)
+            IntentData.put(getVerificationResultKey(source), Thread.currentThread())
+        }
+    }
+
+
+    fun checkResult(sourceKey: String) {
+        getResult(sourceKey) ?: setResult(sourceKey, "")
+        val thread = IntentData.get<Thread>(getVerificationResultKey(sourceKey))
+        LockSupport.unpark(thread)
+    }
+
+    fun setResult(sourceKey: String, result: String, url: String = "") {
+        CacheManager.putMemory(getVerificationResultKey(sourceKey), (url to result))
+    }
+
+    fun getResult(sourceKey: String): Pair<String, String>? {
+        val pair = CacheManager.getFromMemory(getVerificationResultKey(sourceKey)) as? Pair<*, *>
+            ?: return null
+        if (pair.first is String && pair.second is  String) {
+            return pair.first as String to pair.second as String
+        }
+        return null
+    }
+
+    fun clearResult(sourceKey: String) {
+        CacheManager.delete(getVerificationResultKey(sourceKey))
+    }
+}

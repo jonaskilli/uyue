@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/root_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    tools:context=".ui.soundeffect.SoundEffectRuleEditActivity">
+
+    <io.legado.app.ui.widget.TitleBar
+        android:id="@+id/title_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:contentInsetStartWithNavigation="0dp"
+        app:displayHomeAsUp="true"
+        app:title="编辑音效规则" />
+
+    <io.legado.app.ui.widget.NoChildScrollNestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="10dp">
+
+            <io.legado.app.ui.widget.text.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="规则名称">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_name"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <io.legado.app.ui.widget.text.TextInputLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="所属分组">
+
+                    <io.legado.app.lib.theme.view.ThemeEditText
+                        android:id="@+id/et_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:focusable="false"
+                        android:focusableInTouchMode="false"
+                        tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+                </io.legado.app.ui.widget.text.TextInputLayout>
+
+                <ImageView
+                    android:id="@+id/iv_select_group"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:layout_marginStart="4dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="选择分组"
+                    android:padding="6dp"
+                    android:src="@drawable/ic_arrow_drop_down"
+                    app:tint="@color/primaryText" />
+
+            </LinearLayout>
+
+            <io.legado.app.ui.widget.text.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="匹配（要被替换的文字）">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_pattern"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="top"
+                    android:minLines="2"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <io.legado.app.lib.theme.view.ThemeCheckBox
+                    android:id="@+id/cb_use_regex"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="使用正则"
+                    tools:ignore="TouchTargetSizeCheck" />
+
+                <io.legado.app.lib.theme.view.ThemeCheckBox
+                    android:id="@+id/cb_enabled"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="启用"
+                    tools:ignore="TouchTargetSizeCheck" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="top|center_vertical"
+                android:orientation="horizontal">
+
+                <io.legado.app.ui.widget.text.TextInputLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="替换为（音效标记，例如 (打雷音效)）">
+
+                    <io.legado.app.lib.theme.view.ThemeEditText
+                        android:id="@+id/et_replacement"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="top"
+                        android:minLines="2"
+                        tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+                </io.legado.app.ui.widget.text.TextInputLayout>
+
+                <!-- 试听「替换为」中的音效标记，多个按顺序播放 -->
+                <androidx.appcompat.widget.AppCompatImageView
+                    android:id="@+id/iv_play_effect"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:layout_marginStart="4dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="试听音效"
+                    android:padding="8dp"
+                    android:src="@drawable/ic_play_24dp"
+                    android:tint="@color/primaryText"
+                    tools:ignore="TouchTargetSizeCheck" />
+
+            </LinearLayout>
+
+            <io.legado.app.ui.widget.text.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:hint="测试文本">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_test_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="top"
+                    android:minLines="3"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
+
+            <io.legado.app.ui.widget.text.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="替换结果">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_replace_result"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:enabled="false"
+                    android:gravity="top"
+                    android:minLines="3"
+                    android:textColor="@color/secondaryText"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
+
+        </LinearLayout>
+    </io.legado.app.ui.widget.NoChildScrollNestedScrollView>
+
+</LinearLayout>

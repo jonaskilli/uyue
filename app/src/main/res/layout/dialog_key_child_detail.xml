@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 恢复密钥：子项（单个 API）详情。顶部信息，下方一行四个复制按钮 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingTop="14dp"
+    android:paddingBottom="16dp">
+
+    <TextView
+        android:id="@+id/tv_detail_info"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="14sp"
+        android:lineSpacingExtra="4dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:layout_marginBottom="8dp"
+        android:text="复制"
+        android:textSize="13sp"
+        android:alpha="0.55" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_detail_endpoint"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="4dp"
+            android:minWidth="0dp"
+            android:minHeight="34dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="接口"
+            android:textSize="12sp"
+            android:includeFontPadding="false"
+            android:focusable="false" />
+
+        <Button
+            android:id="@+id/btn_detail_model"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="4dp"
+            android:minWidth="0dp"
+            android:minHeight="34dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="模型"
+            android:textSize="12sp"
+            android:includeFontPadding="false"
+            android:focusable="false" />
+
+        <Button
+            android:id="@+id/btn_detail_key"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="4dp"
+            android:minWidth="0dp"
+            android:minHeight="34dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="密钥"
+            android:textSize="12sp"
+            android:includeFontPadding="false"
+            android:focusable="false" />
+
+        <Button
+            android:id="@+id/btn_detail_all"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:minWidth="0dp"
+            android:minHeight="34dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:text="全部"
+            android:textSize="12sp"
+            android:includeFontPadding="false"
+            android:focusable="false" />
+
+    </LinearLayout>
+
+</LinearLayout>

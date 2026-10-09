@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <item
+        android:id="@+id/menu_add_rule"
+        android:icon="@drawable/ic_add"
+        android:title="新建规则"
+        app:showAsAction="always"
+        tools:ignore="AlwaysShowAction" />
+
+    <item
+        android:id="@+id/menu_add_sound_effect"
+        android:icon="@drawable/ic_add"
+        android:title="新增音效"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_batch_add_sound_effect"
+        android:icon="@drawable/ic_add"
+        android:title="批量添加音效"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_add_group"
+        android:icon="@drawable/ic_add"
+        android:title="新建分组"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_import_local"
+        android:icon="@drawable/ic_import"
+        android:title="从本地文件导入"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_export"
+        android:icon="@drawable/ic_export"
+        android:title="导出当前规则文件"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_expand_all"
+        android:title="展开全部分组"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_collapse_all"
+        android:title="折叠全部分组"
+        app:showAsAction="never" />
+
+</menu>

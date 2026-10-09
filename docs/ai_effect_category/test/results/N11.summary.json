@@ -1,0 +1,14 @@
+{
+ "category": "N11",
+ "name": "倾倒灌注",
+ "domain": "N",
+ "effectCount": 49,
+ "paragraphs": 4535,
+ "blocked_common": 0,
+ "blocked_classify": 2506,
+ "blocked_block": 35,
+ "matched": 6,
+ "no_effect": 1988,
+ "seconds": 0.1,
+ "finishedAt": "2026-09-08 10:23:37"
+}

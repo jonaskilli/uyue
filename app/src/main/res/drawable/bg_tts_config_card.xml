@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  卡片背景 = 卡片形状(shape_tts_config_card) + 按压水波纹。
+  水波纹用 mask 裁剪到同样的圆角矩形里，按下时不会出现方形的水波纹方块。
+-->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/colorControlHighlight">
+
+    <item android:drawable="@drawable/shape_tts_config_card" />
+
+    <item android:id="@android:id/mask">
+        <shape android:shape="rectangle">
+            <solid android:color="#ffffffff" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+
+</ripple>

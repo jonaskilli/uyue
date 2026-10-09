@@ -1,0 +1,14 @@
+{
+ "category": "K07",
+ "name": "通讯广播",
+ "domain": "K",
+ "effectCount": 109,
+ "paragraphs": 4059,
+ "blocked_common": 2,
+ "blocked_classify": 3091,
+ "blocked_block": 214,
+ "matched": 8,
+ "no_effect": 744,
+ "seconds": 0.1,
+ "finishedAt": "2026-09-08 10:23:37"
+}

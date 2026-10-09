@@ -1,0 +1,14 @@
+{
+ "category": "E02",
+ "name": "悲伤哭泣",
+ "domain": "E",
+ "effectCount": 10,
+ "paragraphs": 1688,
+ "blocked_common": 0,
+ "blocked_classify": 1070,
+ "blocked_block": 6,
+ "matched": 2,
+ "no_effect": 610,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

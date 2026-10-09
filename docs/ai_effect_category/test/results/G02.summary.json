@@ -1,0 +1,14 @@
+{
+ "category": "G02",
+ "name": "猫科猛兽",
+ "domain": "G",
+ "effectCount": 20,
+ "paragraphs": 1424,
+ "blocked_common": 1,
+ "blocked_classify": 867,
+ "blocked_block": 0,
+ "matched": 2,
+ "no_effect": 554,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

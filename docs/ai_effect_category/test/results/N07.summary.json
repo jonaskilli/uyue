@@ -1,0 +1,14 @@
+{
+ "category": "N07",
+ "name": "身体接触",
+ "domain": "N",
+ "effectCount": 28,
+ "paragraphs": 2446,
+ "blocked_common": 3,
+ "blocked_classify": 2351,
+ "blocked_block": 0,
+ "matched": 4,
+ "no_effect": 88,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:37"
+}

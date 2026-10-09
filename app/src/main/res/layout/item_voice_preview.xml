@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="20dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="12dp"
+    android:minHeight="48dp"
+    android:background="@android:color/transparent">
+
+    <!-- 发音人名称：点击整行区域即选中该发音人（由 ListView 的 item 点击处理） -->
+    <TextView
+        android:id="@+id/tv_voice_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:textSize="15sp"
+        android:textColor="@color/primaryText" />
+
+    <!-- 试听按钮：focusable=false 保证不抢 ListView 的 item 焦点，
+         点击事件在 Adapter 内单独处理，不会关闭弹窗 -->
+    <TextView
+        android:id="@+id/btn_preview_voice"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/preview_voice"
+        android:textSize="13sp"
+        android:textColor="?attr/colorAccent"
+        android:focusable="false"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:background="?attr/selectableItemBackground" />
+
+</LinearLayout>

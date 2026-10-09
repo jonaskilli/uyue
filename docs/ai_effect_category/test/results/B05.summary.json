@@ -1,0 +1,14 @@
+{
+ "category": "B05",
+ "name": "护甲盾牌",
+ "domain": "B",
+ "effectCount": 10,
+ "paragraphs": 1351,
+ "blocked_common": 1,
+ "blocked_classify": 1174,
+ "blocked_block": 2,
+ "matched": 0,
+ "no_effect": 174,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}

@@ -1,0 +1,14 @@
+{
+ "category": "E11",
+ "name": "视觉异常",
+ "domain": "E",
+ "effectCount": 6,
+ "paragraphs": 2286,
+ "blocked_common": 0,
+ "blocked_classify": 2212,
+ "blocked_block": 1,
+ "matched": 0,
+ "no_effect": 73,
+ "seconds": 0.0,
+ "finishedAt": "2026-09-08 10:23:35"
+}
