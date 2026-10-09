@@ -582,8 +582,11 @@ object ProxyServer {
                     CnbClient.chatCompletion(body).use { resp ->
                         val text = resp.body!!.string()
                         val api = org.json.JSONObject(text)
+                        // 不能用 getString：org.json 遇到 content 为 JSON null 会返回
+                        // 字面量 "null"（JSON.toString(NULL)="null"），混进正文用户就看到
+                        // 回复里全是 nullnullnull。义务用 optString：null/缺失都归空串
                         val c = api.getJSONArray("choices").getJSONObject(0)
-                            .getJSONObject("message").getString("content")
+                            .optJSONObject("message")?.optString("content").orEmpty()
                         c to null
                     }
                 }
@@ -2425,9 +2428,11 @@ object ProxyServer {
         val t = text.trim()
         if (t.startsWith("{")) {
             runCatching {
+                // optString 而非 getString：content 为 JSON null 时 getString 会返回
+                // 字面量 "null"（org.json 的坑），混进正文就成了用户看到的 nullnullnull
                 return org.json.JSONObject(t)
                     .getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content")
+                    .optJSONObject("message")?.optString("content").orEmpty()
             }.onFailure {
                 LogStore.w("CNB", "JSON 解析失败，改按 SSE 兜底解析: ${it.message}")
             }

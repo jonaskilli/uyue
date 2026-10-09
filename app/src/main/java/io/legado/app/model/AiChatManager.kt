@@ -54,6 +54,32 @@ object AiChatManager {
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
     /**
+     * 清理回复文本里混入的 null 字面量。
+     *
+     * 部分模型/上游在流式分片里 content 为 JSON null，个别解析路径会把它转成
+     * 字符串 "null" 拼进正文——表现为回复开头一长串 nullnullnull、句尾孤零零
+     * 一个 null（[RoleChatActivity] 实际截图的规律）。正常中文对话里 "null"
+     * 作为独立词成串出现只可能是这种解析残渣，直接清掉；普通英文单词
+     * （如 nullable）不受影响。
+     *
+     * public：界面在流式打字机结束后还要对缓冲整体清理一次（跨分片拼接的
+     * null 单看每个分片认不出来），历史读取时也用它把旧会话里的残渣修掉
+     * ——残渣留在上下文里会被模型当成正常格式学着输出，越聊越多。
+     */
+    fun sanitizeReply(text: String): String {
+        if (!text.contains("null")) return text
+        return text
+            // 正文中间的成串 null（nullnullnull / llnullnullnull，中间可夹空白）。
+            // 刻意不加 \b：残渣常紧贴在前一个字符后面，加了边界反而认不出来；
+            // 误伤面也极小——"nullable" 这类词里 null 只出现一次，{2,} 要求成串
+            .replace(Regex("(?:null\\s*){2,}"), "")
+            // 开头/结尾孤立的 null（对应首尾各一个 finish/role 分片）
+            .replace(Regex("^(?:\\s*null\\s*)+"), "")
+            .replace(Regex("(?:\\s*null\\s*)+$"), "")
+            .trim()
+    }
+
+    /**
      * 独立客户端（与 BgmAIService 同款，挂混元太极本地网关拦截器）。
      * 流式回复总时长不可预估，禁用 callTimeout；readTimeout 是单次读取超时，
      * 只要两个增量之间间隔不超过它即视为存活。
@@ -154,7 +180,10 @@ object AiChatManager {
                         val deltaObj = choices.optJSONObject(0)?.optJSONObject("delta")
                         deltaObj?.optString("content").orEmpty()
                     }.getOrDefault("")
-                    if (delta.isNotEmpty()) {
+                    // 分片恰好是 null 字面量：上游把 JSON null 的 content 转成了字符串，
+                    // 不是正文。思考型模型的 reasoning 阶段与结尾 finish 分片都长这样，
+                    // 不丢的话就是用户看到的开头一串 null + 句尾一个 null
+                    if (delta.isNotEmpty() && delta.trim() != "null") {
                         full.append(delta)
                         callback.onDelta(delta)
                     }
@@ -163,14 +192,15 @@ object AiChatManager {
                     val obj = runCatching { JSONObject(line) }.getOrNull() ?: continue
                     val content = obj.optJSONArray("choices")?.optJSONObject(0)
                         ?.optJSONObject("message")?.optString("content").orEmpty()
-                    if (content.isNotEmpty()) {
+                    // 同上：整段回复为 null 字面量是解析残渣，丢弃让上层换下一组接口重试
+                    if (content.isNotEmpty() && content.trim() != "null") {
                         full.append(content)
                         callback.onDelta(content)
                     }
                     break
                 }
             }
-            val text = full.toString()
+            val text = sanitizeReply(full.toString())
             if (text.isBlank()) throw RuntimeException("AI 未返回任何内容（流式无增量）")
             return text
         } finally {
@@ -247,7 +277,9 @@ object AiChatManager {
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 val role = o.optString("role")
-                val content = o.optString("content")
+                // 旧会话里可能已经存进了 null 残渣：读出来顺手清掉。
+                // 不清的话残渣会一直留在上下文里，模型学着输出 null，越聊越多
+                val content = sanitizeReply(o.optString("content"))
                 if (role.isBlank() || content.isBlank()) continue
                 list.add(ChatMessage(role, content, o.optLong("ts")))
             }

@@ -275,7 +275,9 @@ class RoleChatActivity : BaseActivity<ActivityRoleChatBinding>() {
         generating = false
         binding.tvSend.alpha = 1f
         binding.tvRoleName.text = characterName
-        showText(received.toString())
+        // 缓冲里可能残留跨分片拼出来的 null 字面量（单看每个分片认不出来），
+        // 打字机阶段显示什么就随它去，最终上屏必须清理一次
+        showText(AiChatManager.sanitizeReply(received.toString()))
     }
 
     private fun showText(text: String) {
