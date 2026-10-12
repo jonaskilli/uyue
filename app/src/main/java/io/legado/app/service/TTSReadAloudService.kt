@@ -277,6 +277,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         override fun onDone(s: String?) {
             LogUtils.d(TAG, "onDone synthesis utteranceId:$s")
+            // 【诊断日志】回调到达（10-12 加，只记录不改逻辑）
+            AppLog.putDebug("TTS回调 onDone id=$s")
             s ?: return
             val targetFile = synthesisTargetFiles.remove(s)
             val completer = synthesisCompleters.remove(s)
@@ -291,6 +293,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         override fun onError(utteranceId: String?, errorCode: Int) {
             LogUtils.d(TAG, "onError utteranceId:$utteranceId errorCode:$errorCode")
+            // 【诊断日志】回调到达（10-12 加，只记录不改逻辑）
+            AppLog.putDebug("TTS回调 onError id=$utteranceId code=$errorCode")
             synthesisTargetFiles.remove(utteranceId)
             val completer = synthesisCompleters.remove(utteranceId)
             completer?.complete(null)
@@ -341,6 +345,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 输给并发调用（与 ① 之间只隔一瞬）：改为等对方那笔
             return withContext(NonCancellable) { winner.await() }
         }
+        // 【诊断日志】真正提交引擎的一笔（10-12 加，只记录不改逻辑）
+        AppLog.putDebug("TTS提交引擎 index=$index id=$utteranceId text=${text.take(20)}")
 
         // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
         // 这样某一方被 cancel 不会掐断这一笔——否则 mine 永不 complete，等它的人会永久挂住。
@@ -408,6 +414,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 AppLog.put("tts合成提交失败(attempt=$attempt)\n${it.localizedMessage}", it, true)
                 TextToSpeech.ERROR
             }
+            // 【诊断日志】提交结果（10-12 加，只记录不改逻辑）：
+            // 用来回答「超时那一刻引擎到底收到请求没有」——SUCCESS 表示已交给引擎，
+            // 之后若既无 onDone/onError 又超时，就是引擎侧没回调；ERROR 则是提交就失败。
+            AppLog.putDebug(
+                "TTS提交结果 id=$currentUtteranceId attempt=$attempt result=" +
+                    (if (result == TextToSpeech.SUCCESS) "SUCCESS" else "ERROR($result)") +
+                    " text=${text.take(20)}"
+            )
 
             val synthesizedFile = if (result == TextToSpeech.SUCCESS) {
                 try {
@@ -420,7 +434,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         tempFile
                     } else {
                         clearTTS()
-                        AppLog.put("TTS合成超时，引擎无响应，已清除实例待重试: $currentUtteranceId")
+                        AppLog.put(
+                            "TTS合成超时，引擎无响应，已清除实例待重试: $currentUtteranceId" +
+                                "（提交时 result 见上一条「TTS提交结果」；到此刻仍无 onDone/onError）"
+                        )
                         null
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
