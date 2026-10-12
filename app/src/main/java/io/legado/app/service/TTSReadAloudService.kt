@@ -51,6 +51,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
@@ -62,6 +63,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 本地朗读（系统TTS合成 + 转发器播放/缓存架构）
@@ -75,6 +77,29 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     companion object {
         private const val TAG = "TTSReadAloudService"
         private const val PRELOAD_TRIGGER_REMAIN = 5
+
+        /**
+         * 合成并发链数（10-12 用户实报「翻页后等新音频要等好久」）。
+         *
+         * 实测（UTTS debug 日志）：单段端到端约 2 秒（规则 0.1~0.3s + 取音频 1.5~3.5s），
+         * 而 [play] 的合成循环是**一段一段串行**做的 ⇒ 翻页到未合成的一页要等
+         * 「段数 × 2 秒」（实测 15 段那页等约 26 秒）。
+         *
+         * 改法：段落分给 N 条并发链领号去合成，**播放顺序不变**——
+         * 结果仍由收集方按下标顺序 addMediaItem，所以第 0 段照旧最先入队、最先开播，
+         * 只是后面的段落并行做，翻页等待约除以 N。
+         *
+         * 取 2 是保守值：引擎侧请求本身会排队，链数开太大只会把队列堆更长、
+         * 并放大「又一个请求超时」的概率。要提速优先调这个常量。
+         */
+        private const val SYNTH_CONCURRENCY = 2
+
+        /**
+         * 「该段处理过、但没有可用音频」的占位标记。
+         * 不能用 null 当标记：synthFiles 是 ConcurrentHashMap，**不允许 null 值**（会抛 NPE）。
+         * 收集方见到它即跳过该段（静音兜底已在 fetch 里做掉）。
+         */
+        private val NO_AUDIO = File("no-audio")
     }
 
     // ====== TTS 核心 ======
@@ -142,6 +167,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 预加载走自己的 utteranceId 也会撞上同一段，按「缓存文件」而非 utteranceId 做键才能一起盖住。
      */
     private val inFlightSyntheses = ConcurrentHashMap<String, CompletableDeferred<File?>>()
+    /**
+     * 并发合成产物暂存（10-12 流水线）：段落下标 → 合成好的文件。
+     * 合成可以乱序完成，**入队必须按序**，所以先落这里、由收集方按下标顺序取。
+     * 只由 [play] 里的收集协程读写（都在 Main 上），用完即删。
+     */
+    private val synthFiles = ConcurrentHashMap<Int, File>()
     /** 主合成协程 */
     private var synthesisTask: Job? = null
     /** 跨章预加载协程 */
@@ -547,61 +578,110 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         val chapterTitle = textChapter?.title ?: textChapter?.chapter?.title ?: ""
         val endIndex = if (singleParagraphMode) (nowSpeak + 1).coerceAtMost(contentList.size) else contentList.size
+        // 合成流水线（10-12 用户实报「翻页后等新音频要等好久」）：
+        //   原来 for(i in nowSpeak until endIndex) 是**一段一段串行**合成 ⇒ 翻到未合成的一页
+        //   要等「段数 × 单段耗时」（实测单段约 2 秒，那页 15 段等了约 26 秒）。
+        //   现在把段落分给 SYNTH_CONCURRENCY 条链并发合成，结果先落 synthFiles；
+        //   收集方再**按下标顺序** addMediaItem ⇒ 开播时机、播放顺序与串行版逐一相同，
+        //   只是后面的段落并行做，翻页等待约除以链数。
+        //   播放顺序绝不能乱（下标即播放顺序），所以只有「合成」并发，「入队」不并发。
         synthesisTask = lifecycleScope.launch(Dispatchers.IO) {
             var needPreload = false
-            for (i in nowSpeak until endIndex) {
-                ensureActive()
+            coroutineScope {
+                val next = AtomicInteger(nowSpeak)
 
-                val rawText = getRawText(i)
-                val speakText = applyTtsScripts(rawText)
-                val isEndMarker = i == contentList.lastIndex
-                val file = if (isEndMarker || speakText.matches(AppPattern.notReadAloudRegex)) {
-                    if (isEndMarker) {
-                        AppLog.putDebug("章节末尾静音占位符，使用静音文件")
-                    }
-                    val fileName = getFileNameHelper(chapterTitle, rawText, i)
-                    if (!hasSpeakFile(fileName)) createSilentSound(fileName)
-                    getSpeakFileAsMd5(fileName)
-                } else {
-                    val cacheFile = getCacheFileForText(rawText, i, chapterTitle)
-                    if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
-                        AppLog.putDebug("TTS缓存命中: ${cacheFile.name}")
-                        cacheFile
+                suspend fun fetch(i: Int): File? {
+                    val rawText = getRawText(i)
+                    val speakText = applyTtsScripts(rawText)
+                    val isEndMarker = i == contentList.lastIndex
+                    return if (isEndMarker || speakText.matches(AppPattern.notReadAloudRegex)) {
+                        if (isEndMarker) {
+                            AppLog.putDebug("章节末尾静音占位符，使用静音文件")
+                        }
+                        val fileName = getFileNameHelper(chapterTitle, rawText, i)
+                        if (!hasSpeakFile(fileName)) createSilentSound(fileName)
+                        getSpeakFileAsMd5(fileName)
                     } else {
-                        try {
-                            synthesizeSingle(i) ?: run {
-                                AppLog.put("TTS合成失败，使用静音文件占位: index=$i")
-                                val fileName = getFileNameHelper(chapterTitle, rawText, i)
-                                if (!hasSpeakFile(fileName)) createSilentSound(fileName)
-                                getSpeakFileAsMd5(fileName)
-                            }
-                        } catch (e: Exception) {
-                            when (e) {
-                                is CancellationException -> throw e
-                                else -> {
-                                    AppLog.put("TTS合成异常，使用静音文件占位: index=$i, ${e.message}")
+                        val cacheFile = getCacheFileForText(rawText, i, chapterTitle)
+                        if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
+                            AppLog.putDebug("TTS缓存命中: ${cacheFile.name}")
+                            cacheFile
+                        } else {
+                            try {
+                                synthesizeSingle(i) ?: run {
+                                    AppLog.put("TTS合成失败，使用静音文件占位: index=$i")
                                     val fileName = getFileNameHelper(chapterTitle, rawText, i)
                                     if (!hasSpeakFile(fileName)) createSilentSound(fileName)
                                     getSpeakFileAsMd5(fileName)
+                                }
+                            } catch (e: Exception) {
+                                when (e) {
+                                    is CancellationException -> throw e
+                                    else -> {
+                                        AppLog.put("TTS合成异常，使用静音文件占位: index=$i, ${e.message}")
+                                        val fileName = getFileNameHelper(chapterTitle, rawText, i)
+                                        if (!hasSpeakFile(fileName)) createSilentSound(fileName)
+                                        getSpeakFileAsMd5(fileName)
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                if (file != null && file.exists()) {
-                    withContext(Dispatchers.Main) {
-                        val mediaItem = MediaItem.Builder()
-                            .setMediaId("$i")
-                            .setUri(Uri.fromFile(file))
-                            .build()
-                        exoPlayer.addMediaItem(mediaItem)
+                // 并发链：用领号器动态分工（谁先做完谁领下一段），保证各链负载均衡。
+                // 注意这里**不做入队**——入队统一交给下面的收集方，顺序才不会乱。
+                // finally 兜底写回结果：万一某条链异常，收集方也能拿到值往前走，不会卡死。
+                val chains = List(SYNTH_CONCURRENCY) {
+                    launch(Dispatchers.Default) {
+                        while (true) {
+                            ensureActive()
+                            val i = next.getAndIncrement()
+                            if (i >= endIndex) break
+                            try {
+                                synthFiles[i] = fetch(i) ?: NO_AUDIO
+                            } finally {
+                                // fetch 自己已经吞掉常见异常并给静音兜底；这里只保证「有产出」
+                                if (!synthFiles.containsKey(i)) synthFiles[i] = NO_AUDIO
+                            }
+                        }
                     }
                 }
-
-                if (!singleParagraphMode && contentList.size - i <= PRELOAD_TRIGGER_REMAIN) {
-                    needPreload = true
+                // 收集方：严格按 nowSpeak..endIndex-1 顺序入队——没轮到的下标就等着，
+                // 绝不越过（越过=播放顺序错）。轮询 20ms 一跳：单段合成在秒级，
+                // 这点延迟看不出来；好处是某条链异常时不会永久挂住。
+                val collector = launch(Dispatchers.Main) {
+                    var idx = nowSpeak
+                    try {
+                        while (idx < endIndex) {
+                            val f = synthFiles.remove(idx)
+                            if (f === null) {
+                                delay(20) // 还没轮到它做完，等一等（单段在秒级，20ms 可忽略）
+                                continue
+                            }
+                            if (f === NO_AUDIO) {
+                                AppLog.putDebug("index=$idx 无可用音频，跳过该段")
+                                idx++
+                                continue
+                            }
+                            if (f.exists()) {
+                                val mediaItem = MediaItem.Builder()
+                                    .setMediaId("$idx")
+                                    .setUri(Uri.fromFile(f))
+                                    .build()
+                                exoPlayer.addMediaItem(mediaItem)
+                            }
+                            if (!singleParagraphMode && contentList.size - idx <= PRELOAD_TRIGGER_REMAIN) {
+                                needPreload = true
+                            }
+                            idx++
+                        }
+                    } finally {
+                        // 收集结束（含被取消/出错）：撤掉还在跑的链，别让它们继续合成没人要的段落
+                        chains.forEach { it.cancel() }
+                    }
                 }
+                collector.join()
             }
             // 当前章节全部合成并加入播放列表后，再启动预加载，
             // 避免与当前章节末尾争夺同一个 TTS 实例的 FIFO 队列。
