@@ -1,0 +1,45 @@
+name: Compile Check
+
+# 只编译、不出包（10-12 加）：改完 Kotlin 先过这一步（约 3~6 分钟），
+# 绿了再手动触发 Build Uyue Release（17~25 分钟）。
+# 起因：10-12 两次「直接打包才发现编译错」，白烧两轮 17~25 分钟。
+#
+# 与 build.yml 完全同一套环境（Java 21 / Android SDK 36 / local.properties），
+# 只是把 assembleAppRelease 换成「编译 Kotlin + 打包资源」。
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Java 21: app/build.gradle sourceCompatibility/targetCompatibility = VERSION_21
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Android SDK 36 (compileSdk/targetSdk = 36) + build-tools
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 build-tools;36.0.0 platform-tools'
+
+      - name: Init local.properties
+        run: |
+          touch local.properties
+          echo "sdk.dir=$ANDROID_HOME" >> local.properties
+
+      - name: Compile Kotlin (release)
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:compileAppReleaseKotlin :app:processAppReleaseResources \
+            --build-cache --parallel --daemon --warning-mode all
