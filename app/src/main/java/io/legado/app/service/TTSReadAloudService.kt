@@ -63,6 +63,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -99,7 +100,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 不能用 null 当标记：synthFiles 是 ConcurrentHashMap，**不允许 null 值**（会抛 NPE）。
          * 收集方见到它即跳过该段（静音兜底已在 fetch 里做掉）。
          */
-        private val NO_AUDIO = File("no-audio")
+        private val NO_AUDIO = File("NO_AUDIO")
     }
 
     // ====== TTS 核心 ======
@@ -175,6 +176,20 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private val synthFiles = ConcurrentHashMap<Int, File>()
     /** 主合成协程 */
     private var synthesisTask: Job? = null
+    /**
+     * 当前这轮合成的「停止领新段」开关（10-12 修「提交了却零回调」）。
+     *
+     * 翻页/跳段会 `play()` 重启，原来直接把整条合成链 cancel 掉——
+     * 但**已经交给 TTS 引擎、还在等回调**的那一笔撤不回来：协程没了，没人写缓存、
+     * 也没人记它，于是这一笔就成了「提交成功却零回调」，要等 30 秒超时才被判失败
+     * （真机日志：`Legado15/16/20` 三笔，U阅 侧无 onStart、UTTS 侧连请求都没有）。
+     *
+     * 现在改成：新一轮 `play()` 先把旧开关置 true，旧链**做完手上这一段**（写进缓存，
+     * 下次翻回来直接命中）就自己退出；新链用新开关启动。旧链持有的是自己的那一个实例，
+     * 不会被新一轮复位影响。
+     */
+    @Volatile
+    private var synthStop = AtomicBoolean(false)
     /** 跨章预加载协程 */
     private var preloadJob: Job? = null
 
@@ -373,10 +388,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return withContext(NonCancellable) { winner.await() }
         }
 
-        // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
-        // 这样某一方被 cancel 不会掐断这一笔——否则 mine 永不 complete，等它的人会永久挂住。
-        // 外层 NonCancellable 只为「把子协程启起来」：调用方在 launch 这一瞬被取消，
-        // 也要保证这笔合成有归属、mine 一定被 complete。服务销毁时在 onDestroy 取消它。
+        // ③ 持有者：合成放在服务级 scope 下（不挂在任何调用方的 job 上）
         val job = withContext(NonCancellable) {
             synthScope.launch {
                 val result = try {
@@ -387,13 +399,23 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 mine.complete(result)
             }
         }
-        // 持有者（即提交这一笔的人）可被取消，发给引擎的那笔请求照旧跑完并落缓存
-        return try {
-            job.join()
-            mine.await()
-        } catch (e: CancellationException) {
-            throw e
+        // ⚠️ 持有者的**等待也必须不可取消**（10-12 修「提交了却零回调」）：
+        // 提交一旦发出就撤不回来，若这里被 cancel 直接抛出去，这一笔就成了没人认领的
+        // 「提交成功却零回调」，只能等 30 秒超时（真机日志：Legado15/16/20）。
+        // 不可取消地等完，结果会落进缓存，翻回来直接命中；上层（合成链）随后
+        // 用 stop 开关停止领新段来收尾。
+        // 唯一例外：局部 job 本身异常结束时 join() 会抛——那种情况确实拿不到结果，照实抛。
+        var hardAbort: Throwable? = null
+        val result = withContext(NonCancellable) {
+            try {
+                job.join()
+            } catch (e: Throwable) {
+                hardAbort = e
+            }
+            if (hardAbort != null) null else mine.await()
         }
+        hardAbort?.let { throw it }
+        return result
     }
 
     /**
@@ -567,6 +589,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         //     removeCacheFile()
         // }
 
+        // 先叫停旧合成链：**只让它停止领新段**，手上那一段会跑完并把音频写进缓存。
+        // 不能像原来那样直接 cancel——已交给引擎、还在等回调的那一笔撤不回来，
+        // 会被静默丢掉、等满 30 秒判超时（真机日志 Legado15/16/20 即此）。
+        // 旧链持有的是旧开关实例，这里换成新的不影响它。
+        synthStop.set(true)
+        synthStop = AtomicBoolean(false)
         synthesisTask?.cancel()
         playIndexJob?.cancel()
         // 取消预加载协程，不再继续提交新请求。
@@ -589,6 +617,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             var needPreload = false
             coroutineScope {
                 val next = AtomicInteger(nowSpeak)
+                // 本轮的「停止领新段」开关：旧链各自持有旧实例，新一轮复位不会影响它们
+                val stop = synthStop
 
                 suspend fun fetch(i: Int): File? {
                     val rawText = getRawText(i)
@@ -636,6 +666,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     launch(Dispatchers.Default) {
                         while (true) {
                             ensureActive()
+                            // 被新一轮 play() 叫停：停止领新段自行退出，**不等**（否则会拖慢新一轮）
+                            if (stop.get()) break
                             val i = next.getAndIncrement()
                             if (i >= endIndex) break
                             try {
