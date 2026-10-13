@@ -383,7 +383,7 @@ object ProxyServer {
                 }
                 get("/v1/models") {
                     // 兜底列表：任何异常时仍返回合法 200 JSON，避免客户端报 500。
-                    // gpt-image-2 / gpt-image-1.5 不进列表：免密钥通道使用者太多会明显变慢，
+                    // gpt-image-2 / gpt-image-1.5 / gpt-image-2.5 不进列表：免密钥通道使用者太多会明显变慢，
                     // 隐藏后仍可在客户端手动填模型名调用（识别靠 isStudioGlobalImageModel）。
                     val fallbackJson = """{"object":"list","data":[
                         {"id":"hy3-preview","object":"model","owned_by":"cnb"},
@@ -805,7 +805,7 @@ object ProxyServer {
         return lower.contains("glm-image-hd") || lower.contains("gml-image-hd")
     }
 
-    /** 是否 StudioGlobal 生图模型（免登录）：model 名含 gpt-image（gpt-image-2 / gpt-image-1.5）。 */
+    /** 是否 StudioGlobal 生图模型（免登录）：model 名含 gpt-image（gpt-image-2 / gpt-image-1.5 / gpt-image-2.5）。 */
     private fun isStudioGlobalImageModel(m: String): Boolean {
         val lower = m.lowercase()
         return STUDIO_GLOBAL_IMAGE_MODELS.any { lower.contains(it) }
