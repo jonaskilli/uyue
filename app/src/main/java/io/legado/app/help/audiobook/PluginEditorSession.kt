@@ -147,15 +147,20 @@ class PluginEditorSession(
     }
 
     /**
-     * 在同一 scope 中调用 onListVoices。
+     * 在同一 scope 中调用 getVoices。
+     *
+     * @param strictLocale true 表示 [locale] 是用户显式选中的分类：加载失败直接抛出，
+     * 由上层弹窗展示插件的明确错误，而不是静默回退到其他分类（否则把 locale 当分类开关的
+     * 插件，如本悦读 v12 的 custom=我的克隆，报错后会被公开全量音色顶替显示）。
      */
-    fun listVoices(locale: String): List<VoiceOption> {
+    fun listVoices(locale: String, strictLocale: Boolean = false): List<VoiceOption> {
         val sc = scope ?: return emptyList()
         val uiName = uiObjectName
         val result = runCatching {
-            JReadVoicePluginRuntime.invokeListVoices(sc, uiName, locale)
+            JReadVoicePluginRuntime.invokeListVoices(sc, uiName, locale, strictLocale)
         }.getOrElse {
-            Log.w(TAG, "listVoices failed: plugin=${plugin.name}", it)
+            Log.w(TAG, "listVoices failed: plugin=${plugin.name}, locale=$locale", it)
+            if (strictLocale) throw it
             emptyList()
         }
         Log.d(TAG, "listVoices: plugin=${plugin.name}, locale=$locale, count=${result.size}")

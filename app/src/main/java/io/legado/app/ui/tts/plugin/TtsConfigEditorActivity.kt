@@ -358,13 +358,17 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         lifecycleScope.launch {
             voiceOptions = withContext(Dispatchers.IO) {
                 if (session != null && session.isInitialized) {
-                    loadOrShowError("音色加载失败") { session.listVoices(locale) }
+                    // strictLocale：用户显式选中的分类，加载失败直接弹窗报错，
+                    // 不用其他分类的音色静默顶替（如本悦读 v12 的"我的克隆"报错后被公开全量顶替）
+                    loadOrShowError("音色加载失败") { session.listVoices(locale, strictLocale = true) }
                 } else {
                     val pluginIdx = binding.spinnerPlugin.selectedItemPosition
                     if (pluginIdx <= 0) emptyList()
                     else {
                         val plugin = plugins.getOrNull(pluginIdx - 1) ?: return@withContext emptyList()
-                        loadOrShowError("音色加载失败") { JReadVoicePluginRuntime.listVoices(this@TtsConfigEditorActivity, plugin, locale) }
+                        loadOrShowError("音色加载失败") {
+                            JReadVoicePluginRuntime.listVoices(this@TtsConfigEditorActivity, plugin, locale, strictLocale = true)
+                        }
                     }
                 }
             } ?: emptyList()
