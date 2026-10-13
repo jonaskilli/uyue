@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
+import org.apache.commons.text.StringEscapeUtils
 
 /**
  * 插件变量登录页（移植自 TTS_Server_Android PluginLoginActivity，View 版实现）：
@@ -30,6 +31,10 @@ import kotlin.coroutines.resume
  * - locals.xxx       → localStorage.getItem('xxx')
  * - sessions.xxx     → sessionStorage.getItem('xxx')
  * binding 为 user_input / 空或取值为空时返回空串，由调用方保持原值。
+ *
+ * 顶栏按钮（从左到右）：[UA模式切换] 刷新 保存。
+ * UA 模式默认电脑模式（vars 里 ua=mobile/android 时默认手机模式，ua 为自定义串时作为电脑模式），
+ * 点模式按钮在「电脑模式 / 安卓手机模式」间切换：切换即清缓存重载页面（不动 Cookie，登录态保留）。
  */
 class PluginLoginActivity : Activity() {
 
@@ -45,6 +50,10 @@ class PluginLoginActivity : Activity() {
         private const val UA_PC =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0"
 
+        /** 安卓手机模式 UA（固定值，不随设备系统 UA 波动，行为可预期） */
+        private const val UA_MOBILE =
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36"
+
         /**
          * 改写页面 viewport meta（强制桌面视口，等同浏览器"请求桌面版网站"）：
          * 1) 移除页面自带 meta —— user-scalable=no / maximum-scale=1 会禁用捏合缩放；
@@ -55,6 +64,9 @@ class PluginLoginActivity : Activity() {
          * 3) 不写 initial-scale（交给 overview fit 决定初始缩放），
          *    放开 0.05~10 倍缩放范围 → 可放大、也可缩小回全貌。
          * 4) 末尾派发 resize 事件，让 Chromium 立即按新 viewport 重新布局。
+         *
+         * 注意：只在电脑模式注入（onPageStarted/onPageFinished 按 uaMode 判断）。
+         * 手机模式若也注入，页面会被压成 1200 桌面宽，切了 UA 看起来仍像电脑版。
          */
         private const val DESKTOP_VIEWPORT_WIDTH = 1200
 
@@ -90,7 +102,20 @@ class PluginLoginActivity : Activity() {
 
     private var binding = ""
     private var loginUrl = ""
+    /** UA 模式：pc=电脑模式（默认），mobile=安卓手机模式；顶栏按钮可实时切换 */
+    private var uaMode = "pc"
+    /** 插件 vars 里传入的自定义 UA（既不是 pc 也不是 mobile 时），切换时作为电脑模式使用 */
+    private var customUa: String? = null
     private val scope = MainScope()
+
+    /** 当前模式对应的 UA */
+    private fun currentUa(): String = when (uaMode) {
+        "mobile" -> UA_MOBILE
+        else -> customUa ?: UA_PC
+    }
+
+    /** 模式切换按钮文字：显示点下去会切到的模式 */
+    private fun uaModeButtonText(): String = if (uaMode == "pc") "手机模式" else "电脑模式"
 
     private suspend fun WebView.evaluateJavascriptSuspending(script: String): String =
         suspendCancellableCoroutine { cont ->
@@ -98,6 +123,18 @@ class PluginLoginActivity : Activity() {
                 if (cont.isActive) cont.resume(value ?: "")
             }
         }
+
+    /**
+     * 解码 WebView.evaluateJavascript 的回调值。
+     *
+     * evaluateJavascript 返回的是 JS 表达式结果的 JSON 编码：字符串 abc 回来是 "\"abc\""；
+     * 值内引号/反斜杠/换行会以 \" \\ \n 等转义形式返回（例如 localStorage 里保存的
+     * JSON 账号会话）。必须先 unescapeJson 解除内部转义，再剥掉最外层引号——
+     * 只 trim('"') 会把内部 \" 原样留给插件，插件侧 JSON.parse 直接失败
+     * （本悦读 v12 的 readifyAccountSession 即此问题：登录取值双重转义，我的克隆加载不出）。
+     */
+    private fun String.unescapeWebViewValue(): String =
+        StringEscapeUtils.unescapeJson(this).trim('"')
 
     private suspend fun parseBinding(webView: WebView, binding: String): String = withContext(Dispatchers.Main) {
         val split = binding.trim().split('.')
@@ -113,14 +150,16 @@ class PluginLoginActivity : Activity() {
 
             "locals" -> {
                 webView.evaluateJavascriptSuspending("localStorage.getItem('$end')")
+                    .unescapeWebViewValue()
             }
 
             "sessions" -> {
                 webView.evaluateJavascriptSuspending("sessionStorage.getItem('$end')")
+                    .unescapeWebViewValue()
             }
 
             else -> ""
-        }.trim('"')
+        }
     }
 
     private suspend fun finished(webView: WebView, binding: String) {
@@ -143,11 +182,14 @@ class PluginLoginActivity : Activity() {
         binding = intent.getStringExtra(ARG_BINDING) ?: ""
         val description = intent.getStringExtra(ARG_DESC) ?: ""
         val ua = intent.getStringExtra(ARG_UA) ?: ""
-
-        val userAgent = when (ua.lowercase()) {
-            "pc", "" -> UA_PC
-            "mobile", "android" -> ""
-            else -> ua
+        when (ua.lowercase()) {
+            "mobile", "android" -> uaMode = "mobile"
+            "pc", "" -> uaMode = "pc"
+            else -> {
+                // 插件自带自定义 UA：作为电脑模式使用，仍可按钮切到手机模式
+                uaMode = "pc"
+                customUa = ua
+            }
         }
 
         if (loginUrl.isBlank() || binding.isBlank()) {
@@ -161,7 +203,7 @@ class PluginLoginActivity : Activity() {
             orientation = LinearLayout.VERTICAL
         }
 
-        // 顶栏：说明 + 刷新 + 保存
+        // 顶栏：说明 + UA模式切换 + 刷新 + 保存
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -172,6 +214,15 @@ class PluginLoginActivity : Activity() {
             textSize = 12f
             maxLines = 2
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        // UA 模式切换：默认电脑模式，点一下切安卓手机模式，再点切回；切换后清缓存重载
+        // （只清缓存不动 Cookie，登录态保留）
+        val btnUaMode = Button(this).apply {
+            text = uaModeButtonText()
+            textSize = 12f
+            minWidth = 0
+            minHeight = 0
+            setPadding((12 * density).toInt(), (4 * density).toInt(), (12 * density).toInt(), (4 * density).toInt())
         }
         val btnReload = Button(this).apply {
             text = "刷新"
@@ -188,6 +239,7 @@ class PluginLoginActivity : Activity() {
             setPadding((16 * density).toInt(), (4 * density).toInt(), (16 * density).toInt(), (4 * density).toInt())
         }
         topBar.addView(tvDesc)
+        topBar.addView(btnUaMode)
         topBar.addView(btnReload)
         topBar.addView(btnSave)
 
@@ -196,7 +248,8 @@ class PluginLoginActivity : Activity() {
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            if (userAgent.isNotBlank()) settings.userAgentString = userAgent
+            // 直接写 settings.userAgentString（而非仅首帧请求头）：页面内跳转/子请求也保持该 UA
+            settings.userAgentString = currentUa()
             // 桌面版页面按 PC 视口渲染，宽度远超手机屏：必须允许缩放 + 宽视口，
             // 否则页面只能看到一角且无法拖动/缩放（useWideViewPort 让 viewport 按页面自身宽度走）
             settings.useWideViewPort = true
@@ -213,13 +266,16 @@ class PluginLoginActivity : Activity() {
                 }
 
                 override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                    // 加载开始即写入，让页面 CSS 解析时就按桌面视口布局
-                    view.evaluateJavascript(FIX_VIEWPORT_JS, null)
+                    // 仅电脑模式强制桌面视口；手机模式不注入，让页面按自带 viewport 渲染移动版布局
+                    if (uaMode == "pc") {
+                        view.evaluateJavascript(FIX_VIEWPORT_JS, null)
+                    }
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
-                    // 加载完成再写一次（跳转/异步渲染场景），并确保按新视口重新布局
-                    view.evaluateJavascript(FIX_VIEWPORT_JS, null)
+                    if (uaMode == "pc") {
+                        view.evaluateJavascript(FIX_VIEWPORT_JS, null)
+                    }
                 }
             }
         }
@@ -233,11 +289,20 @@ class PluginLoginActivity : Activity() {
         setContentView(root)
 
         btnReload.setOnClickListener { webView.reload() }
+        btnUaMode.setOnClickListener {
+            uaMode = if (uaMode == "pc") "mobile" else "pc"
+            btnUaMode.text = uaModeButtonText()
+            webView.settings.userAgentString = currentUa()
+            // 清缓存让服务端按新 UA 重新下发页面；clearCache 不动 Cookie，登录态保留
+            webView.clearCache(true)
+            webView.loadUrl(loginUrl, mapOf("User-Agent" to currentUa()))
+            val modeName = if (uaMode == "pc") "电脑模式" else "安卓手机模式"
+            android.widget.Toast.makeText(this, "已切换为$modeName，重新加载中", android.widget.Toast.LENGTH_SHORT).show()
+        }
         btnSave.setOnClickListener {
             scope.launch { finished(webView, binding) }
         }
 
-        if (userAgent.isNotBlank()) webView.loadUrl(loginUrl, mapOf("User-Agent" to userAgent))
-        else webView.loadUrl(loginUrl)
+        webView.loadUrl(loginUrl, mapOf("User-Agent" to currentUa()))
     }
 }
