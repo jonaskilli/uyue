@@ -206,10 +206,19 @@ object JReadVoicePluginRuntime {
         }
     }
 
+    /**
+     * 列出插件音色。
+     *
+     * @param strictLocale true 表示 [locale] 是用户显式选中的分类：该分类加载失败
+     * （抛错或返回空）时直接结束，不再静默回退到其他 locale。否则把 locale 当分类开关的插件
+     * （如本悦读 v12 的 custom=我的克隆）一旦抛错，就会被 zh-CN 的公开全量音色顶替，
+     * 用户看到错误分类的内容，插件的明确错误也被吞掉。
+     */
     fun listVoices(
         context: Context,
         plugin: JReadVoiceEngine.VoicePlugin,
         locale: String = "zh-CN",
+        strictLocale: Boolean = false,
     ): List<VoiceOption> {
         if (plugin.code.isBlank()) return emptyList()
         if (plugin.isBuiltInAudios1064Plugin()) {
@@ -243,18 +252,21 @@ object JReadVoicePluginRuntime {
         }.onFailure {
             Log.w(TAG, "listVoices editor bootstrap failed: plugin=${plugin.name}", it)
         }
-        val candidateLocales = linkedSetOf(locale.ifBlank { "zh-CN" }, "zh-CN").apply {
+        val requestedLocale = locale.ifBlank { "zh-CN" }
+        val candidateLocales = linkedSetOf(requestedLocale, "zh-CN").apply {
             addAll(readPluginLocaleOptionsFromScope(scope, uiObjectName).map { it.id })
         }.filter { it.isMeaningfulLocaleId() }
         var firstError: Throwable? = null
         var lastResult: Any? = null
         for (candidateLocale in candidateLocales) {
+            val isRequestedLocale = candidateLocale == requestedLocale
             val result = runCatching {
                 evalPluginVoices(scope, uiObjectName, candidateLocale)
             }.getOrElse {
                 if (it.message?.contains("插件没有提供音色列表") == true) throw it
                 if (firstError == null) firstError = it
                 Log.w(TAG, "listVoices candidate failed: plugin=${plugin.name}, locale=$candidateLocale", it)
+                if (strictLocale && isRequestedLocale) throw it
                 null
             }
             lastResult = result
@@ -262,6 +274,10 @@ object JReadVoicePluginRuntime {
             if (options.isNotEmpty()) {
                 Log.i(TAG, "listVoices done: plugin=${plugin.name}, locale=$candidateLocale, count=${options.size}")
                 return options
+            }
+            if (strictLocale && isRequestedLocale) {
+                Log.w(TAG, "listVoices empty for requested locale: plugin=${plugin.name}, locale=$candidateLocale")
+                return emptyList()
             }
         }
         val fallbackOptions = microsoftVoiceOptionsFromCache(runtime, locale)
@@ -741,6 +757,100 @@ object JReadVoicePluginRuntime {
         val values: MutableMap<String, String>,
     )
 
+    /**
+     * 渲染声明式变量（来源可以是 JS 里的 PluginJS.vars / EditorJS.vars，
+     * 也可以是插件 JSON 的 defVars 层——两种写法流程一致，这里统一处理）：
+     * 每项 label 标签 + 输入框（hint 占位、预填已保存值/默认值），实时写入 [target]，
+     * 确认后持久化到插件 userVarsJson，合成时 ttsrv.userVars 直接读到。
+     * 声明带 loginUrl/binding 的项（原版 PluginLoginActivity 机制）→ 输入框旁挂"登录"按钮，
+     * 登录请求以 [VarLoginRequestHolder] 挂 container.tag，由调用方注册回调启动登录页并回填。
+     */
+    private fun renderDeclarativeVars(
+        context: Context,
+        varsObj: JSONObject,
+        target: MutableMap<String, String>,
+        container: LinearLayout,
+        pluginName: String,
+    ) {
+        val loginInfos = mutableListOf<VarLoginInfo>()
+        val loginEditViews = mutableMapOf<String, EditText>()
+        val loginButtons = mutableMapOf<String, Button>()
+        val keys = varsObj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            var label = key
+            var hint = ""
+            var loginInfo: VarLoginInfo? = null
+            when (val v = varsObj.opt(key)) {
+                is JSONObject -> {
+                    // label 缺失时回退 name（不同 APP 导出的插件两种键名都存在）
+                    label = v.optString("label", v.optString("name", key))
+                    hint = v.optString("hint", "")
+                    val loginUrl = v.optString("loginUrl", "")
+                    val binding = v.optString("binding", "")
+                    if (loginUrl.isNotBlank() && binding.isNotBlank()) {
+                        loginInfo = VarLoginInfo(
+                            key = key,
+                            loginUrl = loginUrl,
+                            binding = binding,
+                            desc = v.optString("loginDesc", ""),
+                            ua = v.optString("ua", ""),
+                        )
+                    }
+                }
+                null -> {}
+                else -> hint = v.toString()
+            }
+            container.addView(TextView(context).apply {
+                text = label; textSize = 13f; setPadding(4, 16, 4, 2)
+            })
+            val editText = EditText(context).apply {
+                setText(target[key] ?: "")
+                if (hint.isNotBlank()) this.hint = hint
+                textSize = 13f
+                addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun afterTextChanged(s: android.text.Editable?) {
+                        target[key] = s?.toString().orEmpty()
+                    }
+                })
+            }
+            if (loginInfo != null) {
+                // 输入框 + 登录按钮 同行；点击回调由 Activity 通过 holder 注册
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                editText.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                row.addView(editText)
+                row.addView(Button(context).apply {
+                    text = "登录"
+                    textSize = 13f
+                    minWidth = 0
+                    minHeight = 0
+                    setPadding(24, 8, 24, 8)
+                }.also { loginButtons[key] = it })
+                container.addView(row, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
+                loginInfos.add(loginInfo)
+                loginEditViews[key] = editText
+            } else {
+                container.addView(editText, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
+            }
+        }
+        // 登录请求统一挂到 container.tag，由 Activity 注册点击回调与结果回填
+        if (loginInfos.isNotEmpty()) {
+            container.tag = VarLoginRequestHolder(loginInfos, loginButtons, loginEditViews, target)
+        }
+        Log.d(TAG, "loadPluginEditorUI rendered ${varsObj.length()} declarative vars: plugin=$pluginName")
+    }
+
     suspend fun loadPluginEditorUI(
         context: Context,
         plugin: JReadVoiceEngine.VoicePlugin,
@@ -808,83 +918,7 @@ object JReadVoicePluginRuntime {
                         // 确认后持久化到插件 userVarsJson，合成时 ttsrv.userVars 直接读到。
                         // 声明带 loginUrl/binding 的项（原版 PluginLoginActivity 机制）→ 输入框旁挂"登录"按钮，
                         // 登录参数以 VarLoginInfo 挂在 EditText.tag 上，由调用方注册回调启动登录页并回填
-                        val target = userVarsMap ?: dataMap
-                        val loginInfos = mutableListOf<VarLoginInfo>()
-                        val loginEditViews = mutableMapOf<String, EditText>()
-                        val loginButtons = mutableMapOf<String, Button>()
-                        val keys = varsObj.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            var label = key
-                            var hint = ""
-                            var loginInfo: VarLoginInfo? = null
-                            when (val v = varsObj.opt(key)) {
-                                is JSONObject -> {
-                                    label = v.optString("label", key)
-                                    hint = v.optString("hint", "")
-                                    val loginUrl = v.optString("loginUrl", "")
-                                    val binding = v.optString("binding", "")
-                                    if (loginUrl.isNotBlank() && binding.isNotBlank()) {
-                                        loginInfo = VarLoginInfo(
-                                            key = key,
-                                            loginUrl = loginUrl,
-                                            binding = binding,
-                                            desc = v.optString("loginDesc", ""),
-                                            ua = v.optString("ua", ""),
-                                        )
-                                    }
-                                }
-                                null -> {}
-                                else -> hint = v.toString()
-                            }
-                            container.addView(TextView(context).apply {
-                                text = label; textSize = 13f; setPadding(4, 16, 4, 2)
-                            })
-                            val editText = EditText(context).apply {
-                                setText(target[key] ?: "")
-                                if (hint.isNotBlank()) this.hint = hint
-                                textSize = 13f
-                                addTextChangedListener(object : android.text.TextWatcher {
-                                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                                    override fun afterTextChanged(s: android.text.Editable?) {
-                                        target[key] = s?.toString().orEmpty()
-                                    }
-                                })
-                            }
-                            if (loginInfo != null) {
-                                // 输入框 + 登录按钮 同行；点击回调由 Activity 通过 holder 注册
-                                val row = LinearLayout(context).apply {
-                                    orientation = LinearLayout.HORIZONTAL
-                                    gravity = android.view.Gravity.CENTER_VERTICAL
-                                }
-                                editText.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                                row.addView(editText)
-                                row.addView(Button(context).apply {
-                                    text = "登录"
-                                    textSize = 13f
-                                    minWidth = 0
-                                    minHeight = 0
-                                    setPadding(24, 8, 24, 8)
-                                }.also { loginButtons[key] = it })
-                                container.addView(row, LinearLayout.LayoutParams(
-                                    LinearLayout.LayoutParams.MATCH_PARENT,
-                                    LinearLayout.LayoutParams.WRAP_CONTENT
-                                ))
-                                loginInfos.add(loginInfo)
-                                loginEditViews[key] = editText
-                            } else {
-                                container.addView(editText, LinearLayout.LayoutParams(
-                                    LinearLayout.LayoutParams.MATCH_PARENT,
-                                    LinearLayout.LayoutParams.WRAP_CONTENT
-                                ))
-                            }
-                        }
-                        // 登录请求统一挂到 container.tag，由 Activity 注册点击回调与结果回填
-                        if (loginInfos.isNotEmpty()) {
-                            container.tag = VarLoginRequestHolder(loginInfos, loginButtons, loginEditViews, target)
-                        }
-                        Log.d(TAG, "loadPluginEditorUI rendered ${varsObj.length()} declarative vars (defVars mode): plugin=${plugin.name}")
+                        renderDeclarativeVars(context, varsObj, userVarsMap ?: dataMap, container, plugin.name)
                     } else {
                         // 无 vars 声明 → 自绘模式（如微软翻译并发2 的 JSpinner 服务器选择界面）：
                         // onLoadData 可能含网络请求，先在当前 IO 线程执行，再主线程调 onLoadUI
@@ -922,6 +956,21 @@ object JReadVoicePluginRuntime {
                                 LinearLayout.LayoutParams.WRAP_CONTENT
                             ))
                             Log.d(TAG, "loadPluginEditorUI attached plugin root to container: childCount=${(pluginRoot as? ViewGroup)?.childCount}")
+                        }
+                    }
+                    // JS 未声明 vars 且自绘 onLoadUI 没渲染出任何控件时（如本悦读 v12：
+                    // onLoadUI 是空函数，变量声明写在插件 JSON 的 defVars 层而非 PluginJS.vars），
+                    // 回退渲染 JSON 层 defVars——两种声明写法流程一致，统一走声明式变量渲染，
+                    // 其中的 loginUrl/binding 项同样带出"登录"按钮，登录后按 binding 保存 cookie/localStorage 值
+                    if (varsObj.length() == 0 && container.childCount == 0) {
+                        val defVarsObj = runCatching {
+                            JSONObject(plugin.defVarsJson.ifBlank { "{}" })
+                        }.getOrNull()
+                        if (defVarsObj != null && defVarsObj.length() > 0) {
+                            Log.d(TAG, "loadPluginEditorUI fallback to json defVars: plugin=${plugin.name}, count=${defVarsObj.length()}")
+                            renderDeclarativeVars(
+                                context, defVarsObj, userVarsMap ?: dataMap, container, plugin.name
+                            )
                         }
                     }
                     if (container.childCount == 0) {
@@ -984,22 +1033,35 @@ object JReadVoicePluginRuntime {
     }
 
     /**
-     * 在已有 scope 中调用 onListVoices，返回音色列表。
-     * 供 PluginEditorSession 使用。
+     * 在已有 scope 中调用 getVoices，返回音色列表。供 PluginEditorSession 使用。
+     *
+     * @param strictLocale true 表示 [locale] 是用户显式选中的分类：该分类加载失败
+     * （抛错或返回空）时直接结束，不再静默回退到其他 locale——否则把 locale 当分类开关的插件
+     * （如本悦读 v12 的 custom=我的克隆）抛错后，zh-CN 的公开全量音色会顶替显示，
+     * 插件的明确错误也被吞掉（表现为"我的克隆里显示全部音色"）。
      */
-    fun invokeListVoices(scope: Scriptable, uiObjectName: String, locale: String): List<VoiceOption> {
-        val candidateLocales = linkedSetOf(locale.ifBlank { "zh-CN" }, "zh-CN").apply {
+    fun invokeListVoices(
+        scope: Scriptable,
+        uiObjectName: String,
+        locale: String,
+        strictLocale: Boolean = false,
+    ): List<VoiceOption> {
+        val requestedLocale = locale.ifBlank { "zh-CN" }
+        val candidateLocales = linkedSetOf(requestedLocale, "zh-CN").apply {
             addAll(readPluginLocaleOptionsFromScope(scope, uiObjectName).map { it.id })
         }.filter { it.isMeaningfulLocaleId() }
         for (candidateLocale in candidateLocales) {
+            val isRequestedLocale = candidateLocale == requestedLocale
             val result = runCatching {
                 evalPluginVoices(scope, uiObjectName, candidateLocale)
             }.getOrElse {
                 Log.w(TAG, "invokeListVoices candidate failed: locale=$candidateLocale", it)
+                if (strictLocale && isRequestedLocale) throw it
                 null
             }
             val options = voicesResultToOptions(result)
             if (options.isNotEmpty()) return options
+            if (strictLocale && isRequestedLocale) return emptyList()
         }
         return emptyList()
     }
