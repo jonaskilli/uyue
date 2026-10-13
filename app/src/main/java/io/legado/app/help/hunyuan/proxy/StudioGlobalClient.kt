@@ -49,8 +49,11 @@ object StudioGlobalClient {
     /** 对外模型名（OpenAI 风格，写进混元太极的模型列表）→ 站内真实 modelValue */
     const val MODEL_GPT_IMAGE_2 = "gpt-image-2"
     const val MODEL_GPT_IMAGE_15 = "gpt-image-1.5"
+    /** GPT-Image-2.5（站点 UI 显示名 gpt-image-2.5 / gpt-image-2.5-flare，实测 2026-10 可用） */
+    const val MODEL_GPT_IMAGE_25 = "gpt-image-2.5"
     private const val INTERNAL_GPT_IMAGE_2 = "gptImage2"
     private const val INTERNAL_GPT_IMAGE_15 = "gptImage15"
+    private const val INTERNAL_GPT_IMAGE_25 = "gptImage25"
 
     /** 固定肖像竖版 + 低质量 */
     const val SIZE_PORTRAIT = "1024x1536"
@@ -66,7 +69,7 @@ object StudioGlobalClient {
      * 生图，返回图片 URL 列表（正常只有一张）。
      *
      * @param prompt 生图提示词
-     * @param model [MODEL_GPT_IMAGE_2] / [MODEL_GPT_IMAGE_15]，其它值按 GPT-Image-2 处理
+     * @param model [MODEL_GPT_IMAGE_2] / [MODEL_GPT_IMAGE_15] / [MODEL_GPT_IMAGE_25]，其它值按 GPT-Image-2 处理
      */
     fun generateImage(prompt: String, model: String = MODEL_GPT_IMAGE_2): List<String> {
         var lastError: Throwable? = null
@@ -95,6 +98,7 @@ object StudioGlobalClient {
     private fun sendChat(session: String, prompt: String, model: String): String {
         val internal = when (model.lowercase()) {
             MODEL_GPT_IMAGE_15, INTERNAL_GPT_IMAGE_15.lowercase() -> INTERNAL_GPT_IMAGE_15
+            MODEL_GPT_IMAGE_25, INTERNAL_GPT_IMAGE_25.lowercase() -> INTERNAL_GPT_IMAGE_25
             else -> INTERNAL_GPT_IMAGE_2
         }
         val body = buildString {
