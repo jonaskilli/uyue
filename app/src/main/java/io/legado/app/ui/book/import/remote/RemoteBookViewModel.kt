@@ -14,6 +14,7 @@ import io.legado.app.lib.webdav.Authorization
 import io.legado.app.lib.webdav.WebDav
 import io.legado.app.model.analyzeRule.CustomUrl
 import io.legado.app.model.localBook.LocalBook
+import io.legado.app.model.readify.ReadifyApi
 import io.legado.app.model.remote.RemoteBook
 import io.legado.app.model.remote.RemoteBookManager
 import io.legado.app.model.remote.RemoteBookReadify
@@ -267,7 +268,18 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
             val bookWebDav = remoteBookManager
                 ?: throw NoStackTraceException("没有配置远程书库")
             val failed = arrayListOf<String>()
-            remoteBooks.forEach { remoteBook ->
+            // 悦读支持删除前预检（已分享的书不允许删），先剔掉不能删的，避免整批白跑
+            val deletable = if (bookWebDav is RemoteBookReadify) {
+                val blocked = ReadifyApi.preDeleteCheck(remoteBooks.map { it.path })
+                if (blocked.isNotEmpty()) {
+                    context.toastOnUi("${blocked.size} 本书不允许删除(可能已分享)，已跳过")
+                }
+                remoteBooks.filter { it.path !in blocked }
+            } else {
+                remoteBooks.toList()
+            }
+            if (deletable.isEmpty()) throw NoStackTraceException("没有可删除的书籍")
+            deletable.forEach { remoteBook ->
                 try {
                     bookWebDav.delete(remoteBook.path)
                 } catch (e: Exception) {
@@ -297,13 +309,24 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
         onFinally: (success: Boolean) -> Unit
     ) {
         execute {
-            val bookWebDav = remoteBookManager as? RemoteBookWebDav
-                ?: throw NoStackTraceException("当前书库不支持重命名")
             var name = newName.trim()
             if (name.isEmpty()) throw NoStackTraceException("名字不能为空")
             if (name.contains('/') || name.contains('\\')) {
                 throw NoStackTraceException("名字不能包含 / 或 \\ ")
             }
+            val readify = remoteBookManager as? RemoteBookReadify
+            if (readify != null) {
+                // 悦读存的是书名(不带扩展名)，列表显示时我们才会拼 ".txt"，
+                // 所以这里要把用户可能带上的扩展名去掉，否则书名会变成 "xxx.txt" 再拼成 "xxx.txt.txt"
+                val oldSuffix = remoteBook.filename.substringAfterLast('.', "")
+                if (oldSuffix.isNotEmpty() && name.endsWith(".$oldSuffix", ignoreCase = true)) {
+                    name = name.dropLast(oldSuffix.length + 1)
+                }
+                ReadifyApi.renameBook(remoteBook.path, name)
+                return@execute
+            }
+            val bookWebDav = remoteBookManager as? RemoteBookWebDav
+                ?: throw NoStackTraceException("当前书库不支持重命名")
             // 未输入扩展名时自动带上原扩展名
             val oldSuffix = remoteBook.filename.substringAfterLast('.', "")
             if (!remoteBook.isDir && oldSuffix.isNotEmpty()
