@@ -55,6 +55,17 @@ object ReadifyApi {
         val cover: String = json.optString("cover").let { if (it == "null") "" else it }
         val progress: Double = json.optDouble("progress", 0.0)
         val lastReadAt: Long = json.optLong("lastReadAt", 0L)
+        /**
+         * 服务端书籍状态。悦读官网前端常量：0=已删除 1=正常 2/3=转换中 4/5=不可见。
+         * 删除是**软删除**：记录仍在，deletedAt 被置上且 sourceFileType 被清空。
+         */
+        val status: Int = json.optInt("status", 1)
+        val deletedAt: String = json.optString("deletedAt").takeIf {
+            it.isNotBlank() && !it.equals("null", ignoreCase = true)
+        }.orEmpty()
+        /** 与官网列表过滤规则一致：deletedAt 非空，或 status 属于 0/4/5 */
+        val isDeleted: Boolean
+            get() = deletedAt.isNotBlank() || status == 0 || status == 4 || status == 5
     }
 
     /** 上传初始化结果 */
@@ -117,7 +128,8 @@ object ReadifyApi {
         for (i in 0 until array.length()) {
             (array.opt(i) as? JSONObject)?.let { books.add(CloudBook(it)) }
         }
-        return books
+        // 悦读是软删除，官网前端也会过滤掉已删除的书，这里保持一致
+        return books.filter { !it.isDeleted }
     }
 
     // ------------------------------------------------------------------ 上传链路
