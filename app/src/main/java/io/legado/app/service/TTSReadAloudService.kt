@@ -47,11 +47,16 @@ import io.legado.app.utils.servicePendingIntent
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -114,10 +119,35 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     }
 
     // ====== 合成核心 ======
+    /**
+     * 合成专用服务级协程作用域（10-12 在途去重配套）。
+     * 与调用方 job 解耦：某一方（翻页时的老 play 任务）被 cancel 时，
+     * 已提交给引擎的那笔合成仍要跑完并落缓存，等在它上面的人也要拿到结果。
+     * 生命周期与 service 同步，onDestroy 里取消。
+     */
+    private val synthScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+            // 兜底：任何漏网的未捕获异常只记日志，不走默认 handler 崩应用
+            AppLog.put("TTS合成作用域未捕获异常\n${e.localizedMessage}", e)
+        }
+    )
     /** 把 TTS onDone/onError 回调转成挂起函数的 CompletableDeferred */
     private val synthesisCompleters = ConcurrentHashMap<String, CompletableDeferred<File?>>()
     /** utteranceId -> 合成目标临时文件 */
     private val synthesisTargetFiles = ConcurrentHashMap<String, File>()
+    /**
+     * 在途合成（10-12 修「同一段文字被合成两次」）：key = 目标缓存文件绝对路径。
+     *
+     * 为什么必须加：`synthesizeText` 开头只查「缓存文件是否已存在且有效」，
+     * **在途那一笔查不出来**——上一笔还没写盘（合成中/等待回调），新的调用就会
+     * 判定「没缓存」再提交一次，同一段文字被送进引擎两遍、各合成一次。
+     * 翻页/跳段时命中率最高：`seekToParagraphByProgress` 改完 `nowSpeak` 直接 `play()`，
+     * 而 `play()` 的 `synthesisTask?.cancel()` 只能撤协程，撤不掉**已提交给 TTS 引擎**的请求，
+     * 于是老任务在途的那一笔与新任务重头那一笔撞成两笔（真机日志：同文本间隔 74ms 两笔，
+     * 两笔都成功、都没有 `_retry` 后缀 ⇒ 不是超时重试，是两次独立提交）。
+     * 预加载走自己的 utteranceId 也会撞上同一段，按「缓存文件」而非 utteranceId 做键才能一起盖住。
+     */
+    private val inFlightSyntheses = ConcurrentHashMap<String, CompletableDeferred<File?>>()
     /** 主合成协程 */
     private var synthesisTask: Job? = null
     /** 跨章预加载协程 */
@@ -142,9 +172,25 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // loadBgmFiles 移到 play() / playByIndex() 的协程中后台执行，
         // 避免 onCreate 主线程同步遍历文件阻塞朗读启动
         initTts()
-        upSpeechRate()
+        // ⚠️ 这里**不能**调 upSpeechRate()：它末行无条件 play()。
+        // onCreate 期 TextToSpeech 尚未初始化完成，那次 play() 只会置 pendingPlay 等
+        // onInit 回调补播；而 onStartCommand(play) → newReadAloud() 随后还会再 play() 一次。
+        // 两次都从 nowSpeak=0 起跑，play() 开头的 synthesisTask?.cancel() 只能撤协程、
+        // 撤不掉已提交给 TTS 引擎的合成请求 ⇒ 第 0 段（章首）被合成两遍。
+        // 真机日志实证：同一 utteranceId:Legado0 连续两轮 onStart/onDone（无 _retry 后缀
+        // ⇒ 非重试，是两次独立提交），且「TtsEngineActivator 尝试激活」连打两次
+        // （该调用在 play() 内仅一处）。仅新起服务时命中（服务已在跑则 onCreate 不再执行）。
+        // 语速改到 onInit 里应用（见下），播放一律交给 onStartCommand 链路。
         observeEvent<Int>(EventBus.READ_ALOUD_SEEK_PARAGRAPH) { progress ->
             seekToParagraphByProgress(progress)
+        }
+    }
+
+    /** 只把当前语速应用到 TTS 引擎，不触发 [play]（须在引擎初始化完成后调用） */
+    private fun applySpeechRateToEngine() {
+        if (!AppConfig.ttsFlowSys) {
+            val rate = (AppConfig.ttsSpeechRate + 5) / 10f
+            textToSpeech?.setSpeechRate(rate)
         }
     }
 
@@ -157,6 +203,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         playIndexJob?.cancel()
         preloadJob?.cancel()
         silentPlayCheckJob?.cancel()
+        // 合成专用作用域：与 service 同生命周期（10-12 在途去重配套）
+        synthScope.cancel()
         stopSubtitleSync()
         // 取消自动清理：停止朗读时不应删除已缓存的音频文件
         // Coroutine.async { removeCacheFile() }
@@ -213,6 +261,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     LogUtils.d(TAG, "系统TTS voice 已保存: $voiceName")
                 }
                 ttsInitFinish = true
+                // 引擎就绪后再应用语速（原在 onCreate 经 upSpeechRate 应用，但那里的
+                // play() 副作用会导致章首重复合成，故语速挪到这里，只设语速不起播）
+                applySpeechRateToEngine()
                 if (pendingPlay) {
                     pendingPlay = false
                     play()
@@ -232,6 +283,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         override fun onDone(s: String?) {
             LogUtils.d(TAG, "onDone synthesis utteranceId:$s")
+            // 【诊断日志】回调到达（10-12 加，只记录不改逻辑）
+            AppLog.putDebug("TTS回调 onDone id=$s")
             s ?: return
             val targetFile = synthesisTargetFiles.remove(s)
             val completer = synthesisCompleters.remove(s)
@@ -246,6 +299,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         override fun onError(utteranceId: String?, errorCode: Int) {
             LogUtils.d(TAG, "onError utteranceId:$utteranceId errorCode:$errorCode")
+            // 【诊断日志】回调到达（10-12 加，只记录不改逻辑）
+            AppLog.putDebug("TTS回调 onError id=$utteranceId code=$errorCode")
             synthesisTargetFiles.remove(utteranceId)
             val completer = synthesisCompleters.remove(utteranceId)
             completer?.complete(null)
@@ -263,11 +318,75 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     // ====== 核心合成方法 ======
 
     /**
+     * 合成入口（10-12 加「在途去重」）：同一段文字若已有一笔在合成，本次**不再提交第二笔**，
+     * 直接等那一笔的结果——主播放、跨章预加载、翻页重发三条路都走这里，天然共用。
+     *
+     * 去重键 = 目标缓存文件绝对路径，与 `doSynthesizeText` 内部的缓存键完全同源，
+     * 只按「段落文本 + 下标 + 章节标题」判同一段，不受 utteranceId（各调用方自己生成）影响。
+     */
+    private suspend fun synthesizeText(
+        text: String,
+        utteranceId: String,
+        index: Int = -1,
+        chapterTitle: String = "",
+        rawText: String = text
+    ): File? {
+        val cacheFile = getCacheFileForText(rawText, index, chapterTitle)
+        if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
+            return cacheFile
+        }
+        val cacheKey = cacheFile.absolutePath
+
+        // ① 已有在途登记：本次不提交第二笔，只等那一笔的结果。
+        // 用 NonCancellable 包住**等待**（只包等待，不包合成）：翻页时老任务被 cancel
+        // 不该把「这一笔的结果」丢掉；而真正的合成仍归提交它的那个调用方管，可被 cancel。
+        inFlightSyntheses[cacheKey]?.let { pending ->
+            return withContext(NonCancellable) { pending.await() }
+        }
+
+        // ② 自己成为这一笔的持有者
+        val mine = CompletableDeferred<File?>()
+        val winner = inFlightSyntheses.putIfAbsent(cacheKey, mine)
+        if (winner != null) {
+            // 输给并发调用（与 ① 之间只隔一瞬）：改为等对方那笔
+            return withContext(NonCancellable) { winner.await() }
+        }
+        // 【诊断日志】真正提交引擎的一笔（10-12 加，只记录不改逻辑）
+        AppLog.putDebug("TTS提交引擎 index=$index id=$utteranceId text=${text.take(20)}")
+
+        // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
+        // 这样某一方被 cancel 不会掐断这一笔——否则 mine 永不 complete，等它的人会永久挂住。
+        // 外层 NonCancellable 只为「把子协程启起来」：调用方在 launch 这一瞬被取消，
+        // 也要保证这笔合成有归属、mine 一定被 complete。服务销毁时在 onDestroy 取消它。
+        val job = withContext(NonCancellable) {
+            synthScope.launch {
+                // 必须**无条件** complete：doSynthesizeText 若抛异常（而非返回 null），
+                // 一旦跳过 complete，持有者与所有等待方就会永久挂在 mine.await() 上；
+                // 且裸 SupervisorJob 子协程的未捕获异常会走默认 handler 直接崩应用。
+                val result = runCatching {
+                    doSynthesizeText(text, utteranceId, index, chapterTitle, rawText)
+                }.onFailure {
+                    AppLog.put("TTS合成异常\n${it.localizedMessage}", it)
+                }.getOrNull()
+                inFlightSyntheses.remove(cacheKey)
+                mine.complete(result)
+            }
+        }
+        // 持有者（即提交这一笔的人）可被取消，发给引擎的那笔请求照旧跑完并落缓存
+        return try {
+            job.join()
+            mine.await()
+        } catch (e: CancellationException) {
+            throw e
+        }
+    }
+
+    /**
      * 通用 TTS 合成方法。
      * 先写入 .tmp 临时文件，合成成功且验证为有效音频后，再重命名为正式缓存文件。
      * 若验证失败，会自动重试最多2次。
      */
-    private suspend fun synthesizeText(
+    private suspend fun doSynthesizeText(
         text: String,
         utteranceId: String,
         index: Int = -1,
@@ -305,6 +424,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 AppLog.put("tts合成提交失败(attempt=$attempt)\n${it.localizedMessage}", it, true)
                 TextToSpeech.ERROR
             }
+            // 【诊断日志】提交结果（10-12 加，只记录不改逻辑）：
+            // 用来回答「超时那一刻引擎到底收到请求没有」——SUCCESS 表示已交给引擎，
+            // 之后若既无 onDone/onError 又超时，就是引擎侧没回调；ERROR 则是提交就失败。
+            AppLog.putDebug(
+                "TTS提交结果 id=$currentUtteranceId attempt=$attempt result=" +
+                    (if (result == TextToSpeech.SUCCESS) "SUCCESS" else "ERROR($result)") +
+                    " text=${text.take(20)}"
+            )
 
             val synthesizedFile = if (result == TextToSpeech.SUCCESS) {
                 try {
@@ -317,7 +444,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         tempFile
                     } else {
                         clearTTS()
-                        AppLog.put("TTS合成超时，引擎无响应，已清除实例待重试: $currentUtteranceId")
+                        AppLog.put(
+                            "TTS合成超时，引擎无响应，已清除实例待重试: $currentUtteranceId" +
+                                "（提交时 result 见上一条「TTS提交结果」；到此刻仍无 onDone/onError）"
+                        )
                         null
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
