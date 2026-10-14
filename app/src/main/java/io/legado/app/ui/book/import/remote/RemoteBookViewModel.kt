@@ -15,6 +15,8 @@ import io.legado.app.lib.webdav.WebDav
 import io.legado.app.model.analyzeRule.CustomUrl
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.model.remote.RemoteBook
+import io.legado.app.model.remote.RemoteBookManager
+import io.legado.app.model.remote.RemoteBookReadify
 import io.legado.app.model.remote.RemoteBookWebDav
 import io.legado.app.utils.AlphanumComparator
 import io.legado.app.utils.GSON
@@ -98,16 +100,25 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
         }
     }.flowOn(Dispatchers.IO)
 
-    private var remoteBookWebDav: RemoteBookWebDav? = null
+    private var remoteBookManager: RemoteBookManager? = null
     var isDefaultWebdav = false
+    /** 悦读云书库模式：扁平列表，部分网盘操作不可用 */
+    var isReadify = false
 
     /** 记忆浏览位置的存储键(每个服务器独立) */
     private var serverKey = "default"
     private val dirStoreKey: String
         get() = "remoteBookDirPaths_$serverKey"
 
-    fun initData(onSuccess: () -> Unit) {
+    fun initData(readify: Boolean = false, onSuccess: () -> Unit) {
         execute {
+            isReadify = readify
+            if (readify) {
+                serverKey = "readify"
+                remoteBookManager = RemoteBookReadify.createOrNull()
+                    ?: throw NoStackTraceException("未登录悦读书架, 请先在书架菜单登录")
+                return@execute
+            }
             isDefaultWebdav = false
             appDb.serverDao.get(AppConfig.remoteServerId)?.getWebDavConfig()?.let {
                 val authorization = Authorization(it)
@@ -120,16 +131,17 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
                         baseUrl += "books/"
                     }
                 }
-                remoteBookWebDav = RemoteBookWebDav(baseUrl, authorization, AppConfig.remoteServerId)
+                remoteBookManager = RemoteBookWebDav(baseUrl, authorization, AppConfig.remoteServerId)
                 serverKey = AppConfig.remoteServerId.toString()
                 return@execute
             }
             isDefaultWebdav = true
             serverKey = "default"
-            remoteBookWebDav = AppWebDav.defaultBookWebDav
+            remoteBookManager = AppWebDav.defaultBookWebDav
                 ?: throw NoStackTraceException("webDav没有配置")
         }.onError {
-            context.toastOnUi("初始化webDav出错:${it.localizedMessage}")
+            val name = if (readify) "悦读书架" else "webDav"
+            context.toastOnUi("初始化${name}出错:${it.localizedMessage}")
         }.onSuccess {
             onSuccess.invoke()
         }
@@ -184,15 +196,16 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
         onError: (() -> Unit)? = null
     ) {
         executeLazy {
-            val bookWebDav = remoteBookWebDav
-                ?: throw NoStackTraceException("没有配置webDav")
+            val manager = remoteBookManager
+                ?: throw NoStackTraceException("没有配置远程书库")
             dataCallback?.clear()
-            val url = path ?: bookWebDav.rootBookUrl
-            val bookList = bookWebDav.getRemoteBookList(url)
+            val rootUrl = (manager as? RemoteBookWebDav)?.rootBookUrl.orEmpty()
+            val bookList = manager.getRemoteBookList(path ?: rootUrl)
             dataCallback?.setItems(bookList)
         }.onError {
-            AppLog.put("获取webDav书籍出错\n${it.localizedMessage}", it)
-            context.toastOnUi("获取webDav书籍出错\n${it.localizedMessage}")
+            val name = if (isReadify) "悦读书架" else "webDav"
+            AppLog.put("获取${name}书籍出错\n${it.localizedMessage}", it)
+            context.toastOnUi("获取${name}书籍出错\n${it.localizedMessage}")
             onError?.invoke()
         }.onStart {
             loadCallback.invoke(true)
@@ -208,14 +221,18 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
      */
     fun addToBookshelf(remoteBooks: HashSet<RemoteBook>, finally: () -> Unit) {
         execute {
-            val bookWebDav = remoteBookWebDav
-                ?: throw NoStackTraceException("没有配置webDav")
+            val manager = remoteBookManager
+                ?: throw NoStackTraceException("没有配置远程书库")
+            val bookWebDav = manager as? RemoteBookWebDav
             remoteBooks.forEach { remoteBook ->
-                val downloadBookUri = bookWebDav.downloadRemoteBook(remoteBook)
+                val downloadBookUri = manager.downloadRemoteBook(remoteBook)
                 LocalBook.importFiles(downloadBookUri).forEach { book ->
-                    book.origin = BookType.webDavTag + CustomUrl(remoteBook.path)
-                        .putAttribute("serverID", bookWebDav.serverID)
-                        .toString()
+                    // 悦读下载下来就是一份完整的本地文件，保持本地书的 origin 即可
+                    if (bookWebDav != null) {
+                        book.origin = BookType.webDavTag + CustomUrl(remoteBook.path)
+                            .putAttribute("serverID", bookWebDav.serverID)
+                            .toString()
+                    }
                     book.save()
                     runCatching {
                         appDb.bookDao.getBookByFileName(book.originName)?.let { old ->
@@ -247,8 +264,8 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
      */
     fun deleteRemoteBooks(remoteBooks: Collection<RemoteBook>, finally: () -> Unit) {
         execute {
-            val bookWebDav = remoteBookWebDav
-                ?: throw NoStackTraceException("没有配置webDav")
+            val bookWebDav = remoteBookManager
+                ?: throw NoStackTraceException("没有配置远程书库")
             val failed = arrayListOf<String>()
             remoteBooks.forEach { remoteBook ->
                 try {
@@ -280,8 +297,8 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
         onFinally: (success: Boolean) -> Unit
     ) {
         execute {
-            val bookWebDav = remoteBookWebDav
-                ?: throw NoStackTraceException("没有配置webDav")
+            val bookWebDav = remoteBookManager as? RemoteBookWebDav
+                ?: throw NoStackTraceException("当前书库不支持重命名")
             var name = newName.trim()
             if (name.isEmpty()) throw NoStackTraceException("名字不能为空")
             if (name.contains('/') || name.contains('\\')) {

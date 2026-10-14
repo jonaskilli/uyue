@@ -75,6 +75,8 @@ object PreferKey {
     const val webDavDir = "webDavDir"
     const val enableCustomExport = "enableCustomExport"
     const val exportToWebDav = "webDavCacheBackup"
+    // 悦读(Readify) 云同步: 网页登录提取的会话 JSON + 同步开关
+    const val readifySession = "readifySession"
     const val exportNoChapterName = "exportNoChapterName"
     const val exportType = "exportType"
     const val exportPictureFile = "exportPictureFile"

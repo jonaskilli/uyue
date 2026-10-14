@@ -47,9 +47,16 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
     override val viewModel by viewModels<RemoteBookViewModel>()
     private val adapter by lazy { RemoteBookAdapter(this, this) }
     private var groupMenu: SubMenu? = null
+    /** 悦读云书库模式：扁平列表，隐藏"返回上级目录"与网盘服务器配置相关入口 */
+    private var readify = false
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
-        searchView.queryHint = getString(R.string.screen) + " • " + getString(R.string.remote_book)
+        readify = intent.getBooleanExtra("readify", false)
+        searchView.queryHint = if (readify) {
+            getString(R.string.screen) + " • " + "悦读云书架"
+        } else {
+            getString(R.string.screen) + " • " + getString(R.string.remote_book)
+        }
         onBackPressedDispatcher.addCallback(this) {
             if (!goBackDir()) {
                 finish()
@@ -70,10 +77,10 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
                     delay(500)
                 }
             }
-            viewModel.initData {
+            viewModel.initData(readify) {
                 // 直接回到上次浏览的目录(即书籍所在文件夹);
                 // 无记录或目录已被删除时回退到书籍根目录
-                if (viewModel.restoreDirList()) {
+                if (!readify && viewModel.restoreDirList()) {
                     upPath(onError = {
                         viewModel.clearDirList()
                         upPath()
@@ -102,7 +109,8 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
         // 选择栏弹出菜单: 批量删除选中项
         binding.selectActionBar.inflateMenu(R.menu.remote_book_sel)
         binding.selectActionBar.setOnMenuItemClickListener(this)
-        if (!LocalConfig.webDavBookHelpVersionIsLast) {
+        // 悦读云书库不走 webDav 帮助引导
+        if (!readify && !LocalConfig.webDavBookHelpVersionIsLast) {
             showHelp("webDavBookHelp")
         }
     }
@@ -125,6 +133,8 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
 
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.book_remote, menu)
+        // 悦读云书库不走"服务器配置(网盘)", 隐藏该入口
+        menu.findItem(R.id.menu_server_config)?.isVisible = !readify
         return super.onCompatCreateOptionsMenu(menu)
     }
 
@@ -186,20 +196,23 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
     }
 
     private fun upPath(onError: (() -> Unit)? = null) {
-        binding.tvGoBack.isEnabled = viewModel.dirList.isNotEmpty()
-        var path = if (viewModel.isDefaultWebdav) {
-            "books" + File.separator
+        binding.tvGoBack.isEnabled = !readify && viewModel.dirList.isNotEmpty()
+        val path = when {
+            readify -> "悦读云书架" + File.separator
+            viewModel.isDefaultWebdav -> "books" + File.separator
+            else -> File.separator
+        }
+        binding.tvPath.text = if (readify) {
+            path
         } else {
-            File.separator
+            var dirPath = path
+            viewModel.dirList.forEach { dirPath = dirPath + it.filename + File.separator }
+            dirPath
         }
-        viewModel.dirList.forEach {
-            path = path + it.filename + File.separator
-        }
-        binding.tvPath.text = path
         viewModel.dataCallback?.clear()
         adapter.selected.clear()
         // 记住浏览位置, 下次打开直接回到此目录
-        viewModel.saveDirList()
+        if (!readify) viewModel.saveDirList()
         viewModel.loadRemoteBookList(
             viewModel.dirList.lastOrNull()?.path,
             {
@@ -224,7 +237,7 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
     }
 
     override fun onDialogDismiss(tag: String) {
-        viewModel.initData {
+        viewModel.initData(readify) {
             upPath()
         }
     }

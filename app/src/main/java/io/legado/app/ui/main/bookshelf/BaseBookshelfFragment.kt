@@ -1,9 +1,11 @@
 package io.legado.app.ui.main.bookshelf
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.indices
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
@@ -19,6 +21,7 @@ import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.help.DirectLinkUpload
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.model.readify.ReadifySession
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.book.cache.CacheActivity
 import io.legado.app.ui.book.group.GroupManageDialog
@@ -30,6 +33,7 @@ import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.main.MainViewModel
+import io.legado.app.ui.tts.plugin.PluginLoginActivity
 import io.legado.app.ui.widget.dialog.WaitDialog
 import io.legado.app.utils.checkByIndex
 import io.legado.app.utils.getCheckedIndex
@@ -78,6 +82,26 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
     abstract val groupId: Long
     abstract val books: List<Book>
     abstract var onlyUpdateRead: Boolean
+
+    /**
+     * 悦读网页登录：完全复用 TTS 插件的 PluginLoginActivity
+     * （电脑模式 UA + 桌面视口 + localStorage/sessionStorage/cookie 提取）。
+     * binding 用 locals.user，与插件「本悦读 v12」的 defVars 一致。
+     */
+    private val readifyLoginResult = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == PluginLoginActivity.OK) {
+            val value = result.data?.getStringExtra(PluginLoginActivity.RESULT).orEmpty()
+            if (ReadifySession.save(value)) {
+                toastOnUi("已登录悦读账号：${ReadifySession.displayName}")
+                activity?.invalidateOptionsMenu()
+            } else {
+                toastOnUi("未取到完整登录信息，请完成网页登录后再点保存")
+            }
+        }
+    }
+
     private var groupsLiveData: LiveData<List<BookGroup>>? = null
     private val waitDialog by lazy {
         WaitDialog(requireContext()).apply {
@@ -91,6 +115,9 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
 
     override fun onCompatCreateOptionsMenu(menu: Menu) {
         menuInflater.inflate(R.menu.main_bookshelf, menu)
+        menu.findItem(R.id.menu_readify_login)?.title =
+            if (ReadifySession.isLogin) "悦读已登录：${ReadifySession.displayName}"
+            else "登录悦读账号"
     }
 
     override fun onCompatOptionsItemSelected(item: MenuItem) {
@@ -126,9 +153,33 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
             R.id.menu_import_bookshelf -> importBookshelfAlert(groupId)
             // 角色档案总揽: 按书分组列出全部 AI 角色档案。放书架而不是书籍详情页,
             // 这样书删掉后也能直接进来, 不用先找一本书打开
+            R.id.menu_readify_login -> startReadifyLogin()
+            R.id.menu_readify_upload -> startActivity<BookshelfManageActivity> {
+                putExtra("groupId", groupId)
+                putExtra("uploadReadify", true)
+            }
+            R.id.menu_readify_download -> startActivity<RemoteBookActivity> {
+                putExtra("readify", true)
+            }
             R.id.menu_character_profile -> startActivity<CharacterProfileManageActivity>()
             R.id.menu_log -> showDialogFragment<AppLogDialog>()
         }
+    }
+
+    // ---------------------------------------------------------- 悦读云同步
+
+    private fun startReadifyLogin() {
+        readifyLoginResult.launch(
+            Intent(requireContext(), PluginLoginActivity::class.java).apply {
+                putExtra(PluginLoginActivity.ARG_LOGIN_URL, ReadifySession.LOGIN_URL)
+                putExtra(PluginLoginActivity.ARG_BINDING, ReadifySession.LOGIN_BINDING)
+                putExtra(PluginLoginActivity.ARG_UA, ReadifySession.LOGIN_UA)
+                putExtra(
+                    PluginLoginActivity.ARG_DESC,
+                    "登录悦读后点右上角「保存」带回会话"
+                )
+            }
+        )
     }
 
     protected fun initBookGroupData() {
