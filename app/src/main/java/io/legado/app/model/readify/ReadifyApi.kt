@@ -3,6 +3,7 @@ package io.legado.app.model.readify
 import io.legado.app.help.http.addHeaders
 import io.legado.app.help.http.newCallResponse
 import io.legado.app.help.http.okHttpClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaType
@@ -10,11 +11,20 @@ import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 
 /**
  * 悦读（Readify）云书架接口客户端。
  *
- * Base：https://app.readifyai.com
+ * 双域名（同一套前端/同一后端，会话互通）：
+ * - `BASE`     = app.readifyai.com      （AWS 美国，原始主站）
+ * - `BASE_CN`  = readifyapp.voiceclub.cn （阿里云国内，上传/下载更快）
+ *
+ * 所有接口按 `API_BASES` 顺序尝试：**国内优先，国外兜底**。
+ * 只有「连接层失败」（域名不可达/超时/DNS）才换域名重试；只要拿到了 HTTP 响应
+ * （哪怕是业务错误码）就认定请求已到达服务端，不再换域名——避免 bind 这类
+ * 非幂等操作被重复执行。
+ *
  * 必需头：x-token、x-app-name: readifyai、x-lang: zh-CN
  * 业务成功码：0；200000 = userToken 失效（可续期重试）；200001 = refreshToken 失效（需重新登录）
  *
@@ -24,6 +34,12 @@ import org.json.JSONObject
 object ReadifyApi {
 
     const val BASE = "https://app.readifyai.com"
+
+    /** 国内镜像：同一后端，实测上传/下载带宽明显更好 */
+    const val BASE_CN = "https://readifyapp.voiceclub.cn"
+
+    /** API 调用顺序：国内优先，连接失败自动回退国外 */
+    private val API_BASES = listOf(BASE_CN, BASE)
 
     private const val CODE_OK = 0
     const val CODE_TOKEN_INVALID = 200000
@@ -39,6 +55,9 @@ object ReadifyApi {
     class ApiException(val code: Int, message: String) : Exception(message)
 
     private class TokenInvalidException(message: String) : Exception(message)
+
+    /** 连接层失败（域名不可达/超时/DNS/SSL），可换域名重试 */
+    private class NetworkFailureException(val reason: Throwable) : Exception(reason)
 
     // ------------------------------------------------------------------ 数据
 
@@ -99,24 +118,37 @@ object ReadifyApi {
     private suspend fun renewToken(): String {
         val refreshToken = ReadifySession.refreshToken
             ?: throw ApiException(CODE_REFRESH_INVALID, "未登录悦读账号")
-        val data = request(
-            httpMethod = "POST",
-            path = "/api/users/tokens",
-            body = JSONObject(),
-            extraHeaders = mapOf("x-refresh-token" to refreshToken)
-        ).data()
+        var lastError: Throwable? = null
+        for (base in API_BASES) {
+            try {
+                val data = request(
+                    base = base,
+                    httpMethod = "POST",
+                    path = "/api/users/tokens",
+                    body = JSONObject(),
+                    extraHeaders = mapOf("x-refresh-token" to refreshToken)
+                ).data()
 
-        val token = data.optString("userToken")
-        if (token.isBlank()) throw ApiException(-1, "续期未返回 userToken")
-        cachedToken = token
-        cachedTokenExpireAt = toMillis(data.optString("userTokenExpire", "0").toLongOrNull() ?: 0L)
+                val token = data.optString("userToken")
+                if (token.isBlank()) throw ApiException(-1, "续期未返回 userToken")
+                cachedToken = token
+                cachedTokenExpireAt =
+                    toMillis(data.optString("userTokenExpire", "0").toLongOrNull() ?: 0L)
 
-        // 服务端轮换了 refreshToken，必须回填，否则下次冷启动凭据已作废
-        val newRefresh = data.optString("refreshToken")
-        if (newRefresh.isNotBlank() && newRefresh != refreshToken) {
-            ReadifySession.updateRefreshToken(newRefresh)
+                // 服务端轮换了 refreshToken，必须回填，否则下次冷启动凭据已作废
+                val newRefresh = data.optString("refreshToken")
+                if (newRefresh.isNotBlank() && newRefresh != refreshToken) {
+                    ReadifySession.updateRefreshToken(newRefresh)
+                }
+                return token
+            } catch (e: NetworkFailureException) {
+                lastError = e.reason
+            } catch (e: CancellationException) {
+                throw e
+            }
+            // 业务错误（含 200001）与域名无关，直接抛出
         }
-        return token
+        throw lastError ?: ApiException(-1, "悦读服务不可用")
     }
 
     // ------------------------------------------------------------------ 云书架
@@ -248,22 +280,32 @@ object ReadifyApi {
         extraHeaders: Map<String, String> = emptyMap(),
     ): JSONObject {
         val token = ensureToken()
-        return runCatching {
-            request(httpMethod, path, token, body, jsonArrayBody, multipartBody, extraHeaders)
-        }.getOrElse { e ->
-            if (e is TokenInvalidException) {
-                // userToken 过期：作废缓存重新续期后原样重试一次
-                cachedToken = null
-                request(
-                    httpMethod, path, ensureToken(), body, jsonArrayBody, multipartBody, extraHeaders
+        var lastError: Throwable? = null
+        for (base in API_BASES) {
+            try {
+                return request(
+                    base, httpMethod, path, token, body, jsonArrayBody, multipartBody, extraHeaders
                 )
-            } else {
+            } catch (e: TokenInvalidException) {
+                // userToken 过期：作废缓存重新续期后原样重试一次（换域名无济于事）
+                cachedToken = null
+                return request(
+                    base, httpMethod, path, ensureToken(), body, jsonArrayBody, multipartBody,
+                    extraHeaders
+                )
+            } catch (e: NetworkFailureException) {
+                // 连接层失败才换域名；拿到 HTTP 响应的不当成失败，避免 bind 被重复执行
+                lastError = e.reason
+            } catch (e: CancellationException) {
                 throw e
             }
+            // 业务错误码直接向上抛
         }
+        throw lastError ?: ApiException(-1, "悦读服务不可用")
     }
 
     private suspend fun request(
+        base: String,
         httpMethod: String,
         path: String,
         token: String? = null,
@@ -277,8 +319,8 @@ object ReadifyApi {
             "x-lang" to "zh-CN",
             "x-user-agent" to "web",
             "Accept" to "application/json",
-            "Origin" to BASE,
-            "Referer" to "$BASE/library"
+            "Origin" to base,
+            "Referer" to "$base/library"
         )
         token?.let { headers["x-token"] = it }
         headers.putAll(extraHeaders)
@@ -288,10 +330,15 @@ object ReadifyApi {
             jsonArrayBody != null -> jsonArrayBody.toString().toRequestBody(jsonType)
             else -> multipartBody
         }
-        val response = okHttpClient.newCallResponse {
-            url(BASE + path)
-            method(httpMethod, requestBody)
-            addHeaders(headers)
+        val response = try {
+            okHttpClient.newCallResponse {
+                url(base + path)
+                method(httpMethod, requestBody)
+                addHeaders(headers)
+            }
+        } catch (e: IOException) {
+            // 连接层失败：让上层换域名重试
+            throw NetworkFailureException(e)
         }
         val json = runCatching { JSONObject(response.body.string()) }
             .getOrElse { throw ApiException(-1, "返回不是 JSON：$path") }
