@@ -6,7 +6,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.textfield.TextInputEditText
-import com.google.gson.Gson
 import io.legado.app.R
 import io.legado.app.help.audiobook.JReadVoiceEngine
 import io.legado.app.help.audiobook.JReadVoicePluginRuntime
@@ -26,12 +25,15 @@ import org.json.JSONObject
  * 插件信息、变量设置、预览插件界面、音频参数、清空数据、运行调试。
  *
  * 契约：
- *  - 入参：EXTRA_PLUGIN_JSON（插件序列化 JSON，为空表示新增）
- *  - 出参：RESULT_PLUGIN_JSON（保存后的插件 JSON）
+ *  - 入参：EXTRA_PLUGIN_ID（插件 id，为空表示新增）
+ *  - 出参：RESULT_PLUGIN_ID（保存后的插件 id，仅供调用方提示/刷新用）
+ *
+ * ⚠️ 入参/出参都只传 id，不传插件 JSON：插件的 code 动辄几 MB，
+ * 整包塞进 Intent 会直接触发 TransactionTooLargeException（Binder 上限约 1MB）。
+ * 插件数据统一由编辑器自己从 JReadVoiceEngine 读取。
  */
 class PluginEditorActivity : BaseCodeEditorActivity() {
 
-    private val gson = Gson()
     // 注意：必须在字段初始化时创建（registerForActivityResult 要求在 STARTED 之前注册）
     private val pluginDialogs = PluginEditDialogs(this)
 
@@ -65,7 +67,8 @@ class PluginEditorActivity : BaseCodeEditorActivity() {
         val updated = buildPluginForSave(code) ?: return
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { JReadVoiceEngine.savePlugin(this@PluginEditorActivity, updated) }
-            setResult(RESULT_OK, Intent().putExtra(RESULT_PLUGIN_JSON, gson.toJson(updated)))
+            // 只回传 id：整包 JSON 同样会撑爆 Binder，而调用方只需要知道"保存成功了"
+            setResult(RESULT_OK, Intent().putExtra(RESULT_PLUGIN_ID, updated.id))
             toastOnUi("已保存插件: ${updated.name}")
             finishDirectly()
         }
@@ -89,10 +92,10 @@ class PluginEditorActivity : BaseCodeEditorActivity() {
     // ---------------------------------------------------------------- 数据 / 保存
 
     private fun readPluginFromIntent(): JReadVoiceEngine.VoicePlugin {
-        val json = intent.getStringExtra(EXTRA_PLUGIN_JSON)
-        if (!json.isNullOrBlank()) {
-            runCatching { gson.fromJson(json, JReadVoiceEngine.VoicePlugin::class.java) }
-                .getOrNull()?.let { return it }
+        // 只按 id 从存储里读，避免把几 MB 的插件 JSON 走 Intent 传来传去
+        val id = intent.getStringExtra(EXTRA_PLUGIN_ID).orEmpty()
+        if (id.isNotBlank()) {
+            JReadVoiceEngine.listPlugins(this).firstOrNull { it.id == id }?.let { return it }
         }
         return JReadVoiceEngine.VoicePlugin()
     }
@@ -250,8 +253,8 @@ class PluginEditorActivity : BaseCodeEditorActivity() {
     private fun debugPrefs() = getSharedPreferences(DEBUG_PREFS_NAME, MODE_PRIVATE)
 
     companion object {
-        const val EXTRA_PLUGIN_JSON = "pluginJson"
-        const val RESULT_PLUGIN_JSON = "pluginJson"
+        const val EXTRA_PLUGIN_ID = "pluginId"
+        const val RESULT_PLUGIN_ID = "pluginId"
 
         private const val DEFAULT_TEMPLATE_ASSET = "defaultData/ttsrv_plugin_template.js"
         private const val DEFAULT_TEMPLATE_FALLBACK = """let PluginJS = {

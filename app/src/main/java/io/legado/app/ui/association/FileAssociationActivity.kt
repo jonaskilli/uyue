@@ -16,6 +16,7 @@ import io.legado.app.utils.readText
 import io.legado.app.databinding.ActivityTranslucenceBinding
 import io.legado.app.exception.InvalidBooksDirException
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.audiobook.JReadVoiceEngine
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.permission.Permissions
 import io.legado.app.lib.permission.PermissionsCompat
@@ -84,6 +85,9 @@ class FileAssociationActivity :
                 "txtRule" -> showDialogFragment(ImportTxtTocRuleDialog(it.second, true))
                 "dictRule" -> showDialogFragment(ImportDictRuleDialog(it.second, true))
                 "ttsScript" -> importTtsScript(it.second)
+                // TTS 插件 / 配置包：直接导入，不需要弹选择框（导入函数自带去重合并）
+                "voicePlugin" -> importVoicePlugin(it.second)
+                "voiceConfig" -> importVoiceConfig(it.second)
             }
         }
         viewModel.errorLive.observe(this) {
@@ -217,6 +221,54 @@ class FileAssociationActivity :
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * 从外部（文件管理器/其他应用分享）导入 TTS 插件包。
+     * 走 [JReadVoiceEngine.importPluginsFromJson]，与界面内导入完全同一条逻辑：
+     * 按 id/pluginId 命中已存在的就覆盖，否则新增，不会产生重复插件。
+     */
+    private fun importVoicePlugin(uriStr: String) {
+        lifecycleScope.launch {
+            runCatching {
+                withContext(IO) {
+                    val text = Uri.parse(uriStr).readText(this@FileAssociationActivity)
+                    JReadVoiceEngine.importPluginsFromJson(appCtx, text)
+                }
+            }.onSuccess { count ->
+                binding.rotateLoading.gone()
+                toastOnUi(if (count > 0) "TTS插件导入成功，共 $count 个" else "没有可导入的插件")
+                handler.postDelayed(2000) { finish() }
+            }.onFailure {
+                binding.rotateLoading.gone()
+                val msg = "TTS插件导入失败\n${it.localizedMessage}"
+                AppLog.put(msg, it)
+                toastOnUi(msg)
+                handler.postDelayed(2000) { finish() }
+            }
+        }
+    }
+
+    /** 从外部导入 TTS 配置包（发音人列表），逻辑与界面内导入一致 */
+    private fun importVoiceConfig(uriStr: String) {
+        lifecycleScope.launch {
+            runCatching {
+                withContext(IO) {
+                    val text = Uri.parse(uriStr).readText(this@FileAssociationActivity)
+                    JReadVoiceEngine.importConfigsFromJson(appCtx, text)
+                }
+            }.onSuccess { count ->
+                binding.rotateLoading.gone()
+                toastOnUi(if (count > 0) "TTS配置导入成功，共 $count 项" else "没有可导入的配置")
+                handler.postDelayed(2000) { finish() }
+            }.onFailure {
+                binding.rotateLoading.gone()
+                val msg = "TTS配置导入失败\n${it.localizedMessage}"
+                AppLog.put(msg, it)
+                toastOnUi(msg)
+                handler.postDelayed(2000) { finish() }
             }
         }
     }

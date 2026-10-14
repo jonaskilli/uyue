@@ -1452,6 +1452,27 @@ object JReadVoiceEngine {
             .toString(2)
     }
 
+    /**
+     * 导出**单个**插件，格式与整包导出完全一致（plugins 数组里只有这一个），
+     * 因此导出结果可以直接走既有的导入流程，不需要额外的解析分支。
+     *
+     * @param pluginId 插件 id
+     * @param includeUserVars 是否带上用户变量（默认 false，与整包导出一致，避免把会话令牌等写进分享文件）
+     * @return 插件不存在时返回 null
+     */
+    fun exportPluginJson(
+        context: Context,
+        pluginId: String,
+        includeUserVars: Boolean = false,
+    ): String? {
+        val plugin = listPlugins(context).firstOrNull { it.id == pluginId } ?: return null
+        return JSONObject()
+            .put("format", "jread_voice_plugin_bundle")
+            .put("version", 1)
+            .put("plugins", JSONArray().put(pluginToJson(plugin, includeUserVars)))
+            .toString(2)
+    }
+
     fun exportConfigsJson(context: Context): String {
         val appContext = context.applicationContext
         return JSONObject()

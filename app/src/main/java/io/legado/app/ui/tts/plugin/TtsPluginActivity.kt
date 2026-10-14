@@ -37,7 +37,6 @@ import io.legado.app.lib.theme.primaryColor
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.showHelp
-import io.legado.app.utils.GSON
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +72,8 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     private var mediaPlayer: MediaPlayer? = null
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri -> uri?.let { doImport(it) } }
+    /** 正在导出的单个插件；null 表示走整体导出（见 doExport） */
+    private var pendingExportPlugin: JReadVoiceEngine.VoicePlugin? = null
     private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> uri?.let { doExport(it) } }
     // 编辑/新增配置保存后回传，父页面据此刷新内置发音人列表缓存
     private val configEditorLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -81,18 +82,19 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     // 变量设置 / 预览UI / 音频参数 / 清空数据：与插件代码编辑器共用同一套对话框实现，
     // 避免列表页和编辑器各写一份
     private val pluginDialogs = PluginEditDialogs(this)
-    // 新增/编辑插件统一走 PluginEditorActivity（同一个界面，只以插件 JSON 区分）
+    // 新增/编辑插件统一走 PluginEditorActivity（同一个界面，只以插件 id 区分）
     private val pluginEditorLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode != RESULT_OK) return@registerForActivityResult
-        val json = result.data?.getStringExtra(PluginEditorActivity.RESULT_PLUGIN_JSON)
-        if (json.isNullOrBlank()) {
+        // 编辑器只回传 id（整包 JSON 会撑爆 Binder，见 PluginEditorActivity 契约说明）
+        val id = result.data?.getStringExtra(PluginEditorActivity.RESULT_PLUGIN_ID)
+        if (id.isNullOrBlank()) {
             reloadListsLight()
             return@registerForActivityResult
         }
-        runCatching { GSON.fromJson(json, JReadVoiceEngine.VoicePlugin::class.java) }
-            .getOrNull()?.let { toastOnUi("已保存插件: ${it.name}") }
+        val name = JReadVoiceEngine.listPlugins(this).firstOrNull { it.id == id }?.name
+        toastOnUi("已保存插件: ${name ?: id}")
         reloadListsLight()
     }
 
@@ -206,6 +208,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             onPluginToggle = { plugin, enabled -> togglePlugin(plugin, enabled) },
             onPluginDelete = { plugin -> deletePlugin(plugin) },
             onPluginAudioParams = { plugin -> showPluginAudioParams(plugin) },
+            onPluginExport = { plugin -> exportSinglePlugin(plugin) },
         )
         loadData()
     }
@@ -674,6 +677,8 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             }
             R.id.menu_import -> importLauncher.launch("*/*")
             R.id.menu_export -> {
+                // 清掉可能残留的单插件目标，确保这次走整体导出
+                pendingExportPlugin = null
                 val suffix = if (currentTab == TAB_CONFIGS) "configs" else "plugins"
                 exportLauncher.launch("tts_${suffix}_${System.currentTimeMillis()}.json")
             }
@@ -1581,9 +1586,12 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
      * 输入时还要跑全文正则，越输越卡。
      */
     private fun showPluginEditor(plugin: JReadVoiceEngine.VoicePlugin?) {
-        val target = plugin ?: JReadVoiceEngine.VoicePlugin()
+        // 只传 id，不传整包 JSON：插件 code 动辄几 MB，塞进 Intent 会触发
+        // TransactionTooLargeException（Binder 事务上限约 1MB）。新增时 id 为空，
+        // 编辑器会新建一个 VoicePlugin 并填入内置模板。
         pluginEditorLauncher.launch(Intent(this, PluginEditorActivity::class.java).apply {
-            putExtra(PluginEditorActivity.EXTRA_PLUGIN_JSON, GSON.toJson(target))
+            plugin?.id?.takeIf { it.isNotBlank() }
+                ?.let { putExtra(PluginEditorActivity.EXTRA_PLUGIN_ID, it) }
         })
     }
 
@@ -1648,17 +1656,43 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         }
     }
 
+    /**
+     * 导出单个插件：复用整体导出那个 CreateDocument launcher，
+     * 用 [pendingExportPlugin] 区分「导这一个」与「整包导出」两种目标。
+     */
+    private fun exportSinglePlugin(plugin: JReadVoiceEngine.VoicePlugin) {
+        pendingExportPlugin = plugin
+        // 名字里可能带 / \ : 等文件名非法字符，先洗掉再当默认文件名
+        val safeName = plugin.name.trim().replace(Regex("[<>:\"/\\\\|?*\\x00-\\x1F]"), "_")
+            .ifBlank { "plugin" }
+        exportLauncher.launch("ttsrv-plugin-$safeName.json")
+    }
+
     private fun doExport(uri: android.net.Uri) {
+        // 取一次就清掉：用户可能在选文件框里取消，残留会让下一次整体导出误导成单插件
+        val single = pendingExportPlugin
+        pendingExportPlugin = null
         lifecycleScope.launch {
             val json = withContext(Dispatchers.IO) {
-                when (currentTab) {
-                    TAB_CONFIGS -> JReadVoiceEngine.exportConfigsJson(this@TtsPluginActivity)
-                    TAB_PLUGINS -> JReadVoiceEngine.exportPluginsJson(this@TtsPluginActivity, includeUserVars = false)
-                    else -> "[]"
+                if (single != null) {
+                    // 单插件导出与整包同格式（plugins 数组里只有这一个），可直接再导入
+                    JReadVoiceEngine.exportPluginJson(this@TtsPluginActivity, single.id)
+                } else {
+                    when (currentTab) {
+                        TAB_CONFIGS -> JReadVoiceEngine.exportConfigsJson(this@TtsPluginActivity)
+                        TAB_PLUGINS -> JReadVoiceEngine.exportPluginsJson(
+                            this@TtsPluginActivity, includeUserVars = false
+                        )
+                        else -> "[]"
+                    }
                 }
             }
+            if (json == null) {
+                toastOnUi("导出失败：找不到该插件")
+                return@launch
+            }
             contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
-            toastOnUi("导出完成")
+            toastOnUi(if (single != null) "已导出插件：${single.name}" else "导出完成")
         }
     }
 
