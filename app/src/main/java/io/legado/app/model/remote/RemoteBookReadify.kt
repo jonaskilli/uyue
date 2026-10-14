@@ -60,7 +60,11 @@ class RemoteBookReadify : RemoteBookManager() {
     }
 
     private fun ReadifyApi.CloudBook.toRemoteBook(): RemoteBook {
+        // sourceFileType 为 JSON null 时 optString 会返回字符串 "null"，必须挡掉，
+        // 否则书名会被拼成 "xxx.null"（软删除/文件信息被清空时就会出现）
         val ext = fileType.trim().trimStart('.')
+            .takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            .orEmpty()
         val name = when {
             ext.isBlank() -> title
             title.endsWith(".$ext", true) -> title
