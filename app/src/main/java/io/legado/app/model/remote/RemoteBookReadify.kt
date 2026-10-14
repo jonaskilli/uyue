@@ -51,6 +51,15 @@ class RemoteBookReadify : RemoteBookManager() {
         ReadifyApi.deleteBooks(listOf(remoteBookUrl))
     }
 
+    /** 删除前预检（已分享的书不允许删）；解析失败不阻断删除 */
+    suspend fun preDeleteCheck(bookIds: List<String>): Set<String> =
+        ReadifyApi.preDeleteCheck(bookIds)
+
+    /** 云端重命名：name 传书名，不要带扩展名 */
+    suspend fun rename(bookId: String, name: String) {
+        ReadifyApi.renameBook(bookId, name)
+    }
+
     private suspend fun resolveDownloadUrl(bookId: String): String {
         cloudBooks[bookId]?.downloadUrl?.takeIf { it.isNotBlank() }?.let { return it }
         // 缓存失效（如界面重建）时重新拉一次列表

@@ -191,6 +191,42 @@ object ReadifyApi {
         authorized("POST", "/api/bookshelves/books", body)
     }
 
+    /**
+     * 删除前预检：返回**不允许删除**的 bookId 集合（如已分享的书）。
+     * 解析失败或接口异常时返回空集合——预检只是体验优化，不能反过来阻断删除。
+     */
+    suspend fun preDeleteCheck(bookIds: List<String>): Set<String> {
+        if (bookIds.isEmpty()) return emptySet()
+        val body = JSONObject().apply {
+            put("bookIds", JSONArray().apply { bookIds.forEach { put(it) } })
+        }
+        val json = runCatching { authorized("POST", "/api/bookshelves/books/pre-check", body) }
+            .getOrNull() ?: return emptySet()
+        val data = json.optJSONObject("data") ?: return emptySet()
+        if (data.optBoolean("canDeleteAll", true)) return emptySet()
+        val blocked = mutableSetOf<String>()
+        val reasons = data.optJSONArray("cannotDeleteReasons") ?: return emptySet()
+        for (i in 0 until reasons.length()) {
+            val ids = reasons.optJSONObject(i)?.optJSONArray("bookIds") ?: continue
+            for (j in 0 until ids.length()) {
+                ids.optString(j).takeIf { it.isNotBlank() }?.let { blocked.add(it) }
+            }
+        }
+        return blocked
+    }
+
+    /**
+     * 云端重命名（官网端点）。注意服务端存的是「书名」，不带扩展名：
+     * 传 "斗罗大陆" 而不是 "斗罗大陆.txt"。
+     */
+    suspend fun renameBook(bookId: String, name: String) {
+        val body = JSONObject().apply {
+            put("bookId", bookId)
+            put("name", name)
+        }
+        authorized("POST", "/api/bookshelves/books/rename", body)
+    }
+
     /** 删除云端书籍：bookId 数组必须放 body 里，放路径参数无效 */
     suspend fun deleteBooks(bookIds: List<String>) {
         val body = JSONArray().apply { bookIds.forEach { put(it) } }
