@@ -35,6 +35,24 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_readify_login"
+        android:icon="@drawable/ic_export"
+        android:title="登录悦读账号"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_readify_upload"
+        android:icon="@drawable/ic_export"
+        android:title="上传本地书籍到悦读"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_readify_download"
+        android:icon="@drawable/ic_download_line"
+        android:title="下载悦读云书籍"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_add_url"
         android:icon="@drawable/ic_add_online"
         android:title="@string/add_url"
