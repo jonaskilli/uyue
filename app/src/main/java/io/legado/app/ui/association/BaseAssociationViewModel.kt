@@ -20,6 +20,14 @@ abstract class BaseAssociationViewModel(application: Application) : BaseViewMode
         }
 
         when {
+            // 悦读/TTS 引擎的插件包与配置包：顶层带 format 标记，是最可靠的识别方式
+            // （导出格式见 JReadVoiceEngine.exportPluginJson / exportConfigsJson）
+            map["format"] == "jread_voice_plugin_bundle" ->
+                successLive.postValue("voicePlugin" to uri.toString())
+
+            map["format"] == "jread_voice_config_bundle" ->
+                successLive.postValue("voiceConfig" to uri.toString())
+
             map.containsKey("bookSourceUrl") ->
                 successLive.postValue("bookSource" to uri.toString())
 
