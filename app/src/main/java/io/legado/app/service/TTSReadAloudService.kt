@@ -47,6 +47,7 @@ import io.legado.app.utils.servicePendingIntent
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -124,7 +125,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 已提交给引擎的那笔合成仍要跑完并落缓存，等在它上面的人也要拿到结果。
      * 生命周期与 service 同步，onDestroy 里取消。
      */
-    private val synthScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val synthScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+            // 兜底：任何漏网的未捕获异常只记日志，不走默认 handler 崩应用
+            AppLog.put("TTS合成作用域未捕获异常\n${e.localizedMessage}", e)
+        }
+    )
     /** 把 TTS onDone/onError 回调转成挂起函数的 CompletableDeferred */
     private val synthesisCompleters = ConcurrentHashMap<String, CompletableDeferred<File?>>()
     /** utteranceId -> 合成目标临时文件 */
@@ -354,11 +360,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 也要保证这笔合成有归属、mine 一定被 complete。服务销毁时在 onDestroy 取消它。
         val job = withContext(NonCancellable) {
             synthScope.launch {
-                val result = try {
+                // 必须**无条件** complete：doSynthesizeText 若抛异常（而非返回 null），
+                // 一旦跳过 complete，持有者与所有等待方就会永久挂在 mine.await() 上；
+                // 且裸 SupervisorJob 子协程的未捕获异常会走默认 handler 直接崩应用。
+                val result = runCatching {
                     doSynthesizeText(text, utteranceId, index, chapterTitle, rawText)
-                } finally {
-                    inFlightSyntheses.remove(cacheKey)
-                }
+                }.onFailure {
+                    AppLog.put("TTS合成异常\n${it.localizedMessage}", it)
+                }.getOrNull()
+                inFlightSyntheses.remove(cacheKey)
                 mine.complete(result)
             }
         }
