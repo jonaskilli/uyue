@@ -17,4 +17,8 @@
         android:id="@+id/menu_bind_tts_engines"
         android:title="@string/bind_tts_engines" />
 
+    <item
+        android:id="@+id/menu_set_params"
+        android:title="@string/set_params" />
+
 </menu>

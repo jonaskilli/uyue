@@ -178,6 +178,11 @@
     <string name="aloud_stop">朗读停止</string>
     <string name="clear_cache">清理缓存</string>
     <string name="clear_cache_success">成功清理缓存</string>
+    <string name="auto_clear_cache_on_start">打开应用时自动清理缓存</string>
+    <string name="auto_clear_cache_on_start_summary">每次打开应用时在后台静默清理图片缓存，已缓存的章节和下载的书籍不受影响</string>
+    <string name="set_params">设定参数</string>
+    <string name="tts_script_params_invalid">请检查输入：数值超出允许范围</string>
+    <string name="tts_script_params_saved">参数已保存</string>
     <string name="clear_tts_cache_title">清理朗读音频缓存</string>
     <string name="clear_tts_cache_all">清除全部缓存音频</string>
     <string name="clear_tts_cache_current_chapter">仅删除当前章节缓存音频</string>

@@ -61,6 +61,7 @@ object PreferKey {
     const val recordLog = "recordLog"
     const val processText = "process_text"
     const val cleanCache = "cleanCache"
+    const val autoClearCacheOnStart = "autoClearCacheOnStart"
     const val saveTabPosition = "saveTabPosition"
     const val fontFolder = "fontFolder"
     const val backupPath = "backupUri"
