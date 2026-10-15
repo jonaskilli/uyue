@@ -68,6 +68,26 @@ object BookHelp {
         )
     }
 
+    /**
+     * 只清理应用内部缓存目录（cacheDir）：
+     * 含 Glide 图片磁盘缓存（image_manager_disk_cache）、AI 生图临时缓存（ai_images）等。
+     * **不动书源章节正文缓存**（book_cache，含下载的书），删除后各模块按需自动重建。
+     * 必须在后台线程调用。
+     */
+    fun clearInternalCache() {
+        FileUtils.delete(appCtx.cacheDir.absolutePath)
+    }
+
+    /**
+     * 清理全部缓存：内部 cache 目录 + 外置书籍缓存（book_cache）。
+     * 注意 book_cache 里含阅读缓存的章节正文与“下载”的书，删后需联网重新获取。
+     * 必须在后台线程调用。
+     */
+    fun clearAllCache() {
+        clearInternalCache()
+        clearCache()
+    }
+
     fun clearCache(book: Book) {
         val filePath = FileUtils.getPath(downloadDir, cacheFolderName, book.getFolderName())
         FileUtils.delete(filePath)

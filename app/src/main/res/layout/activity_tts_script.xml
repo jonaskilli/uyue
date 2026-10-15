@@ -63,10 +63,20 @@
         android:layout_height="0dp"
         android:layout_weight="1">
 
-        <io.legado.app.ui.widget.recycler.scroller.FastScrollRecyclerView
+        <!--
+          与 TTS 引擎插件配置列表保持一致：用普通 RecyclerView 而非 FastScrollRecyclerView，
+          避免快速滚动条(FastScroller)常驻盖在卡片右缘、压住圆角卡片右边框导致"框没闭合"。
+          卡片本身的 margin + 描边 + elevation 已能清晰分隔每条，无需再画分隔线。
+        -->
+        <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recycler_view"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
+            android:background="@color/background_menu"
+            android:clipToPadding="false"
+            android:paddingTop="4dp"
+            android:paddingBottom="8dp"
+            android:scrollbars="none"
             tools:ignore="SpeakableTextPresentCheck" />
 
     </FrameLayout>

@@ -6,6 +6,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.PopupMenu
 import androidx.core.os.bundleOf
+import androidx.core.view.isVisible
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import io.legado.app.R
@@ -13,10 +14,8 @@ import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter
 import io.legado.app.data.entities.TtsScript
 import io.legado.app.databinding.ItemTtsScriptBinding
-import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
-import io.legado.app.utils.ColorUtils
 
 class TtsScriptAdapter(context: Context, var callBack: CallBack) :
     RecyclerAdapter<TtsScript, ItemTtsScriptBinding>(context),
@@ -35,6 +34,8 @@ class TtsScriptAdapter(context: Context, var callBack: CallBack) :
         override fun areContentsTheSame(oldItem: TtsScript, newItem: TtsScript): Boolean {
             if (oldItem.name != newItem.name) return false
             if (oldItem.isEnabled != newItem.isEnabled) return false
+            // 参数保存只改 code，不比较会导致摘要行不刷新
+            if (oldItem.code != newItem.code) return false
             return true
         }
 
@@ -80,10 +81,13 @@ class TtsScriptAdapter(context: Context, var callBack: CallBack) :
     ) {
         binding.run {
             if (payloads.isEmpty()) {
-                root.setBackgroundColor(ColorUtils.withAlpha(context.backgroundColor, 0.5f))
                 cbName.text = item.name
                 swtEnabled.isChecked = item.isEnabled
                 cbName.isChecked = selected.contains(item)
+                // 参数摘要：仅含参数的脚本显示，其余隐藏（条目恢复原高度）
+                val summary = TtsScriptParams.summary(item.code)
+                tvParams.text = summary.orEmpty()
+                tvParams.isVisible = summary != null
             } else {
                 for (i in payloads.indices) {
                     val bundle = payloads[i] as Bundle
@@ -130,6 +134,9 @@ class TtsScriptAdapter(context: Context, var callBack: CallBack) :
         val item = getItem(position) ?: return
         val popupMenu = PopupMenu(context, view)
         popupMenu.inflate(R.menu.tts_script_item)
+        // 只有含参数的脚本才显示“设定参数”
+        popupMenu.menu.findItem(R.id.menu_set_params)?.isVisible =
+            TtsScriptParams.parse(item.code) != null
         popupMenu.setOnMenuItemClickListener { menuItem ->
             when (menuItem.itemId) {
                 R.id.menu_top -> callBack.toTop(item)
@@ -139,6 +146,7 @@ class TtsScriptAdapter(context: Context, var callBack: CallBack) :
                     selected.remove(item)
                 }
                 R.id.menu_bind_tts_engines -> callBack.bindTtsEngines(item)
+                R.id.menu_set_params -> callBack.setParams(item)
             }
             true
         }
@@ -198,6 +206,7 @@ class TtsScriptAdapter(context: Context, var callBack: CallBack) :
         fun toTop(script: TtsScript)
         fun toBottom(script: TtsScript)
         fun bindTtsEngines(script: TtsScript)
+        fun setParams(script: TtsScript)
         fun upOrder()
         fun upCountView()
     }

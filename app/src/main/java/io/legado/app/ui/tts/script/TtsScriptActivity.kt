@@ -3,15 +3,20 @@ package io.legado.app.ui.tts.script
 import android.annotation.SuppressLint
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.text.InputType
 import android.view.Menu
 import android.view.MenuItem
 import android.view.SubMenu
+import android.view.View
+import android.widget.LinearLayout
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.widget.PopupMenu
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import io.legado.app.R
 import io.legado.app.base.VMBaseActivity
 import io.legado.app.constant.AppLog
@@ -26,7 +31,6 @@ import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.widget.SelectActionBar
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
-import io.legado.app.ui.widget.recycler.VerticalDivider
 import io.legado.app.utils.GSON
 import io.legado.app.utils.StringUtils
 import io.legado.app.utils.readText
@@ -110,7 +114,6 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
         binding.recyclerView.setEdgeEffectColor(primaryColor)
         binding.recyclerView.layoutManager = LinearLayoutManager(this)
         binding.recyclerView.adapter = adapter
-        binding.recyclerView.addItemDecoration(VerticalDivider(this))
         val itemTouchCallback = ItemTouchCallback(adapter)
         itemTouchCallback.isCanDrag = true
         val dragSelectTouchHelper: DragSelectTouchHelper =
@@ -297,6 +300,94 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
                 }
             }
         }
+    }
+
+    /**
+     * 设定参数：弹出 4 个输入框（默认值 = 脚本当前值，超时按秒），
+     * 保存后按变量名原位改写脚本代码并写库，下一段朗读即生效。
+     * 仅对含参数的脚本调用（菜单项已控制显隐）。
+     */
+    override fun setParams(script: TtsScript) {
+        val values = TtsScriptParams.parse(script.code) ?: run {
+            toastOnUi("该脚本没有可配置的参数")
+            return
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+        }
+
+        fun addInput(
+            param: TtsScriptParams.Param,
+            value: String,
+            decimal: Boolean
+        ): TextInputEditText {
+            val til = TextInputLayout(this).apply { hint = param.label }
+            val editText = TextInputEditText(this).apply {
+                setText(value)
+                inputType = if (decimal) {
+                    InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                } else {
+                    InputType.TYPE_CLASS_NUMBER
+                }
+                setSelectAllOnFocus(true)
+            }
+            til.addView(editText)
+            container.addView(til)
+            return editText
+        }
+
+        val pChar = TtsScriptParams.PARAMS[0]
+        val pLen = TtsScriptParams.PARAMS[1]
+        val pRetry = TtsScriptParams.PARAMS[2]
+        val pTimeout = TtsScriptParams.PARAMS[3]
+        val etChar = addInput(pChar, values.intOf(pChar.varName)?.toString().orEmpty(), false)
+        val etLen = addInput(pLen, values.intOf(pLen.varName)?.toString().orEmpty(), false)
+        val etRetry = addInput(pRetry, values.intOf(pRetry.varName)?.toString().orEmpty(), false)
+        // 超时框按秒编辑，保存时换算回毫秒
+        val etTimeout = addInput(
+            pTimeout,
+            TtsScriptParams.toSecondsText(values.intOf(pTimeout.varName) ?: 0),
+            true
+        )
+
+        alert(R.string.set_params) {
+            customView { container }
+            okButton {
+                val vChar = readParam(etChar, pChar)
+                val vLen = readParam(etLen, pLen)
+                val vRetry = readParam(etRetry, pRetry)
+                val vTimeout = readParam(etTimeout, pTimeout)
+                if (vChar == null || vLen == null || vRetry == null || vTimeout == null) {
+                    toastOnUi(R.string.tts_script_params_invalid)
+                    return@okButton
+                }
+                // 注意：必须用 copy 生成新对象去更新库，不能就地改 script.code。
+                // 否则适配器里当前条目已被改成新 code，flowAll 重发后 diff 认为内容未变，
+                // 不触发重绑，条目上的参数摘要就不会刷新（需退出重进才刷新）。
+                viewModel.update(
+                    script.copy(
+                        code = TtsScriptParams.applyFromInputs(
+                            script.code,
+                            vChar.toInt(), vLen.toInt(), vRetry.toInt(), vTimeout
+                        )
+                    )
+                )
+                toastOnUi(R.string.tts_script_params_saved)
+            }
+            noButton()
+        }
+    }
+
+    /** 读取并校验一个参数输入，非法时在输入框上提示取值范围 */
+    private fun readParam(editText: TextInputEditText, param: TtsScriptParams.Param): Double? {
+        val value = editText.text?.toString()?.trim()?.toDoubleOrNull()
+        if (value == null || value < param.min || value > param.max) {
+            editText.error = param.rangeHint()
+            editText.requestFocus()
+            return null
+        }
+        return value
     }
 
     override fun upOrder() {

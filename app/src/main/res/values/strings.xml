@@ -183,6 +183,11 @@
     <string name="aloud_stop">Speak Stopped</string>
     <string name="clear_cache">Clear cache</string>
     <string name="clear_cache_success">Cache cleared</string>
+    <string name="auto_clear_cache_on_start">Auto clear cache on startup</string>
+    <string name="auto_clear_cache_on_start_summary">Silently clear image caches in the background when the app opens; cached chapters and downloaded books are kept</string>
+    <string name="set_params">Set parameters</string>
+    <string name="tts_script_params_invalid">Please check the inputs: values are out of range</string>
+    <string name="tts_script_params_saved">Parameters saved</string>
     <string name="clear_tts_cache_title">Clear read-aloud audio cache</string>
     <string name="clear_tts_cache_all">Clear all cached audio</string>
     <string name="clear_tts_cache_current_chapter">Delete only current chapter cache</string>

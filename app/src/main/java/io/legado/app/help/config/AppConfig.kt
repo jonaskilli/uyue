@@ -666,6 +666,18 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefBoolean(PreferKey.previewImageByClick, value)
         }
 
+    /**
+     * 开启后，每次打开 App 都在后台静默清理内部图片缓存
+     * （Glide 图片磁盘缓存 image_manager_disk_cache、AI 生图临时缓存 ai_images 等）。
+     * 不动书源章节正文缓存与下载的书。默认关闭；
+     * 清理在 IO 协程里延后执行，不阻塞主线程、不影响正常使用。
+     */
+    var autoClearCacheOnStart: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.autoClearCacheOnStart, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.autoClearCacheOnStart, value)
+        }
+
     val clickImgWay: String?
         get() = appCtx.getPrefString(PreferKey.clickImgWay)
 

@@ -23,8 +23,7 @@ class ConfigViewModel(application: Application) : BaseViewModel(application) {
 
     fun clearCache() {
         execute {
-            BookHelp.clearCache()
-            FileUtils.delete(context.cacheDir.absolutePath)
+            BookHelp.clearAllCache()
         }.onSuccess {
             context.toastOnUi(R.string.clear_cache_success)
         }

@@ -57,6 +57,7 @@ import io.legado.app.utils.LogUtils
 import io.legado.app.utils.defaultSharedPreferences
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.isDebuggable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.chromium.base.ThreadUtils
 import splitties.init.appCtx
@@ -121,6 +122,19 @@ class App : Application() {
             BookHelp.clearInvalidCache()
             Backup.clearCache()
             ReadBookConfig.clearBgAndCache()
+            //开启后，打开App时在后台静默清理图片等内部缓存（不动书源章节缓存）。
+            //用 launch 另起子协程 + 延后执行：不阻塞后面的初始化，也避开启动瞬间的图片加载。
+            if (AppConfig.autoClearCacheOnStart) {
+                launch {
+                    delay(10_000)
+                    runCatching {
+                        BookHelp.clearInternalCache()
+                        LogUtils.d("App", "已后台自动清理图片缓存")
+                    }.onFailure {
+                        LogUtils.e("App", "后台自动清理缓存失败: ${it.message}")
+                    }
+                }
+            }
 //            ThemeConfig.clearBg() //每次手动切换主题时清理多余图片
             //初始化简繁转换引擎
             when (AppConfig.chineseConverterType) {
