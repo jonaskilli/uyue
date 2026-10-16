@@ -66,6 +66,13 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     /** 千问（Qwen）Cookie 列表（索引 0 为「默认Cookie」，含 tongyi_sso_ticket），支持多个并自动轮换。 */
     private val qwenCookies = MutableStateFlow(loadList("qwen_cookies", "qwen_cookie"))
 
+    /**
+     * 混元（aistudio.tencent.com 网页版）Cookie 列表（索引 0 为「默认Cookie」，
+     * 含 hunyuan_user / hunyuan_token / hunyuan_source），支持多个并自动轮换。
+     * 注意：与「混元3」(cnb) 是两套独立凭证，互不干扰。
+     */
+    private val hunyuanCookies = MutableStateFlow(loadList("hunyuan_cookies", "hunyuan_cookie"))
+
     /** 混元3（CNB）登录 Cookie 列表，需在内置浏览器登录 cnb.cool 后提取（含 CNBSESSION）。 */
     private val cnbCookies = MutableStateFlow(loadList("cnb_cookies", "cnb_cookie"))
 
@@ -212,12 +219,25 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         BailianClient.applyConfig(json)
     }
 
-    /** 当前服务商对应的凭证列表（供 UI 展示/编辑）。 */
-    val cookies: StateFlow<List<String>> = combine(provider, doubaoCookies, kimiCookies, qwenCookies, cnbCookies) { p, d, k, q, c ->
+    /**
+     * 当前服务商对应的凭证列表（供 UI 展示/编辑）。
+     * 用 vararg 版 combine：服务商 5 个 Cookie 列表 + provider 共 6 个流，
+     * 超出带类型的 combine 重载上限（5 个），只能走 Array<*> 形式。
+     */
+    val cookies: StateFlow<List<String>> = combine(
+        provider, doubaoCookies, kimiCookies, qwenCookies, cnbCookies, hunyuanCookies
+    ) { arr ->
+        val p = arr[0] as String
+        val d = arr[1] as List<String>
+        val k = arr[2] as List<String>
+        val q = arr[3] as List<String>
+        val c = arr[4] as List<String>
+        val h = arr[5] as List<String>
         when (p) {
             "kimi" -> k
             "qwen" -> q
             "cnb" -> c
+            "hunyuan" -> h
             else -> d
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, doubaoCookies.value)
@@ -247,12 +267,14 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "kimi" -> "kimi_cookie_selected"
             "qwen" -> "qwen_cookie_selected"
             "cnb" -> "cnb_cookie_selected"
+            "hunyuan" -> "hunyuan_cookie_selected"
             else -> "doubao_cookie_selected"
         }
         val list = when (p) {
             "kimi" -> kimiCookies
             "qwen" -> qwenCookies
             "cnb" -> cnbCookies
+            "hunyuan" -> hunyuanCookies
             else -> doubaoCookies
         }.value
         return prefs.getInt(key, 0).coerceIn(0, list.lastIndex)
@@ -263,6 +285,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "kimi" -> kimiCookies
             "qwen" -> qwenCookies
             "cnb" -> cnbCookies
+            "hunyuan" -> hunyuanCookies
             else -> doubaoCookies
         }
 
@@ -273,6 +296,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "kimi" -> "kimi_cookies"
             "qwen" -> "qwen_cookies"
             "cnb" -> "cnb_cookies"
+            "hunyuan" -> "hunyuan_cookies"
             else -> "doubao_cookies"
         }
         prefs.edit().putString(key, arr.toString()).apply()
@@ -283,6 +307,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "kimi" -> "kimi_cookie_selected"
             "qwen" -> "qwen_cookie_selected"
             "cnb" -> "cnb_cookie_selected"
+            "hunyuan" -> "hunyuan_cookie_selected"
             else -> "doubao_cookie_selected"
         }
         prefs.edit().putInt(key, selectedIndex.value).apply()
@@ -314,6 +339,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "kimi" -> "kimi_cookie_selected"
             "qwen" -> "qwen_cookie_selected"
             "cnb" -> "cnb_cookie_selected"
+            "hunyuan" -> "hunyuan_cookie_selected"
             else -> "doubao_cookie_selected"
         }
         val list = activeList().value
@@ -359,6 +385,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.setKimiCookieList(kimiCookies.value)
         ProxyServer.setQwenCookieList(qwenCookies.value)
         ProxyServer.setCnbCookieList(cnbCookies.value)
+        ProxyServer.setHunyuanCookieList(hunyuanCookies.value)
         ProxyServer.setDeepSeekTokenList(deepseekTokens.value)
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
         ProxyServer.setBailianConfigList(bailianConfigs.value)

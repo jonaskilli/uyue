@@ -220,6 +220,43 @@ object ProxyServer {
         return c
     }
 
+    // ── 混元（aistudio.tencent.com 网页版）Cookie 轮换（含 hunyuan_user / hunyuan_token）──
+    private val hunyuanLock = Any()
+    @Volatile private var hunyuanCookieList: List<String> = emptyList()
+    private var hunyuanCookieNames: List<String> = emptyList()
+    private val hunyuanRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 设置参与轮换的混元 Cookie 列表（自动过滤空值，并保留对应名称）。 */
+    fun setHunyuanCookieList(list: List<String>) {
+        synchronized(hunyuanLock) {
+            val pairs = list.mapIndexed { i, c ->
+                val name = if (i == 0) "默认Cookie" else "Cookie ${i + 1}"
+                name to c
+            }.filter { it.second.isNotBlank() }
+            hunyuanCookieList = pairs.map { it.second }
+            hunyuanCookieNames = pairs.map { it.first }
+            if (hunyuanRotationIdx.get() >= hunyuanCookieList.size) hunyuanRotationIdx.set(0)
+        }
+    }
+
+    /** 取下一个用于混元请求的 Cookie（在已保存的非空 Cookie 间轮询）。 */
+    fun nextHunyuanCookie(): String {
+        val list = synchronized(hunyuanLock) { hunyuanCookieList }
+        if (list.isEmpty()) {
+            LogStore.i("Hunyuan", "轮换：暂无可用 Cookie（列表为空）")
+            return ""
+        }
+        val idx = hunyuanRotationIdx.getAndUpdate { (it + 1) % list.size }
+        val c = list[idx]
+        val name = synchronized(hunyuanLock) { hunyuanCookieNames.getOrNull(idx) ?: "Cookie ${idx + 1}" }
+        val preview = if (c.length <= 16) c else c.take(16) + "...(len=${c.length})"
+        LogStore.i(
+            "Hunyuan",
+            "轮换：使用 [$name]（第 $idx 个，共 ${list.size} 个），预览=${preview}"
+        )
+        return c
+    }
+
     // ── DeepSeek Token 轮换（DeepSeek 使用 Bearer token 鉴权）──
     private val deepseekLock = Any()
     @Volatile private var deepseekTokenList: List<String> = emptyList()
@@ -264,6 +301,13 @@ object ProxyServer {
 
     /** 识别为 DeepSeek 模型的名称（前缀匹配，大小写不敏感）。 */
     private val DEEPSEEK_MODELS = listOf("deepseek")
+
+    /**
+     * 识别为「混元」（aistudio.tencent.com 网页版）模型的名称。
+     * 与内置「混元3」(cnb / hy3-preview) 是两个入口：cnb 走 CnbClient，
+     * 这里走 HunyuanStudioClient。故不能匹配 hy3，否则会抢走 cnb 的请求。
+     */
+    private val HUNYUAN_MODELS = listOf("hunyuan", "混元")
 
     /**
      * 识别为智谱（GLM）文本模型的名称（免登录）。
@@ -387,6 +431,10 @@ object ProxyServer {
                     // 隐藏后仍可在客户端手动填模型名调用（识别靠 isStudioGlobalImageModel）。
                     val fallbackJson = """{"object":"list","data":[
                         {"id":"hy3-preview","object":"model","owned_by":"cnb"},
+                        {"id":"hunyuan3","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan3-think","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan4","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan4-think","object":"model","owned_by":"hunyuan"},
                         {"id":"longcat","object":"model","owned_by":"longcat"},
                         {"id":"longcat-search","object":"model","owned_by":"longcat"},
                         {"id":"bailian","object":"model","owned_by":"bailian"},
@@ -408,6 +456,10 @@ object ProxyServer {
                         val data = org.json.JSONArray()
                         val entries = listOf(
                             CnbClient.DEFAULT_MODEL to "cnb",          // hy3-preview
+                            "hunyuan3" to "hunyuan",
+                            "hunyuan3-think" to "hunyuan",
+                            "hunyuan4" to "hunyuan",
+                            "hunyuan4-think" to "hunyuan",
                             "longcat" to "longcat",
                             "longcat-search" to "longcat",
                             "bailian" to "bailian",
@@ -468,6 +520,14 @@ object ProxyServer {
                 "Proxy",
                 "收到请求 | clientStream=${req.stream} upstreamStream=$streamMode model=${req.model} msgs=${req.messages.size}"
             )
+
+            // 混元（aistudio 网页版）模型 → 走腾讯混元官方接口（混元3 / 混元4，含思考模式）
+            if (isHunyuanModel(req.model)) {
+                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+                val created = (System.currentTimeMillis() / 1000).toInt()
+                handleHunyuanChat(req, completionId, created)
+                return
+            }
 
             // Kimi 模型 → 走 Kimi 接口（聊天）
             if (isKimiModel(req.model)) {
@@ -758,6 +818,12 @@ object ProxyServer {
     private fun isDeepSeekModel(m: String): Boolean {
         val lower = m.lowercase()
         return DEEPSEEK_MODELS.any { lower.startsWith(it) || lower.contains(it) }
+    }
+
+    /** 是否「混元」（aistudio 网页版）模型：hunyuan3 / hunyuan3-think / hunyuan4 / hunyuan4-think。 */
+    private fun isHunyuanModel(m: String): Boolean {
+        val lower = m.lowercase()
+        return HUNYUAN_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否 LongCat（美团龙猫）模型。 */
@@ -1988,6 +2054,162 @@ object ProxyServer {
      * 普通 / 思考由 model 名是否含 think/reason 决定（deep_search）。
      * 回复结束后按 deleteSessionAfterReply 开关删除该会话。
      */
+    /**
+     * 混元（aistudio 网页版）聊天。
+     * 会话路由挂在 URL 上，故每次请求先新建一个会话，回复完成后按开关删除（与千问一致，避免堆积历史）。
+     * 思考链（type=thought）不混入正文，只取 type=text。
+     */
+    private suspend fun RoutingContext.handleHunyuanChat(
+        req: ChatCompletionRequest, completionId: String, created: Int
+    ) {
+        val cookie = nextHunyuanCookie()
+        val text = extractDoubaoPrompt(req.messages)
+        val (chatModelId, effort) = HunyuanStudioClient.resolve(req.model)
+        LogStore.i(
+            "Hunyuan",
+            "调用聊天，输入长度=${text.length} model=${req.model} " +
+                    "chatModelId=$chatModelId effort=$effort cookie空白=${cookie.isBlank()}"
+        )
+        if (cookie.isBlank()) {
+            call.respond(
+                HttpStatusCode.BadGateway,
+                mapOf("error" to "混元未配置 Cookie：请在「浏览器」页登录 aistudio.tencent.com 后点「提取Cookie」")
+            )
+            return
+        }
+
+        val convId = try {
+            withContext(Dispatchers.IO) { HunyuanStudioClient.newConversation(cookie) }
+        } catch (e: Exception) {
+            LogStore.e("Hunyuan", "新建会话失败: ${e.localizedMessage}")
+            call.respond(
+                HttpStatusCode.BadGateway,
+                mapOf("error" to (e.localizedMessage ?: "混元新建会话失败"))
+            )
+            return
+        }
+
+        if (req.stream) {
+            call.respond(object : OutgoingContent.WriteChannelContent() {
+                override val contentType = ContentType.Text.EventStream
+                override val headers = Headers.build {
+                    append("Cache-Control", "no-cache")
+                    append("Connection", "keep-alive")
+                    append("X-Accel-Buffering", "no")
+                }
+
+                override suspend fun writeTo(channel: ByteWriteChannel) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            withTimeout(300_000) {
+                                val resp = HunyuanStudioClient.chatCompletion(
+                                    convId, text, cookie, chatModelId, effort
+                                )
+                                try {
+                                    val roleChunk = ChatCompletionChunk(
+                                        completionId, "chat.completion.chunk", created, req.model,
+                                        listOf(ChunkChoice(delta = ChoiceDelta(role = "assistant")))
+                                    )
+                                    channel.writeFully(
+                                        ("data: " + json.encodeToString(
+                                            ChatCompletionChunk.serializer(), roleChunk
+                                        ) + "\n\n").toByteArray()
+                                    )
+                                    channel.flush()
+
+                                    HunyuanStudioClient.parseSse(resp.body!!.source()) { t ->
+                                        val chunk = ChatCompletionChunk(
+                                            completionId, "chat.completion.chunk", created, req.model,
+                                            listOf(ChunkChoice(delta = ChoiceDelta(content = t)))
+                                        )
+                                        channel.writeFully(
+                                            ("data: " + json.encodeToString(
+                                                ChatCompletionChunk.serializer(), chunk
+                                            ) + "\n\n").toByteArray()
+                                        )
+                                        channel.flush()
+                                    }
+
+                                    channel.writeFully(
+                                        ("data: " + json.encodeToString(
+                                            ChatCompletionChunk.serializer(),
+                                            ChatCompletionChunk(
+                                                completionId, "chat.completion.chunk", created, req.model,
+                                                listOf(
+                                                    ChunkChoice(
+                                                        delta = ChoiceDelta(),
+                                                        finish_reason = "stop"
+                                                    )
+                                                )
+                                            )
+                                        ) + "\n\n").toByteArray()
+                                    )
+                                    channel.writeFully("data: [DONE]\n\n".toByteArray())
+                                    channel.flush()
+                                } finally {
+                                    resp.close()
+                                }
+                            }
+                        } catch (e: Exception) {
+                            LogStore.e("Hunyuan", "流式转发异常: ${e.stackTraceToString()}")
+                        } finally {
+                            if (deleteSessionAfterReply) {
+                                HunyuanStudioClient.deleteConversation(convId, cookie)
+                            }
+                        }
+                    }
+                }
+            })
+            return
+        }
+
+        val (content, errMsg) = withContext(Dispatchers.IO) {
+            try {
+                withTimeout(300_000) {
+                    val resp = HunyuanStudioClient.chatCompletion(
+                        convId, text, cookie, chatModelId, effort
+                    )
+                    try {
+                        val sb = StringBuilder()
+                        HunyuanStudioClient.parseSse(resp.body!!.source()) { sb.append(it) }
+                        sb.toString() to null
+                    } finally {
+                        resp.close()
+                    }
+                }
+            } catch (e: Exception) {
+                LogStore.e("Hunyuan", "请求异常: ${e.stackTraceToString()}")
+                null to (e.localizedMessage ?: e.toString())
+            }
+        }
+        // 删除会话是阻塞网络调用，切到 IO，别占着 Ktor 的事件循环线程
+        if (deleteSessionAfterReply) {
+            withContext(Dispatchers.IO) {
+                HunyuanStudioClient.deleteConversation(convId, cookie)
+            }
+        }
+
+        if (errMsg != null) {
+            LogStore.e("Hunyuan", "返回错误给客户端: $errMsg")
+            call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+            return
+        }
+
+        val contentText = content ?: ""
+        if (contentText.isBlank()) {
+            call.respond(HttpStatusCode.BadGateway, mapOf("error" to "混元未返回内容"))
+            return
+        }
+        LogStore.i("Hunyuan", "返回完成结果，长度=${contentText.length}")
+        call.respond(
+            ChatCompletion(
+                completionId, "chat.completion", created, req.model,
+                listOf(Choice(message = Msg("assistant", contentText), finish_reason = "stop")),
+                Usage(), ""
+            )
+        )
+    }
+
     private suspend fun RoutingContext.handleQwenChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
@@ -2158,6 +2380,7 @@ object ProxyServer {
         LogStore.i("Proxy", "进程内聊天 | model=$model msgs=${req.messages.size}")
         return try {
             val content = when {
+                isHunyuanModel(model) -> hunyuanText(req)
                 isKimiModel(model) -> kimiText(req)
                 isZhipuModel(model) -> zhipuText(req, isZhipuPlusModel(model))
                 isWenxinModel(model) -> wenxinText(req)
@@ -2236,6 +2459,10 @@ object ProxyServer {
     fun modelsInProcess(): InProcessResult {
         val entries = listOf(
             CnbClient.DEFAULT_MODEL to "cnb",
+            "hunyuan3" to "hunyuan",
+            "hunyuan3-think" to "hunyuan",
+            "hunyuan4" to "hunyuan",
+            "hunyuan4-think" to "hunyuan",
             "longcat" to "longcat",
             "longcat-search" to "longcat",
             "bailian" to "bailian",
@@ -2353,6 +2580,30 @@ object ProxyServer {
             parseBailianSse(resp.body!!.source()) { sb.append(it) }
         } finally {
             resp.close()
+        }
+        sb.toString()
+    }
+
+    private suspend fun hunyuanText(req: ChatCompletionRequest): String = upstream("Hunyuan") {
+        val cookie = nextHunyuanCookie()
+        if (cookie.isBlank()) {
+            throw RuntimeException(
+                "混元未配置 Cookie：请在「浏览器」页登录 aistudio.tencent.com 后点「提取Cookie」"
+            )
+        }
+        val text = extractDoubaoPrompt(req.messages)
+        val (chatModelId, effort) = HunyuanStudioClient.resolve(req.model)
+        val convId = HunyuanStudioClient.newConversation(cookie)
+        val sb = StringBuilder()
+        try {
+            val resp = HunyuanStudioClient.chatCompletion(convId, text, cookie, chatModelId, effort)
+            try {
+                HunyuanStudioClient.parseSse(resp.body!!.source()) { sb.append(it) }
+            } finally {
+                resp.close()
+            }
+        } finally {
+            if (deleteSessionAfterReply) HunyuanStudioClient.deleteConversation(convId, cookie)
         }
         sb.toString()
     }

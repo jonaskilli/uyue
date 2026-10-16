@@ -87,8 +87,15 @@ private val FieldContentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.
  * （Compose 绘制不裁剪所以看得到，但命中测试会在 FlowRow 边界处被跳过），
  * 因此把不常用的排到末尾，保证常用的都落在第一排、都能点。
  */
+/**
+ * 注意：列表里的「混元」与「混元3」是两个不同服务商，不要合并：
+ *  - "cnb"     混元3：cnb.cool 的 NPC 通道（模型 hy3-preview）
+ *  - "hunyuan" 混元 ：腾讯 aistudio.tencent.com 官方网页端（混元3 / 混元4 都走这里）
+ * 两者凭证互不通用，各自独立保存与轮换。
+ */
 private val PROVIDERS = listOf(
     "cnb" to "混元3",
+    "hunyuan" to "混元",
     "longcat" to "龙猫",
     "bailian" to "百炼",
     "kimi" to "Kimi",
@@ -570,8 +577,14 @@ fun ProxyScreen(
     val portFlow by vm.port.collectAsState()
     val context = LocalContext.current
 
+    // 新增四项直接用模型名做标签：下拉里已有 cnb 通道的「混元3」，
+    // 再写汉字会分不清是哪个入口，故这里保持模型名原样。
     val modelOptions = listOf(
         "hy3-preview" to "混元3",
+        "hunyuan3" to "hunyuan3",
+        "hunyuan3-think" to "hunyuan3-think",
+        "hunyuan4" to "hunyuan4",
+        "hunyuan4-think" to "hunyuan4-think",
         "doubao" to "豆包",
         "doubao-think" to "豆包-思考",
         "doubao-auto" to "豆包-自动",
@@ -690,6 +703,7 @@ fun ProxyScreen(
                         value = cookie, onValueChange = onCookieChange,
                         placeholder = when (provider) {
                             "cnb" -> "在内置浏览器登录 cnb.cool 后点「提取Cookie」（csrftoken 自动获取）"
+                            "hunyuan" -> "在内置浏览器登录 aistudio.tencent.com 后点「提取Cookie」（含 hunyuan_user / hunyuan_token）"
                             "kimi" -> "粘贴 kimi.com 的 Cookie（含 JWT 自动提取）"
                             "qwen" -> "粘贴 qianwen.com 的 Cookie（含 tongyi_sso_ticket）"
                             else -> "粘贴 doubao.com 的完整 Cookie 字符串"
@@ -1058,6 +1072,7 @@ fun BrowserScreen(
         mutableStateOf(
             when (provider) {
                 "cnb" -> "https://cnb.cool/npc/CodeBuddy"
+                "hunyuan" -> "https://aistudio.tencent.com/"
                 "kimi" -> "https://www.kimi.com/"
                 "qwen" -> "https://www.qianwen.com/"
                 "deepseek" -> "https://chat.deepseek.com/"
@@ -1113,6 +1128,7 @@ fun BrowserScreen(
         capturedBailian.value = null
         val target = when (provider) {
             "cnb" -> "https://cnb.cool/npc/CodeBuddy"
+            "hunyuan" -> "https://aistudio.tencent.com/"
             "kimi" -> "https://www.kimi.com/"
             "qwen" -> "https://www.qianwen.com/"
             "deepseek" -> "https://chat.deepseek.com/"
@@ -1165,6 +1181,10 @@ fun BrowserScreen(
                 // 宁可多列不能漏列，漏掉的 host-only Cookie 就是「清不掉」的常见原因
                 val hosts = when (p) {
                     "cnb" -> listOf("cnb.cool", "www.cnb.cool", "api.cnb.cool", "account.cnb.cool")
+                    // 混元：登录态常写在 .tencent.com 父域（见下方 roots），子域也一并列出
+                    "hunyuan" -> listOf(
+                        "aistudio.tencent.com", "hunyuan.tencent.com", "api.hunyuan.tencent.com"
+                    )
                     "kimi" -> listOf("kimi.com", "www.kimi.com", "api.kimi.com", "chat.kimi.com", "m.kimi.com")
                     "qwen" -> listOf("qianwen.com", "www.qianwen.com", "chat.qianwen.com", "m.qianwen.com")
                     "deepseek" -> listOf(
@@ -1196,6 +1216,9 @@ fun BrowserScreen(
                 // 百炼要把埋点域的根一起删，才能把 cna/umid 等设备标识一并清掉
                 val roots = when (p) {
                     "cnb" -> listOf("cnb.cool")
+                    // hunyuan_user / hunyuan_token 多半挂在 .tencent.com 父域上，
+                    // 只删子域删不掉，必须用根域清 domain 级 Cookie
+                    "hunyuan" -> listOf("tencent.com")
                     "kimi" -> listOf("kimi.com")
                     "qwen" -> listOf("qianwen.com")
                     "deepseek" -> listOf("deepseek.com")
@@ -1393,19 +1416,39 @@ fun BrowserScreen(
                     cm.flush()
                     // 豆包 / Kimi 采用完全相同的 Cookie 提取方式：
                     // 合并对应站点两个域（带 www 与不带）下的 Cookie，去重后以 "; " 拼接填入设置。
-                    val (host1, host2, siteName) = when (provider) {
-                        "cnb" -> Triple("https://cnb.cool", "https://www.cnb.cool", "混元3")
-                        "kimi" -> Triple("https://www.kimi.com", "https://kimi.com", "Kimi")
-                        "qwen" -> Triple("https://www.qianwen.com", "https://qianwen.com", "千问")
-                        else -> Triple("https://www.doubao.com", "https://doubao.com", "豆包")
+                    val (hosts, siteName) = when (provider) {
+                        "cnb" -> listOf("https://cnb.cool", "https://www.cnb.cool") to "混元3"
+                        // 混元的登录 Cookie 可能落在 aistudio / hunyuan / api.hunyuan 三个域之一
+                        // （写在 .tencent.com 父域的会随任一子域一并读出），只读一个域会漏，故都读。
+                        "hunyuan" -> listOf(
+                            "https://aistudio.tencent.com",
+                            "https://hunyuan.tencent.com",
+                            "https://api.hunyuan.tencent.com"
+                        ) to "混元"
+                        "kimi" -> listOf("https://www.kimi.com", "https://kimi.com") to "Kimi"
+                        "qwen" -> listOf("https://www.qianwen.com", "https://qianwen.com") to "千问"
+                        else -> listOf("https://www.doubao.com", "https://doubao.com") to "豆包"
                     }
-                    val cookies = listOf(
-                        cm.getCookie(host1).orEmpty(),
-                        cm.getCookie(host2).orEmpty()
-                    ).flatMap { s -> s.split(';') }
-                        .map { it.trim() }.filter { it.isNotBlank() }
-                        .distinct()
-                        .joinToString("; ")
+                    // 按 Cookie 名去重：同名 Cookie 在多个域重复出现时只保留第一条
+                    val seenNames = mutableSetOf<String>()
+                    val allCookies = hosts
+                        .flatMap { cm.getCookie(it).orEmpty().split(';') }
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .filter { seenNames.add(it.substringBefore("=").trim()) }
+                    // 混元只取鉴权相关 Cookie（hunyuan_* / hy_*）：.tencent.com 父域下挂了
+                    // 一大堆无关 Cookie，全塞进请求头既臃肿又可能干扰鉴权。
+                    // 实测可用最小集是 hunyuan_user + hunyuan_token + hunyuan_source。
+                    val picked = if (provider == "hunyuan") {
+                        val auth = allCookies.filter {
+                            val n = it.substringBefore("=").trim()
+                            n.startsWith("hunyuan") || n.startsWith("hy_")
+                        }
+                        auth.ifEmpty { allCookies }
+                    } else {
+                        allCookies
+                    }
+                    val cookies = picked.joinToString("; ")
                     if (cookies.isBlank()) {
                         toast = "未获取到 Cookie，请先在页面登录 $siteName"
                     } else {
