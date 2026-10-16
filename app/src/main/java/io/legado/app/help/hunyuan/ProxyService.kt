@@ -48,6 +48,7 @@ class ProxyService : android.app.Service() {
             val deepseek = loadList(prefs, "deepseek_tokens", "deepseek_token")
             val longcat = loadList(prefs, "longcat_configs", "longcat_config")
             val cnb = loadList(prefs, "cnb_cookies", "cnb_cookie")
+            val hunyuan = loadList(prefs, "hunyuan_cookies", "hunyuan_cookie")
             // 百炼：此前这里漏了还原，导致 App 重启后自动恢复服务时
             // ProxyServer 的百炼轮换列表为空（用户明明提取过很多条），
             // 接口一调用就报「百炼未配置」。必须与 longcat/cnb 一样从配置还原。
@@ -64,6 +65,7 @@ class ProxyService : android.app.Service() {
             ProxyServer.setKimiCookieList(kimi)
             ProxyServer.setQwenCookieList(qwen)
             ProxyServer.setCnbCookieList(cnb)
+            ProxyServer.setHunyuanCookieList(hunyuan)
             ProxyServer.setDeepSeekTokenList(deepseek)
             ProxyServer.setLongCatConfigList(longcat)
             ProxyServer.setBailianConfigList(bailian)
@@ -133,6 +135,8 @@ class ProxyService : android.app.Service() {
         // 混元3（CNB）登录 Cookie 不经过 intent 传递，统一在此从配置还原，
         // 保证任何启动路径（界面启动 / 自动恢复）都能带上登录态 Cookie。
         ProxyServer.setCnbCookieList(loadList(lcPrefs, "cnb_cookies", "cnb_cookie"))
+        // 混元（aistudio 网页版）登录 Cookie 同样不经过 intent，统一从配置还原
+        ProxyServer.setHunyuanCookieList(loadList(lcPrefs, "hunyuan_cookies", "hunyuan_cookie"))
 
         startForeground(NOTIF_ID, buildNotification("服务运行中 · 端口 $port · ${if (stream) "流式" else "非流式"}"))
 

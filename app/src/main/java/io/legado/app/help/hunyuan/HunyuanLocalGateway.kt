@@ -198,6 +198,9 @@ object HunyuanLocalGateway : Interceptor {
         ProxyServer.setDoubaoCookieList(loadList(p, "doubao_cookies", "doubao_cookie"))
         ProxyServer.setKimiCookieList(loadList(p, "kimi_cookies", "kimi_tokens"))
         ProxyServer.setQwenCookieList(loadList(p, "qwen_cookies", "qwen_cookie"))
+        // 混元（aistudio 网页版）：进程内直连没有「点启动」那一步，必须在此还原 Cookie，
+        // 否则 hunyuanCookieList 为空 → 报「混元未配置 Cookie」。
+        ProxyServer.setHunyuanCookieList(loadList(p, "hunyuan_cookies", "hunyuan_cookie"))
         // 混元3（CNB）2026-09-18 起免登录失效，必须带浏览器登录后的 Cookie（含 CNBSESSION）。
         // 进程内直连没有「点启动」那一步，必须在此把 cnb_cookies 还原进 CnbClient，
         // 否则 CnbClient.cookieList 为空 → 只发 csrfkey → 被判未登录（401 / 连接不上）。
