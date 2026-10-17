@@ -76,8 +76,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
@@ -214,7 +212,17 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
     // 当前段出错是否已重试过，保证同一段只重试一次，避免死循环
     private var itemRetryPending = false
     private var downloadErrorNo: Int = 0
-    private val downloadTaskActiveLock = Mutex()
+    /**
+     * 播放代次：每次开新的下载任务（开始朗读 / 翻页 / 切章）自增。
+     *
+     * 为什么需要它：旧任务可能正卡在阻塞式合成里——协程的 `cancel()` 传不进
+     * Java 阻塞调用，要等整个 HTTP 往返结束才生效。以前用一把 Mutex
+     * 把下载任务串行化来防播放列表错乱，代价就是新任务必须等旧任务放锁，
+     * 翻页时白等一两秒。改成代次后：新任务立刻往下跑，旧任务凭这个号在下一轮
+     * 循环发现自己已被取代，当即停止合成、不再往播放列表加东西。
+     */
+    @Volatile
+    private var playGeneration = 0
     private var silentPlayCheckJob: Job? = null
     private var lastActivateTime: Long = 0L
 
@@ -446,14 +454,18 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
     private fun downloadAndPlayAudios() {
         exoPlayer.clearMediaItems()
         downloadTask?.cancel()
+        // 代次自增：旧任务（可能还卡在阻塞合成里）下一轮循环即自行退出
+        val generation = ++playGeneration
         downloadTask = execute {
             ensureActive()
             val httpTts = ReadAloud.httpTTS ?: throw NoStackTraceException("tts is null")
-            downloadTaskActiveLock.withLock {
+            run {
                 ensureActive()
                 val endIndex = if (singleParagraphMode) (nowSpeak + 1).coerceAtMost(contentList.size) else contentList.size
                 contentList.forEachIndexed { index, contentText ->
                     ensureActive()
+                    // 翻页/切章开了新任务 → 停止合成，也别再往播放列表加东西
+                    if (generation != playGeneration) return@execute
                     if (index < nowSpeak) return@forEachIndexed
                     if (singleParagraphMode && index >= endIndex) return@forEachIndexed
                     var text = contentText
@@ -752,6 +764,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
     private fun downloadAndPlayAudiosStream() {
         exoPlayer.clearMediaItems()
         downloadTask?.cancel()
+        // 代次自增：旧任务（可能还卡在阻塞合成里）下一轮循环即自行退出
+        val generation = ++playGeneration
         downloadTask = execute {
             ensureActive()
             val httpTts = ReadAloud.httpTTS ?: throw NoStackTraceException("tts is null")
@@ -761,11 +775,13 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                     kotlin.runCatching { downloader.download(null) }
                 }
             }
-            downloadTaskActiveLock.withLock {
+            run {
                 ensureActive()
                 val endIndex = if (singleParagraphMode) (nowSpeak + 1).coerceAtMost(contentList.size) else contentList.size
                 contentList.forEachIndexed { index, contentText ->
                     ensureActive()
+                    // 翻页/切章开了新任务 → 停止合成，也别再往播放列表加东西
+                    if (generation != playGeneration) return@execute
                     if (index < nowSpeak) return@forEachIndexed
                     if (singleParagraphMode && index >= endIndex) return@forEachIndexed
                     var text = contentText
