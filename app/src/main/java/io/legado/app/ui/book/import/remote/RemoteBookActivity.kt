@@ -109,6 +109,8 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
         // 选择栏弹出菜单: 批量删除选中项
         binding.selectActionBar.inflateMenu(R.menu.remote_book_sel)
         binding.selectActionBar.setOnMenuItemClickListener(this)
+        // 悦读云书架支持长按"转 EPUB"（服务端异步转换）
+        adapter.supportEpubConvert = readify
         // 悦读云书库不走 webDav 帮助引导
         if (!readify && !LocalConfig.webDavBookHelpVersionIsLast) {
             showHelp("webDavBookHelp")
@@ -304,6 +306,18 @@ class RemoteBookActivity : BaseImportBookActivity<RemoteBookViewModel>(),
                 }
             }
             noButton()
+        }
+    }
+
+    override fun convertToEpub(remoteBook: RemoteBook) {
+        binding.refreshProgressBar.isAutoLoading = true
+        viewModel.convertToEpub(remoteBook) { success ->
+            if (success) {
+                // 转换完成后刷新列表，新生成的 epub 条目即出现在列表中
+                upPath()
+            } else {
+                binding.refreshProgressBar.isAutoLoading = false
+            }
         }
     }
 

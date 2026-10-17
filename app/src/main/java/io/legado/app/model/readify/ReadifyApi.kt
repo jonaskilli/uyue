@@ -71,6 +71,15 @@ object ReadifyApi {
         val fileType: String = json.optString("sourceFileType")
         /** 无签名的公网下载直链，Range 可用 */
         val downloadUrl: String = json.optString("sourceUrl")
+        /**
+         * 悦读自动转换出的 epub 直链（同为 /oss-proxy/ 无签名链接）。
+         * 云端对 pdf 等格式会做 epub 转换，转换完成后服务端才会填充该字段；
+         * 为空（或字符串 "null"）表示没有可下载的 epub。
+         */
+        val epubUrl: String =
+            json.optString("epubUrl").let { if (it == "null") "" else it }
+        /** epub 转换状态（官网前端常量）；转换完成后才会有 epubUrl */
+        val epubStatus: Int = json.optInt("epubStatus", 0)
         val cover: String = json.optString("cover").let { if (it == "null") "" else it }
         val progress: Double = json.optDouble("progress", 0.0)
         val lastReadAt: Long = json.optLong("lastReadAt", 0L)
@@ -85,6 +94,10 @@ object ReadifyApi {
         /** 与官网列表过滤规则一致：deletedAt 非空，或 status 属于 0/4/5 */
         val isDeleted: Boolean
             get() = deletedAt.isNotBlank() || status == 0 || status == 4 || status == 5
+
+        /** 是否有可下载的 epub（直链非空即转换完成，可作为独立条目展示/下载） */
+        val hasEpub: Boolean
+            get() = epubUrl.isNotBlank()
     }
 
     /** 上传初始化结果 */
@@ -267,6 +280,31 @@ object ReadifyApi {
             path = "/api/bookshelves/books",
             jsonArrayBody = body
         )
+    }
+
+    /** epub 转换状态查询结果 */
+    class EpubConvertStatus(json: JSONObject) {
+        /** 0=未转换 1=转换中 2=转换完成（悦读官网前端同款常量） */
+        val epubStatus: Int = json.optInt("epubStatus", 0)
+        val epubUrl: String =
+            json.optString("epubUrl").let { if (it == "null") "" else it }
+        val isDone: Boolean get() = epubStatus == 2 || epubUrl.isNotBlank()
+    }
+
+    /**
+     * 触发云端把这本书转换成 epub（txt/pdf 等均可，官网阅读器打开书时
+     * 自动走的就是这个接口）。服务端**异步**转换，需配合
+     * [getEpubConvertStatus] 轮询结果；已转换过的不会重复转换。
+     */
+    suspend fun triggerEpubConvert(bookId: String) {
+        val body = JSONObject().apply { put("bookId", bookId) }
+        authorized("POST", "/api/bookshelves/books/toepub", body)
+    }
+
+    /** 查询 epub 转换状态/结果 */
+    suspend fun getEpubConvertStatus(bookId: String): EpubConvertStatus {
+        val data = authorized("GET", "/api/bookshelves/books/toepub/$bookId").data()
+        return EpubConvertStatus(data)
     }
 
     // ------------------------------------------------------------------ 底层请求

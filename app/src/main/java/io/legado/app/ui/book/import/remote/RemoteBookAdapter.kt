@@ -24,6 +24,9 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
     var selected = hashSetOf<RemoteBook>()
     var checkableCount = 0
 
+    /** 是否支持 EPUB 转换（悦读云书架专属，WebDav 不显示该入口） */
+    var supportEpubConvert = false
+
     override fun getViewBinding(parent: ViewGroup): ItemImportBookBinding {
         return ItemImportBookBinding.inflate(inflater, parent, false)
     }
@@ -107,13 +110,16 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
     }
 
     /**
-     * 长按操作菜单: 重命名 / 删除 / (已上架时)重新加入书架
+     * 长按操作菜单: 重命名 / 删除 / (已上架时)重新加入书架 / (悦读)转 EPUB
      */
     @SuppressLint("NotifyDataSetChanged")
     private fun showItemActions(remoteBook: RemoteBook) {
         val actions = arrayListOf<Pair<String, () -> Unit>>()
         if (remoteBook.isOnBookShelf) {
             actions.add("重新加入书架" to { callBack.addToBookShelfAgain(remoteBook) })
+        }
+        if (supportEpubConvert) {
+            actions.add("转 EPUB" to { callBack.convertToEpub(remoteBook) })
         }
         actions.add("重命名" to { callBack.renameRemoteBook(remoteBook) })
         actions.add("删除" to { callBack.deleteRemoteBooks(listOf(remoteBook)) })
@@ -179,6 +185,9 @@ class RemoteBookAdapter(context: Context, val callBack: CallBack) :
         fun upCountView()
         fun startRead(remoteBook: RemoteBook)
         fun addToBookShelfAgain(remoteBook: RemoteBook)
+
+        /** 触发云端把这本书转换成 EPUB（仅悦读云书架） */
+        fun convertToEpub(remoteBook: RemoteBook)
 
         /** 删除远程书籍/目录(含确认) */
         fun deleteRemoteBooks(remoteBooks: Collection<RemoteBook>)

@@ -225,6 +225,7 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
             val manager = remoteBookManager
                 ?: throw NoStackTraceException("没有配置远程书库")
             val bookWebDav = manager as? RemoteBookWebDav
+            val imported = arrayListOf<String>()
             remoteBooks.forEach { remoteBook ->
                 val downloadBookUri = manager.downloadRemoteBook(remoteBook)
                 LocalBook.importFiles(downloadBookUri).forEach { book ->
@@ -235,6 +236,7 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
                             .toString()
                     }
                     book.save()
+                    imported.add(book.name)
                     runCatching {
                         appDb.bookDao.getBookByFileName(book.originName)?.let { old ->
                             if (old.bookUrl != book.bookUrl) {
@@ -244,6 +246,11 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
                     }
                 }
                 remoteBook.isOnBookShelf = true
+            }
+            imported
+        }.onSuccess { imported ->
+            if (imported.isNotEmpty()) {
+                context.toastOnUi("已加入书架：${imported.joinToString("、")}")
             }
         }.onError {
             AppLog.put("导入出错\n${it.localizedMessage}", it)
@@ -270,11 +277,15 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
             val failed = arrayListOf<String>()
             // 悦读支持删除前预检（已分享的书不允许删），先剔掉不能删的，避免整批白跑
             val deletable = if (bookWebDav is RemoteBookReadify) {
-                val blocked = ReadifyApi.preDeleteCheck(remoteBooks.map { it.path })
+                val blocked = ReadifyApi.preDeleteCheck(
+                    remoteBooks.map { RemoteBookReadify.bookIdOf(it.path) }
+                )
                 if (blocked.isNotEmpty()) {
                     context.toastOnUi("${blocked.size} 本书不允许删除(可能已分享)，已跳过")
                 }
-                remoteBooks.filter { it.path !in blocked }
+                remoteBooks.filter { RemoteBookReadify.bookIdOf(it.path) !in blocked }
+                    // 同一本书的源文件/epub 两个条目只删一次
+                    .distinctBy { RemoteBookReadify.bookIdOf(it.path) }
             } else {
                 remoteBooks.toList()
             }
@@ -322,7 +333,7 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
                 if (oldSuffix.isNotEmpty() && name.endsWith(".$oldSuffix", ignoreCase = true)) {
                     name = name.dropLast(oldSuffix.length + 1)
                 }
-                ReadifyApi.renameBook(remoteBook.path, name)
+                ReadifyApi.renameBook(RemoteBookReadify.bookIdOf(remoteBook.path), name)
                 return@execute
             }
             val bookWebDav = remoteBookManager as? RemoteBookWebDav
@@ -345,6 +356,30 @@ class RemoteBookViewModel(application: Application) : BaseViewModel(application)
             AppLog.put("重命名远程书籍出错\n${it.localizedMessage}", it)
             context.toastOnUi(it.localizedMessage)
             onFinally.invoke(false)
+        }
+    }
+
+    /**
+     * 悦读云端把这本书转换成 EPUB（txt/pdf 等均可）。
+     * 云端异步转换，这里触发后轮询到完成；已转换过的直接提示。
+     * @param onFinally success=转换完成(调用方应刷新列表，epub 条目即可下载)
+     */
+    fun convertToEpub(remoteBook: RemoteBook, onFinally: (success: Boolean) -> Unit) {
+        execute {
+            val readify = remoteBookManager as? RemoteBookReadify
+                ?: throw NoStackTraceException("当前书库不支持 EPUB 转换")
+            readify.convertToEpub(remoteBook.path)
+        }.onSuccess { converted ->
+            if (converted) {
+                context.toastOnUi("《${remoteBook.filename}》EPUB 转换完成，刷新列表后可下载")
+            } else {
+                context.toastOnUi("云端已有 EPUB，无需重复转换")
+            }
+            onFinally(true)
+        }.onError {
+            AppLog.put("转换 EPUB 出错\n${it.localizedMessage}", it)
+            context.toastOnUi(it.localizedMessage ?: "转换失败")
+            onFinally(false)
         }
     }
 
