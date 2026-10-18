@@ -164,10 +164,16 @@ class TtsPluginJsBridge {
     }
 
     /**
-     * 合成完毕后立即按该角色（voiceTag）自身的后处理参数调节音频：
-     * 分组/全局链路 × 插件后参数 × 朗读界面语速滑块，一次乘齐，源头上调完，
-     * 让引擎/脚本后续拿到的就是成品，合并阶段只做纯拼接。
-     * 参数全部为默认值时字节原样返回（零转码开销），但同样置位标志以免合并阶段重复调速。
+     * 合成完毕后立即做两件事（转码优先，是硬要求）：
+     * 1. **统一转码**：不管插件返回什么格式（MP3/AAC/参数不一的 WAV），一律
+     *    解码 → 重采样 24000Hz/16bit/单声道 → 封装标准 WAV。
+     *    原因：引擎/脚本会把各角色片段直接字节拼接成一个块返回，格式不一致时
+     *    （如旁白 WAV + 对话 MP3），按内容嗅探拆分与 WAV 头声明的 data 长度
+     *    都会把后续段截断，表现为「只读旁白不读对话」；源头统一成同参数 WAV 后，
+     *    拼接块是纯 WAV 序列，每段自带头且声明长度精确，拆分/落盘/播放再无格式问题。
+     * 2. **后处理调速**：按该角色自身参数（分组/全局链路 × 插件后参数 × 朗读界面
+     *    语速滑块）一次乘齐，与转码同趟完成（Sonic 只能在 PCM 域工作），
+     *    让引擎/脚本后续拿到的就是成品，合并阶段只做纯拼接。
      */
     private fun applyPostAudioImmediately(
         bytes: ByteArray?,
@@ -178,10 +184,11 @@ class TtsPluginJsBridge {
         synthesisPostProcessed = true
         val params = config?.let { JReadVoiceEngine.resolvePostAudioParams(context, it) }
             ?: JReadVoiceEngine.resolvePostAudioParams(context, voiceTag)
-        if (params.resolved().isDefault()) return bytes
         // 输入可能是插件原始格式（mp3 等）或标准 WAV，decodeToStandardWav 统一处理：
-        // 解码 → 重采样 24k → Sonic(语速/音量/音高) → 封装 WAV
-        return io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(bytes, postParams = params) ?: bytes
+        // 解码 → 重采样 24k → Sonic(语速/音量/音高，参数为默认时跳过) → 封装 WAV。
+        // 转码失败（极端损坏数据）才回退原始字节，保证合成不中断。
+        val out = io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(bytes, postParams = params)
+        return out ?: bytes
     }
 
     /**

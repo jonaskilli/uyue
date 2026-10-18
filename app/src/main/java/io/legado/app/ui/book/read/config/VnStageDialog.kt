@@ -597,7 +597,7 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     /**
      * 把段落按**中文全角双引号**切成交替的旁白/对话片段序列（带 raw 段内字符区间）。
      *
-     * 规则与内置朗读脚本「(脚本)猫箱-VV(混元3+Z)」保持一致——
+     * 规则与内置朗读脚本「朗读脚本Z3需要密钥」保持一致——
      * [ScriptCharacterRepository.matchChapterRoleByText] 是按**对话文本**反查归属的，
      * 只有切出来的文本与脚本写入章节缓存的 dialogText 逐字一致才能命中说话人。
      *
