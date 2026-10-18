@@ -78,6 +78,9 @@ object PreferKey {
     const val exportToWebDav = "webDavCacheBackup"
     // 悦读(Readify) 云同步: 网页登录提取的会话 JSON + 同步开关
     const val readifySession = "readifySession"
+    // 悦读账号密码直登: 记住的账号/密码（仅存本机，避免每次重输）
+    const val readifyLoginAccount = "readifyLoginAccount"
+    const val readifyLoginPassword = "readifyLoginPassword"
     const val exportNoChapterName = "exportNoChapterName"
     const val exportType = "exportType"
     const val exportPictureFile = "exportPictureFile"

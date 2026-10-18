@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:overScrollMode="ifContentScrolls"
+    android:paddingLeft="16dp"
+    android:paddingRight="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <io.legado.app.ui.widget.text.TextInputLayout
+            android:id="@+id/til_session"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="登录认证（会话 JSON 或 refreshToken）">
+
+            <io.legado.app.lib.theme.view.ThemeEditText
+                android:id="@+id/et_session"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:minLines="4"
+                android:scrollbars="vertical"
+                tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+        </io.legado.app.ui.widget.text.TextInputLayout>
+
+        <io.legado.app.ui.widget.text.AccentTextView
+            android:id="@+id/tv_tip"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="粘贴网页登录后 localStorage.user 里的整串会话 JSON；也可以只贴单独的 refreshToken。"
+            android:textSize="12sp"
+            tools:ignore="HardcodedText" />
+
+    </LinearLayout>
+
+</androidx.core.widget.NestedScrollView>

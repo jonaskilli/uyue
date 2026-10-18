@@ -1,5 +1,6 @@
 package io.legado.app.model.readify
 
+import cn.hutool.crypto.digest.DigestUtil
 import io.legado.app.help.http.addHeaders
 import io.legado.app.help.http.newCallResponse
 import io.legado.app.help.http.okHttpClient
@@ -112,6 +113,81 @@ object ReadifyApi {
     }
 
     // ------------------------------------------------------------------ 账号 / 令牌
+
+    /**
+     * 账号密码直接登录（逆向自官网前端 `main-app-*.js` 的 `/users/email/login`）。
+     *
+     * 官网登录框提交的就是这个接口：密码传 **SHA-256 十六进制串**（无盐、无 RSA、
+     * 无验证码），响应 `data` 直接带回 `refreshToken`，与网页登录提取
+     * `localStorage.user` 拿到的凭据完全等价——省掉整个 Next.js SPA 的加载
+     * （主站 AWS 美国 + 36 个 JS chunk 共 2.8MB，手机上要几十秒；直连接口 1 秒内）。
+     *
+     * 成功后按网页登录同款格式落盘会话（userId/readerId/nickname/refreshToken），
+     * 并顺手缓存响应里的 userToken，省掉一次续期请求。
+     *
+     * @return 登录账号的显示名（nickname/email）
+     */
+    suspend fun loginWithPassword(email: String, password: String): String {
+        val account = email.trim()
+        if (account.isBlank() || password.isEmpty()) {
+            throw ApiException(-1, "请输入账号和密码")
+        }
+        val body = JSONObject().apply {
+            put("email", account)
+            put("password", DigestUtil.sha256Hex(password))
+        }
+        var lastError: Throwable? = null
+        for (base in API_BASES) {
+            try {
+                val data = request(
+                    base = base,
+                    httpMethod = "POST",
+                    path = "/api/users/email/login",
+                    body = body
+                ).data()
+
+                val refreshToken = data.optString("refreshToken")
+                if (refreshToken.isBlank()) throw ApiException(-1, "登录未返回 refreshToken")
+                // 组装成与网页登录（localStorage.user）同构的会话 JSON，复用同一套存储
+                val session = JSONObject().apply {
+                    put("userId", data.optString("userId"))
+                    put("readerId", data.optString("readerId"))
+                    put("nickname", data.optString("nickname"))
+                    put("email", account)
+                    put("refreshToken", refreshToken)
+                }
+                if (!ReadifySession.save(session.toString())) {
+                    throw ApiException(-1, "会话保存失败")
+                }
+                // 登录响应已带短期令牌，直接入缓存，后续接口不必立刻续期
+                val token = data.optString("userToken")
+                if (token.isNotBlank()) {
+                    cachedToken = token
+                    cachedTokenExpireAt = toMillis(
+                        data.optString("userTokenExpire", "0").toLongOrNull() ?: 0L
+                    )
+                }
+                return ReadifySession.displayName.ifBlank { account }
+            } catch (e: NetworkFailureException) {
+                lastError = e.reason
+            } catch (e: CancellationException) {
+                throw e
+            }
+            // 业务错误（账号/密码错误等）与域名无关，直接抛出服务端 message
+        }
+        throw lastError ?: ApiException(-1, "悦读服务不可用")
+    }
+
+    /**
+     * 退出登录：清掉内存里的短期令牌缓存 + 清掉本机会话。
+     * 不调服务端 `/users/logout`——那会把 refreshToken 在服务端也作废，
+     * 影响用户在网页/其他设备上的登录态；本地退出足够。
+     */
+    fun logout() {
+        cachedToken = null
+        cachedTokenExpireAt = 0L
+        ReadifySession.clear()
+    }
 
     /** 拿到可用的短期 userToken（不够新鲜就续期，续期全程持锁） */
     suspend fun ensureToken(): String {

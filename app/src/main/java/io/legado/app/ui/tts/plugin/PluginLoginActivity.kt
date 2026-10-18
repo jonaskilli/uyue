@@ -265,6 +265,32 @@ class PluginLoginActivity : Activity() {
                     return false
                 }
 
+                /**
+                 * 登录页加载加速：拦掉字体/音视频等与登录无关的资源。
+                 * 登录页主体是表单（输入框+按钮），不依赖这些资源渲染；
+                 * JS/CSS/XHR/图片一律放行（微信登录的二维码就是图片，不能拦）。
+                 * 对悦读这种 Next.js SPA 登录页尤其明显——跨境网络下每个
+                 * 请求都要多付一个跨境 RTT。
+                 */
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest
+                ): android.webkit.WebResourceResponse? {
+                    val url = request.url.toString()
+                    val path = url.substringBefore('?').lowercase()
+                    val blocked = path.endsWith(".woff") || path.endsWith(".woff2") ||
+                        path.endsWith(".ttf") || path.endsWith(".otf") ||
+                        path.endsWith(".eot") ||
+                        path.endsWith(".mp4") || path.endsWith(".webm") ||
+                        path.endsWith(".mp3") || path.endsWith(".wav")
+                    if (blocked) {
+                        return android.webkit.WebResourceResponse(
+                            "text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
+                    return null
+                }
+
                 override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                     // 仅电脑模式强制桌面视口；手机模式不注入，让页面按自带 viewport 渲染移动版布局
                     if (uaMode == "pc") {

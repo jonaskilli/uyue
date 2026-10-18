@@ -21,8 +21,17 @@ import splitties.init.appCtx
 @Suppress("unused")
 object ReadifySession {
 
-    /** 与插件里的 loginUrl 一致：桌面 UA 下走这个路径才能进登录页（/login 不存在） */
-    const val LOGIN_URL = "https://app.readifyai.com/library/voices"
+    /**
+     * 与插件里的 loginUrl 一致：桌面 UA 下走这个路径才能进登录页（/login 不存在）。
+     * 默认走**国内镜像域名**：与主站是同一套前端（首屏 36 个 JS chunk 里 35 个哈希
+     * 逐字节一致，仅 Next.js 运行时 main-app chunk 因构建版本不同而哈希不同，实测
+     * 2026-10-18），服务器在阿里云国内，登录页 TTFB 0.28s vs 主站 AWS 美国 1.94s（约 7 倍）。
+     * 会话按 origin 隔离不影响我们——登录取的是 localStorage.user 的 JSON，与域名无关。
+     */
+    const val LOGIN_URL = "https://readifyapp.voiceclub.cn/library/voices"
+
+    /** 主站（AWS 美国）登录页：镜像域名不可达时的兜底 */
+    const val LOGIN_URL_GLOBAL = "https://app.readifyai.com/library/voices"
 
     /** PluginLoginActivity 的 binding：locals.xxx → localStorage.getItem('xxx') */
     const val LOGIN_BINDING = "locals.user"
@@ -61,6 +70,22 @@ object ReadifySession {
         if (json.optString("refreshToken").isBlank()) return false
         raw = rawValue
         return true
+    }
+
+    /**
+     * 保存「编辑登录认证」里手工输入的内容，兼容两种格式：
+     * 1) 网页登录提取的整串会话 JSON（localStorage.user，含 refreshToken/nickname 等）；
+     * 2) 只贴一个 refreshToken（JWT，eyJ 开头）——自动包成最小会话 JSON，
+     *    后续续期/书架/上传下载全部照常，仅昵称可能为空。
+     */
+    fun saveFromInput(input: String): Boolean {
+        val value = input.trim()
+        if (value.isEmpty()) return false
+        if (value.startsWith("{")) return save(value)
+        if (value.startsWith("eyJ")) {
+            return save(JSONObject().put("refreshToken", value).toString())
+        }
+        return false
     }
 
     /** 续期时服务端轮换了 refreshToken → 回填到会话 JSON 里 */

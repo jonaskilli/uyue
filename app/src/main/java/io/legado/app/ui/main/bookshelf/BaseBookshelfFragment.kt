@@ -10,17 +10,22 @@ import androidx.core.view.indices
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.LiveData
+import androidx.lifecycle.lifecycleScope
 import io.legado.app.R
 import io.legado.app.base.VMBaseFragment
 import io.legado.app.constant.EventBus
+import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookGroup
 import io.legado.app.databinding.DialogBookshelfConfigBinding
 import io.legado.app.databinding.DialogEditTextBinding
+import io.legado.app.databinding.DialogReadifyLoginBinding
+import io.legado.app.databinding.DialogReadifySessionEditBinding
 import io.legado.app.help.DirectLinkUpload
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.model.readify.ReadifyApi
 import io.legado.app.model.readify.ReadifySession
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.book.cache.CacheActivity
@@ -37,13 +42,17 @@ import io.legado.app.ui.tts.plugin.PluginLoginActivity
 import io.legado.app.ui.widget.dialog.WaitDialog
 import io.legado.app.utils.checkByIndex
 import io.legado.app.utils.getCheckedIndex
+import io.legado.app.utils.getPrefString
 import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.postEvent
+import io.legado.app.utils.putPrefString
 import io.legado.app.utils.readText
 import io.legado.app.utils.sendToClip
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.startActivity
 import io.legado.app.utils.toastOnUi
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfViewModel>(layoutId),
     MainFragmentInterface {
@@ -116,8 +125,13 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
     override fun onCompatCreateOptionsMenu(menu: Menu) {
         menuInflater.inflate(R.menu.main_bookshelf, menu)
         menu.findItem(R.id.menu_readify_login)?.title =
-            if (ReadifySession.isLogin) "悦读已登录：${ReadifySession.displayName}"
-            else "登录悦读账号"
+            if (ReadifySession.isLogin) {
+                // 只贴了 refreshToken 的会话没有昵称，别显示成"悦读已登录："
+                val name = ReadifySession.displayName
+                if (name.isBlank()) "悦读已登录" else "悦读已登录：$name"
+            } else {
+                "登录悦读账号"
+            }
     }
 
     override fun onCompatOptionsItemSelected(item: MenuItem) {
@@ -168,7 +182,38 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
 
     // ---------------------------------------------------------- 悦读云同步
 
+    /**
+     * 登录入口：优先「账号密码直登」（调登录接口，不加载网页，秒级完成）；
+     * 网页登录留给手机号/微信扫码兜底；也可手工编辑登录认证，或退出登录。
+     *
+     * 注意：AlertController 的 setMessage 与 setItems 互斥——同屏设置 message 时
+     * items 列表根本不会挂到视图树上（appcompat AlertController#setupContent），
+     * 所以这里把状态信息并进标题，列表单独用。
+     */
     private fun startReadifyLogin() {
+        val options = mutableListOf("账号密码登录（快）", "网页登录", "编辑登录认证")
+        if (ReadifySession.isLogin) options.add("退出登录")
+        val title = if (ReadifySession.isLogin) {
+            val name = ReadifySession.displayName
+            if (name.isBlank()) "悦读已登录" else "悦读已登录：$name"
+        } else {
+            "登录悦读账号"
+        }
+        alert(title = title) {
+            items(options) { _, index ->
+                when (options[index]) {
+                    "账号密码登录（快）" -> showReadifyPasswordLogin()
+                    "网页登录" -> launchReadifyWebLogin()
+                    "编辑登录认证" -> showReadifySessionEdit()
+                    "退出登录" -> confirmReadifyLogout()
+                }
+            }
+            negativeButton(android.R.string.cancel)
+        }
+    }
+
+    /** 网页登录：复用 TTS 插件的 PluginLoginActivity（电脑模式 UA + localStorage 提取） */
+    private fun launchReadifyWebLogin() {
         readifyLoginResult.launch(
             Intent(requireContext(), PluginLoginActivity::class.java).apply {
                 putExtra(PluginLoginActivity.ARG_LOGIN_URL, ReadifySession.LOGIN_URL)
@@ -180,6 +225,98 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
                 )
             }
         )
+    }
+
+    /**
+     * 账号密码直登：调 /api/users/email/login 直接换 refreshToken。
+     * 凭据只按用户勾选存本机 SharedPreferences，不写死进代码/仓库。
+     */
+    @SuppressLint("InflateParams")
+    private fun showReadifyPasswordLogin() {
+        val binding = DialogReadifyLoginBinding.inflate(layoutInflater)
+        val savedAccount = requireContext().getPrefString(PreferKey.readifyLoginAccount)
+        val savedPassword = requireContext().getPrefString(PreferKey.readifyLoginPassword)
+        binding.etAccount.setText(savedAccount.orEmpty())
+        binding.etPassword.setText(savedPassword.orEmpty())
+        binding.cbRemember.isChecked =
+            !savedAccount.isNullOrBlank() && !savedPassword.isNullOrBlank()
+        alert(title = "悦读账号登录") {
+            customView { binding.root }
+            positiveButton("登录") {
+                val account = binding.etAccount.text?.toString()?.trim().orEmpty()
+                val password = binding.etPassword.text?.toString().orEmpty()
+                if (account.isBlank() || password.isBlank()) {
+                    toastOnUi("请输入账号和密码")
+                    return@positiveButton
+                }
+                if (binding.cbRemember.isChecked) {
+                    requireContext().putPrefString(PreferKey.readifyLoginAccount, account)
+                    requireContext().putPrefString(PreferKey.readifyLoginPassword, password)
+                } else {
+                    requireContext().putPrefString(PreferKey.readifyLoginAccount, null)
+                    requireContext().putPrefString(PreferKey.readifyLoginPassword, null)
+                }
+                waitDialog.setTitle("正在登录悦读")
+                waitDialog.show()
+                lifecycleScope.launch {
+                    try {
+                        val name = ReadifyApi.loginWithPassword(account, password)
+                        waitDialog.dismiss()
+                        toastOnUi("已登录悦读账号：$name")
+                        activity?.invalidateOptionsMenu()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        waitDialog.dismiss()
+                        toastOnUi(e.localizedMessage ?: "悦读登录失败")
+                    }
+                }
+            }
+            negativeButton(android.R.string.cancel)
+        }
+    }
+
+    /**
+     * 手工编辑登录认证：粘贴网页提取的整串会话 JSON（localStorage.user），
+     * 或只贴单独的 refreshToken；保存后与网页登录完全等价。
+     */
+    @SuppressLint("InflateParams")
+    private fun showReadifySessionEdit() {
+        val binding = DialogReadifySessionEditBinding.inflate(layoutInflater)
+        binding.etSession.setText(ReadifySession.raw.orEmpty())
+        alert(title = "编辑登录认证") {
+            customView { binding.root }
+            positiveButton("保存") {
+                val input = binding.etSession.text?.toString().orEmpty()
+                if (input.isBlank()) {
+                    toastOnUi("认证内容不能为空")
+                    return@positiveButton
+                }
+                if (ReadifySession.saveFromInput(input)) {
+                    val name = ReadifySession.displayName
+                    toastOnUi(
+                        if (name.isBlank()) "已保存悦读登录认证" else "已登录悦读账号：$name"
+                    )
+                    activity?.invalidateOptionsMenu()
+                } else {
+                    toastOnUi("认证格式不正确：需要含 refreshToken 的会话 JSON，或单独的 refreshToken")
+                }
+            }
+            negativeButton(android.R.string.cancel)
+        }
+    }
+
+    /** 退出登录：二次确认后清掉本机会话（云端书架数据不受影响） */
+    private fun confirmReadifyLogout() {
+        alert(title = "退出登录") {
+            setMessage("退出后将清除本机保存的悦读登录认证，云端书架数据不受影响。")
+            positiveButton("退出登录") {
+                ReadifyApi.logout()
+                toastOnUi("已退出悦读账号")
+                activity?.invalidateOptionsMenu()
+            }
+            negativeButton(android.R.string.cancel)
+        }
     }
 
     protected fun initBookGroupData() {
