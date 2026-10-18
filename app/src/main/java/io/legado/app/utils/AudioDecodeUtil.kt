@@ -9,6 +9,7 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.SilenceSkippingAudioProcessor
 import com.google.common.collect.ImmutableList
+import io.legado.app.help.audio.ExoAudioDecoder
 import io.legado.app.help.audio.Sonic
 import io.legado.app.help.audiobook.PostAudioParams
 import io.legado.app.help.config.AppConfig
@@ -498,14 +499,66 @@ object AudioDecodeUtil {
 
     /** 使用 MediaExtractor + MediaCodec 解码任意格式音频 */
     private fun decodeViaMediaCodec(audioData: ByteArray): Triple<ByteArray, Int, Int>? {
-        val ext = detectAudioExtension(audioData)
+        // ★ 优先用 ExoPlayer（media3 自带 extractor：纯 Java、打包在 APK 内）解码。
+        // 平台 MediaExtractor 的 MP3 解析由 OEM 维护、随 Android 版本/ROM 变化，
+        // 对 ID3 标签尤其挑剔，是「时好时坏」的根源；media3 跨设备行为一致，对
+        // ID3/裸帧/VBR 容忍度高——移植自 TTS_Server_Android，它的合成转码从不
+        // 失败就是因为用了这套。失败才回退下面的平台解码路径。
+        try {
+            ExoAudioDecoder.decode(audioData)?.let { return it }
+        } catch (e: Exception) {
+            // Exo 解码异常：静默回退平台解码（合成不中断优先）
+        }
+
+        var data = audioData
+        var ext = detectAudioExtension(audioData)
+        // MP3 裸流（含头部带垃圾/扩展名未识别的）先对齐到第一个合法帧头：
+        // MediaExtractor 对首帧极敏感，分块拼接或截断产生的头部残帧会让整个解析失败，
+        // 表现为「时好时坏」——流完整就能解，头部带残帧就整体失败返回 null。
+        if (ext == ".mp3" || ext == ".tmp") {
+            val aligned = alignToFirstMp3Frame(data)
+            if (aligned != null) {
+                data = aligned
+                ext = ".mp3"
+            }
+        }
         val tempFile = File.createTempFile("audio_decode", ext)
-        tempFile.writeBytes(audioData)
+        tempFile.writeBytes(data)
         try {
             return decodeFileViaMediaCodec(tempFile)
         } finally {
             tempFile.delete()
         }
+    }
+
+    /**
+     * 把 MP3 流对齐到第一个合法帧头（剥掉头部垃圾/残帧字节）。
+     * @return 对齐后的数据；首帧即合法、或找不到合法帧头时返回 null（按原样解）
+     */
+    private fun alignToFirstMp3Frame(data: ByteArray): ByteArray? {
+        if (data.size < 8) return null
+        if (isMp3FrameHeaderAt(data, 0)) return null
+        val limit = minOf(data.size - 1, 8192)
+        for (i in 1 until limit) {
+            if (isMp3FrameHeaderAt(data, i)) {
+                return data.copyOfRange(i, data.size)
+            }
+        }
+        return null
+    }
+
+    /** 位置 i 是否是合法的 MPEG 音频帧头（sync + 版本/层/比特率/采样率均合法） */
+    private fun isMp3FrameHeaderAt(data: ByteArray, i: Int): Boolean {
+        if (i + 4 > data.size) return false
+        val b1 = data[i + 1].toInt() and 0xFF
+        if ((data[i].toInt() and 0xFF) != 0xFF || (b1 and 0xE0) != 0xE0) return false
+        if (((b1 shr 3) and 0x03) == 1) return false      // 版本保留位
+        if (((b1 shr 1) and 0x03) == 0) return false      // 层保留位
+        val b2 = data[i + 2].toInt() and 0xFF
+        val bitrateIdx = (b2 shr 4) and 0x0F
+        if (bitrateIdx == 0 || bitrateIdx == 15) return false  // 比特率 free/损坏
+        if (((b2 shr 2) and 0x03) == 3) return false      // 采样率保留位
+        return true
     }
 
     /**
@@ -580,50 +633,71 @@ object AudioDecodeUtil {
                 val bufferInfo = MediaCodec.BufferInfo()
                 var inputDone = false
                 var outputDone = false
+                var inputStall = 0
+                var outputIdle = 0
 
+                // 容错解码：单帧损坏/解码器报错只中断后续，保留已解码的 PCM。
+                // 整段返回 null 在混合格式场景会连锁丢整段对话，而「丢个尾巴」对听感几乎无影响。
                 while (!outputDone) {
-                    if (!inputDone) {
-                        val inputIdx = decoder.dequeueInputBuffer(10000)
-                        if (inputIdx >= 0) {
-                            val buffer = decoder.getInputBuffer(inputIdx)!!
-                            val sampleSize = extractor.readSampleData(buffer, 0)
-                            if (sampleSize < 0) {
-                                decoder.queueInputBuffer(inputIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                inputDone = true
-                            } else {
-                                decoder.queueInputBuffer(inputIdx, 0, sampleSize, extractor.sampleTime, 0)
-                                extractor.advance()
+                    try {
+                        if (!inputDone) {
+                            val inputIdx = decoder.dequeueInputBuffer(10000)
+                            if (inputIdx >= 0) {
+                                inputStall = 0
+                                val buffer = decoder.getInputBuffer(inputIdx)!!
+                                val sampleSize = extractor.readSampleData(buffer, 0)
+                                if (sampleSize < 0) {
+                                    decoder.queueInputBuffer(inputIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                    inputDone = true
+                                } else {
+                                    decoder.queueInputBuffer(inputIdx, 0, sampleSize, extractor.sampleTime, 0)
+                                    extractor.advance()
+                                }
+                            } else if (++inputStall > 3) {
+                                // dequeueInputBuffer 已阻塞 10s 仍拿不到缓冲区：解码器大概率卡死
+                                break
                             }
                         }
-                    }
 
-                    val outputIdx = decoder.dequeueOutputBuffer(bufferInfo, 10000)
-                    when {
-                        outputIdx >= 0 -> {
-                            val buffer = decoder.getOutputBuffer(outputIdx)!!
-                            val chunk = ByteArray(bufferInfo.size)
-                            buffer.get(chunk)
-                            pcmChunks.add(chunk)
-                            decoder.releaseOutputBuffer(outputIdx, false)
-                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                                outputDone = true
+                        val outputIdx = decoder.dequeueOutputBuffer(bufferInfo, 10000)
+                        when {
+                            outputIdx >= 0 -> {
+                                outputIdle = 0
+                                val buffer = decoder.getOutputBuffer(outputIdx)!!
+                                val chunk = ByteArray(bufferInfo.size)
+                                buffer.get(chunk)
+                                pcmChunks.add(chunk)
+                                decoder.releaseOutputBuffer(outputIdx, false)
+                                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                    outputDone = true
+                                }
+                            }
+                            outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                                // 获取输出格式，通常与输入一致
+                            }
+                            outputIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                                if (inputDone) {
+                                    // 输入已 EOS 但解码器一直不给输出：约 10s 后放弃，保留已解码部分
+                                    if (++outputIdle > 2000) {
+                                        break
+                                    }
+                                    Thread.sleep(5)
+                                }
                             }
                         }
-                        outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                            // 获取输出格式，通常与输入一致
-                        }
-                        outputIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                            if (inputDone) {
-                                Thread.sleep(5)
-                            }
-                        }
+                    } catch (_: Exception) {
+                        // 损坏帧/解码器异常：不再整体失败，保留已解码的 PCM
+                        break
                     }
                 }
 
-                decoder.stop()
-                decoder.release()
+                runCatching { decoder.stop() }
+                runCatching { decoder.release() }
 
                 val totalSize = pcmChunks.sumOf { it.size }
+                if (totalSize == 0) {
+                    return null
+                }
                 val pcm = ByteArray(totalSize)
                 var offset = 0
                 pcmChunks.forEach {
@@ -635,6 +709,7 @@ object AudioDecodeUtil {
                 return Triple(pcm, sampleRate, channels)
             }
         } catch (e: Exception) {
+            // 轨道解析/解码器创建等初始化阶段失败：返回 null，由调用方回退
         } finally {
             extractor.release()
         }
