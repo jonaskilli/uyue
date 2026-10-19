@@ -69,7 +69,7 @@ class TtsPluginJsBridge {
          * 所以分段顺序与这里的记录顺序一致，再用字节数二次校验即可放心对应。
          */
         class SynthesisRecord(
-            /** 本次合成使用的标签（旁白 / 男性青年…） */
+            /** 本次合成使用的标签（旁白 / 男性青年…）；音效段为「音效:<文件名>」 */
             val voiceTag: String,
             /** 本次合成实际使用的配置 id */
             val configId: String,
@@ -79,7 +79,27 @@ class TtsPluginJsBridge {
             val converted: Boolean,
             /** 返回给脚本的字节数，用于与分段长度比对 */
             val byteSize: Int,
+            /**
+             * 是否为音效段（由 [markSoundEffect] 标记，不走 TTS 合成）。
+             * 音效没有角色参数，音量单独跟随背景音乐界面的「音效音量」滑块。
+             */
+            val isSoundEffect: Boolean = false,
         )
+
+        /**
+         * 合并阶段某一集的音频处理配置。
+         */
+        class SegmentAudioConfig(
+            /** 后处理参数；null 表示该段已处理过或不需要（如音效段） */
+            val params: PostAudioParams?,
+            /** 附加音量增益；音效段取「音效音量」滑块，其余为 1.0f */
+            val gain: Float,
+        )
+
+        /** 音效音量倍率（背景音乐界面滑块，0~300%） */
+        private fun soundEffectGain(): Float =
+            (io.legado.app.help.config.AppConfig.soundEffectVolume / 100f)
+                .coerceIn(0f, PostAudioParams.MAX)
 
         private val synthesisRecords = mutableListOf<SynthesisRecord>()
 
@@ -93,7 +113,33 @@ class TtsPluginJsBridge {
         }
 
         /**
-         * 按「索引 + 字节长度」双重校验，把每次合成的后处理参数对齐到对应分段。
+         * 脚本在把音效字节 write 进分段缓冲区**之后**调用，声明这一段是音效。
+         *
+         * 音效不经过 TTS 合成、没有角色参数，若不做标记，合并阶段既拿不到它的
+         * 后处理参数、也不会应用「音效音量」滑块——表现为音效忽大忽小、
+         * 调了音量没反应。传入同一份字节以便与分段长度校验对齐。
+         *
+         * @param fileName 音效 JSON 文件名，仅用于日志排查
+         * @param bytes    刚刚 write 进分段缓冲区的音效字节（必须是同一份）
+         */
+        @JvmStatic
+        fun markSoundEffect(fileName: String, bytes: ByteArray) {
+            if (bytes.isEmpty()) return
+            addRecord(
+                SynthesisRecord(
+                    voiceTag = "音效:$fileName",
+                    configId = "",
+                    // 音效不用角色后处理参数，音量由 gain 单独给
+                    params = PostAudioParams(),
+                    converted = false,
+                    byteSize = bytes.size,
+                    isSoundEffect = true,
+                )
+            )
+        }
+
+        /**
+         * 按「索引 + 字节长度」双重校验，把每次合成的音频参数对齐到对应分段。
          *
          * @param segments 分段缓冲区切出来的音频段
          * @param ranges   每段的 (起始偏移, 长度)
@@ -105,7 +151,18 @@ class TtsPluginJsBridge {
         fun buildPerSegmentParams(
             segments: List<ByteArray>,
             ranges: List<Pair<Int, Int>>,
-        ): List<PostAudioParams?>? {
+        ): List<PostAudioParams?>? =
+            buildPerSegmentAudioConfig(segments, ranges)?.map { it.params }
+
+        /**
+         * 同 [buildPerSegmentParams]，但同时给出每段的附加音量增益。
+         * 用于音效段：它不该套角色的语速/音调，但要按「音效音量」滑块调整音量。
+         */
+        @JvmStatic
+        fun buildPerSegmentAudioConfig(
+            segments: List<ByteArray>,
+            ranges: List<Pair<Int, Int>>,
+        ): List<SegmentAudioConfig>? {
             val recs = records
             if (recs.isEmpty() || segments.size <= 1) return null
             if (recs.size != segments.size || ranges.size != segments.size) return null
@@ -114,7 +171,19 @@ class TtsPluginJsBridge {
                 if (r.byteSize != segments[i].size) return null
                 if (ranges[i].second != segments[i].size) return null
             }
-            return recs.map { if (it.converted) null else it.params }
+            val sfxGain = soundEffectGain()
+            return recs.map { r ->
+                if (r.isSoundEffect) {
+                    // 音效：不套角色参数，只按音效音量调增益
+                    SegmentAudioConfig(params = null, gain = sfxGain)
+                } else {
+                    // 已转码成功的段：参数在合成时已应用，只补增益（默认 1.0）
+                    SegmentAudioConfig(
+                        params = if (r.converted) null else r.params,
+                        gain = 1.0f,
+                    )
+                }
+            }
         }
 
         /**
@@ -177,6 +246,17 @@ class TtsPluginJsBridge {
         if (isSymbolOnly(text)) {
             AppLog.putDebug("[TtsPluginJsBridge] 纯符号切片，返回0.2秒静音: tag=$voiceTag textLen=${text.length}")
             synthesisPostProcessed = true
+            // 静音段脚本同样会 write，必须记一条，否则 records 比 segments 少，
+            // 逐段对齐会整体失效（静音已是标准 WAV、无需参数，converted=true）
+            addRecord(
+                SynthesisRecord(
+                    voiceTag = voiceTag,
+                    configId = lastConfigId,
+                    params = PostAudioParams(),
+                    converted = true,
+                    byteSize = silentPcm02s().size,
+                )
+            )
             return silentPcm02s()
         }
         val requestId = UUID.randomUUID().toString()
@@ -187,15 +267,19 @@ class TtsPluginJsBridge {
         return try {
             val bytes = JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
             val outcome = applyPostAudioImmediately(bytes, usedConfig, voiceTag)
-            addRecord(
-                SynthesisRecord(
-                    voiceTag = voiceTag,
-                    configId = lastConfigId,
-                    params = outcome.params,
-                    converted = outcome.converted,
-                    byteSize = outcome.bytes?.size ?: 0,
+            // 只有真的返回了字节才记录：脚本是 `if (audio && audio.length > 0)` 才 write，
+            // 返回空时若也记一条，records 就会比 segments 多，导致逐段对齐整体失效。
+            if (outcome.bytes != null && outcome.bytes.isNotEmpty()) {
+                addRecord(
+                    SynthesisRecord(
+                        voiceTag = voiceTag,
+                        configId = lastConfigId,
+                        params = outcome.params,
+                        converted = outcome.converted,
+                        byteSize = outcome.bytes.size,
+                    )
                 )
-            )
+            }
             outcome.bytes
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesize 失败: tag=$voiceTag error=${e.message}", e)
@@ -225,6 +309,16 @@ class TtsPluginJsBridge {
         if (isSymbolOnly(text)) {
             AppLog.putDebug("[TtsPluginJsBridge] 纯符号切片，返回0.2秒静音: configId=$configId textLen=${text.length}")
             synthesisPostProcessed = true
+            // 同 synthesize：静音段也要记录，保持 records 与 segments 一一对应
+            addRecord(
+                SynthesisRecord(
+                    voiceTag = config.voiceTag,
+                    configId = config.id,
+                    params = PostAudioParams(),
+                    converted = true,
+                    byteSize = silentPcm02s().size,
+                )
+            )
             return silentPcm02s()
         }
         val requestId = UUID.randomUUID().toString()
@@ -232,15 +326,18 @@ class TtsPluginJsBridge {
         return try {
             val bytes = JReadVoiceEngine.synthesizeConfigLineAudio(context, config, text, pointerJson, requestId)
             val outcome = applyPostAudioImmediately(bytes, config, config.voiceTag)
-            addRecord(
-                SynthesisRecord(
-                    voiceTag = config.voiceTag,
-                    configId = config.id,
-                    params = outcome.params,
-                    converted = outcome.converted,
-                    byteSize = outcome.bytes?.size ?: 0,
+            // 只有真的返回了字节才记录（脚本按 length > 0 决定是否 write）
+            if (outcome.bytes != null && outcome.bytes.isNotEmpty()) {
+                addRecord(
+                    SynthesisRecord(
+                        voiceTag = config.voiceTag,
+                        configId = config.id,
+                        params = outcome.params,
+                        converted = outcome.converted,
+                        byteSize = outcome.bytes.size,
+                    )
                 )
-            )
+            }
             outcome.bytes
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesizeByConfigId 失败: configId=$configId error=${e.message}", e)

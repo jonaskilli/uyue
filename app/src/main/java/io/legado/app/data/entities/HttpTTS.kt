@@ -63,6 +63,18 @@ data class HttpTTS(
     @Suppress("MemberVisibilityCanBePrivate")
     companion object {
 
+        /**
+         * 内置 TTS 插件引擎的固定 id（assets/defaultData/httpTTS.json 里那条正数 id）。
+         *
+         * **这个 id 绝对不能改**：`Book.config.ttsEngine` 与 `AppConfig.ttsEngine`
+         * 存的就是它的字符串形式（见 ReadAloud.getReadAloudClass 按 id 查引擎），
+         * 改了会让所有选中该引擎的书和全局设置静默退回系统 TTS。
+         *
+         * 它又不在 `deleteDefault()`（id < 0）的覆盖范围内，所以内置引擎更新时
+         * 必须按这个常量显式删除后重新插入，见 DefaultData.importDefaultHttpTTS。
+         */
+        const val BUILTIN_TTS_PLUGIN_ID: Long = 1780805418993L
+
         fun fromJsonDoc(doc: DocumentContext): Result<HttpTTS> {
             return kotlin.runCatching {
                 val loginUi = doc.read<Any>("$.loginUi")

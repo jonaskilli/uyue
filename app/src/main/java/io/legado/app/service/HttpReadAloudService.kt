@@ -251,7 +251,12 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
              * 元素为 null 表示该段已在合成阶段处理过，无需补做。
              * 为 null 时表示无法逐段对齐，退回 [postAudioParams] 整体处理。
              */
-            val perSegmentParams: List<io.legado.app.help.audiobook.PostAudioParams?>? = null
+            val perSegmentParams: List<io.legado.app.help.audiobook.PostAudioParams?>? = null,
+            /**
+             * 逐段附加音量增益（与 [segments] 等长）。
+             * 音效段取「音效音量」滑块值，其余为 1.0f；与整体音量增益相乘。
+             */
+            val perSegmentGain: List<Float?>? = null
         ) : TtsSpeakResult()
         data class Url(val url: String) : TtsSpeakResult()
     }
@@ -550,6 +555,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                             speakResult.segments,
                                             postParams = speakResult.postAudioParams,
                                             perSegmentParams = speakResult.perSegmentParams,
+                                            perSegmentGain = speakResult.perSegmentGain,
                                             silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                                 enabled = needSilenceSkip,
                                                 minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -713,6 +719,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                             speakResult.segments,
                                             postParams = speakResult.postAudioParams,
                                             perSegmentParams = speakResult.perSegmentParams,
+                                            perSegmentGain = speakResult.perSegmentGain,
                                             silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                                 enabled = needSilenceSkip,
                                                 minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -830,6 +837,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                             speakResult.segments,
                                             postParams = speakResult.postAudioParams,
                                             perSegmentParams = speakResult.perSegmentParams,
+                                            perSegmentGain = speakResult.perSegmentGain,
                                             silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                                 enabled = needSilenceSkip,
                                                 minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -992,6 +1000,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                     speakResult.segments,
                                     postParams = speakResult.postAudioParams,
                                     perSegmentParams = speakResult.perSegmentParams,
+                                    perSegmentGain = speakResult.perSegmentGain,
                                     silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                         enabled = needSilenceSkip,
                                         minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -1259,14 +1268,16 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                 // 逐段对齐音频参数：脚本是「合成一次 → write 一次」，
                                 // 按索引 + 字节长度双重校验后，每段用自己角色的参数补做后处理，
                                 // 避免旁白成功把开关置位后，转码失败的对话段拿不到参数。
+                                // 音效段（markSoundEffect 标记过）则按「音效音量」滑块调增益。
                                 // 校验不通过则返回 null，退回整体 postParams。
-                                val perSegment = io.legado.app.help.audiobook.TtsPluginJsBridge
-                                    .buildPerSegmentParams(segments, ranges)
+                                val segConfigs = io.legado.app.help.audiobook.TtsPluginJsBridge
+                                    .buildPerSegmentAudioConfig(segments, ranges)
                                 return TtsSpeakResult.MultiSegment(
                                     segments, ranges,
                                     forceConvertToWav = ttsUsed,
                                     postAudioParams = postParams,
-                                    perSegmentParams = perSegment,
+                                    perSegmentParams = segConfigs?.map { it.params },
+                                    perSegmentGain = segConfigs?.map { it.gain },
                                 )
                             }
                             // 兜底：脚本直接拼接的 ByteArray 也做自动拆分
@@ -1336,13 +1347,14 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                             if (segments != null && segments.size > 1) {
                                 val ranges = wsHelper.lastSegmentedBuffer?.getSegmentRanges() ?: emptyList()
                                 // 逐段对齐音频参数（同 @js 路径，详见上方说明）
-                                val perSegment = io.legado.app.help.audiobook.TtsPluginJsBridge
-                                    .buildPerSegmentParams(segments, ranges)
+                                val segConfigs = io.legado.app.help.audiobook.TtsPluginJsBridge
+                                    .buildPerSegmentAudioConfig(segments, ranges)
                                 return TtsSpeakResult.MultiSegment(
                                     segments, ranges,
                                     forceConvertToWav = ttsUsed,
                                     postAudioParams = postParams,
-                                    perSegmentParams = perSegment,
+                                    perSegmentParams = segConfigs?.map { it.params },
+                                    perSegmentGain = segConfigs?.map { it.gain },
                                 )
                             }
                             val splitSegments = splitMixedAudioBytes(jsResult)

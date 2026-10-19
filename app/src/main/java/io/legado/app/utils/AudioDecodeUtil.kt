@@ -122,6 +122,9 @@ object AudioDecodeUtil {
      * @param perSegmentParams 与 [segments] 等长的逐段后处理参数，元素为 null 表示该段
      *        已处理过、不补做。用于「同一段朗读里不同角色用了不同参数」的场景，
      *        避免用一套参数调所有角色。数量与 [segments] 不一致时自动退回 [postParams]。
+     * @param perSegmentGain 与 [segments] 等长的逐段附加音量增益，元素为 null 时按 1.0f。
+     *        用于音效段：它不该套角色的语速/音调，但要按「音效音量」滑块调整音量。
+     *        与整体 [gain] 是相乘关系（两个设置叠加）。
      * @param silenceSkip 快节奏播放（去除静音）参数
      */
     fun mergeSegmentsToWav(
@@ -129,6 +132,7 @@ object AudioDecodeUtil {
         gain: Float = AppConfig.convertCacheToWavGain,
         postParams: PostAudioParams? = null,
         perSegmentParams: List<PostAudioParams?>? = null,
+        perSegmentGain: List<Float?>? = null,
         silenceSkip: SilenceSkipConfig? = null,
     ): ByteArray? {
         if (segments.isEmpty()) {
@@ -137,16 +141,20 @@ object AudioDecodeUtil {
 
         // 逐段参数不可信（数量不符）时退回整体参数，避免张冠李戴
         val perSegment = perSegmentParams?.takeIf { it.size == segments.size }
+        val perGain = perSegmentGain?.takeIf { it.size == segments.size }
 
         val allPcm = mutableListOf<ByteArray>()
         try {
             segments.forEachIndexed { index, segment ->
                 val segParams = perSegment?.get(index) ?: postParams
+                // 逐段附加增益（音效段非 1.0）。这里只乘段级增益，
+                // 整体 gain 仍由下方合并后统一应用一次，两者相乘不重复
+                val segGain = perGain?.get(index) ?: 1.0f
                 // 每一段合成后立即去除空音频（快节奏），所有处理在合并之前完成。
-                // gain 传 1.0f：逐段解码属于中间趟，增益由下方合并后统一应用一次
+                // gain 传 segGain：逐段解码属于中间趟，整体增益由下方合并后应用
                 val wavBytes = decodeToStandardWav(
                     segment,
-                    gain = 1.0f,
+                    gain = segGain,
                     postParams = segParams,
                     silenceSkip = silenceSkip,
                 )

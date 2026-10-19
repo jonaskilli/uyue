@@ -64,7 +64,10 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
         get() = isLastVersion(1, "ruleHelpVersion")
 
     val needUpHttpTTS: Boolean
-        get() = !isLastVersion(6, "httpTtsVersion")
+        // 6 → 7：「内置TTS插件」的 id 由正数 1780805418993 改为负数 -30，
+        // 使其纳入 deleteDefault(id < 0) 的覆盖范围。老用户的 httpTtsVersion
+        // 早已置成 6，不升版本号则永远不会重新导入，内置引擎脚本无法更新。
+        get() = !isLastVersion(7, "httpTtsVersion")
 
     val needUpTxtTocRule: Boolean
         get() = !isLastVersion(3, "txtTocRuleVersion")
