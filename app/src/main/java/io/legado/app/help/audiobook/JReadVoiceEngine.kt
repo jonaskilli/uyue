@@ -420,15 +420,24 @@ object JReadVoiceEngine {
      * 于是条目级/分组级/插件级后处理参数全部读不到（表现为"配了没效果"），
      * 而全局参数与配置无关所以照常生效。
      */
+    /** 全局级后处理音频参数（朗读配置列表右上角菜单里设置的那套） */
+    private fun globalPostParams(): PostAudioParams = PostAudioParams(
+        io.legado.app.help.config.AppConfig.ttsPostSpeed,
+        io.legado.app.help.config.AppConfig.ttsPostVolume,
+        io.legado.app.help.config.AppConfig.ttsPostPitch,
+    )
+
     fun resolvePostAudioParams(context: Context, voiceTag: String): PostAudioParams {
         val uiSpeedFactor = readAloudUiSpeedFactor()
         val config = findConfig(context, voiceTag)
-            ?: return PostAudioParams(
-                speed = (PostAudioParams.DEFAULT * uiSpeedFactor)
-                    .coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
-                volume = PostAudioParams.DEFAULT,
-                pitch = PostAudioParams.DEFAULT,
-            )
+            ?: return globalPostParams().let {
+                PostAudioParams(
+                    speed = (it.speed * uiSpeedFactor)
+                        .coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+                    volume = it.volume.coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+                    pitch = it.pitch.coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+                )
+            }
         return resolvePostAudioParams(context, config, uiSpeedFactor)
     }
 
@@ -455,40 +464,36 @@ object JReadVoiceEngine {
         uiSpeedFactor: Float,
     ): PostAudioParams {
         val groups = listGroups(context)
-        val globalParams = PostAudioParams(
-            io.legado.app.help.config.AppConfig.ttsPostSpeed,
-            io.legado.app.help.config.AppConfig.ttsPostVolume,
-            io.legado.app.help.config.AppConfig.ttsPostPitch,
-        )
+        val globalParams = globalPostParams()
 
-        // 大分组
+        // 大分组：与全局相乘（分组某项为 FOLLOW 则视为 1.0，只保留全局）
         val groupParams = groups
             .firstOrNull { it.groupName == config.groupName && it.subGroupName.isBlank() && it.thirdGroupName.isBlank() }
-            ?.let { PostAudioParams(it.postSpeed, it.postVolume, it.postPitch).copyIfFollow(globalParams) }
+            ?.let { PostAudioParams(it.postSpeed, it.postVolume, it.postPitch).timesWithParent(globalParams) }
             ?: globalParams
 
         // 中分组 (subGroup)
         val subGroupParams = groups
             .firstOrNull { it.groupName == config.groupName && it.subGroupName == config.subGroupName && it.thirdGroupName.isBlank() }
-            ?.let { PostAudioParams(it.postSpeed, it.postVolume, it.postPitch).copyIfFollow(groupParams) }
+            ?.let { PostAudioParams(it.postSpeed, it.postVolume, it.postPitch).timesWithParent(groupParams) }
             ?: groupParams
 
         // 小分组 (thirdGroup)
         val thirdGroupParams = groups
             .firstOrNull { it.groupName == config.groupName && it.subGroupName == config.subGroupName && it.thirdGroupName == config.thirdGroupName }
-            ?.let { PostAudioParams(it.postSpeed, it.postVolume, it.postPitch).copyIfFollow(subGroupParams) }
+            ?.let { PostAudioParams(it.postSpeed, it.postVolume, it.postPitch).timesWithParent(subGroupParams) }
             ?: subGroupParams
 
-        // 配置级别
+        // 配置级别：与上面逐级累乘的结果再相乘
         val base = PostAudioParams(config.postSpeed, config.postVolume, config.postPitch)
-            .copyIfFollow(thirdGroupParams)
+            .timesWithParent(thirdGroupParams)
             .resolved()
         // 插件级后处理参数：与链路结果相乘（FOLLOW/0 视为 1.0 = 不干预）；
         // 语速再乘朗读界面滑块系数；总体钳制到有效范围
         val plugin = findPlugin(context, config.pluginId) ?: return PostAudioParams(
             speed = (base.speed * uiSpeedFactor).coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
-            volume = base.volume,
-            pitch = base.pitch,
+            volume = base.volume.coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
+            pitch = base.pitch.coerceIn(PostAudioParams.MIN, PostAudioParams.MAX),
         )
         return PostAudioParams(
             speed = (base.speed * pluginSynthFactor(plugin.postSpeed) * uiSpeedFactor)
@@ -1989,7 +1994,12 @@ object JReadVoiceEngine {
                         "plugin=${plugin.name.ifBlank { plugin.pluginId.ifBlank { plugin.id } }} voice=${config.voice}"
                 )
             }
-            return applySilenceSkipIfEnabled(bytes)
+            // 注意：不在这里做「快节奏（去静音）」裁剪。
+            // 此时音频还没经过后处理（Sonic 语速/音调/音量），静音段的时长是「未变速」的
+            // 原始时长；若先裁再变速，语速调快后停顿被成倍压缩，衔接处会因过度压缩而失真。
+            // 去静音统一放到朗读落盘前（HttpReadAloudService 的转码封装处）执行，
+            // 那时转 WAV + 参数调节都已完成，裁剪基于成品时长，听感速度才统一。
+            return bytes
         }
 
         val request = config.resolveRequest(plugin)
@@ -2024,28 +2034,10 @@ object JReadVoiceEngine {
                     "J阅读声音请求返回异常小音频: bytes=${audioBytes.size} textLen=${text.length}"
                 )
             }
-            applySilenceSkipIfEnabled(audioBytes)
+            // 同上：去静音不在合成阶段做，交给朗读落盘前的统一封装处
+            audioBytes
         }
         return result
-    }
-
-    /**
-     * 若开启「快节奏播放」则对音频做静音裁剪，否则原样返回。
-     * 复用 io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav（解码→重采样24000→Sonic→静音裁剪→封装WAV），
-     * 静音裁剪步骤对齐 tts_server_android 的 DefaultResultProcessor PCM 流程。
-     */
-    private fun applySilenceSkipIfEnabled(bytes: ByteArray): ByteArray {
-        if (!io.legado.app.help.config.AppConfig.ttsSilenceSkipEnabled) {
-            return bytes
-        }
-        val out = io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(
-            bytes,
-            silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
-                enabled = true,
-                minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
-            )
-        )
-        return out ?: bytes
     }
 
     private fun isClearlyInvalidPluginAudio(text: String, bytes: ByteArray): Boolean {

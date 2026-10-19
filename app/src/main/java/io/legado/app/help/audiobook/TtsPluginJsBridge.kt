@@ -186,8 +186,14 @@ class TtsPluginJsBridge {
             ?: JReadVoiceEngine.resolvePostAudioParams(context, voiceTag)
         // 输入可能是插件原始格式（mp3 等）或标准 WAV，decodeToStandardWav 统一处理：
         // 解码 → 重采样 24k → Sonic(语速/音量/音高，参数为默认时跳过) → 封装 WAV。
+        // gain 传 1.0f：本趟是中间处理，音量增益由朗读落盘前的最终封装统一应用一次，
+        // 这里再乘会导致同一段被放大两次。
         // 转码失败（极端损坏数据）才回退原始字节，保证合成不中断。
-        val out = io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(bytes, postParams = params)
+        val out = io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(
+            bytes,
+            gain = 1.0f,
+            postParams = params,
+        )
         return out ?: bytes
     }
 

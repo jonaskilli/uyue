@@ -737,12 +737,19 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             // 与朗读同一套后处理链路（条目 → 分组 → 插件 → 全局），
             // 否则试听听不出条目/分组/插件级参数的效果
             val postParams = JReadVoiceEngine.resolvePostAudioParams(this@TtsPluginActivity, config)
-            val playedBytes = if (postParams.isDefault()) {
+            // 快节奏（去静音）与朗读落盘前同一时机：在 Sonic 变速之后做。
+            // 若先裁静音再变速，停顿会被成倍压缩，衔接处失真。
+            val needSilenceSkip = AppConfig.ttsSilenceSkipEnabled
+            val silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
+                enabled = needSilenceSkip,
+                minDurationMs = AppConfig.ttsSilenceSkipMinMs,
+            )
+            val playedBytes = if (postParams.isDefault() && !needSilenceSkip) {
                 audioBytes
             } else {
                 withContext(Dispatchers.IO) {
                     io.legado.app.utils.AudioDecodeUtil
-                        .decodeToStandardWav(audioBytes, postParams = postParams)
+                        .decodeToStandardWav(audioBytes, postParams = postParams, silenceSkip = silenceSkip)
                 } ?: audioBytes
             }
             if (isFinishing || isDestroyed) return@launch

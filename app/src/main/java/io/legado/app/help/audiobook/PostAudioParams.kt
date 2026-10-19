@@ -28,6 +28,27 @@ data class PostAudioParams(
     }
 
     /**
+     * 与上级**相乘**合并（各级音频参数的关系是累乘，不是覆盖）。
+     *
+     * 规则：
+     * - 本级为 FOLLOW(0) → 视为 1.0，即本级不干预，只保留上级；
+     * - 上级为 FOLLOW(0) → 同样视为 1.0；
+     * - 两边都有值时直接相乘，使「全局 × 大分组 × 中分组 × 小分组 × 条目」逐级叠加。
+     *
+     * 与 [copyIfFollow] 的区别：后者是「本级有值就顶掉上级」，会让上级设置静默失效。
+     */
+    fun timesWithParent(parent: PostAudioParams): PostAudioParams {
+        return PostAudioParams(
+            speed = (if (speed <= 0f) DEFAULT else speed) *
+                (if (parent.speed <= 0f) DEFAULT else parent.speed),
+            volume = (if (volume <= 0f) DEFAULT else volume) *
+                (if (parent.volume <= 0f) DEFAULT else parent.volume),
+            pitch = (if (pitch <= 0f) DEFAULT else pitch) *
+                (if (parent.pitch <= 0f) DEFAULT else parent.pitch),
+        )
+    }
+
+    /**
      * 解析为实际生效值（FOLLOW 视为 1.0）
      */
     fun resolved(): PostAudioParams {

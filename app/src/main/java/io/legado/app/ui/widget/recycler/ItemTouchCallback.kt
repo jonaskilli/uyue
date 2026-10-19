@@ -88,16 +88,24 @@ class ItemTouchCallback(private val callback: Callback) : ItemTouchHelper.Callba
     ): Boolean {
         val fromPosition: Int = srcViewHolder.bindingAdapterPosition
         val toPosition: Int = targetViewHolder.bindingAdapterPosition
+        if (fromPosition < 0 || toPosition < 0 || fromPosition == toPosition) return false
+        // 逐格互换推进。某一格被 adapter 拒绝（swap 返回 false）时必须立即停止：
+        // 拖拽不得越过这一格。否则 ItemTouchHelper 仍会认为「已移动到目标位置」，
+        // 后续手指每移动一格就重新发起一轮互换，作用在已经错位的位置上，
+        // 把途经的其它条目（甚至整个分组）的顺序改乱。
+        var moved = false
         if (fromPosition < toPosition) {
             for (i in fromPosition until toPosition) {
-                callback.swap(i, i + 1)
+                if (!callback.swap(i, i + 1)) break
+                moved = true
             }
         } else {
             for (i in fromPosition downTo toPosition + 1) {
-                callback.swap(i, i - 1)
+                if (!callback.swap(i, i - 1)) break
+                moved = true
             }
         }
-        return true
+        return moved
     }
 
     override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {

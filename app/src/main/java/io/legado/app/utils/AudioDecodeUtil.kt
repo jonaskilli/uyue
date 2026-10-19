@@ -47,14 +47,15 @@ object AudioDecodeUtil {
      * 将任意格式的音频 ByteArray 解码并重采样为标准 WAV PCM。
      *
      * @param audioData 原始音频字节数据
-     * @param gain 音量增益，1.0 为原始音量
+     * @param gain 音量增益，1.0 为原始音量。**只应在「最终封装」那一趟传实际增益**；
+     *             中间处理趟必须传 1.0f，否则同一段音频会被反复放大 gain^n 倍导致削波
      * @param postParams 变速变调参数，为 null 时不做变速变调处理
      * @param silenceSkip 快节奏播放（去除静音）参数，不为 null 且 enabled 时在 PCM 域裁剪静音
      * @return 标准 WAV 文件的 ByteArray，失败返回 null
      */
     fun decodeToStandardWav(
         audioData: ByteArray,
-        gain: Float = 1.0f,
+        gain: Float = AppConfig.convertCacheToWavGain,
         postParams: PostAudioParams? = null,
         silenceSkip: SilenceSkipConfig? = null,
     ): ByteArray? {
@@ -105,7 +106,6 @@ object AudioDecodeUtil {
                 processed
             }
 
-            val gain = AppConfig.convertCacheToWavGain
             val amplified = if (gain != 1.0f) applyVolumeGain(skipped, gain) else skipped
             writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS)
         } catch (e: Exception) {
@@ -118,7 +118,7 @@ object AudioDecodeUtil {
      */
     fun mergeSegmentsToWav(
         segments: List<ByteArray>,
-        gain: Float = 1.0f,
+        gain: Float = AppConfig.convertCacheToWavGain,
         postParams: PostAudioParams? = null,
         silenceSkip: SilenceSkipConfig? = null,
     ): ByteArray? {
@@ -129,8 +129,9 @@ object AudioDecodeUtil {
         val allPcm = mutableListOf<ByteArray>()
         try {
             segments.forEachIndexed { index, segment ->
-                // 每一段合成后立即去除空音频（快节奏），所有处理在合并之前完成
-                val wavBytes = decodeToStandardWav(segment, silenceSkip = silenceSkip)
+                // 每一段合成后立即去除空音频（快节奏），所有处理在合并之前完成。
+                // gain 传 1.0f：逐段解码属于中间趟，增益由下方合并后统一应用一次
+                val wavBytes = decodeToStandardWav(segment, gain = 1.0f, silenceSkip = silenceSkip)
                 if (wavBytes == null) {
                     return@forEachIndexed
                 }
@@ -160,7 +161,6 @@ object AudioDecodeUtil {
                 mergedPcm
             }
 
-            val gain = AppConfig.convertCacheToWavGain
             val amplified = if (gain != 1.0f) applyVolumeGain(processed, gain) else processed
             return writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS)
         } catch (e: Exception) {
