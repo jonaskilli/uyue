@@ -261,11 +261,21 @@ class TtsPluginJsBridge {
         }
         val requestId = UUID.randomUUID().toString()
         val pointerJson = JSONObject().put("voiceTag", voiceTag).toString()
-        // 预先按合成口径选定配置，后处理用同一条，避免按标签反查命中同名配置
+        // 预先按合成口径选定配置，后处理用同一条，避免按标签反查命中同名配置。
+        // findPlayableConfig 对旁白标签会优先取「本书专属旁白」。
         val usedConfig = JReadVoiceEngine.findPlayableConfig(context, voiceTag)
         lastConfigId = usedConfig?.id.orEmpty()
         return try {
-            val bytes = JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
+            // 必须把选好的配置直接传给合成： synthesizeLineAudio 内部会重新按标签选一次，
+            // 而它过滤 enabled，会把本书指定的旁白（旁白标签默认只启用一个，其余是禁用态）
+            // 过滤掉，导致「选了旁白却始终用默认的」。
+            val bytes = if (usedConfig != null) {
+                JReadVoiceEngine.synthesizeLineAudioWithConfig(
+                    context, usedConfig, text, pointerJson, requestId
+                )
+            } else {
+                JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
+            }
             val outcome = applyPostAudioImmediately(bytes, usedConfig, voiceTag)
             // 只有真的返回了字节才记录：脚本是 `if (audio && audio.length > 0)` 才 write，
             // 返回空时若也记一条，records 就会比 segments 多，导致逐段对齐整体失效。
