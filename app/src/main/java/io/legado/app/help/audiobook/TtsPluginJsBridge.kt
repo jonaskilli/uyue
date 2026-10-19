@@ -53,11 +53,76 @@ class TtsPluginJsBridge {
         /**
          * 本次朗读的音频是否已在 synthesize 返回前按各角色自身的后处理参数调节完毕。
          * 为 true 时合并阶段不再做统一调速（各角色参数不同，不能用一套参数调）。
+         *
+         * 注意这是**整段朗读级别的粗粒度开关**，只用于无法分段的场景
+         * （如 Single/InputStream）。能拿到分段的场景请用 [buildPerSegmentParams]，
+         * 它逐段判断、按角色对齐，不会出现「旁白成功把开关置位、对话失败却拿不到参数」。
          */
         @Volatile
         @JvmStatic
         var synthesisPostProcessed: Boolean = false
             private set
+
+        /**
+         * 一次 synthesize 调用的记录。
+         * 用于合并阶段把后处理参数对齐回正确的分段：脚本是「合成一次 → write 一次」，
+         * 所以分段顺序与这里的记录顺序一致，再用字节数二次校验即可放心对应。
+         */
+        class SynthesisRecord(
+            /** 本次合成使用的标签（旁白 / 男性青年…） */
+            val voiceTag: String,
+            /** 本次合成实际使用的配置 id */
+            val configId: String,
+            /** 该角色解析出来的后处理参数 */
+            val params: PostAudioParams,
+            /** 是否已成功转成标准 WAV 并应用了 [params]；false 表示合并阶段需补做 */
+            val converted: Boolean,
+            /** 返回给脚本的字节数，用于与分段长度比对 */
+            val byteSize: Int,
+        )
+
+        private val synthesisRecords = mutableListOf<SynthesisRecord>()
+
+        /** 本次朗读至今的合成记录（按调用顺序） */
+        @JvmStatic
+        val records: List<SynthesisRecord>
+            get() = synchronized(synthesisRecords) { synthesisRecords.toList() }
+
+        private fun addRecord(record: SynthesisRecord) {
+            synchronized(synthesisRecords) { synthesisRecords.add(record) }
+        }
+
+        /**
+         * 按「索引 + 字节长度」双重校验，把每次合成的后处理参数对齐到对应分段。
+         *
+         * @param segments 分段缓冲区切出来的音频段
+         * @param ranges   每段的 (起始偏移, 长度)
+         * @return 与 [segments] 等长的参数列表，元素为 null 表示该段已处理过、无需补；
+         *         数量或长度对不上（脚本改过音频、或不是分段缓冲区路径）时返回 null，
+         *         调用方应退回整体参数，**绝不猜测对应关系**
+         */
+        @JvmStatic
+        fun buildPerSegmentParams(
+            segments: List<ByteArray>,
+            ranges: List<Pair<Int, Int>>,
+        ): List<PostAudioParams?>? {
+            val recs = records
+            if (recs.isEmpty() || segments.size <= 1) return null
+            if (recs.size != segments.size || ranges.size != segments.size) return null
+            recs.forEachIndexed { i, r ->
+                // 长度必须完全一致：脚本若对音频做过裁剪/再编码，对应关系即不可信
+                if (r.byteSize != segments[i].size) return null
+                if (ranges[i].second != segments[i].size) return null
+            }
+            return recs.map { if (it.converted) null else it.params }
+        }
+
+        /**
+         * 没有任何一段需要补参数时返回 true（用于 Single 这类无法分段的场景）。
+         */
+        @JvmStatic
+        fun allSegmentsConverted(): Boolean =
+            records.isNotEmpty() && records.all { it.converted }
 
         @JvmStatic
         fun resetSynthesizeFlag() {
@@ -65,6 +130,7 @@ class TtsPluginJsBridge {
             lastVoiceTag = ""
             lastConfigId = ""
             synthesisPostProcessed = false
+            synchronized(synthesisRecords) { synthesisRecords.clear() }
         }
 
         /** 可朗读字符：任意语言文字 + 十进制数字。不含任何此类字符的切片送进引擎必然报"不支持文本" */
@@ -120,7 +186,17 @@ class TtsPluginJsBridge {
         lastConfigId = usedConfig?.id.orEmpty()
         return try {
             val bytes = JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
-            applyPostAudioImmediately(bytes, usedConfig, voiceTag)
+            val outcome = applyPostAudioImmediately(bytes, usedConfig, voiceTag)
+            addRecord(
+                SynthesisRecord(
+                    voiceTag = voiceTag,
+                    configId = lastConfigId,
+                    params = outcome.params,
+                    converted = outcome.converted,
+                    byteSize = outcome.bytes?.size ?: 0,
+                )
+            )
+            outcome.bytes
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesize 失败: tag=$voiceTag error=${e.message}", e)
             Log.e(TAG, "synthesize failed: tag=$voiceTag", e)
@@ -155,13 +231,30 @@ class TtsPluginJsBridge {
         val pointerJson = JSONObject().put("voiceTag", config.voiceTag).toString()
         return try {
             val bytes = JReadVoiceEngine.synthesizeConfigLineAudio(context, config, text, pointerJson, requestId)
-            applyPostAudioImmediately(bytes, config, config.voiceTag)
+            val outcome = applyPostAudioImmediately(bytes, config, config.voiceTag)
+            addRecord(
+                SynthesisRecord(
+                    voiceTag = config.voiceTag,
+                    configId = config.id,
+                    params = outcome.params,
+                    converted = outcome.converted,
+                    byteSize = outcome.bytes?.size ?: 0,
+                )
+            )
+            outcome.bytes
         } catch (e: Exception) {
             AppLog.put("[TtsPluginJsBridge] synthesizeByConfigId 失败: configId=$configId error=${e.message}", e)
             Log.e(TAG, "synthesizeByConfigId failed: configId=$configId", e)
             null
         }
     }
+
+    /** 合成后处理的产物：[bytes] 交给脚本，[converted] 表示是否已转码并应用了 [params] */
+    private class PostAudioOutcome(
+        val bytes: ByteArray?,
+        val converted: Boolean,
+        val params: PostAudioParams,
+    )
 
     /**
      * 合成完毕后立即做两件事（转码优先，是硬要求）：
@@ -179,22 +272,39 @@ class TtsPluginJsBridge {
         bytes: ByteArray?,
         config: JReadVoiceEngine.VoiceConfig?,
         voiceTag: String,
-    ): ByteArray? {
-        if (bytes == null || bytes.isEmpty()) return bytes
-        synthesisPostProcessed = true
+    ): PostAudioOutcome {
+        if (bytes == null || bytes.isEmpty()) {
+            return PostAudioOutcome(bytes, false, PostAudioParams())
+        }
         val params = config?.let { JReadVoiceEngine.resolvePostAudioParams(context, it) }
             ?: JReadVoiceEngine.resolvePostAudioParams(context, voiceTag)
         // 输入可能是插件原始格式（mp3 等）或标准 WAV，decodeToStandardWav 统一处理：
-        // 解码 → 重采样 24k → Sonic(语速/音量/音高，参数为默认时跳过) → 封装 WAV。
+        // 解码（Exo → 净化后 Exo → 平台 MediaExtractor → MediaCodec 裸流直解）
+        // → 重采样 24k → Sonic(语速/音量/音高，参数为默认时跳过) → 封装 WAV。
         // gain 传 1.0f：本趟是中间处理，音量增益由朗读落盘前的最终封装统一应用一次，
         // 这里再乘会导致同一段被放大两次。
-        // 转码失败（极端损坏数据）才回退原始字节，保证合成不中断。
         val out = io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(
             bytes,
             gain = 1.0f,
             postParams = params,
         )
-        return out ?: bytes
+        // 四级解码全失败才回退原始字节，保证合成不中断。
+        //
+        // 关键：**只有转码成功才置位** synthesisPostProcessed、才标记 converted。
+        // 若失败也置位，朗读落盘前那趟会认为「参数已经调过」而把 postParams 置 null，
+        // 于是这句音频从头到尾没经过 Sonic——插件返回的是 MP3、拿不到 PCM，
+        // 音量/语速调节全部失效，表现为「音量调得很小，偶尔有一句突然很大」。
+        // 同时把 converted=false 记进 [SynthesisRecord]，合并阶段就能按**这个角色**
+        // 自己的参数补做后处理（旁白成功与否不影响对话那段）。
+        if (out == null) {
+            AppLog.put(
+                "[TtsPluginJsBridge] 合成音频转 WAV 失败，回退原始字节: " +
+                    "tag=$voiceTag bytes=${bytes.size}"
+            )
+            return PostAudioOutcome(bytes, converted = false, params = params)
+        }
+        synthesisPostProcessed = true
+        return PostAudioOutcome(out, converted = true, params = params)
     }
 
     /**
