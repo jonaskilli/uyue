@@ -121,6 +121,11 @@ object DefaultData {
     }
 
     fun importDefaultHttpTTS() {
+        // 「内置TTS插件」用的是正数 id（见 HttpTTS.BUILTIN_TTS_PLUGIN_ID），
+        // 不在 deleteDefault(id < 0) 的覆盖范围内，且 Book/AppConfig 的引擎选择
+        // 都按这个 id 绑定、不能改。所以按固定 id 显式删掉旧记录，再用 assets 里的
+        // 最新版本插入——既实现内置引擎随 APP 升级自动更新，又不破坏任何绑定。
+        appDb.httpTTSDao.delete(HttpTTS.BUILTIN_TTS_PLUGIN_ID)
         appDb.httpTTSDao.deleteDefault()
         appDb.httpTTSDao.insert(*httpTTS.toTypedArray())
     }
