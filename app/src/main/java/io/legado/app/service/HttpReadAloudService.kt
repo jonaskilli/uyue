@@ -245,7 +245,13 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
             val segments: List<ByteArray>,
             val ranges: List<Pair<Int, Int>> = emptyList(),
             val forceConvertToWav: Boolean = false,
-            val postAudioParams: io.legado.app.help.audiobook.PostAudioParams? = null
+            val postAudioParams: io.legado.app.help.audiobook.PostAudioParams? = null,
+            /**
+             * 逐段后处理参数（与 [segments] 等长）。
+             * 元素为 null 表示该段已在合成阶段处理过，无需补做。
+             * 为 null 时表示无法逐段对齐，退回 [postAudioParams] 整体处理。
+             */
+            val perSegmentParams: List<io.legado.app.help.audiobook.PostAudioParams?>? = null
         ) : TtsSpeakResult()
         data class Url(val url: String) : TtsSpeakResult()
     }
@@ -543,6 +549,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                         val wavBytes = io.legado.app.utils.AudioDecodeUtil.mergeSegmentsToWav(
                                             speakResult.segments,
                                             postParams = speakResult.postAudioParams,
+                                            perSegmentParams = speakResult.perSegmentParams,
                                             silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                                 enabled = needSilenceSkip,
                                                 minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -705,6 +712,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                         val wavBytes = io.legado.app.utils.AudioDecodeUtil.mergeSegmentsToWav(
                                             speakResult.segments,
                                             postParams = speakResult.postAudioParams,
+                                            perSegmentParams = speakResult.perSegmentParams,
                                             silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                                 enabled = needSilenceSkip,
                                                 minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -821,6 +829,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                         val wavBytes = io.legado.app.utils.AudioDecodeUtil.mergeSegmentsToWav(
                                             speakResult.segments,
                                             postParams = speakResult.postAudioParams,
+                                            perSegmentParams = speakResult.perSegmentParams,
                                             silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                                 enabled = needSilenceSkip,
                                                 minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -982,6 +991,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                 val wavBytes = io.legado.app.utils.AudioDecodeUtil.mergeSegmentsToWav(
                                     speakResult.segments,
                                     postParams = speakResult.postAudioParams,
+                                    perSegmentParams = speakResult.perSegmentParams,
                                     silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
                                         enabled = needSilenceSkip,
                                         minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
@@ -1246,7 +1256,18 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                             val segments = wsHelper.lastSegmentedBuffer?.getSegments()
                             if (segments != null && segments.size > 1) {
                                 val ranges = wsHelper.lastSegmentedBuffer?.getSegmentRanges() ?: emptyList()
-                                return TtsSpeakResult.MultiSegment(segments, ranges, forceConvertToWav = ttsUsed, postAudioParams = postParams)
+                                // 逐段对齐音频参数：脚本是「合成一次 → write 一次」，
+                                // 按索引 + 字节长度双重校验后，每段用自己角色的参数补做后处理，
+                                // 避免旁白成功把开关置位后，转码失败的对话段拿不到参数。
+                                // 校验不通过则返回 null，退回整体 postParams。
+                                val perSegment = io.legado.app.help.audiobook.TtsPluginJsBridge
+                                    .buildPerSegmentParams(segments, ranges)
+                                return TtsSpeakResult.MultiSegment(
+                                    segments, ranges,
+                                    forceConvertToWav = ttsUsed,
+                                    postAudioParams = postParams,
+                                    perSegmentParams = perSegment,
+                                )
                             }
                             // 兜底：脚本直接拼接的 ByteArray 也做自动拆分
                             val splitSegments = splitMixedAudioBytes(jsResult)
@@ -1314,7 +1335,15 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                             val segments = wsHelper.lastSegmentedBuffer?.getSegments()
                             if (segments != null && segments.size > 1) {
                                 val ranges = wsHelper.lastSegmentedBuffer?.getSegmentRanges() ?: emptyList()
-                                return TtsSpeakResult.MultiSegment(segments, ranges, forceConvertToWav = ttsUsed, postAudioParams = postParams)
+                                // 逐段对齐音频参数（同 @js 路径，详见上方说明）
+                                val perSegment = io.legado.app.help.audiobook.TtsPluginJsBridge
+                                    .buildPerSegmentParams(segments, ranges)
+                                return TtsSpeakResult.MultiSegment(
+                                    segments, ranges,
+                                    forceConvertToWav = ttsUsed,
+                                    postAudioParams = postParams,
+                                    perSegmentParams = perSegment,
+                                )
                             }
                             val splitSegments = splitMixedAudioBytes(jsResult)
                             if (splitSegments.size > 1) {

@@ -115,23 +115,41 @@ object AudioDecodeUtil {
 
     /**
      * 将多段音频统一解码、重采样后合并为一个 WAV 文件。
+     *
+     * @param segments 待合并的音频段（可能是 MP3/WAV 混合）
+     * @param gain 整体音量增益，只在最终封装应用一次
+     * @param postParams 所有段共用的后处理参数；段级参数更精确时会被 [perSegmentParams] 覆盖
+     * @param perSegmentParams 与 [segments] 等长的逐段后处理参数，元素为 null 表示该段
+     *        已处理过、不补做。用于「同一段朗读里不同角色用了不同参数」的场景，
+     *        避免用一套参数调所有角色。数量与 [segments] 不一致时自动退回 [postParams]。
+     * @param silenceSkip 快节奏播放（去除静音）参数
      */
     fun mergeSegmentsToWav(
         segments: List<ByteArray>,
         gain: Float = AppConfig.convertCacheToWavGain,
         postParams: PostAudioParams? = null,
+        perSegmentParams: List<PostAudioParams?>? = null,
         silenceSkip: SilenceSkipConfig? = null,
     ): ByteArray? {
         if (segments.isEmpty()) {
             return null
         }
 
+        // 逐段参数不可信（数量不符）时退回整体参数，避免张冠李戴
+        val perSegment = perSegmentParams?.takeIf { it.size == segments.size }
+
         val allPcm = mutableListOf<ByteArray>()
         try {
             segments.forEachIndexed { index, segment ->
+                val segParams = perSegment?.get(index) ?: postParams
                 // 每一段合成后立即去除空音频（快节奏），所有处理在合并之前完成。
                 // gain 传 1.0f：逐段解码属于中间趟，增益由下方合并后统一应用一次
-                val wavBytes = decodeToStandardWav(segment, gain = 1.0f, silenceSkip = silenceSkip)
+                val wavBytes = decodeToStandardWav(
+                    segment,
+                    gain = 1.0f,
+                    postParams = segParams,
+                    silenceSkip = silenceSkip,
+                )
                 if (wavBytes == null) {
                     return@forEachIndexed
                 }
@@ -499,15 +517,28 @@ object AudioDecodeUtil {
 
     /** 使用 MediaExtractor + MediaCodec 解码任意格式音频 */
     private fun decodeViaMediaCodec(audioData: ByteArray): Triple<ByteArray, Int, Int>? {
-        // ★ 优先用 ExoPlayer（media3 自带 extractor：纯 Java、打包在 APK 内）解码。
+        // ★ 第一优先：ExoPlayer（media3 自带 extractor：纯 Java、打包在 APK 内）解码。
         // 平台 MediaExtractor 的 MP3 解析由 OEM 维护、随 Android 版本/ROM 变化，
         // 对 ID3 标签尤其挑剔，是「时好时坏」的根源；media3 跨设备行为一致，对
         // ID3/裸帧/VBR 容忍度高——移植自 TTS_Server_Android，它的合成转码从不
-        // 失败就是因为用了这套。失败才回退下面的平台解码路径。
+        // 失败就是因为用了这套。失败才回退下面的兜底路径。
         try {
             ExoAudioDecoder.decode(audioData)?.let { return it }
         } catch (e: Exception) {
-            // Exo 解码异常：静默回退平台解码（合成不中断优先）
+            // Exo 解码异常：静默进入兜底（合成不中断优先）
+        }
+
+        // ★ 兜底一：净化输入后重试 Exo。
+        // 偶发失败多由头部垃圾引起——ID3 残留、分块拼接留下的残帧。
+        // 剥干净再喂，media3 的容错解析通常就能通过。
+        // 这一趟不能省：一旦这里放弃，后续的 Sonic 音量/语速调节就整段失效
+        // （原始 MP3 拿不到 PCM，无法后处理），表现为「调了参数偶尔有一句没反应」。
+        sanitizeAudioInput(audioData)?.let { cleaned ->
+            try {
+                ExoAudioDecoder.decode(cleaned)?.let { return it }
+            } catch (e: Exception) {
+                // 同样静默进入下一级兜底
+            }
         }
 
         var data = audioData
@@ -525,9 +556,238 @@ object AudioDecodeUtil {
         val tempFile = File.createTempFile("audio_decode", ext)
         tempFile.writeBytes(data)
         try {
-            return decodeFileViaMediaCodec(tempFile)
+            decodeFileViaMediaCodec(tempFile)?.let { return it }
         } finally {
             tempFile.delete()
+        }
+
+        // ★ 兜底二：不经 MediaExtractor，把 MP3 裸流直接喂给 MediaCodec。
+        // MediaExtractor 解析失败（封装非标/无 track）时，MediaCodec 本身只认帧，
+        // 直喂整块数据往往仍能解出 PCM。
+        return decodeRawMp3ViaMediaCodec(audioData)
+    }
+
+    /**
+     * 为兜底重试准备「干净」的输入：
+     * - 剥掉 ID3v2 头（`ID3` + 版本 + size，size 为 synchsafe integer）
+     * - 剥掉尾部 ID3v1（末 128 字节 `TAG`）
+     * - MP3 裸流对齐到第一个合法帧头
+     *
+     * @return 净化后的数据；无需处理时返回 null
+     */
+    private fun sanitizeAudioInput(data: ByteArray): ByteArray? {
+        if (data.size < 16) return null
+        var bytes = data
+        var changed = false
+
+        // ID3v2 头
+        if (data.size >= 10 &&
+            data[0] == 'I'.code.toByte() && data[1] == 'D'.code.toByte() && data[2] == '3'.code.toByte()
+        ) {
+            val size = ((data[6].toInt() and 0x7F) shl 21) or
+                ((data[7].toInt() and 0x7F) shl 14) or
+                ((data[8].toInt() and 0x7F) shl 7) or
+                (data[9].toInt() and 0x7F)
+            val end = 10 + size
+            if (end in 1 until data.size) {
+                bytes = data.copyOfRange(end, data.size)
+                changed = true
+            }
+        }
+
+        // 尾部 ID3v1
+        if (bytes.size > 128 &&
+            bytes[bytes.size - 128] == 'T'.code.toByte() &&
+            bytes[bytes.size - 127] == 'A'.code.toByte() &&
+            bytes[bytes.size - 126] == 'G'.code.toByte()
+        ) {
+            bytes = bytes.copyOfRange(0, bytes.size - 128)
+            changed = true
+        }
+
+        // MP3 首帧对齐
+        alignToFirstMp3Frame(bytes)?.let {
+            bytes = it
+            changed = true
+        }
+
+        return if (changed) bytes else null
+    }
+
+    /** MPEG 音频帧关键信息（用于 MediaCodec 裸流直解） */
+    private data class Mp3FrameInfo(
+        val sampleRate: Int,
+        val channels: Int,
+        /** 帧长度（字节）；无法可靠计算时为 0 */
+        val frameLength: Int,
+    )
+
+    // MPEG-1 Layer I/II/III 与 MPEG-2/2.5 的比特率表（kbps）
+    private val MPEG1_BITRATES =
+        intArrayOf(0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)
+    private val MPEG2_BITRATES =
+        intArrayOf(0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0)
+    private val MPEG1_RATES = intArrayOf(44100, 48000, 32000)
+    private val MPEG2_RATES = intArrayOf(22050, 24000, 16000)
+    private val MPEG25_RATES = intArrayOf(11025, 12000, 8000)
+
+    /** 解析位置 i 处的 MPEG 音频帧头；不是合法帧头时返回 null */
+    private fun parseMp3FrameAt(data: ByteArray, i: Int): Mp3FrameInfo? {
+        if (i < 0 || i + 4 > data.size) return null
+        val b0 = data[i].toInt() and 0xFF
+        val b1 = data[i + 1].toInt() and 0xFF
+        if (b0 != 0xFF || (b1 and 0xE0) != 0xE0) return null
+        val versionBits = (b1 shr 3) and 0x03
+        if (versionBits == 1) return null          // 版本保留位
+        val layerBits = (b1 shr 1) and 0x03
+        if (layerBits == 0) return null            // 层保留位
+        val b2 = data[i + 2].toInt() and 0xFF
+        val bitrateIdx = (b2 shr 4) and 0x0F
+        if (bitrateIdx == 0 || bitrateIdx == 15) return null   // 比特率 free/损坏
+        val rateIdx = (b2 shr 2) and 0x03
+        if (rateIdx == 3) return null              // 采样率保留位
+        val padding = (b2 shr 1) and 0x01
+
+        val sampleRate = when (versionBits) {
+            3 -> MPEG1_RATES[rateIdx]              // MPEG-1
+            2 -> MPEG2_RATES[rateIdx]              // MPEG-2
+            else -> MPEG25_RATES[rateIdx]          // MPEG-2.5
+        }
+        val bitrateKbps = if (versionBits == 3) MPEG1_BITRATES[bitrateIdx] else MPEG2_BITRATES[bitrateIdx]
+        val b3 = data[i + 3].toInt() and 0xFF
+        val channels = if ((b3 shr 6) and 0x03 == 3) 1 else 2
+
+        // 帧长（字节）：Layer III/II 用 samplesPerFrame/8 公式，Layer I 需 *4
+        val samplesPerFrame = when (layerBits) {
+            3 -> 384                                  // Layer I
+            2 -> 1152                                 // Layer II
+            else -> if (versionBits == 3) 1152 else 576 // Layer III
+        }
+        val frameLength = when (layerBits) {
+            3 -> ((samplesPerFrame / 8) * bitrateKbps * 1000 / sampleRate + padding) * 4
+            else -> (samplesPerFrame / 8) * bitrateKbps * 1000 / sampleRate + padding
+        }
+        return Mp3FrameInfo(sampleRate, channels, frameLength)
+    }
+
+    /** 找到第一个「连续两帧都合法」的 MPEG 帧头位置，避免误判数据里的伪同步字 */
+    private fun indexOfFirstMp3Frame(data: ByteArray): Int? {
+        if (data.size < 16) return null
+        val limit = minOf(data.size - 4, 8192)
+        var i = 0
+        while (i < limit) {
+            val info = parseMp3FrameAt(data, i)
+            if (info != null && info.frameLength > 0 &&
+                i + info.frameLength + 4 <= data.size &&
+                parseMp3FrameAt(data, i + info.frameLength) != null
+            ) {
+                return i
+            }
+            i++
+        }
+        return null
+    }
+
+    /**
+     * 兜底二：不经 MediaExtractor，把 MP3 裸流直接喂给 MediaCodec。
+     *
+     * 平台 MediaExtractor 的 MP3 解析由 OEM 维护，对封装完整性极挑剔；
+     * MediaCodec 本身只认帧，把整块数据按 64KB 分次 queue 进去反而稳。
+     * 仅处理 MP3（TTS 插件返回的压缩格式绝大多数是它）。
+     */
+    private fun decodeRawMp3ViaMediaCodec(data: ByteArray): Triple<ByteArray, Int, Int>? {
+        if (data.size < 16) return null
+        val start = indexOfFirstMp3Frame(data) ?: return null
+        val info = parseMp3FrameAt(data, start) ?: return null
+        val decoder = try {
+            MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_MPEG)
+        } catch (e: Exception) {
+            return null
+        }
+        try {
+            decoder.configure(
+                MediaFormat.createAudioFormat(
+                    MediaFormat.MIMETYPE_AUDIO_MPEG,
+                    info.sampleRate,
+                    info.channels
+                ),
+                null,
+                null,
+                0
+            )
+            decoder.start()
+
+            val pcmChunks = mutableListOf<ByteArray>()
+            val bufferInfo = MediaCodec.BufferInfo()
+            var inputDone = false
+            var outputDone = false
+            var pos = start
+            var inputStall = 0
+            var outputIdle = 0
+            val chunkSize = 64 * 1024
+
+            while (!outputDone) {
+                try {
+                    if (!inputDone) {
+                        val inputIdx = decoder.dequeueInputBuffer(10000)
+                        if (inputIdx >= 0) {
+                            inputStall = 0
+                            val buffer = decoder.getInputBuffer(inputIdx)!!
+                            val remaining = data.size - pos
+                            val size = minOf(remaining, chunkSize)
+                            buffer.clear()
+                            buffer.put(data, pos, size)
+                            pos += size
+                            val flags =
+                                if (remaining <= chunkSize) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
+                            decoder.queueInputBuffer(inputIdx, 0, size, 0, flags)
+                            inputDone = flags == MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        } else if (++inputStall > 3) {
+                            break
+                        }
+                    }
+
+                    val outputIdx = decoder.dequeueOutputBuffer(bufferInfo, 10000)
+                    when {
+                        outputIdx >= 0 -> {
+                            outputIdle = 0
+                            val buffer = decoder.getOutputBuffer(outputIdx)!!
+                            val chunk = ByteArray(bufferInfo.size)
+                            buffer.get(chunk)
+                            pcmChunks.add(chunk)
+                            decoder.releaseOutputBuffer(outputIdx, false)
+                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                outputDone = true
+                            }
+                        }
+                        outputIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                            if (inputDone) {
+                                if (++outputIdle > 2000) break
+                                Thread.sleep(5)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    // 损坏帧：保留已解码部分
+                    break
+                }
+            }
+
+            runCatching { decoder.stop() }
+            runCatching { decoder.release() }
+
+            val totalSize = pcmChunks.sumOf { it.size }
+            if (totalSize == 0) return null
+            val pcm = ByteArray(totalSize)
+            var offset = 0
+            pcmChunks.forEach {
+                System.arraycopy(it, 0, pcm, offset, it.size)
+                offset += it.size
+            }
+            return Triple(pcm, info.sampleRate, info.channels)
+        } catch (e: Exception) {
+            runCatching { decoder.release() }
+            return null
         }
     }
 
