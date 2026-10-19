@@ -1776,7 +1776,10 @@ object JReadVoiceEngine {
             .ifBlank { pointer.optString("scriptVoiceTag") }
             .ifBlank { "旁白" }
             .trim()
-        val config = findConfig(context, voiceTag) ?: run {
+        // 用 findPlayableConfig 而不是 findConfig：前者对旁白标签会优先取「本书专属旁白」，
+        // 且不做启用过滤（旁白标签默认只启用一个，其余禁用态但仍可能被本书指定）。
+        // 之前这里用 findConfig，会把用户指定的禁用旁白过滤掉，导致选了却始终用默认旁白。
+        val config = findPlayableConfig(context, voiceTag) ?: run {
             AppLog.putDebug("[J阅读声音引擎] 未找到可用配置: voiceTag=$voiceTag")
             TtsSynthLog.put(
                 TtsSynthLog.Level.ERROR,
@@ -1793,6 +1796,35 @@ object JReadVoiceEngine {
         }
         // 直接返回合成字节，不再落盘到 line_audio 缓存（该缓存 key 含随机 requestId，
         // 永不命中，且清理函数从未被调用，纯属移植残留、只会无限占空间）
+        return requestAudioToFile(context, config, text, resolvedVoiceTag, pointer, requestId)
+    }
+
+    /**
+     * 用**已经选好的配置**合成，不再按标签重新挑选。
+     *
+     * 供 JS 桥使用：它在 synthesize 入口已按 voiceTag + 本书专属旁白选好配置，
+     * 若再走 [synthesizeLineAudio] 内部重选，预设旁白（通常是禁用态）会被
+     * `filter { it.enabled }` 过滤掉，导致「选了旁白却始终用默认的」。
+     */
+    fun synthesizeLineAudioWithConfig(
+        context: Context,
+        config: VoiceConfig,
+        text: String,
+        pointerJson: String,
+        requestId: String,
+    ): ByteArray? {
+        val pointer = runCatching { JSONObject(pointerJson) }.getOrNull() ?: JSONObject()
+        val voiceTag = pointer.optString("voiceTag")
+            .ifBlank { pointer.optString("jreadVoiceTag") }
+            .ifBlank { pointer.optString("scriptVoiceTag") }
+            .ifBlank { "旁白" }
+            .trim()
+        val resolvedVoiceTag = config.voiceTag.ifBlank { voiceTag }
+        if (!sameVoiceTag(voiceTag, resolvedVoiceTag)) {
+            AppLog.putDebug(
+                "[J阅读声音引擎] 使用指定配置合成: requested=$voiceTag actual=$resolvedVoiceTag"
+            )
+        }
         return requestAudioToFile(context, config, text, resolvedVoiceTag, pointer, requestId)
     }
 
@@ -1822,9 +1854,40 @@ object JReadVoiceEngine {
     /**
      * 与合成完全一致地按标签选出实际生效的配置。
      * 供 JS 桥在合成后对「同一条配置」施加条目/分组/插件级后处理参数。
+     *
+     * 旁白标签额外优先用「本书专属旁白」：每本书可在朗读界面指定自己的旁白音色，
+     * 指定后合成旁白段时直接用那条，不再走下面的默认挑选。
      */
-    fun findPlayableConfig(context: Context, voiceTag: String): VoiceConfig? =
-        findConfig(context, voiceTag)
+    fun findPlayableConfig(context: Context, voiceTag: String): VoiceConfig? {
+        if (isNarrationTag(voiceTag)) {
+            val presetId = io.legado.app.model.ReadBook.book?.config?.ttsNarrationConfigId
+            if (!presetId.isNullOrBlank()) {
+                // findConfigById 不做启用/可用性过滤：旁白标签默认只启用一个，
+                // 其余是禁用态但仍可被选为本书旁白；只有配置真的被删除才返回 null，
+                // 此时自然回退到下面的默认逻辑。
+                findConfigById(context, presetId)?.let { return it }
+            }
+        }
+        return findConfig(context, voiceTag)
+    }
+
+    /**
+     * 是否「旁白」标签。口径与 [normalizeVoiceTag] / [voiceTagPool] 保持一致，
+     * 保证配置列表、脚本标签、这里的判定三者相同。
+     */
+    fun isNarrationTag(voiceTag: String): Boolean =
+        voiceTagPool(normalizeVoiceTag(voiceTag).ifBlank { voiceTag })?.key == "narration"
+
+    /**
+     * 列出所有旁白标签的配置（含禁用态），供「本书旁白」选择弹窗使用。
+     * 旁白默认只启用一个，其余都是禁用态，所以这里不能按启用状态过滤。
+     */
+    fun listNarrationConfigs(context: Context): List<VoiceConfig> =
+        listConfigs(context).filter { isNarrationTag(it.voiceTag) }
+            .sortedWith(
+                compareByDescending<VoiceConfig> { it.enabled }
+                    .thenBy { it.displayName.ifBlank { it.voiceTag } }
+            )
 
     private fun findConfig(context: Context, voiceTag: String): VoiceConfig? {
         val configs = listConfigs(context).filter { it.enabled }        // 预取插件列表一次，传给 isPlayable/resolveRequest，避免每个候选配置都重新 listPlugins

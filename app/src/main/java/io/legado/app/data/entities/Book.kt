@@ -445,6 +445,14 @@ data class Book(
         var useReplaceRule: Boolean? = null,// 正文使用净化替换规则
         var delTag: Long = 0L,//去除标签
         var ttsEngine: String? = null,
+        /**
+         * 本书专属旁白配置 id（JReadVoiceEngine.VoiceConfig.id）。
+         * null = 未设置，按默认逻辑选旁白（第一个可用的旁白标签配置）。
+         *
+         * 存 id 而非名字：配置改名/改音色后依然对准；只有该配置被**真的删除**时才回退默认
+         * （禁用不算失效——旁白标签默认只启用一个，其余都是禁用态，但仍可被选为本书旁白）。
+         */
+        var ttsNarrationConfigId: String? = null,
         var splitLongChapter: Boolean = true,
         var readSimulating: Boolean = false,
         var startDate: LocalDate? = null,

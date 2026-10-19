@@ -449,11 +449,23 @@
                 android:textColor="@color/primaryText"
                 android:textSize="14sp" />
 
-            <Space
+            <TextView
+                android:id="@+id/tv_tts_narration"
                 android:layout_width="0dp"
-                android:layout_height="1dp"
+                android:layout_height="wrap_content"
                 android:layout_gravity="center"
-                android:layout_weight="1" />
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:ellipsize="end"
+                android:focusable="true"
+                android:gravity="center"
+                android:maxLines="1"
+                android:paddingHorizontal="8dp"
+                android:textColor="@color/secondaryText"
+                android:textSize="12sp"
+                tools:text="默认旁白"
+                tools:ignore="TouchTargetSizeCheck" />
 
             <io.legado.app.lib.theme.view.ThemeSwitch
                 android:id="@+id/cb_tts_follow_sys"

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="?android:attr/selectableItemBackground"
+    android:gravity="center_vertical"
+    android:minHeight="48dp"
+    android:orientation="horizontal"
+    android:paddingStart="8dp"
+    android:paddingTop="4dp"
+    android:paddingEnd="8dp"
+    android:paddingBottom="4dp">
+
+    <RadioButton
+        android:id="@+id/rb_pick"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:clickable="false"
+        android:focusable="false" />
+
+    <TextView
+        android:id="@+id/tv_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:paddingStart="4dp"
+        android:paddingEnd="8dp"
+        android:textColor="@color/primaryText"
+        android:textSize="14sp"
+        tools:text="默认旁白" />
+
+    <ImageView
+        android:id="@+id/iv_play"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="试听此音色"
+        android:padding="7dp"
+        android:src="@drawable/ic_play_24dp"
+        app:tint="@color/primaryText"
+        tools:ignore="UnusedAttribute" />
+
+    <ImageView
+        android:id="@+id/iv_edit"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="编辑此配置"
+        android:padding="7dp"
+        android:src="@drawable/ic_edit"
+        app:tint="@color/primaryText"
+        tools:ignore="UnusedAttribute" />
+
+</LinearLayout>

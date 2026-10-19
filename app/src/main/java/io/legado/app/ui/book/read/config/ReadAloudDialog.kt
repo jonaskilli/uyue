@@ -96,6 +96,9 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     private var currentImageIndex = 0
     private var bookImageFiles: List<File> = emptyList()
 
+    /** 旁白试听播放器，与配置列表条目试听同一套链路；离开弹窗/销毁时释放 */
+    private var narrationPreviewPlayer: android.media.MediaPlayer? = null
+
     /** AI 生图历史浏览：当前显示的历史图片索引（在 aiHistoryImages 中的位置） */
     private var aiHistoryImages: List<File> = emptyList()
     private var aiHistoryIndex = -1
@@ -416,6 +419,9 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         oldBgmStartedCallback = null
         stopImageTimer()
         cancelAiHistoryReset()
+        // 关掉朗读面板时同时停掉旁白试听，避免后台继续播放
+        narrationPreviewPlayer?.release()
+        narrationPreviewPlayer = null
     }
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
@@ -906,6 +912,9 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             upTtsSpeechRateEnabled(!isChecked)
             upTtsSpeechRate()
         }
+        // 本书专属旁白：点击弹出旁白音色选择（默认 = 不指定，按默认逻辑挑）
+        tvTtsNarration.setOnClickListener { showNarrationPicker() }
+        upNarrationText()
         ivTtsSpeechReduce.setOnClickListener {
             val v = (AppConfig.ttsSpeechRateFine - 5).coerceAtLeast(0)
             seekTtsSpeechRate.progress = v
@@ -1453,6 +1462,207 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     private fun upTtsSpeechRateText(value: Int) {
         // 精细刻度：显示系数 = (进度 + 50) / 100，如进度 52 → 1.02
         binding.tvTtsSpeedValue.text = String.format("%.2f", (value + 50) / 100f)
+    }
+
+    /** 刷新「旁白」位置的文字：未设置显示「默认旁白」，已设置显示该配置的名字 */
+    private fun upNarrationText() {
+        val book = ReadBook.book ?: return
+        val presetId = book.config.ttsNarrationConfigId
+        binding.tvTtsNarration.text = if (presetId.isNullOrBlank()) {
+            getString(io.legado.app.R.string.narration_default)
+        } else {
+            val config = runCatching {
+                io.legado.app.help.audiobook.JReadVoiceEngine
+                    .findConfigById(requireContext(), presetId)
+            }.getOrNull()
+            // 预设被删除时也显示「默认旁白」，与合成时的回退行为保持一致
+            config?.displayName?.ifBlank { config.voiceTag }?.ifBlank { null }
+                ?: getString(io.legado.app.R.string.narration_default)
+        }
+    }
+
+    /**
+     * 本书专属旁白选择弹窗。
+     *
+     * 列出**所有旁白标签的配置**，与是否禁用无关（旁白默认只启用一个，其余是禁用态，
+     * 但仍可作为本书旁白，所以不显示「已禁用」字样，避免误解为不可用）。
+     * 第一项是「默认旁白(实际生效的那条)」，选它等于清除本书预设。
+     * 每项右侧带编辑按钮，可直接进入该旁白的 TTS 配置编辑页改音色/语速。
+     */
+    private fun showNarrationPicker() {
+        val context = context ?: return
+        val configs = runCatching {
+            io.legado.app.help.audiobook.JReadVoiceEngine.listNarrationConfigs(context)
+        }.getOrDefault(emptyList())
+        // 当前真正生效的默认旁白（未设本书预设时合成实际用的那条）。
+        // findPlayableConfig 内部对旁白标签走的就是默认挑选逻辑。
+        val defaultConfig = configs.firstOrNull { it.enabled }
+            ?: runCatching {
+                io.legado.app.help.audiobook.JReadVoiceEngine
+                    .findPlayableConfig(context, "旁白")
+            }.getOrNull()
+        val defaultLabel = defaultConfig?.displayName
+            ?.ifBlank { defaultConfig.voiceTag }?.ifBlank { null } ?: "自动"
+
+        val names = mutableListOf("默认旁白($defaultLabel)")
+        val ids = mutableListOf("")
+        configs.forEach { config ->
+            names.add(config.displayName.ifBlank { config.voiceTag })
+            ids.add(config.id)
+        }
+        val currentId = ReadBook.book?.config?.ttsNarrationConfigId.orEmpty()
+        val checked = ids.indexOf(currentId).coerceAtLeast(0)
+
+        val container = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        var pickerDialog: androidx.appcompat.app.AlertDialog? = null
+        names.forEachIndexed { index, name ->
+            io.legado.app.databinding.ItemNarrationPickBinding.inflate(layoutInflater).apply {
+                rbPick.isChecked = index == checked
+                tvName.text = name
+                val configId = ids[index]
+                // 第一项是「默认旁白」，不对应具体配置，没有试听/编辑入口
+                ivPlay.visible(index > 0)
+                ivEdit.visible(index > 0)
+                ivPlay.setOnClickListener {
+                    val config = configs.getOrNull(index - 1) ?: return@setOnClickListener
+                    previewNarrationConfig(config)
+                }
+                ivEdit.setOnClickListener { openTtsConfigEditor(configId) }
+                // 点行即选中并关闭弹窗：旁白切换是一次性操作，无需再确认
+                root.setOnClickListener {
+                    pickerDialog?.dismiss()
+                    applyNarrationPreset(configId)
+                }
+            }.root.let { container.addView(it) }
+        }
+        android.widget.TextView(context).apply {
+            text = "旁白标签默认只启用一个，其余为禁用态；指定为本书旁白后即可正常合成。"
+            textSize = 11f
+            setPadding(36, 10, 36, 4)
+        }.let { container.addView(it) }
+
+        pickerDialog = androidx.appcompat.app.AlertDialog.Builder(context)
+            .setTitle("本书旁白")
+            .setView(container)
+            .setNegativeButton("取消", null)
+            .create()
+        pickerDialog.show()
+    }
+
+    /**
+     * 试听某条旁白配置：与配置列表条目上的试听同一套链路
+     * （合成 → 后处理参数 → 快节奏 → 播放），保证听到的就是朗读时的效果。
+     */
+    private fun previewNarrationConfig(
+        config: io.legado.app.help.audiobook.JReadVoiceEngine.VoiceConfig
+    ) {
+        val context = context ?: return
+        toastOnUi("正在试听: ${config.voiceTag}")
+        narrationPreviewPlayer?.release()
+        CoroutineScope(Dispatchers.Main).launch {
+            val requestId = java.util.UUID.randomUUID().toString()
+            val pointerJson = org.json.JSONObject().put("voiceTag", config.voiceTag).toString()
+            val audioBytes = withContext(Dispatchers.IO) {
+                runCatching {
+                    io.legado.app.help.audiobook.JReadVoiceEngine.synthesizeConfigLineAudio(
+                        context, config,
+                        config.previewText
+                            .ifBlank { io.legado.app.help.audiobook.JReadVoiceEngine.DEFAULT_PREVIEW_TEXT },
+                        pointerJson, requestId
+                    )
+                }.getOrNull()
+            }
+            if (audioBytes == null || audioBytes.isEmpty()) {
+                toastOnUi("试听失败")
+                return@launch
+            }
+            val postParams = io.legado.app.help.audiobook.JReadVoiceEngine
+                .resolvePostAudioParams(context, config)
+            val needSilenceSkip = io.legado.app.help.config.AppConfig.ttsSilenceSkipEnabled
+            val silenceSkip = io.legado.app.utils.AudioDecodeUtil.SilenceSkipConfig(
+                enabled = needSilenceSkip,
+                minDurationMs = io.legado.app.help.config.AppConfig.ttsSilenceSkipMinMs,
+            )
+            val playedBytes = if (postParams.isDefault() && !needSilenceSkip) {
+                audioBytes
+            } else {
+                withContext(Dispatchers.IO) {
+                    io.legado.app.utils.AudioDecodeUtil
+                        .decodeToStandardWav(
+                            audioBytes,
+                            postParams = postParams,
+                            silenceSkip = silenceSkip
+                        )
+                } ?: audioBytes
+            }
+            if (!isAdded) return@launch
+            val tempFile = withContext(Dispatchers.IO) {
+                java.io.File(requireContext().cacheDir, "narration_preview_$requestId.wav")
+                    .apply { writeBytes(playedBytes) }
+            }
+            narrationPreviewPlayer?.release()
+            narrationPreviewPlayer = android.media.MediaPlayer().apply {
+                setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                setDataSource(tempFile.absolutePath)
+                prepare()
+                setOnCompletionListener { it.release(); narrationPreviewPlayer = null }
+                start()
+            }
+        }
+    }
+
+    /** 打开某条 TTS 配置的编辑页（改音色 / 语速等） */
+    private fun openTtsConfigEditor(configId: String) {
+        if (configId.isBlank()) return
+        runCatching {
+            startActivity(
+                Intent(
+                    requireContext(),
+                    io.legado.app.ui.tts.plugin.TtsConfigEditorActivity::class.java
+                ).apply {
+                    putExtra(
+                        io.legado.app.ui.tts.plugin.TtsConfigEditorActivity.EXTRA_CONFIG_ID,
+                        configId
+                    )
+                    putExtra(
+                        io.legado.app.ui.tts.plugin.TtsConfigEditorActivity.EXTRA_IS_NEW,
+                        false
+                    )
+                }
+            )
+        }.onFailure { toastOnUi("打不开配置编辑页：${it.localizedMessage}") }
+    }
+
+    /** 应用本书旁白预设并刷新显示 */
+    private fun applyNarrationPreset(selectedId: String) {
+        val book = ReadBook.book ?: return
+        if (book.config.ttsNarrationConfigId == selectedId) {
+            // 已选中仍要收起弹窗
+            return
+        }
+        book.config.ttsNarrationConfigId = selectedId
+        upNarrationText()
+        // 旁白是按段合成的，改完立刻让新设置对后续段落生效
+        if (!BaseReadAloudService.pause) {
+            io.legado.app.model.ReadAloud.pause(requireContext())
+            io.legado.app.model.ReadAloud.resume(requireContext())
+        }
+        // 落库用一次性 IO 作用域（与本文件其它处一致，避免 DialogFragment
+        // 的 lifecycleScope 在 dismiss 后取消导致写入丢失）
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { appDb.bookDao.update(book) }
+        }
     }
 
     private fun upTtsSpeechRate() {
