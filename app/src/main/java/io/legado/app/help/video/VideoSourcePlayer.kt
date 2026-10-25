@@ -135,8 +135,15 @@ object VideoSourcePlayer {
      * 准备目录：本地没有章节时才联网拉取并落库。
      *
      * 抽出来是为了让选集 UI 与播放共用同一份目录，不必各拉一次。
+     *
+     * @param forceRefresh 跳过本地缓存，强制联网重拉。
+     * 剧集会持续更新（11 集→12 集），只认本地缓存的话更新出来的新集永远进不来。
      */
-    suspend fun prepareChapters(book: Book, source: BookSource): List<BookChapter> {
+    suspend fun prepareChapters(
+        book: Book,
+        source: BookSource,
+        forceRefresh: Boolean = false
+    ): List<BookChapter> {
         // 保住 notShelf：下面的 getBookInfoAwait / getChapterListAwait 会 removeAllBookType 清掉该位，
         // 若不补回，原本"不自动上书架"的视频书会被当成普通书入库（表现为自动入架）。
         val wasNotShelf = book.isNotShelf
@@ -149,7 +156,8 @@ object VideoSourcePlayer {
                     AppLog.put("详情页出错: ${it.localizedMessage}", it)
                 }
         }
-        var list = appDb.bookChapterDao.getChapterList(book.bookUrl)
+        var list =
+            if (forceRefresh) emptyList() else appDb.bookChapterDao.getChapterList(book.bookUrl)
         if (list.isEmpty()) {
             val oldBook = book.copy()
             val newList = WebBook.getChapterListAwait(source, book).getOrThrow()

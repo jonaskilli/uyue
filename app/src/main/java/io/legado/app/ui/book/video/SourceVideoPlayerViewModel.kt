@@ -129,12 +129,36 @@ object SourceVideoPlayerSession {
      */
     private var loadJob: Job? = null
     /**
+     * 后台刷新剧集目录的任务。
+     *
+     * 剧集是持续更新的（11 集→12 集），重新进入同一部时如果不主动拉一次，
+     * 就只能用内存里那份旧目录，新集要等杀进程重建会话才看得到。
+     */
+    private var chapterRefreshJob: Job? = null
+    /**
      * 预取地址的存活时间。
      *
      * 嗅探出来的加密直链常带一次性签名/短时效 token，隔太久再用必然 403。
      * 超时就丢弃、走正常解析重新拿，而不是一直抱着过期地址。
      */
     private const val PREFETCH_URL_TTL = 10 * 60_000L
+    /**
+     * 写进剧集里的直链的存活时间。
+     *
+     * 加密源的地址是一次性签名/短时效 token，几小时后必然 403。
+     * [resolveEpisode] 只看 uri 空不空，没有这一步的话，过期地址会被一直复用，
+     * 滑过去就是播不出、而且永远不再重新解析——
+     * 表现成「这一集突然看不了，退出重进或重启才好」。
+     *
+     * 取 3 分钟：连续竖滑切集是秒级，不会触发；隔了几分钟再滑回某一集
+     * （地址很可能已失效）才重新拿一次。重拿只是几次规则请求，流量很小。
+     */
+    private const val RESOLVED_URL_TTL = 3 * 60_000L
+    /**
+     * 每一集直链的解析时刻（毫秒），用于判断地址是否已过期。
+     * 只记网络地址，本地文件没有时效问题。
+     */
+    private val resolvedAt = ConcurrentHashMap<Int, Long>()
     /**
      * 预取深度：一次解析后续几部的地址。
      *
@@ -346,6 +370,8 @@ object SourceVideoPlayerSession {
                 if (ep.uri.toString().startsWith("file:")) ep else ep.copy(uri = Uri.EMPTY)
             }
             _uiState.update { s -> s.copy(episodes = resetEpisodes) }
+            // 刚把所有网络地址清空了，对应的时间戳一并作废
+            markResolvedAt(0, resetEpisodes)
             // 期间可能又有几集下载完了，补一次本地地址。
             // 这里必须 includeCurrent=true：上面刚把网络地址清空成 Uri.EMPTY，
             // 而此刻 currentIndex 还是上一次留下的值，当前集会被 refreshLocalUri 跳过，
@@ -376,6 +402,9 @@ object SourceVideoPlayerSession {
             // 列表刚挂上：立刻确认后续够不够、并预取下一个视频
             ensureMore()
             ensureNextVideoPrefetch()
+            // 早退分支不重新加载目录，但剧集完全可能已经在别处更新过（11 集→12 集）。
+            // 不补这一下的话，界面会一直停在旧集数，只有杀进程重建会话才看得到新的一集。
+            refreshChaptersIfNeeded()
             return
         }
         // 必须清掉上一部视频遗留的所有错误状态，否则失败一次后
@@ -431,6 +460,60 @@ object SourceVideoPlayerSession {
         }
     }
 
+    /**
+     * 把 [fresh] 里多出来的新集追加到剧集列表。
+     *
+     * 本会话是全局单例、跨 Activity 存活，内存里的 [chapters] 会一直停在旧集数；
+     * 即使书架更新/详情页已经在别处把新集写进了库，界面照旧只认内存那份，
+     * 表现就是「外面已经更新到 12 集，播放页始终停在 11 集，杀进程重启才看得到」。
+     */
+    private fun appendNewChapters(fresh: List<BookChapter>) {
+        val b = book ?: return
+        val oldSize = chapters.size
+        if (fresh.size <= oldSize) return
+        chapters = fresh
+        val appended = fresh.subList(oldSize, fresh.size).mapIndexed { offset, chapter ->
+            val i = oldSize + offset
+            val local = VideoDownloader.findLocalFile(b.name, i, chapter.title)
+            // 章节地址本身就是流地址的直接采信，否则留空，等点到那一集时再解析
+            val url = local?.let { Uri.fromFile(it).toString() }
+                ?: chapter.url.trim().takeIf { VideoSourcePlayer.isPlayableUrl(it) }
+            LocalVideo(
+                uri = url?.let { Uri.parse(it) } ?: Uri.EMPTY,
+                name = chapter.title,
+                path = chapter.url.trim(),
+                size = local?.length() ?: 0L,
+                dateModified = 0L,
+            )
+        }
+        _uiState.update { s -> s.copy(episodes = s.episodes + appended) }
+        markResolvedAt(oldSize, appended)
+    }
+
+    /**
+     * 重新进入同一部时把目录追到最新：先用库里的补上（不联网、即时），
+     * 再后台联网确认一次，两步都由 [appendNewChapters] 收敛成"只增不减"。
+     */
+    private fun refreshChaptersIfNeeded() {
+        val b = book ?: return
+        appendNewChapters(appDb.bookChapterDao.getChapterList(b.bookUrl))
+        val s = source ?: return
+        chapterRefreshJob?.cancel()
+        chapterRefreshJob = scope.launch {
+            runCatching {
+                // 用库里现取的副本，别把内存那份（播放进度等可能已滞后）直接写回库
+                val target = appDb.bookDao.getBook(b.bookUrl) ?: b
+                VideoSourcePlayer.prepareChapters(target, s, forceRefresh = true)
+            }.onSuccess { list ->
+                appendNewChapters(list)
+            }.onFailure { e ->
+                if (e is CancellationException) throw e
+                // 拉不到最新目录也不影响已经能播的旧集，只记日志不打扰
+                AppLog.put("刷新剧集目录失败\n${e.localizedMessage}", e)
+            }
+        }
+    }
+
     private suspend fun loadInternal(bookUrl: String, startIndex: Int) {
         ensureFeed(bookUrl)
         val feedEnabled = (feed?.urls()?.size ?: 0) > 1
@@ -452,6 +535,8 @@ object SourceVideoPlayerSession {
         this@SourceVideoPlayerSession.source = source
         this@SourceVideoPlayerSession.chapters = chapters
         resolving.clear()
+        // 换视频了，上一部各集的解析时刻作废（index 是按集序号记的，两部之间不通用）
+        resolvedAt.clear()
         // 换了视频：上一轮预取的「下一个视频」作废（它现在就是当前视频）
         prefetchedNext = null
         // 目标变了，还在跑的那一轮（可能正卡在 20 秒的嗅探里）没必要继续
@@ -525,6 +610,8 @@ object SourceVideoPlayerSession {
                 headers = headers,
             )
         }
+        // 记下这一轮各集地址的解析时刻：加密直链有时效，滑回来时才知道要不要重新拿
+        markResolvedAt(0, episodes)
         // 进入/切换到当前视频时，立即保证后续列表已加载（当前页加载下一页）
         ensureMore()
         // 立即后台预取列表里的下一个视频（目录 + 首集直链，加密源还会提前嗅探）：
@@ -550,6 +637,34 @@ object SourceVideoPlayerSession {
             return true
         }
         return false
+    }
+
+    /**
+     * 记下 [startIndex] 起各集直链的解析时刻，供 [isResolvedUrlExpired] 判断要不要重新拿。
+     * uri 为空的集（还没解析）要清掉旧时间戳，否则解析完会被误判成"刚拿的"。
+     */
+    private fun markResolvedAt(startIndex: Int, episodes: List<LocalVideo>) {
+        episodes.forEachIndexed { offset, ep ->
+            val i = startIndex + offset
+            val uri = ep.uri
+            if (uri != Uri.EMPTY && !uri.toString().startsWith("file:")) {
+                resolvedAt[i] = System.currentTimeMillis()
+            } else {
+                resolvedAt.remove(i)
+            }
+        }
+    }
+
+    /**
+     * 第 [index] 集的直链是否已过期。
+     *
+     * 只对网络地址生效；本地文件没有时效问题。
+     */
+    private fun isResolvedUrlExpired(index: Int): Boolean {
+        val at = resolvedAt[index] ?: return false
+        val uri = _uiState.value.episodes.getOrNull(index)?.uri ?: return false
+        if (uri == Uri.EMPTY || uri.toString().startsWith("file:")) return false
+        return System.currentTimeMillis() - at > RESOLVED_URL_TTL
     }
 
     /**
@@ -631,7 +746,10 @@ object SourceVideoPlayerSession {
             refreshLocalUri(index, includeCurrent = true)
             return
         }
-        if (state.episodes[index].uri != Uri.EMPTY) return
+        // 已就绪的集直接用，但加密直链有时效：超过 TTL 的地址多半已失效，
+        // 必须重新拿——否则滑过去就是播不出，而且因为 uri 非空这里永远 return，
+        // 这一集就成了"突然看不了，退出重进或重启才好"
+        if (state.episodes[index].uri != Uri.EMPTY && !isResolvedUrlExpired(index)) return
         // 预取与真实解析用各自独立的集合，互不挡路
         val guard = if (prefetch) prefetching else resolving
         if (!guard.add(index)) return
@@ -678,6 +796,8 @@ object SourceVideoPlayerSession {
                     merged[index] = merged[index].copy(uri = Uri.parse(url))
                     current.copy(episodes = merged)
                 }
+                // 记下解析时刻：加密直链有时效，之后滑回这一集才知道要不要重新拿
+                resolvedAt[index] = System.currentTimeMillis()
             }.onFailure { e ->
                 guard.remove(index)
                 // 取消不是失败：不要因为页面切走就把这一集判成"解析不出直链"弹出兜底播放器

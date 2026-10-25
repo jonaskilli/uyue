@@ -755,8 +755,10 @@ object VideoDownloader {
         // 分片缓存文件夹：有分片即视为已缓存
         val epFolder = epFolderOf(dir, t)
         if (epFolder.isDirectory &&
-            epFolder.listFiles().orEmpty().any { it.name.startsWith("seg_") && it.name.endsWith(".ts") }
+            epFolder.listFiles().orEmpty().any { isSegFileName(it.name) }
         ) {
+            // 换名前建的老目录没有 .nomedia，里面的 .ts 仍在污染相册，顺手补上
+            ensureNoMedia(epFolder)
             return buildLocalPlaylist(epFolder)
         }
         return null
@@ -989,6 +991,9 @@ object VideoDownloader {
         onProgress: (Int) -> Unit,
     ): Pair<Int, Int> {
         epFolder.mkdirs()
+        // 分片已经不带 .ts 后缀，但换名前的老目录、以及用户手动拷进来的文件
+        // 仍会被相册扫到，放一个 .nomedia 双保险（幂等，重复调用无开销）
+        ensureNoMedia(epFolder)
         var playlist = fetchText(playlistUrl, headers)
         // 主清单(#EXT-X-STREAM-INF)：取码率最高的二级媒体清单，递归解析
         if (playlist.contains("#EXT-X-STREAM-INF")) {
@@ -1062,7 +1067,24 @@ object VideoDownloader {
         // 密钥 / 初始化段：存原始字节，离线播放与合并都要用
         if (keyUri != null) {
             val keyUrl = NetworkUtils.getAbsoluteURL(playlistUrl, keyUri)
-            runCatching { File(epFolder, "key.bin").writeBytes(fetchBytes(keyUrl, headers, write = false)) }
+            val bytes = fetchBytes(keyUrl, headers, write = false)
+            val keyFile = File(epFolder, "key.bin")
+            // 密钥和上一轮不一样：已下的分片是用旧密钥加密的，留着也解不开，
+            // 而且旧密钥会把新的顶掉，让整集都播不了。清空重下——
+            // 缓存一半后加密过期、重新解析再来时就会走到这里。
+            if (keyFile.exists() && !keyFile.readBytes().contentEquals(bytes)) {
+                AppLog.put("密钥已变化，重新下载该选集：${epFolder.name}")
+                epFolder.listFiles()
+                    ?.filter { it.name.startsWith("seg_") }
+                    ?.forEach { it.delete() }
+                File(epFolder, "index.idx").delete()
+            }
+            runCatching { keyFile.writeBytes(bytes) }
+        } else {
+            // 这一轮没有加密（METHOD=NONE），旧密钥必须删掉：
+            // buildLocalPlaylist 见到 key.bin 存在就会把清单里的 KEY 行换成本地文件，
+            // 未加密的分片被按加密解，结果是整集花屏
+            File(epFolder, "key.bin").delete()
         }
         if (initSegment != null) {
             val initUrl = NetworkUtils.getAbsoluteURL(playlistUrl, initSegment)
@@ -1081,7 +1103,7 @@ object VideoDownloader {
         // 断点续传：已存在的非空分片直接跳过（best-effort，避免重下几十 MB 的分片）
         val need = (0 until total).filter {
             it !in adSkipped &&
-                !(segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0)
+                !(findSegFile(epFolder, it) != null)
         }
         if (need.isEmpty()) return total to total
         // 边播边存收集阶段：只搬缓存里已有的分片，缺口留给收尾
@@ -1151,12 +1173,13 @@ object VideoDownloader {
             // 中断/异常时清掉没下完的半截分片，别在文件夹里留坏文件。
             // 正常路径下分片是「写 .part 再改名」，不会留下 0 字节的 seg_；
             // 这里真正要清的是进程被杀时来不及删掉的 .part 临时文件——
-            // 它们不影响续传判据（名字带 .part，匹配不上 seg_%06d.ts），
+            // 它们不影响续传判据（名字带 .part，匹配不上 seg_%06d.<后缀>），
             // 但会白占磁盘，一集几百片时累积可观。
             for (k in todo) {
                 val f = segFile(epFolder, k)
-                if (f.exists() && f.length() == 0L) f.delete()
                 File(epFolder, "${f.name}.part").delete()
+                // 老后缀的半截文件也要清（换名前中断的下载会留下 0 字节的 .ts）
+                findSegFile(epFolder, k)?.takeIf { it.length() == 0L }?.delete()
             }
         }
         errorRef.get()?.let { throw it }
@@ -1184,8 +1207,7 @@ object VideoDownloader {
         // 完成数以磁盘实际落盘为准（不依赖 writtenCount 计数），避免并发/超时造成的漏算。
         // 被判广告而剔除的片段算"已完成"——它本来就不该出现在成品里。
         val written = (0 until total).count {
-            it in adSkipped ||
-                (segFile(epFolder, it).exists() && segFile(epFolder, it).length() > 0)
+            it in adSkipped || findSegFile(epFolder, it) != null
         }
         return total to written
     }
@@ -1315,12 +1337,12 @@ object VideoDownloader {
 
     /**
      * 求一个分片在**原始 playlist.m3u8** 里的序号（skipped-ads.json 用原始序号）。
-     * 本地分片直接从文件名 `seg_%06d.ts` 取；未下载回填的 http 分片按地址行匹配
+     * 本地分片直接从文件名 `seg_%06d.<后缀>` 取；未下载回填的 http 分片按地址行匹配
      * （playlist.m3u8 存的就是绝对地址）。
      */
     fun indexOfSegmentInPlaylist(epFolder: File, url: String): Int {
         if (url.startsWith("file:")) {
-            return Regex("""seg_(\d+)\.ts$""").find(Uri.parse(url).path ?: "")
+            return Regex("""seg_(\d+)\.(seg|ts)$""").find(Uri.parse(url).path ?: "")
                 ?.groupValues?.get(1)?.toIntOrNull() ?: -1
         }
         val playlist = runCatching { File(epFolder, "playlist.m3u8").readText() }.getOrNull()
@@ -1387,14 +1409,14 @@ object VideoDownloader {
         } else {
             null
         }
-        // 先写临时文件，写满再**原子改名**成 seg_XXXXXX.ts。
+        // 先写临时文件，写满再**原子改名**成 seg_XXXXXX.<后缀>。
         //
         // 直接往成品名上写的话，进程被杀 / 网络中断会留下一个**半截分片**；
         // 而断点续传的判据只看 `exists() && length > 0`（downloadHls 的 need 计算），
         // 半截分片会被当成"已经下过了"直接跳过，缺口永远补不上，
         // 最后合并出一个花屏 / 后半段卡死的坏视频——而且它无从察觉，
         // 因为文件确实存在、长度也不为 0。
-        // 改名在同一目录内是原子的：seg_XXXXXX.ts 一出现就代表这一片是完整的。
+        // 改名在同一目录内是原子的：seg_XXXXXX.<后缀> 一出现就代表这一片是完整的。
         val tmp = File(segFile.parentFile, "${segFile.name}.part")
         var renamed = false
         try {
@@ -1485,15 +1507,59 @@ object VideoDownloader {
     /** 某一集的分片缓存目录：Download/保存视频/<dir>/<标题>/ */
     private fun epFolderOf(dir: File, title: String): File = File(dir, title)
 
+    /**
+     * 分片后缀。
+     *
+     * 早期用 `.ts`：系统媒体库认这个扩展名，会把缓存分片当视频全扫进相册，
+     * 存几十部剧之后相册里全是几秒一片的碎片，根本没法看。
+     * 改成 `.seg`（媒体库不认）顺带在目录里放 [NO_MEDIA] 双保险。
+     */
+    private const val SEG_EXT = "seg"
+
+    /** 换名前的老分片后缀，读的时候要能认，否则老缓存会全部失效 */
+    private const val SEG_EXT_LEGACY = "ts"
+
+    /** 媒体库跳过标记。放在分片目录里，MediaScanner 就不再扫这个目录 */
+    private const val NO_MEDIA = ".nomedia"
+
     /** 第 k 个分片文件（按播放列表顺序，0 基），原始字节（加密则保持加密） */
     private fun segFile(epFolder: File, index: Int): File =
-        File(epFolder, "seg_%06d.ts".format(index))
+        File(epFolder, "seg_%06d.$SEG_EXT".format(index))
+
+    /**
+     * 取**已落盘**的分片：新后缀 [SEG_EXT] 优先，回退换名前的老后缀。
+     * 只认非空文件——0 字节的是没写完的半截。
+     */
+    private fun findSegFile(epFolder: File, index: Int): File? {
+        val seg = File(epFolder, "seg_%06d.$SEG_EXT".format(index))
+        if (seg.exists() && seg.length() > 0) return seg
+        val legacy = File(epFolder, "seg_%06d.$SEG_EXT_LEGACY".format(index))
+        if (legacy.exists() && legacy.length() > 0) return legacy
+        return null
+    }
+
+    /** 是不是分片文件名（新老后缀都算） */
+    private fun isSegFileName(name: String): Boolean =
+        name.startsWith("seg_") &&
+            (name.endsWith(".$SEG_EXT") || name.endsWith(".$SEG_EXT_LEGACY"))
+
+    /** 从分片文件名里取原始序号；不是分片名返回 null */
+    private fun segIndexFromName(name: String): Int? =
+        name.removePrefix("seg_")
+            .removeSuffix(".$SEG_EXT")
+            .removeSuffix(".$SEG_EXT_LEGACY")
+            .toIntOrNull()
+
+    /** 确保目录带媒体库跳过标记（幂等；换名前建的老目录也靠它救回来） */
+    private fun ensureNoMedia(dir: File) {
+        runCatching { File(dir, NO_MEDIA).createNewFile() }
+    }
 
     /**
      * 统计一个 m3u8 分片目录的**真实**完成情况：`(分片总数, 已落盘数)`。
      *
      * 总数取自 playlist.m3u8 里的分片行数（与 [buildLocalPlaylist] 同一套数法），
-     * 已落盘数逐片核对磁盘上 `seg_%06d.ts` 是否存在且非空；被判广告剔除的分片
+     * 已落盘数逐片核对磁盘上 `seg_%06d.<后缀>` 是否存在且非空；被判广告剔除的分片
      * （skipped-ads.json）本来就不该出现在成品里，按"已处理"计入。
      *
      * 返回 null = 这不是一个可用的 HLS 分片目录（没有 playlist.m3u8 或里面没有分片），
@@ -1518,8 +1584,8 @@ object VideoDownloader {
                 done++
                 continue
             }
-            val f = segFile(epFolder, k)
-            if (f.exists() && f.length() > 0) done++
+            val f = findSegFile(epFolder, k)
+            if (f != null) done++
         }
         return total to done
     }
@@ -1559,8 +1625,8 @@ object VideoDownloader {
         if (!epFolder.isDirectory) return null
         val mp4 = File(dir, "$title.mp4")
         val segs = epFolder.listFiles().orEmpty()
-            .filter { it.name.startsWith("seg_") && it.name.endsWith(".ts") }
-            .sortedBy { it.name }
+            .filter { isSegFileName(it.name) }
+            .sortedBy { segIndexFromName(it.name) ?: 0 }
         if (segs.isEmpty()) return null
         val meta = runCatching { org.json.JSONObject(File(epFolder, "meta.json").readText()) }.getOrNull()
         val seq = meta?.optLong("seq", 0L) ?: 0L
@@ -1575,7 +1641,7 @@ object VideoDownloader {
                 // 广告分片被剔除后中间会留下空洞（seg_1 没了、seg_2 还在），
                 // 用 forEachIndexed 的下标会让 AES 解密序号整体错位，
                 // 而 AES/CBC/PKCS5Padding 的强制 padding 会让错位之后的每一段都解成乱码。
-                val k = seg.name.removePrefix("seg_").removeSuffix(".ts").toIntOrNull() ?: 0
+                val k = segIndexFromName(seg.name) ?: 0
                 val cipher = if (keyBytes != null) aesCipher(keyBytes, iv, seq + k) else null
                 seg.inputStream().use { ins ->
                     val decoded = cipher?.let { CipherInputStream(ins, it) } ?: ins
@@ -1659,8 +1725,8 @@ object VideoDownloader {
                         // 广告分片：描述标签和地址行一起丢掉
                     } else {
                         tags?.forEach { sb.append(it).append('\n') }
-                        val localSeg = segFile(epFolder, k)
-                        if (localSeg.exists()) {
+                        val localSeg = findSegFile(epFolder, k)
+                        if (localSeg != null) {
                             sb.append(Uri.fromFile(localSeg).toString()).append('\n')
                         } else {
                             // 这一片没下到本地 → 回填原始网络地址，播放时去网上取
