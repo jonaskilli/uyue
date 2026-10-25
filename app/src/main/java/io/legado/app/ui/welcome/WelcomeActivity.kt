@@ -129,7 +129,11 @@ open class WelcomeActivity : BaseActivity<ActivityWelcomeBinding>() {
     private fun startMainActivity() {
         startActivity<MainActivity>()
         if (getPrefBoolean(PreferKey.defaultToRead) && appDb.bookDao.lastReadBook != null) {
-            startActivity<ReadBookActivity>()
+            startActivity<ReadBookActivity> {
+                if (getPrefBoolean(PreferKey.defaultToReadAloud)) {
+                    putExtra("readAloud", true)
+                }
+            }
         }
         finish()
     }
