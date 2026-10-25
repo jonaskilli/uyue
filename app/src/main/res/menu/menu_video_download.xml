@@ -2,6 +2,14 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
+    <!-- 无限刷入口：原为视频发现页底部中央的抖音图标按钮，现改为音符图标，
+         移到标题栏观看历史左侧。短按直接开刷，长按打开分类筛选面板 -->
+    <item
+        android:id="@+id/menu_infinite_swipe"
+        android:icon="@drawable/ic_music_note"
+        android:title="@string/infinite_swipe"
+        app:showAsAction="ifRoom" />
+
     <!-- 观看历史：记录最近看过的视频（最多100条），位于下载按钮左侧 -->
     <item
         android:id="@+id/menu_video_history"

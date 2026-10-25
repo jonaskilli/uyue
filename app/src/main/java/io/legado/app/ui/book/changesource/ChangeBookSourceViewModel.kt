@@ -10,6 +10,7 @@ import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.AppPattern
 import io.legado.app.data.appDb
+import io.legado.app.data.dao.getVideoSourceParts
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
@@ -18,12 +19,15 @@ import io.legado.app.data.entities.SearchBook
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.getBookSource
+import io.legado.app.help.book.isVideo
 import io.legado.app.help.book.primaryStr
 import io.legado.app.help.book.releaseHtmlData
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.SourceConfig
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.source.SourceHelp
+import io.legado.app.help.source.isVideoSource
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.internString
 import io.legado.app.utils.mapParallel
@@ -121,6 +125,47 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
     }
     private var task: Job? = null
     val bookMap = ConcurrentHashMap<String, Book>()
+
+    /**
+     * 视频换源时只搜这些 origin 的视频源；null = 不限制（普通换源，搜全部启用书源）。
+     * 懒加载：第一次用到时才查库（dialog 打开时先读历史结果，也要按它过滤）。
+     */
+    private var videoSourceOrigins: Set<String>? = null
+    private var videoSourceOriginsReady = false
+
+    /**
+     * 是否按视频源范围换源：当前书是视频（书架里的视频分类、视频详情页长按进来的都是），
+     * 或它的书源按视频口径判定（类型=4 ∥ 分组/书名关键词 ∥ 规则含 m3u8/mp4）。
+     *
+     * 全局换源会把几千个小说源全跑一遍（每个源发一次搜索请求），视频名在小说源里
+     * 基本搜不到东西却要干等超时，慢到几乎不可用，所以视频只搜视频源。
+     * 口径与视频主页、搜索页的「所有视频源」完全一致（见 [getVideoSourceParts]）。
+     */
+    private fun videoOrigins(): Set<String>? {
+        if (!videoSourceOriginsReady) {
+            videoSourceOriginsReady = true
+            val book = oldBook
+            videoSourceOrigins = if (book != null &&
+                (book.isVideo || book.getBookSource()?.isVideoSource() == true)
+            ) {
+                appDb.bookSourceDao.getVideoSourceParts()
+                    .map { it.bookSourceUrl }
+                    .toSet()
+            } else {
+                null
+            }
+        }
+        return videoSourceOrigins
+    }
+
+    /** 参与搜索的书源：视频换源只拿视频源，其余拿全部启用书源 */
+    private fun enabledParts(videoOrigins: Set<String>?): List<BookSourcePart> =
+        if (videoOrigins == null) {
+            appDb.bookSourceDao.allEnabledPart
+        } else {
+            appDb.bookSourceDao.getVideoSourceParts()
+        }
+
     val searchDataFlow = callbackFlow {
 
         searchCallback = object : SourceCallback {
@@ -218,16 +263,20 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
             tocMapChapterCount = 0
             _changeSourceProgress.value = 0 to ""
             val searchGroup = AppConfig.searchGroup
+            val videoOrigins = videoOrigins()
             if (searchGroup.isBlank()) {
-                bookSourceParts.addAll(appDb.bookSourceDao.allEnabledPart)
+                bookSourceParts.addAll(enabledParts(videoOrigins))
             } else {
-                val sources = appDb.bookSourceDao.getEnabledPartByGroup(searchGroup)
-                if (sources.isEmpty()) {
-                    AppConfig.searchGroup = ""
-                    bookSourceParts.addAll(appDb.bookSourceDao.allEnabledPart)
-                } else {
-                    bookSourceParts.addAll(sources)
+                var sources = appDb.bookSourceDao.getEnabledPartByGroup(searchGroup)
+                if (videoOrigins != null) {
+                    sources = sources.filter { it.bookSourceUrl in videoOrigins }
                 }
+                if (sources.isEmpty()) {
+                    // 该分组下没有可用源（视频换源时即该分组没有视频源）：重置为全部分组
+                    AppConfig.searchGroup = ""
+                    sources = enabledParts(videoOrigins)
+                }
+                bookSourceParts.addAll(sources)
             }
             initSearchPool()
             search()
@@ -488,7 +537,7 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
     }
 
     private fun getDbSearchBooks(): List<SearchBook> {
-        return if (screenKey.isEmpty()) {
+        val list = if (screenKey.isEmpty()) {
             if (AppConfig.changeSourceCheckAuthor) {
                 appDb.searchBookDao.changeSourceByGroup(
                     name, author, AppConfig.searchGroup
@@ -509,6 +558,10 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
                 )
             }
         }
+        // 视频换源时，库里的历史结果也可能混着小说源（搜索记录是全应用共用的），
+        // 按视频源 origin 过滤，保证列表干净
+        val videoOrigins = videoOrigins()
+        return if (videoOrigins == null) list else list.filter { it.origin in videoOrigins }
     }
 
     /**

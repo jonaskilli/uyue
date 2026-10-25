@@ -54,6 +54,7 @@ import io.legado.app.ui.main.explore.ExploreAdapter
 import io.legado.app.ui.main.explore.ExploreDiffItemCallBack
 import io.legado.app.ui.main.video.VideoHistoryActivity
 import io.legado.app.utils.applyTint
+import io.legado.app.utils.iconItemOnLongClick
 import io.legado.app.utils.flowWithLifecycleAndDatabaseChange
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.startActivity
@@ -117,7 +118,6 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         initRecyclerView()
         upVideoData()
         initSearchObserve()
-        initInfiniteSwipe()
     }
 
     override fun onPause() {
@@ -333,6 +333,7 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         when (item.itemId) {
             R.id.menu_download -> startActivity<VideoDownloadActivity>()
             R.id.menu_video_history -> startActivity<VideoHistoryActivity>()
+            R.id.menu_infinite_swipe -> startInfiniteSwipe()
         }
     }
 
@@ -341,6 +342,12 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         menuInflater.inflate(R.menu.menu_video_download, menu)
         // 菜单图标按主题着色，否则浅色主题下白色矢量图看不见
         menu.applyTint(requireContext())
+        // 无限刷入口（音符图标）：短按直接开刷，长按打开分类筛选面板。
+        // 注意要在 applyTint 之后设置，actionView 里的图标取自 item.icon
+        menu.iconItemOnLongClick(R.id.menu_infinite_swipe) {
+            InfiniteSwipeFilterDialog { startInfiniteSwipe() }
+                .show(childFragmentManager, "infinite_swipe_filter")
+        }
     }
 
     override fun scrollTo(pos: Int) {
@@ -465,24 +472,14 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
     }
 
     /**
-     * 无限刷入口：以"分类"为单位，随机挑 8 个视频源发现分类，每个分类先只抓 4 页，
+     * 按当前筛选配置执行无限刷（标题栏音符图标短按、筛选面板「开始无限刷」都会走到这里）。
+     *
+     * 无限刷本身：以"分类"为单位，随机挑 8 个视频源发现分类，每个分类先只抓 4 页，
      * 够 15 条就先做成先行播放列表立刻开播；随后后台把每个分类的**全部页取完**，
      * 取完再随机挑下一批分类继续取（只往前取，不回头、不循环），
      * 并按水位（当前位置之后始终留 150 条可播）自动续接到播放列表尾部。
      * 全部由 [InfiniteSwipeFeed] 负责。
      */
-    private fun initInfiniteSwipe() {
-        // 长按：打开分类筛选面板（每个视频源总开关 + 各分类开关），确认后开始无限刷
-        binding.fabInfiniteSwipe.setOnLongClickListener {
-            InfiniteSwipeFilterDialog { startInfiniteSwipe() }
-                .show(childFragmentManager, "infinite_swipe_filter")
-            true
-        }
-        // 短按：按当前筛选配置直接开始无限刷
-        binding.fabInfiniteSwipe.setOnClickListener { startInfiniteSwipe() }
-    }
-
-    /** 按当前筛选配置执行无限刷（短按按钮、面板「开始无限刷」都会走到这里） */
     private fun startInfiniteSwipe() {
         // 一个书源都没选过（全新安装默认全关 / 用户全关了）：
         // 直接提示去长按按钮选源，别白跑一轮抓取、也不用干等超时
@@ -490,7 +487,6 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
             toastOnUi(getString(R.string.infinite_swipe_no_source_selected))
             return
         }
-        binding.fabInfiniteSwipe.isEnabled = false
         lifecycleScope.launch(IO) {
             var toastMsg: String? = null
             try {
@@ -526,7 +522,6 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
                 toastMsg = e.localizedMessage ?: "准备失败"
             }
             withContext(Dispatchers.Main) {
-                binding.fabInfiniteSwipe.isEnabled = true
                 toastMsg?.let { toastOnUi(it) }
             }
         }

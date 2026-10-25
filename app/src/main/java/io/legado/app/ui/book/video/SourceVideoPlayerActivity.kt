@@ -92,6 +92,7 @@ import com.bumptech.glide.request.target.CustomTarget
 import com.bumptech.glide.request.target.Target
 import com.bumptech.glide.request.transition.Transition
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.glide.ImageLoader
 import io.legado.app.help.glide.OkHttpModelLoader
 import android.app.PendingIntent
@@ -1003,6 +1004,15 @@ internal fun DownloadDialog(
     val itemChecked = remember { mutableStateListOf<String>() }
     val videoChecked = remember { mutableStateListOf<String>() }
 
+    // 主题色：独立页面（视频发现页右上角进来的下载管理）跟随应用主题
+    // （应用主题设为"自动"时即跟随系统深浅色 + 应用主题色）；
+    // 播放页里的弹窗叠在黑底播放器上，保持黑底白字不变。
+    val dark = if (standalone) ThemeConfig.isDarkTheme() else true
+    val contentColor = if (dark) Color.White else MaterialTheme.colorScheme.onBackground
+    // 半透明元素（进度轨道等）也用同一个色：深色主题下是白，浅色主题下是深色
+    val pageBg = if (dark) Color(0xFF101010) else MaterialTheme.colorScheme.background
+    val dialogBg = if (dark) Color(0xFF1C1C1E) else MaterialTheme.colorScheme.surface
+
     // 下载管理页（standalone）：已从「全部视频」进入某一部视频的详情时，
     // 系统返回键先退回视频列表，而不是直接退出整个页面——
     // 用户点进一部视频看完分集，按返回的预期是回去挑下一部，
@@ -1097,13 +1107,13 @@ internal fun DownloadDialog(
                     TextButton(onClick = { selectorOpen = !selectorOpen }) {
                         Text(
                             if (currentName.length > 14) currentName.take(14) + "…" else currentName,
-                            color = Color.White,
+                            color = contentColor,
                             fontSize = 15.sp,
                             maxLines = 1
                         )
                         Text(
                             if (selectorOpen) " ▲" else " ▼",
-                            color = Color.White.copy(alpha = 0.6f),
+                            color = contentColor.copy(alpha = 0.6f),
                             fontSize = 12.sp
                         )
                     }
@@ -1129,7 +1139,7 @@ internal fun DownloadDialog(
                             Icon(
                                 Icons.Filled.MoreVert,
                                 contentDescription = "批量操作",
-                                tint = Color.White
+                                tint = contentColor
                             )
                         }
                         DropdownMenu(
@@ -1210,7 +1220,7 @@ internal fun DownloadDialog(
                     // 已缓存视频列表：每部视频可勾选、可全选批量删，点名字切过去管理
                     Text(
                         "已缓存视频（${groups.size}）",
-                        color = Color.White.copy(alpha = 0.6f),
+                        color = contentColor.copy(alpha = 0.6f),
                         fontSize = 12.sp
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1221,7 +1231,7 @@ internal fun DownloadDialog(
                             Text("全选", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
                         }
                         TextButton(onClick = { videoChecked.clear() }) {
-                            Text("取消", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                            Text("取消", color = contentColor.copy(alpha = 0.6f), fontSize = 12.sp)
                         }
                         Spacer(modifier = Modifier.weight(1f))
                         if (videoChecked.isNotEmpty()) {
@@ -1245,7 +1255,7 @@ internal fun DownloadDialog(
                         ) {
                             Text(
                                 "还没有缓存任何视频",
-                                color = Color.White.copy(alpha = 0.5f),
+                                color = contentColor.copy(alpha = 0.5f),
                                 fontSize = 13.sp
                             )
                         }
@@ -1273,13 +1283,13 @@ internal fun DownloadDialog(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             g.name,
-                                            color = Color.White.copy(alpha = 0.9f),
+                                            color = contentColor.copy(alpha = 0.9f),
                                             fontSize = 13.sp,
                                             maxLines = 1
                                         )
                                         Text(
                                             "${g.completedCount}/${g.episodeCount} 集 · ${formatSize(g.sizeBytes)}",
-                                            color = Color.White.copy(alpha = 0.5f),
+                                            color = contentColor.copy(alpha = 0.5f),
                                             fontSize = 11.sp
                                         )
                                     }
@@ -1298,7 +1308,7 @@ internal fun DownloadDialog(
                         horizontalArrangement = Arrangement.End
                     ) {
                         TextButton(onClick = { selectorOpen = false }) {
-                            Text("收起", color = Color.White)
+                            Text("收起", color = contentColor)
                         }
                     }
                 } else {
@@ -1314,7 +1324,7 @@ internal fun DownloadDialog(
                                     color = if (tab == 0) {
                                         MaterialTheme.colorScheme.primary
                                     } else {
-                                        Color.White.copy(alpha = 0.6f)
+                                        contentColor.copy(alpha = 0.6f)
                                     }
                                 )
                             }
@@ -1325,7 +1335,7 @@ internal fun DownloadDialog(
                                 color = if (tab == 1) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
-                                    Color.White.copy(alpha = 0.6f)
+                                    contentColor.copy(alpha = 0.6f)
                                 }
                             )
                         }
@@ -1356,7 +1366,7 @@ internal fun DownloadDialog(
                                     )
                                     Text(
                                         "第${no}集 ${ep.name}",
-                                        color = Color.White.copy(alpha = 0.9f),
+                                        color = contentColor.copy(alpha = 0.9f),
                                         fontSize = 13.sp,
                                         maxLines = 1
                                     )
@@ -1368,7 +1378,7 @@ internal fun DownloadDialog(
                             horizontalArrangement = Arrangement.End
                         ) {
                             TextButton(onClick = onDismiss) {
-                                Text("取消", color = Color.White)
+                                Text("取消", color = contentColor)
                             }
                             TextButton(onClick = {
                                 val selected = checked.indices.filter { checked[it] }
@@ -1418,7 +1428,7 @@ internal fun DownloadDialog(
                                     TextButton(onClick = { itemChecked.clear() }) {
                                         Text(
                                             "取消(${itemChecked.size})",
-                                            color = Color.White.copy(alpha = 0.6f),
+                                            color = contentColor.copy(alpha = 0.6f),
                                             fontSize = 12.sp
                                         )
                                     }
@@ -1444,7 +1454,7 @@ internal fun DownloadDialog(
                             ) {
                                 Text(
                                     if (isCurrentVideo) "暂无下载任务" else "这部视频没有下载记录",
-                                    color = Color.White.copy(alpha = 0.5f),
+                                    color = contentColor.copy(alpha = 0.5f),
                                     fontSize = 13.sp
                                 )
                             }
@@ -1465,6 +1475,7 @@ internal fun DownloadDialog(
                                             else itemChecked.remove(st.key)
                                         },
                                         onPlay = onPlayEpisode,
+                                        contentColor = contentColor,
                                     )
                                 }
                             }
@@ -1478,14 +1489,14 @@ internal fun DownloadDialog(
         // 独立页面：铺满整屏
         Surface(
             modifier = Modifier.fillMaxSize(),
-            color = Color(0xFF101010)
+            color = pageBg
         ) { body() }
     } else {
         Dialog(onDismissRequest = onDismiss) {
             Surface(
                 modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.88f),
                 shape = RoundedCornerShape(16.dp),
-                color = Color(0xFF1C1C1E)
+                color = dialogBg
             ) { body() }
         }
     }
@@ -1582,6 +1593,8 @@ private fun DownloadStateItem(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     onPlay: (VideoDownloader.TaskState) -> Unit,
+    /** 正文色：深色主题（播放页弹窗）为白，浅色主题（跟随系统的下载管理页）为深色 */
+    contentColor: Color,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val running = st.status == VideoDownloader.DlStatus.QUEUED ||
@@ -1593,7 +1606,7 @@ private fun DownloadStateItem(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 st.title,
-                color = Color.White.copy(alpha = 0.9f),
+                color = contentColor.copy(alpha = 0.9f),
                 fontSize = 13.sp,
                 maxLines = 1
             )
@@ -1604,7 +1617,7 @@ private fun DownloadStateItem(
                     .fillMaxWidth()
                     .height(6.dp)
                     .clip(RoundedCornerShape(3.dp))
-                    .background(Color.White.copy(alpha = 0.15f))
+                    .background(contentColor.copy(alpha = 0.15f))
             ) {
                 if (st.progress > 0) {
                     Box(
@@ -1638,7 +1651,7 @@ private fun DownloadStateItem(
             color = when (st.status) {
                 VideoDownloader.DlStatus.FAILED -> Color(0xFFFF6B6B)
                 VideoDownloader.DlStatus.COMPLETED -> Color(0xFF34C759)
-                else -> Color.White.copy(alpha = 0.6f)
+                else -> contentColor.copy(alpha = 0.6f)
             },
             fontSize = 11.sp
         )
@@ -1655,7 +1668,7 @@ private fun DownloadStateItem(
                 else if (running) Icons.Filled.Pause
                 else Icons.Filled.PlayArrow,
                 contentDescription = if (completed) "播放" else if (running) "暂停" else "继续",
-                tint = if (completed) MaterialTheme.colorScheme.primary else Color.White
+                tint = if (completed) MaterialTheme.colorScheme.primary else contentColor
             )
         }
         // 三点菜单
@@ -1664,7 +1677,7 @@ private fun DownloadStateItem(
                 Icon(
                     Icons.Filled.MoreVert,
                     contentDescription = "更多操作",
-                    tint = Color.White
+                    tint = contentColor
                 )
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
