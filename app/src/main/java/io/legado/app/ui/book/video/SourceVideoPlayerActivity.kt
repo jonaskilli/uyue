@@ -272,7 +272,12 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         // 点「倒序」/切循环模式时两者一起反转（随机播放同理）。按 bookUrl + 集数重置，
         // 切到另一个视频时回到自然序。
         val playOrderState = remember(state.bookUrl, state.episodes.size) {
-            mutableStateOf(state.episodes.indices.toList())
+            // 集数变化（切到另一部、或后台刷新出更新后的新集）都会重算这里，
+            // 按该视频自己的 reverseOrder 复原，否则用户设的倒序会被悄悄打回自然序
+            mutableStateOf(
+                if (state.reverseOrder) state.episodes.indices.toList().reversed()
+                else state.episodes.indices.toList()
+            )
         }
         var playOrder by playOrderState
         /**
