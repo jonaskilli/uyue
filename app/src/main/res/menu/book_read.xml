@@ -100,6 +100,13 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_fix_quote"
+        android:checkable="true"
+        android:checked="false"
+        android:title="@string/fix_quote"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_re_segment"
         android:checkable="true"
         android:checked="false"

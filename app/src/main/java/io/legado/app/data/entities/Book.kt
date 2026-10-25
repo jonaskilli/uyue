@@ -219,6 +219,14 @@ data class Book(
         return AppConfig.replaceEnableDefault
     }
 
+    fun setFixQuote(fixQuote: Boolean) {
+        config.fixQuote = fixQuote
+    }
+
+    fun getFixQuote(): Boolean {
+        return config.fixQuote
+    }
+
     fun setReSegment(reSegment: Boolean) {
         config.reSegment = reSegment
     }
@@ -440,6 +448,7 @@ data class Book(
     data class ReadConfig(
         var reverseToc: Boolean = false,
         var pageAnim: Int? = null,
+        var fixQuote: Boolean = true,//双引号修复（默认开启）
         var reSegment: Boolean = false,
         var imageStyle: String? = null,
         var useReplaceRule: Boolean? = null,// 正文使用净化替换规则

@@ -96,6 +96,7 @@ class ContentProcessor private constructor(
         includeTitle: Boolean = true,
         useReplace: Boolean = true,
         chineseConvert: Boolean = true,
+        fixQuote: Boolean = true,
         reSegment: Boolean = true
     ): BookContent {
         var mContent = content
@@ -128,6 +129,10 @@ class ContentProcessor private constructor(
                 }
             } catch (e: Exception) {
                 AppLog.put("去除重复标题出错\n${e.localizedMessage}", e)
+            }
+            if (fixQuote && book.getFixQuote()) {
+                //双引号修复（必须先于重新分段，修复错乱/缺失的引号）
+                mContent = QuoteFix.fix(mContent)
             }
             if (reSegment && book.getReSegment()) {
                 //重新分段
