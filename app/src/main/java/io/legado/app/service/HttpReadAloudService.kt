@@ -91,6 +91,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import splitties.init.appCtx
 import android.media.MediaMetadataRetriever
 import java.io.File
@@ -1543,6 +1544,9 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         val audioData = ByteArrayOutputStream()
         val latch = CountDownLatch(1)
         var wsError: Throwable? = null
+        // 服务端是否明确宣告合成完毕（TaskFinished）。onClosed 只代表连接断开，
+        // 中途断流时已到的帧只是前半截，不能当成成功返回。
+        val finished = AtomicBoolean(false)
 
         fun generateId(): String = java.util.UUID.randomUUID().toString().replace("-", "").take(16)
 
@@ -1644,6 +1648,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                             webSocket.send(finishMsg.toString())
                         } else if (event == "TaskFinished") {
                             AppLog.putDebug("猫箱TaskFinished，音频长度=${audioData.size()}")
+                            finished.set(true)
                             latch.countDown()
                         } else if (data.has("status_code")) {
                             // 【修复】增加服务端错误码处理（与原插件保持一致）
@@ -1705,6 +1710,17 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         if (wsError != null) throw wsError!!
 
         AppLog.putDebug("猫箱合成结束，音频总长度=${audioData.size()}")
+
+        // 没收到 TaskFinished 就是没合成完：连接提前断掉 / 等待超时都会走到这里，
+        // audioData 里只是已到的前半截。判失败让上层重试，别把半截当成功返回。
+        if (!finished.get()) {
+            AppLog.put(
+                "猫箱合成未收到 TaskFinished，判定不完整（已收 ${audioData.size()} 字节），丢弃重试"
+            )
+            throw NoStackTraceException(
+                "TTS 合成未完成（未收到 TaskFinished），已收到 ${audioData.size()} 字节"
+            )
+        }
         return@withContext if (audioData.size() > 0) {
             ByteArrayInputStream(audioData.toByteArray())
         } else null
