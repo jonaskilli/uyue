@@ -1095,6 +1095,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         includeTitle = true,
                         useReplace = AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
                         chineseConvert = AppConfig.chineseConverterType != 0,
+                        fixQuote = book.getFixQuote(),
                         reSegment = book.getReSegment()
                     )
                     // 同步 TextChapter.getNeedReadAloud() 中对 [袮꧁] 的替换，确保缓存命中

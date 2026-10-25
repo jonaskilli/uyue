@@ -402,6 +402,7 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
                     includeTitle = false,
                     useReplace = io.legado.app.help.config.AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
                     chineseConvert = io.legado.app.help.config.AppConfig.chineseConverterType != 0,
+                    fixQuote = book.getFixQuote(),
                     reSegment = book.getReSegment()
                 )
                 val paragraphCount = bookContent.textList.size
@@ -708,6 +709,7 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
             includeTitle = false,
             useReplace = AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
             chineseConvert = AppConfig.chineseConverterType != 0,
+            fixQuote = book.getFixQuote(),
             reSegment = book.getReSegment()
         ).toString()
 

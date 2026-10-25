@@ -320,6 +320,7 @@ class ExportBookService : BaseService() {
                 includeTitle = !AppConfig.exportNoChapterName,
                 useReplace = useReplace,
                 chineseConvert = false,
+                fixQuote = false,
                 reSegment = false
             ).toString()
         // 添加角色标注
@@ -565,6 +566,7 @@ class ExportBookService : BaseService() {
                     includeTitle = false,
                     useReplace = useReplace,
                     chineseConvert = false,
+                    fixQuote = false,
                     reSegment = false
                 ).toString()
             val title = chapter.run {
@@ -759,6 +761,7 @@ class ExportBookService : BaseService() {
                             includeTitle = false,
                             useReplace = useReplace,
                             chineseConvert = false,
+                            fixQuote = false,
                             reSegment = false
                         ).toString()
                     val title = chapter.run {

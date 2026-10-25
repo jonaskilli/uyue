@@ -234,6 +234,7 @@ object HttpTtsAudioCache {
             includeTitle = false, // 不在这里包含标题，后面单独添加
             useReplace = AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
             chineseConvert = AppConfig.chineseConverterType != 0,
+            fixQuote = book.getFixQuote(),
             reSegment = book.getReSegment()
         )
 
