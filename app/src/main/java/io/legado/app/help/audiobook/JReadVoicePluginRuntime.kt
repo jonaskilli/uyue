@@ -20,6 +20,7 @@ import kotlinx.coroutines.withContext
 import androidx.annotation.Keep
 import com.script.ScriptBindings
 import com.script.rhino.RhinoScriptEngine
+import io.legado.app.constant.AppLog
 import io.legado.app.help.crypto.SymmetricCryptoAndroid
 import io.legado.app.help.http.okHttpClient
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -1092,10 +1093,17 @@ object JReadVoicePluginRuntime {
             callback.awaitClose(80L)
         }
         drainWebsocketEvents(scope, websocketFactory)
-        if (!callback.isClosed() && !callback.hasBytes()) {
+        // 没收到 close()/error() 就是没合成完：超时、连接中途断掉、插件没发结束信号，
+        // 都已收到的分片只是前半截。必须算失败交给上层重试，
+        // 不能因为"收到过字节"就把半截当成功返回（表现为这句只响前半段就跳下一句）。
+        if (!callback.isClosed()) {
             websocketFactory.cancelAll()
+            AppLog.put(
+                "[TtsPluginJsBridge] 插件音频等待超时未收到完成信号，判定合成不完整"
+            )
             throw IllegalStateException("等待插件音频超时，请检查网络或插件 WebSocket")
         }
+        // 已关闭时再由 bytesOrNull 区分「正常 close」与「error」，两者都不会放行半截
         return callback.bytesOrNull()
     }
 
@@ -2348,6 +2356,16 @@ object JReadVoicePluginRuntime {
         private var error: String? = null
         private val closed = CountDownLatch(1)
 
+        /**
+         * 插件是否明确宣告合成完毕（调了 [close]）。
+         *
+         * 这是**唯一**的成功信号：网络中途断流、插件未发结束信号、等待超时，
+         * 都已收到的分片只是「前半截」。若只凭"收到过字节"就当成成功返回，
+         * 就会出现「这句只响前半段就跳下一句」，而且落成缓存后每次重读都是半截。
+         */
+        @Volatile
+        private var finished = false
+
         fun write(value: Any?) {
             val bytes = anyToBytes(value)
             synchronized(chunks) {
@@ -2357,6 +2375,7 @@ object JReadVoicePluginRuntime {
         }
 
         fun close() {
+            finished = true
             Log.i(TAG, "AudioCallback.close: bytes=${synchronized(chunks) { chunks.sumOf { it.size } }}")
             closed.countDown()
         }
@@ -2384,6 +2403,14 @@ object JReadVoicePluginRuntime {
                 }
             }
             error?.let { throw IllegalStateException(it) }
+            // 没有收到 close() 就是没合成完，一律算失败——哪怕已经收了一部分字节。
+            // 交给上层重试：网络抖动重试一次大概率就好，比播放半截正确得多。
+            if (!finished) {
+                val got = synchronized(chunks) { chunks.sumOf { it.size } }
+                throw IllegalStateException(
+                    "插件音频未收到完成信号(close)，合成不完整：已收到 $got 字节但流未正常结束"
+                )
+            }
             val snapshot = synchronized(chunks) { chunks.toList() }
             if (snapshot.isEmpty()) return null
             return snapshot.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
