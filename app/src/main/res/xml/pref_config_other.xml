@@ -38,6 +38,14 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.SwitchPreference
+            android:defaultValue="false"
+            android:key="defaultToReadAloud"
+            android:dependency="defaultToRead"
+            android:summary="@string/ps_default_read_aloud"
+            android:title="@string/pt_default_read_aloud"
+            app:iconSpaceReserved="false" />
+
+        <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="true"
             android:key="showDiscovery"
             android:title="@string/show_discovery"
