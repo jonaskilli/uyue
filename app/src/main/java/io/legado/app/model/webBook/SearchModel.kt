@@ -135,7 +135,7 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
                     equalData.forEach { pBook ->
                         currentCoroutineContext().ensureActive()
                         if (pBook.name == nBook.name && pBook.author == nBook.author) {
-                            pBook.addOrigin(nBook.origin)
+                            pBook.addOrigin(nBook.origin, nBook.bookUrl)
                             hasSame = true
                         }
                     }
@@ -147,7 +147,7 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
                     containsData.forEach { pBook ->
                         currentCoroutineContext().ensureActive()
                         if (pBook.name == nBook.name && pBook.author == nBook.author) {
-                            pBook.addOrigin(nBook.origin)
+                            pBook.addOrigin(nBook.origin, nBook.bookUrl)
                             hasSame = true
                         }
                     }
@@ -159,7 +159,7 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
                     otherData.forEach { pBook ->
                         currentCoroutineContext().ensureActive()
                         if (pBook.name == nBook.name && pBook.author == nBook.author) {
-                            pBook.addOrigin(nBook.origin)
+                            pBook.addOrigin(nBook.origin, nBook.bookUrl)
                             hasSame = true
                         }
                     }

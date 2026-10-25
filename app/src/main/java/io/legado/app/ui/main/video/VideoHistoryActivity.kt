@@ -152,18 +152,18 @@ class VideoHistoryActivity : BaseActivity<ActivityVideoHistoryBinding>(),
         return (b.type and BookType.notShelf) == 0
     }
 
-    override fun showBookInfo(name: String, author: String, bookUrl: String) {
+    override fun showBookInfo(searchBook: SearchBook) {
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
                 val now = System.currentTimeMillis()
-                val exist = appDb.bookDao.getBook(bookUrl)
+                val exist = appDb.bookDao.getBook(searchBook.bookUrl)
                 val book = if (exist != null) {
                     exist.ensureVideoType()
                     exist.durChapterTime = now
                     appDb.bookDao.update(exist)
                     exist
                 } else {
-                    appDb.searchBookDao.getSearchBook(bookUrl)?.toBook()?.apply {
+                    appDb.searchBookDao.getSearchBook(searchBook.bookUrl)?.toBook()?.apply {
                         // notShelf：看过的视频不自动上书架，播放器里点图标才加入
                         addType(BookType.video)
                         addType(BookType.notShelf)

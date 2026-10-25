@@ -74,8 +74,15 @@ class SearchAdapter(context: Context, val callBack: CallBack) :
     override fun registerListener(holder: ItemViewHolder, binding: ItemSearchBinding) {
         binding.root.setOnClickListener {
             getItem(holder.layoutPosition)?.let {
-                callBack.showBookInfo(it.name, it.author, it.bookUrl)
+                // 传整个对象：同名结果可能是多源合并的，接收方要能按用户选的源取对应链接
+                callBack.showBookInfo(it)
             }
+        }
+        binding.root.setOnLongClickListener {
+            getItem(holder.layoutPosition)?.let {
+                callBack.openBookInfo(it)
+            }
+            true
         }
     }
 
@@ -156,8 +163,19 @@ class SearchAdapter(context: Context, val callBack: CallBack) :
         fun isInBookshelf(book: SearchBook): Boolean
 
         /**
-         * 显示书籍详情
+         * 显示书籍详情。
+         * 传整个 [SearchBook] 而非三个字符串：同一条目可能是多个源的同名结果合并而来，
+         * 接收方需要能按用户选中的源取到该源自己的链接（见 [SearchBook.getBookUrlByOrigin]）。
          */
-        fun showBookInfo(name: String, author: String, bookUrl: String)
+        fun showBookInfo(book: SearchBook)
+
+        /**
+         * 长按：打开书籍详情页，方便加书架、换源等后续操作。
+         * 默认与点击行为一致，需要区分的地方单独实现
+         * （如视频列表：点击即播、长按进详情页）。
+         */
+        fun openBookInfo(book: SearchBook) {
+            showBookInfo(book)
+        }
     }
 }

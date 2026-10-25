@@ -81,6 +81,12 @@ class ExploreShowAdapter(context: Context, val callBack: CallBack) :
                 callBack.showBookInfo(it)
             }
         }
+        holder.itemView.setOnLongClickListener {
+            getItem(holder.bindingAdapterPosition - getHeaderCount())?.let {
+                callBack.openBookInfo(it)
+            }
+            true
+        }
     }
 
     interface CallBack {
@@ -90,5 +96,14 @@ class ExploreShowAdapter(context: Context, val callBack: CallBack) :
         fun isInBookshelf(book: SearchBook): Boolean
 
         fun showBookInfo(book: SearchBook)
+
+        /**
+         * 长按：打开书籍详情页，方便加书架、换源等后续操作。
+         * 默认与点击行为一致，需要区分的地方单独实现
+         * （如视频列表：点击即播、长按进详情页）。
+         */
+        fun openBookInfo(book: SearchBook) {
+            showBookInfo(book)
+        }
     }
 }

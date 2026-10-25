@@ -41,6 +41,7 @@ import io.legado.app.lib.theme.primaryColor
 import io.legado.app.lib.theme.primaryTextColor
 import io.legado.app.utils.ColorUtils
 import io.legado.app.ui.book.explore.ExploreShowActivity
+import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.search.SearchScope
 import io.legado.app.ui.book.search.SearchAdapter
@@ -389,18 +390,23 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
      * 点搜索结果：视频没有看简介的必要，直接进播放页的「首页模式」
      * （播放器在上、选集在下），可以先挑集再看。
      */
-    override fun showBookInfo(name: String, author: String, bookUrl: String) {
+    override fun showBookInfo(searchBook: SearchBook) {
+        // 顶部切到了某个源时，要播的是「那个源」返回的那条。
+        // 同名结果是多源合并的，SearchBook.bookUrl 只保留了最先返回的那个源，
+        // 直接用会无视用户选的源——这里先定下目标源，免得之后切源改了值。
+        val origin = selectedSourceUrl
+        val targetUrl = searchBook.getBookUrlByOrigin(origin)
         lifecycleScope.launch(IO) {
             runCatching {
                 val now = System.currentTimeMillis()
-                val exist = appDb.bookDao.getBook(bookUrl)
+                val exist = appDb.bookDao.getBook(targetUrl)
                 val book = if (exist != null) {
                     exist.ensureVideoType()
                     exist.durChapterTime = now
                     appDb.bookDao.update(exist)
                     exist
                 } else {
-                    appDb.searchBookDao.getSearchBook(bookUrl)?.toBook()?.apply {
+                    appDb.searchBookDao.getSearchBook(targetUrl)?.toBook()?.apply {
                         // notShelf：看过的视频不自动上书架，播放器里点图标才加入
                         addType(BookType.video)
                         addType(BookType.notShelf)
@@ -412,11 +418,11 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
                         ?: throw IllegalStateException("没有找到该视频")
                 }
                 // 搜索结果整体交给播放器，右侧 30% 竖滑可在结果之间切。
-                // 用未过滤的全部结果(allResults)做动态供给：源标签只过滤“展示”，
-                // 切换列表始终是“整个搜索结果”；且后续源陆续返回的新结果会自动进入可切换范围。
+                // 用未过滤的全部结果(allResults)做动态供给，后续源陆续返回的新结果会自动
+                // 进入可切换范围；选了具体源时只在该源的结果内切，且用各源自己的链接。
                 withContext(Dispatchers.Main) {
                     VideoFeedStore.put(
-                        provider = { allResults.map { it.bookUrl } },
+                        provider = { allResults.urlsOfOrigin(origin) },
                         currentBookUrl = book.bookUrl,
                     )
                     startActivity(
@@ -432,6 +438,29 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
                 AppLog.put("打开搜索结果失败\n${it.localizedMessage}", it)
                 toastOnUi(it.localizedMessage ?: "打开失败")
             }
+        }
+    }
+
+    /**
+     * 长按搜索结果：视频点击即播，长按进详情页，好在里面加书架、换源、改信息等。
+     * 与点击时一样按顶部选中的源取链接，否则详情页打开的会是另一个源的那一本。
+     */
+    override fun openBookInfo(book: SearchBook) {
+        startActivity<BookInfoActivity> {
+            putExtra("name", book.name)
+            putExtra("author", book.author)
+            putExtra("bookUrl", book.getBookUrlByOrigin(selectedSourceUrl))
+        }
+    }
+
+    /**
+     * 取各结果在 [origin] 这个源下的链接。
+     * origin 为空（选了「全部」）则不做筛选，取各结果自身链接。
+     */
+    private fun List<SearchBook>.urlsOfOrigin(origin: String?): List<String> {
+        if (origin.isNullOrBlank()) return map { it.bookUrl }
+        return mapNotNull { book ->
+            if (book.origins.contains(origin)) book.getBookUrlByOrigin(origin) else null
         }
     }
 
