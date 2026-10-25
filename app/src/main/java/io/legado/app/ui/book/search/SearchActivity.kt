@@ -478,18 +478,8 @@ class SearchActivity : VMBaseActivity<ActivityBookSearchBinding, SearchViewModel
     /**
      * 显示书籍详情
      */
-    override fun showBookInfo(name: String, author: String, bookUrl: String) {
-        // 搜索结果整体作为播放器的切换列表（动态供给：搜索新增结果自动进入切换范围）
-        VideoFeedStore.put(
-            { viewModel.searchBookLiveData.value?.map { it.bookUrl } ?: emptyList() },
-            bookUrl,
-            loadMore = null
-        )
-        startActivity<BookInfoActivity> {
-            putExtra("name", name)
-            putExtra("author", author)
-            putExtra("bookUrl", bookUrl)
-        }
+    override fun showBookInfo(book: SearchBook) {
+        openBookInfo(book.name, book.author, book.bookUrl)
     }
 
     /**
@@ -503,7 +493,21 @@ class SearchActivity : VMBaseActivity<ActivityBookSearchBinding, SearchViewModel
      * 显示书籍详情
      */
     override fun showBookInfo(book: Book) {
-        showBookInfo(book.name, book.author, book.bookUrl)
+        openBookInfo(book.name, book.author, book.bookUrl)
+    }
+
+    private fun openBookInfo(name: String, author: String, bookUrl: String) {
+        // 搜索结果整体作为播放器的切换列表（动态供给：搜索新增结果自动进入切换范围）
+        VideoFeedStore.put(
+            { viewModel.searchBookLiveData.value?.map { it.bookUrl } ?: emptyList() },
+            bookUrl,
+            loadMore = null
+        )
+        startActivity<BookInfoActivity> {
+            putExtra("name", name)
+            putExtra("author", author)
+            putExtra("bookUrl", bookUrl)
+        }
     }
 
     /**

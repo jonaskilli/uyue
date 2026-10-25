@@ -82,8 +82,29 @@ data class SearchBook(
     @IgnoredOnParcel
     val origins: LinkedHashSet<String> by lazy { linkedSetOf(origin) }
 
-    fun addOrigin(origin: String) {
+    /**
+     * 同名结果被合并时，各源自己那条结果的 bookUrl。
+     * 见 [addOrigin]；没有它，切到某个源播放时只能拿到「最先返回的源」的链接。
+     */
+    @delegate:Transient
+    @delegate:Ignore
+    @IgnoredOnParcel
+    val originUrls: LinkedHashMap<String, String> by lazy {
+        linkedMapOf(origin to bookUrl)
+    }
+
+    fun addOrigin(origin: String, bookUrl: String) {
         origins.add(origin)
+        originUrls[origin] = bookUrl
+    }
+
+    /**
+     * 取 [origin] 这个源返回的结果链接；未指定源或该源链接缺失时退回自身。
+     * 合并记录的 bookUrl 只是最先返回那个源的，切源播放必须用它。
+     */
+    fun getBookUrlByOrigin(origin: String?): String {
+        if (origin.isNullOrBlank()) return bookUrl
+        return originUrls[origin]?.takeIf { it.isNotBlank() } ?: bookUrl
     }
 
     fun getDisplayLastChapterTitle(): String {

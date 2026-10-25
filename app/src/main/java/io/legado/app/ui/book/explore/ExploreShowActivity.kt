@@ -202,6 +202,17 @@ class ExploreShowActivity : VMBaseActivity<ActivityExploreShowBinding, ExploreSh
     }
 
     /**
+     * 长按：视频点击即播，长按进详情页，好在里面加书架、换源、改信息等。
+     */
+    override fun openBookInfo(book: SearchBook) {
+        startActivity<BookInfoActivity> {
+            putExtra("name", book.name)
+            putExtra("author", book.author)
+            putExtra("bookUrl", book.bookUrl)
+        }
+    }
+
+    /**
      * 复刻时光播放器 VideoViewModel.prepareBook 的入库逻辑：
      * 确保书籍入库且带 video 位，然后直接进剧集播放页。
      * 目录准备、白名单分流由播放页自身完成（SourceVideoPlayerViewModel.load）。
