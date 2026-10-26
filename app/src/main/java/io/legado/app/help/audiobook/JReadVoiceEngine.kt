@@ -84,13 +84,9 @@ object JReadVoiceEngine {
     /** 迁移幂等标志：首次执行后设 true，本次进程内不再重复迁移 */
     @Volatile
     private var migrationDone = false
-    private const val KEY_BUILTIN_VIVI_CONFIG_SEEDED = "builtin_vivi_voice_pool_v6_2398_grouped_seeded_v4"
     private const val KEY_BUILTIN_PLUGIN_BUNDLE_12_SEEDED = "builtin_jread_voice_plugins_12_seeded"
-    private const val KEY_BUILTIN_AUDIOS_1064_PLUGIN_SEEDED = "builtin_audios_1064_plugin_seeded"
     private const val BUILTIN_SYSTEM_CONFIG_ASSET = "defaultData/jreadVoice/jread_voice_system_configs.json"
-    private const val BUILTIN_VIVI_CONFIG_ASSET = "defaultData/jreadVoice/vivi_voice_pool_v6_2398.json"
     private const val BUILTIN_PLUGIN_BUNDLE_12_ASSET = "defaultData/jreadVoice/jread_voice_plugins_12.zip"
-    private const val BUILTIN_AUDIOS_1064_PLUGIN_ASSET = "defaultData/jreadVoice/audios_1064_builtin_plugin.json"
     private const val BUILTIN_VIVI_GROUP_KEY = "性格分组演员池"
     private const val BUILTIN_VIVI_LEGACY_GROUP_KEY = "Vivi的独舞"
     private const val BUILTIN_PLUGIN_BUNDLE_12_KEY = "maoxiang.tts.gj_v35"
@@ -242,64 +238,6 @@ object JReadVoiceEngine {
         ensureBuiltInSystemVoiceConfigPresets(appContext)
         val prefs = appContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         deduplicateBuiltInVoicePool(appContext, prefs)
-        if (prefs.getBoolean(KEY_BUILTIN_VIVI_CONFIG_SEEDED, false)) {
-            return
-        }
-        val text = runCatching {
-            appContext.assets.open(BUILTIN_VIVI_CONFIG_ASSET)
-                .bufferedReader(Charsets.UTF_8)
-                .use { it.readText() }
-        }.getOrNull() ?: return
-        seedingBuiltInConfigs = true
-        try {
-            resetBuiltInViviVoicePool(appContext)
-            val count = runCatching { importConfigsFromJson(appContext, text, useStableId = true) }.getOrDefault(0)
-            if (count > 0 || hasConfigGroup(prefs.getString(KEY_CONFIGS, "[]").orEmpty(), BUILTIN_VIVI_GROUP_KEY)) {
-                prefs.edit().putBoolean(KEY_BUILTIN_VIVI_CONFIG_SEEDED, true).apply()
-                AppLog.putDebug("[J阅读声音引擎] 已预置 Vivi 性格音色池：$count 项")
-            }
-        } finally {
-            seedingBuiltInConfigs = false
-        }
-    }
-
-    private fun resetBuiltInViviVoicePool(context: Context) {
-        val prefs = context.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val configs = runCatching { JSONArray(prefs.getString(KEY_CONFIGS, "[]").orEmpty()) }.getOrNull()
-        if (configs != null) {
-            val keptConfigs = buildList {
-                for (index in 0 until configs.length()) {
-                    val item = configs.optJSONObject(index) ?: continue
-                    val group = firstText(item, "groupName", "group", "configGroupName")
-                    val name = firstText(item, "displayName", "name", "label")
-                    if (
-                        group.contains(BUILTIN_VIVI_GROUP_KEY, ignoreCase = true) ||
-                        group.contains(BUILTIN_VIVI_LEGACY_GROUP_KEY, ignoreCase = true) ||
-                        name.contains(BUILTIN_VIVI_LEGACY_GROUP_KEY, ignoreCase = true) ||
-                        name.contains(BUILTIN_VIVI_GROUP_KEY, ignoreCase = true)
-                    ) {
-                        continue
-                    }
-                    add(item)
-                }
-            }
-            prefs.edit().putString(KEY_CONFIGS, JSONArray(keptConfigs).toString()).apply()
-        }
-        val groups = runCatching { JSONArray(prefs.getString(KEY_GROUPS, "[]").orEmpty()) }.getOrNull()
-        if (groups != null) {
-            val keptGroups = buildList {
-                for (index in 0 until groups.length()) {
-                    val item = groups.optJSONObject(index) ?: continue
-                    val group = firstText(item, "groupName", "group", "configGroupName")
-                    if (
-                        group.contains(BUILTIN_VIVI_GROUP_KEY, ignoreCase = true) ||
-                        group.contains(BUILTIN_VIVI_LEGACY_GROUP_KEY, ignoreCase = true)
-                    ) continue
-                    add(item)
-                }
-            }
-            prefs.edit().putString(KEY_GROUPS, JSONArray(keptGroups).toString()).apply()
-        }
     }
 
     private fun ensureBuiltInSystemVoiceConfigPresets(context: Context) {
@@ -354,18 +292,6 @@ object JReadVoiceEngine {
             saveConfigs(context, kept)
         }
         prefs.edit().putBoolean(KEY_BUILTIN_VIVI_DEDUPED, true).apply()
-    }
-
-    private fun hasConfigGroup(raw: String, groupKeyword: String): Boolean {
-        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return false
-        for (index in 0 until array.length()) {
-            val item = array.optJSONObject(index) ?: continue
-            val group = firstText(item, "groupName", "group", "configGroupName")
-            if (group.contains(groupKeyword, ignoreCase = true)) return true
-            val name = firstText(item, "displayName", "name", "label")
-            if (name.contains(groupKeyword, ignoreCase = true)) return true
-        }
-        return false
     }
 
     fun isConfigPlayable(context: Context, config: VoiceConfig): Boolean {
@@ -1243,25 +1169,6 @@ object JReadVoiceEngine {
             }
         }
 
-        if (!prefs.getBoolean(KEY_BUILTIN_AUDIOS_1064_PLUGIN_SEEDED, false)) {
-            val text = runCatching {
-                appContext.assets.open(BUILTIN_AUDIOS_1064_PLUGIN_ASSET)
-                    .bufferedReader(Charsets.UTF_8)
-                    .use { it.readText() }
-            }.getOrNull()
-            if (text != null) {
-                seedingBuiltInPlugins = true
-                try {
-                    val count = runCatching { importPluginsFromJson(appContext, text) }.getOrDefault(0)
-                    if (count > 0 || hasPlugin(prefs.getString(KEY_PLUGINS, "[]").orEmpty(), "jread.audios.1064")) {
-                        prefs.edit().putBoolean(KEY_BUILTIN_AUDIOS_1064_PLUGIN_SEEDED, true).apply()
-                        AppLog.putDebug("[J阅读声音引擎] 已预置 Audios 1064 内置音效插件：$count 个")
-                    }
-                } finally {
-                    seedingBuiltInPlugins = false
-                }
-            }
-        }
         cleanupBundledLegacyPlugins(appContext)
     }
 
