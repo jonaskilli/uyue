@@ -1998,15 +1998,85 @@ class ReadBookActivity : BaseReadBookActivity(),
             .show()
         dialogRef.set(dialog)
 
-        // 相邻角色与发音人后台加载：查全书章节列表 + 读约10个章节JSON + 角色音频记录，
-        // 都挪到 IO 线程；算好后回主线程填进弹窗。用户等不及先关了弹窗就丢弃结果。
+        // 相邻角色与发音人后台加载：只读 当前章 + 前后各一章（最多 3 个 JSON），
+        // 把前后名字亮出来就收工。不再做全盘扫描——网格只是快捷填充按钮，
+        // 「替换全书」点击时本来就由 replaceBookRole 自己现扫章节文件，互不依赖。
+        // 全部在 IO 线程，弹窗早在启动协程前就已经显示了。
+        fun fillNeighborGrid(roles: List<DialogRoleManager.RoleInfo>) {
+            neighborSlot.removeAllViews()
+            if (roles.isEmpty()) return
+            val tvLabel = TextView(context).apply {
+                text = "相邻角色"
+                textSize = 14f
+                setPadding(0, 0, 0, 8.dpToPx())
+            }
+            neighborSlot.addView(tvLabel)
+            val gridContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            var currentRow: LinearLayout? = null
+            roles.take(9).forEachIndexed { index, role ->
+                if (index % 3 == 0) {
+                    currentRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                    }
+                    gridContainer.addView(
+                        currentRow,
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                }
+                val btn = Button(context).apply {
+                    text = role.name
+                    textSize = 11f
+                    setPadding(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
+                    setOnClickListener {
+                        etName.setText(role.name)
+                        spGender.setSelection(
+                            genderOptions.indexOf(role.gender).coerceAtLeast(0)
+                        )
+                        spAge.setSelection(
+                            ageOptions.indexOf(role.age).coerceAtLeast(0)
+                        )
+                        val v =
+                            CharacterVoiceHelper.findCharacterVoice(bookName, role.name)
+                                ?: "未设置"
+                        btnVoice.text = v
+                        refreshVoiceName(v)
+                    }
+                }
+                currentRow?.addView(
+                    btn,
+                    LinearLayout.LayoutParams(
+                        0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        1f
+                    ).apply {
+                        if (index % 3 != 2) marginEnd = 4.dpToPx()
+                        if (index >= 3) topMargin = 4.dpToPx()
+                    }
+                )
+            }
+            neighborSlot.addView(
+                gridContainer,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = 12.dpToPx() }
+            )
+        }
+
         lifecycleScope.launch(IO) {
             val chapterTitles = book?.let {
                 appDb.bookChapterDao.getChapterList(it.bookUrl).map { c -> c.title }
             } ?: emptyList()
             val currentChapterIndex = chapterTitles.indexOf(chapterTitle)
-            val neighborRoles = DialogRoleManager.collectNeighborRoles(
-                bookName, chapterTitle, seq, name, chapterTitles, currentChapterIndex
+            // 只看当前章与前后各一章，立刻出前后名字
+            val fastRoles = DialogRoleManager.collectNeighborRoles(
+                bookName, chapterTitle, seq, name, chapterTitles, currentChapterIndex,
+                maxChapterSpan = 1
             )
             val voice = CharacterVoiceHelper.findCharacterVoice(bookName, name) ?: "未设置"
             withContext(Main) {
@@ -2014,68 +2084,7 @@ class ReadBookActivity : BaseReadBookActivity(),
                 if (!dlg.isShowing) return@withContext
                 btnVoice.text = voice
                 refreshVoiceName(voice)
-                if (neighborRoles.isEmpty()) return@withContext
-                val tvLabel = TextView(context).apply {
-                    text = "相邻角色"
-                    textSize = 14f
-                    setPadding(0, 0, 0, 8.dpToPx())
-                }
-                neighborSlot.addView(tvLabel)
-                val gridContainer = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                }
-                var currentRow: LinearLayout? = null
-                neighborRoles.take(9).forEachIndexed { index, role ->
-                    if (index % 3 == 0) {
-                        currentRow = LinearLayout(context).apply {
-                            orientation = LinearLayout.HORIZONTAL
-                        }
-                        gridContainer.addView(
-                            currentRow,
-                            LinearLayout.LayoutParams(
-                                LinearLayout.LayoutParams.MATCH_PARENT,
-                                LinearLayout.LayoutParams.WRAP_CONTENT
-                            )
-                        )
-                    }
-                    val btn = Button(context).apply {
-                        text = role.name
-                        textSize = 11f
-                        setPadding(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
-                        setOnClickListener {
-                            etName.setText(role.name)
-                            spGender.setSelection(
-                                genderOptions.indexOf(role.gender).coerceAtLeast(0)
-                            )
-                            spAge.setSelection(
-                                ageOptions.indexOf(role.age).coerceAtLeast(0)
-                            )
-                            val v =
-                                CharacterVoiceHelper.findCharacterVoice(bookName, role.name)
-                                    ?: "未设置"
-                            btnVoice.text = v
-                            refreshVoiceName(v)
-                        }
-                    }
-                    currentRow?.addView(
-                        btn,
-                        LinearLayout.LayoutParams(
-                            0,
-                            LinearLayout.LayoutParams.WRAP_CONTENT,
-                            1f
-                        ).apply {
-                            if (index % 3 != 2) marginEnd = 4.dpToPx()
-                            if (index >= 3) topMargin = 4.dpToPx()
-                        }
-                    )
-                }
-                neighborSlot.addView(
-                    gridContainer,
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { bottomMargin = 12.dpToPx() }
-                )
+                fillNeighborGrid(fastRoles)
             }
         }
 
