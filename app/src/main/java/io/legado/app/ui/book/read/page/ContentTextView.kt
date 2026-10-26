@@ -557,8 +557,11 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
 
     /**
      * 使用 ExoPlayer 播放单个缓存音频文件
+     * 播放前把该缓存音频复制到 /storage/emulated/0/Download/chajian/试听音频.mp3（覆盖），
+     * 方便把可能出问题的音频导出到电脑上分析。
      */
     private fun playCacheFile(file: File) {
+        exportCacheFileForAudit(file)
         try {
             paragraphPlayer?.release()
             paragraphPlayer = ExoPlayer.Builder(context).build().apply {
@@ -568,6 +571,27 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
             }
         } catch (e: Exception) {
             context.longToastOnUi("播放出错：${e.localizedMessage}")
+        }
+    }
+
+    /**
+     * 把试听的缓存音频复制到 Download/chajian（固定文件名覆盖保存），
+     * 每次试听新段落都会覆盖上一次的，始终保留最新试听的那段。
+     * 系统 TTS 缓存是 .wav，按原扩展名保存（试听音频.wav）。
+     */
+    private fun exportCacheFileForAudit(file: File) {
+        renderThread.execute {
+            runCatching {
+                val ext = if (file.name.endsWith(".wav")) "wav" else "mp3"
+                val dest = File("/storage/emulated/0/Download/chajian/试听音频.$ext")
+                dest.parentFile?.mkdirs()
+                dest.delete()
+                file.copyTo(dest, overwrite = true)
+            }.onSuccess {
+                // 静默导出，不弹提示
+            }.onFailure {
+                context.longToastOnUi("导出试听音频失败：${it.localizedMessage}")
+            }
         }
     }
 

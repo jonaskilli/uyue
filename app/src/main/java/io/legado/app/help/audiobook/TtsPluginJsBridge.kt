@@ -276,7 +276,18 @@ class TtsPluginJsBridge {
             } else {
                 JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
             }
-            val outcome = applyPostAudioImmediately(bytes, usedConfig, voiceTag)
+            val outcome = applyPostAudioImmediately(bytes, usedConfig, voiceTag) {
+                // 转码失败时的重新合成兜底：走同样的引擎入口，失败返回 null
+                runCatching {
+                    if (usedConfig != null) {
+                        JReadVoiceEngine.synthesizeLineAudioWithConfig(
+                            context, usedConfig, text, pointerJson, requestId
+                        )
+                    } else {
+                        JReadVoiceEngine.synthesizeLineAudio(context, text, pointerJson, requestId)
+                    }
+                }.getOrNull()
+            }
             // 只有真的返回了字节才记录：脚本是 `if (audio && audio.length > 0)` 才 write，
             // 返回空时若也记一条，records 就会比 segments 多，导致逐段对齐整体失效。
             if (outcome.bytes != null && outcome.bytes.isNotEmpty()) {
@@ -335,7 +346,12 @@ class TtsPluginJsBridge {
         val pointerJson = JSONObject().put("voiceTag", config.voiceTag).toString()
         return try {
             val bytes = JReadVoiceEngine.synthesizeConfigLineAudio(context, config, text, pointerJson, requestId)
-            val outcome = applyPostAudioImmediately(bytes, config, config.voiceTag)
+            val outcome = applyPostAudioImmediately(bytes, config, config.voiceTag) {
+                // 转码失败时的重新合成兜底：失败返回 null
+                runCatching {
+                    JReadVoiceEngine.synthesizeConfigLineAudio(context, config, text, pointerJson, requestId)
+                }.getOrNull()
+            }
             // 只有真的返回了字节才记录（脚本按 length > 0 决定是否 write）
             if (outcome.bytes != null && outcome.bytes.isNotEmpty()) {
                 addRecord(
@@ -379,6 +395,7 @@ class TtsPluginJsBridge {
         bytes: ByteArray?,
         config: JReadVoiceEngine.VoiceConfig?,
         voiceTag: String,
+        retrySynthesize: (() -> ByteArray?)? = null,
     ): PostAudioOutcome {
         if (bytes == null || bytes.isEmpty()) {
             return PostAudioOutcome(bytes, false, PostAudioParams())
@@ -395,7 +412,8 @@ class TtsPluginJsBridge {
             gain = 1.0f,
             postParams = params,
         )
-        // 四级解码全失败才回退原始字节，保证合成不中断。
+        // 解码失败（含"解出一半被完整性校验拦截"）→ 重新合成一次再转；
+        // 重新合成仍失败才回退原始字节，保证合成不中断。
         //
         // 关键：**只有转码成功才置位** synthesisPostProcessed、才标记 converted。
         // 若失败也置位，朗读落盘前那趟会认为「参数已经调过」而把 postParams 置 null，
@@ -405,9 +423,29 @@ class TtsPluginJsBridge {
         // 自己的参数补做后处理（旁白成功与否不影响对话那段）。
         if (out == null) {
             AppLog.put(
-                "[TtsPluginJsBridge] 合成音频转 WAV 失败，回退原始字节: " +
+                "[TtsPluginJsBridge] 合成音频转 WAV 失败（解码兜底全部失败或解码不完整）: " +
                     "tag=$voiceTag bytes=${bytes.size}"
             )
+            if (retrySynthesize != null) {
+                val retryBytes = runCatching { retrySynthesize() }.getOrNull()
+                if (retryBytes != null && retryBytes.isNotEmpty()) {
+                    val retryOut = io.legado.app.utils.AudioDecodeUtil.decodeToStandardWav(
+                        retryBytes,
+                        gain = 1.0f,
+                        postParams = params,
+                    )
+                    if (retryOut != null) {
+                        // 重合成成功：不打日志（避免刷屏），静默返回成品
+                        synthesisPostProcessed = true
+                        return PostAudioOutcome(retryOut, converted = true, params = params)
+                    }
+                    AppLog.put("[TtsPluginJsBridge] 重新合成后仍转 WAV 失败，回退原始字节: tag=$voiceTag")
+                    TtsSynthLog.put(TtsSynthLog.Level.ERROR, "重新合成后仍转码失败 [$voiceTag]")
+                } else {
+                    AppLog.put("[TtsPluginJsBridge] 重新合成失败，回退原始字节: tag=$voiceTag")
+                    TtsSynthLog.put(TtsSynthLog.Level.ERROR, "重新合成失败 [$voiceTag]")
+                }
+            }
             return PostAudioOutcome(bytes, converted = false, params = params)
         }
         synthesisPostProcessed = true
