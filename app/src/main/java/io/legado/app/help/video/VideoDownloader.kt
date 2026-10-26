@@ -994,6 +994,21 @@ object VideoDownloader {
         // 分片已经不带 .ts 后缀，但换名前的老目录、以及用户手动拷进来的文件
         // 仍会被相册扫到，放一个 .nomedia 双保险（幂等，重复调用无开销）
         ensureNoMedia(epFolder)
+        // ===== 完整缓存保护 =====
+        // 上次的分片已经**全部落盘**时（哪怕这次拿到的密钥和当时不同），这份缓存
+        // 自带旧密钥（key.bin/meta.json），自成一体、可以正常播放——直接按
+        // "已完成"返回，一个分片都不动，也不联网。只有分片**缺失**的才继续往下走：
+        // 那种情况如果密钥变了，旧分片必须整集清掉重下（新密钥解不开旧密钥
+        // 加密的分片，混用整集花屏），见下方 key.bin 比对处。
+        // 判定完全用磁盘现状（旧 playlist.m3u8 + 逐片核对），发生在拉取新清单之前，
+        // 所以完整缓存连一次网络请求都不发。
+        if (resume) {
+            val done = hlsSegProgress(epFolder)
+            if (done != null && done.first > 0 && done.second >= done.first) {
+                AppLog.putDebug("分片已完整，跳过下载：${epFolder.name}（${done.first} 片）")
+                return done
+            }
+        }
         var playlist = fetchText(playlistUrl, headers)
         // 主清单(#EXT-X-STREAM-INF)：取码率最高的二级媒体清单，递归解析
         if (playlist.contains("#EXT-X-STREAM-INF")) {
@@ -1072,6 +1087,8 @@ object VideoDownloader {
             // 密钥和上一轮不一样：已下的分片是用旧密钥加密的，留着也解不开，
             // 而且旧密钥会把新的顶掉，让整集都播不了。清空重下——
             // 缓存一半后加密过期、重新解析再来时就会走到这里。
+            // （分片**完整**的缓存走不到这里：入口处的"完整缓存保护"已直接按
+            //   已完成返回，旧密钥那份缓存原样保留。）
             if (keyFile.exists() && !keyFile.readBytes().contentEquals(bytes)) {
                 AppLog.put("密钥已变化，重新下载该选集：${epFolder.name}")
                 epFolder.listFiles()
@@ -1619,8 +1636,13 @@ object VideoDownloader {
     }
 
     private fun mergeEpisode(task: Task): File? {
-        val dir = dirOf(task)
-        val title = titleOf(task)
+        val mp4 = mergeSegFolder(dirOf(task), titleOf(task)) ?: return null
+        notifyCompleted(task) // mp4 已生成：会话可切到本地 mp4 播放
+        return mp4
+    }
+
+    /** 分片文件夹 → mp4 的合并核心：有记录的任务与「其他缓存」孤儿共用同一套 */
+    private fun mergeSegFolder(dir: File, title: String): File? {
         val epFolder = epFolderOf(dir, title)
         if (!epFolder.isDirectory) return null
         val mp4 = File(dir, "$title.mp4")
@@ -1657,8 +1679,223 @@ object VideoDownloader {
             }
         }
         File(epFolder, "index.idx").delete()
-        notifyCompleted(task) // mp4 已生成：会话可切到本地 mp4 播放
         return mp4
+    }
+
+    // ---------- 其他缓存（无下载记录的磁盘缓存） ----------
+
+    /** 一个无下载记录的缓存条目：整份分片文件夹，或一个成品 mp4 */
+    data class OrphanCache(
+        /** 所属视频的保存目录名（Download/保存视频/<dirName>） */
+        val dirName: String,
+        /** 分片文件夹名 / mp4 文件名（不含 .mp4 后缀） */
+        val title: String,
+        /** true = m3u8 分片文件夹；false = 单文件 mp4 */
+        val isHls: Boolean,
+        /** HLS 分片总数 / 已落盘数（isHls 时有效） */
+        val segTotal: Int,
+        val segDone: Int,
+        val sizeBytes: Long,
+    )
+
+    /**
+     * 探测某个视频目录下**没有下载记录**的缓存条目。
+     *
+     * 两种情况会产生这种条目：
+     * - 下载记录丢失（tasks.json 被清 / 数据损坏），分片文件夹、密钥等文件都还在；
+     * - 换了视频源重下，每集命名不同（"1、2…" vs "第一集、第二集…"），
+     *   旧源下的目录对不上新源的任何一集记录。
+     * 有记录的条目一律忽略：界面上平时只显示有记录的，「其他缓存」按钮才补看这些孤儿。
+     *
+     * 注意：下载记录的恢复（[restoreIfNeeded]）是异步的，调用方应配合记录状态流的
+     * 变化重扫一遍，避免恢复完成前把其实有记录的目录误报成孤儿。
+     */
+    fun orphanCaches(dirName: String): List<OrphanCache> {
+        if (dirName.isBlank()) return emptyList()
+        val dir = File(rootDir(), dirName)
+        if (!dir.isDirectory) return emptyList()
+        val recorded = synchronized(statesMap) {
+            statesMap.values.filter { it.dirName == dirName }
+        }.mapTo(HashSet()) { it.title }
+        val result = mutableListOf<OrphanCache>()
+        dir.listFiles()?.forEach { f ->
+            when {
+                f.isDirectory -> {
+                    // 只认分片文件夹（有 seg_ 分片），其它杂物目录不动
+                    val hasSeg = f.listFiles().orEmpty().any { isSegFileName(it.name) }
+                    if (!hasSeg || f.name in recorded) return@forEach
+                    val (total, done) = hlsSegProgress(f) ?: (0 to 0)
+                    result.add(
+                        OrphanCache(
+                            dirName = dirName,
+                            title = f.name,
+                            isHls = true,
+                            segTotal = total,
+                            segDone = done,
+                            sizeBytes = runCatching {
+                                f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                            }.getOrDefault(0L),
+                        )
+                    )
+                }
+                f.isFile && f.name.endsWith(".mp4") -> {
+                    val title = f.name.removeSuffix(".mp4")
+                    if (title in recorded) return@forEach
+                    result.add(
+                        OrphanCache(dirName, title, false, 0, 0, f.length())
+                    )
+                }
+            }
+        }
+        // 排序三层：手动顺序（存在视频文件夹里的 .order.json，随文件夹走）
+        // → 集数自然排序（1/01/第1集/第一集…统一按数字比）→ 标题兜底。
+        // 只影响「其他缓存」列表；有记录的分集仍按目录集序号排，两套互不干扰。
+        val savedIdx = HashMap<String, Int>()
+        loadOrphanOrder(dirName).forEachIndexed { i, t -> if (t !in savedIdx) savedIdx[t] = i }
+        return result.sortedWith(
+            compareBy<OrphanCache> { savedIdx[it.title] ?: Int.MAX_VALUE }
+                .thenBy { parseEpisodeNumber(it.title) ?: Int.MAX_VALUE }
+                .thenBy { it.title }
+        )
+    }
+
+    /**
+     * 从集数命名里解析出集号，供自然排序用。
+     * 支持：`1` / `01` / `1集` / `第1集` / `第01话` / `EP12`，以及中文数字
+     * `第一集` / `第十二集` / `一百零三`（支持 十/百 组合，"两"按 2 处理）。
+     * 解析不出的返回 null（排到有集号的后面）。
+     */
+    fun parseEpisodeNumber(title: String): Int? {
+        val t = title.trim()
+        if (t.isEmpty()) return null
+        t.toIntOrNull()?.let { return it }
+        Regex("^(\\d+)\\s*集?$").find(t)?.let { return it.groupValues[1].toIntOrNull() }
+        Regex("^第\\s*(\\d+)\\s*[集话話期季部卷篇回]?.*$").find(t)?.let {
+            return it.groupValues[1].toIntOrNull()
+        }
+        Regex("^EP?\\.?\\s*(\\d+).*$", RegexOption.IGNORE_CASE).find(t)?.let {
+            return it.groupValues[1].toIntOrNull()
+        }
+        val cn = Regex("^第\\s*([零一二两三四五六七八九十百]+)\\s*[集话話期季部卷篇回]?$").find(t)
+            ?.groupValues?.get(1)
+            ?: t.takeIf { it.matches(Regex("^[零一二两三四五六七八九十百]+$")) }
+        return cn?.let { chineseToInt(it) }
+    }
+
+    private val CN_DIGITS = mapOf(
+        '零' to 0, '一' to 1, '二' to 2, '两' to 2, '三' to 3, '四' to 4,
+        '五' to 5, '六' to 6, '七' to 7, '八' to 8, '九' to 9,
+    )
+
+    /** 中文数字 → 整数（支持到百位："十"=10、"二十三"=23、"一百二十三"=123） */
+    private fun chineseToInt(s: String): Int? {
+        var total = 0
+        var current = 0
+        var any = false
+        for (c in s) {
+            when (c) {
+                '零' -> { any = true }
+                '十' -> { total += (if (current == 0) 1 else current) * 10; current = 0; any = true }
+                '百' -> { total += (if (current == 0) 1 else current) * 100; current = 0; any = true }
+                else -> {
+                    val d = CN_DIGITS[c] ?: return null
+                    current = current * 10 + d
+                    any = true
+                }
+            }
+        }
+        return if (any) total + current else null
+    }
+
+    /**
+     * 「其他缓存」手动排序的存档文件：直接放在视频文件夹里（隐藏文件），
+     * 内容是按顺序排好的标题数组。这样排序跟着文件夹走——
+     * APP 数据丢了、换台设备重新读这个文件夹，自定义顺序都还在。
+     */
+    private const val ORPHAN_ORDER_FILE = ".order.json"
+
+    /** 读取手动排序（无文件/损坏返回空列表，走默认自然排序） */
+    fun loadOrphanOrder(dirName: String): List<String> =
+        runCatching {
+            val f = File(File(rootDir(), dirName), ORPHAN_ORDER_FILE)
+            val arr = org.json.JSONArray(f.readText())
+            (0 until arr.length()).map { arr.optString(it) }
+        }.getOrDefault(emptyList())
+
+    /** 保存手动排序（后台写，避免卡界面） */
+    fun saveOrphanOrderAsync(dirName: String, titles: List<String>) {
+        scope.launch {
+            runCatching {
+                val arr = org.json.JSONArray()
+                titles.forEach { arr.put(it) }
+                File(File(rootDir(), dirName), ORPHAN_ORDER_FILE).writeText(arr.toString())
+            }.onFailure { AppLog.put("保存其他缓存排序失败：$dirName", it) }
+        }
+    }
+
+    /** 清掉手动排序，回到默认自然排序 */
+    fun clearOrphanOrderAsync(dirName: String) {
+        scope.launch {
+            runCatching { File(File(rootDir(), dirName), ORPHAN_ORDER_FILE).delete() }
+                .onFailure { AppLog.put("清除其他缓存排序失败：$dirName", it) }
+        }
+    }
+
+    /**
+     * 播放无记录的缓存：成品 mp4 优先；分片文件夹则重建 local.m3u8 后返回。
+     * 与有记录的分集走同一套本地播放机制（密钥/初始化段用文件夹里的本地副本）。
+     */
+    fun findOrphanFile(dirName: String, title: String): File? {
+        val dir = File(rootDir(), dirName)
+        val mp4 = File(dir, "$title.mp4")
+        if (mp4.exists() && mp4.length() > 0) return mp4
+        val epFolder = File(dir, title)
+        if (epFolder.isDirectory &&
+            epFolder.listFiles().orEmpty().any { isSegFileName(it.name) }
+        ) {
+            ensureNoMedia(epFolder)
+            return runCatching { buildLocalPlaylist(epFolder) }.getOrNull()
+        }
+        return null
+    }
+
+    /** 合并无记录的缓存分片为 MP4（合并完成或失败后 onDone 在主线程回调，供界面刷新列表） */
+    fun mergeOrphanToMp4(dirName: String, title: String, onDone: (() -> Unit)? = null) {
+        scope.launch {
+            runCatching { mergeSegFolder(File(rootDir(), dirName), title) }
+                .onSuccess { mp4 ->
+                    appCtx.toastOnUi(
+                        if (mp4 != null) {
+                            "已合并为 MP4：$title.mp4"
+                        } else {
+                            "合并失败：$title 没有可合并的分片"
+                        },
+                        Toast.LENGTH_LONG,
+                    )
+                }
+                .onFailure {
+                    AppLog.put("合并为 MP4 失败：$title", it)
+                    appCtx.toastOnUi("合并失败：$title", Toast.LENGTH_LONG)
+                }
+            withContext(Dispatchers.Main) { onDone?.invoke() }
+        }
+    }
+
+    /** 删除无记录的缓存条目（删除完成后 onDone 在主线程回调，供界面刷新列表） */
+    fun deleteOrphanCache(
+        dirName: String,
+        title: String,
+        isHls: Boolean,
+        onDone: (() -> Unit)? = null,
+    ) {
+        scope.launch {
+            runCatching {
+                val dir = File(rootDir(), dirName)
+                if (isHls) File(dir, title).deleteRecursively()
+                else File(dir, "$title.mp4").delete()
+            }.onFailure { AppLog.put("删除其他缓存失败：$title", it) }
+            withContext(Dispatchers.Main) { onDone?.invoke() }
+        }
     }
 
     /**
