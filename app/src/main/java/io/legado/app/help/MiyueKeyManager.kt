@@ -4,11 +4,15 @@ import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.content.res.ColorStateList
+import android.net.Uri
 import android.preference.PreferenceManager
 import android.text.Editable
 import android.text.TextWatcher
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -27,6 +31,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import com.google.android.material.textfield.TextInputEditText
 import io.legado.app.R
+import io.legado.app.lib.theme.primaryColor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,57 +59,236 @@ object MiyueKeyManager {
     private const val KEY_LIST_FILE = "keys.json"
     private const val PREF_KEY = "miyue"
 
+    /** 保存密钥界面「免费大模型合集」跳转的网址 */
+    private const val FREE_MODELS_URL = "https://sps.yy-gp.com/hho99/i.html"
+
     /** 测试 / 取模型都是网络操作，统一挂在这个 scope 上，界面关闭时取消 */
     private val keyScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     // ==================== 对外入口 ====================
 
-    /** 保存密钥：两步弹窗（先输密钥内容，再输密钥名称） */
+    /**
+     * 保存密钥：单界面完成，不再分两步。
+     *
+     * 顶部一行：右上角「免费大模型合集」调系统浏览器打开白嫖渠道页；
+     * 下面是密钥名称；再下面两个切换按钮选录入方式：
+     *  - 传统方式：接口地址 / 模型名字 / 密钥 三个输入框，模型名字旁有「获取模型」，
+     *    与密钥管理里同一套（拉模型列表，点选即用）；
+     *  - @@方式：一个输入框，直接粘贴脚本侧约定的 `地址@@模型@@密钥` 文本。
+     * 两种方式最终都存成同一格式（传统方式由三个框拼成一组 @@ 格式）。
+     * 校验不过不关弹窗，改完直接再点保存。
+     */
     fun saveKey(context: Context) {
-        val keyInput = TextInputEditText(context).apply {
-            hint = "输入密钥内容"
-            setPadding(50, 30, 50, 30)
+        val container = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 20, 50, 20)
         }
 
-        AlertDialog.Builder(context)
-            .setTitle("保存密钥 - 第1步")
-            .setView(keyInput)
-            .setPositiveButton("下一步") { _, _ ->
-                val keyContent = keyInput.text?.toString()?.trim() ?: ""
-                if (keyContent.isNotEmpty()) {
-                    val nameInput = TextInputEditText(context).apply {
-                        hint = "输入密钥名称"
-                        setPadding(50, 30, 50, 30)
-                    }
-
-                    AlertDialog.Builder(context)
-                        .setTitle("保存密钥 - 第2步")
-                        .setView(nameInput)
-                        .setPositiveButton("保存") { _, _ ->
-                            val name = nameInput.text?.toString()?.trim() ?: ""
-                            if (name.isNotEmpty()) {
-                                saveKeyToJson(name, keyContent)
-                                toast(context, "密钥已保存: $name")
-                            } else {
-                                toast(context, "名称不能为空")
-                            }
-                        }
-                        .setNegativeButton("取消", null)
-                        .show()
-                } else {
-                    toast(context, "密钥内容不能为空")
+        fun addInput(hint: String, multiLine: Boolean = false): TextInputEditText =
+            TextInputEditText(context).apply {
+                this.hint = hint
+                // 提示文字调小一档：默认 16sp 在这个弹窗里显得太挤
+                textSize = 13f
+                if (multiLine) {
+                    setSingleLine(false)
+                    minLines = 3
                 }
+                // 不加内边距——底部 padding 会把提示文字压到下划线上，
+                // 输入框之间的距离交给外边距（addSpaced）
             }
+
+        /** 统一给输入框/行加上下间距：竖向拉开距离，避免整块挤成一团 */
+        fun addSpaced(
+            parent: LinearLayout,
+            view: View,
+            topPx: Int = 22,
+        ) {
+            parent.addView(
+                view,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = topPx }
+            )
+        }
+
+        // ===== 顶部一行：右侧「免费大模型合集」 =====
+        val headerRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        }
+        val btnFreeModels = Button(context).apply {
+            text = "免费大模型合集"
+            textSize = 11f
+            minWidth = 0
+            minHeight = 0
+            includeFontPadding = false
+            setPadding(20, 10, 20, 10)
+            backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF9800"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(FREE_MODELS_URL)))
+                }.onFailure { toast(context, "没有找到可用的浏览器") }
+            }
+        }
+        headerRow.addView(
+            btnFreeModels,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        container.addView(headerRow)
+
+        // ===== 密钥名称 =====
+        val etName = addInput("密钥名称")
+        addSpaced(container, etName)
+
+        // ===== 方式切换按钮 =====
+        val modeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        fun modeButton(text: String): Button = Button(context).apply {
+            this.text = text
+            textSize = 12f
+            minWidth = 0
+            minHeight = 0
+            includeFontPadding = false
+            setPadding(0, 12, 0, 12)
+            setTextColor(Color.WHITE)
+        }
+        val btnModeTrad = modeButton("传统方式")
+        val btnModeRaw = modeButton("@@方式")
+        modeRow.addView(
+            btnModeTrad,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = 8
+            }
+        )
+        modeRow.addView(
+            btnModeRaw,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        addSpaced(container, modeRow)
+
+        // ===== 传统方式：接口地址 / 模型名字（+获取模型）/ 密钥 =====
+        // etKey 声明放在「获取模型」按钮之前：按钮的点击回调要用它
+        val etKey = addInput("密钥")
+        val panelTrad = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val etEndpoint = addInput("接口地址（留空用默认智谱地址）")
+        panelTrad.addView(etEndpoint)
+        val modelRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        val etModel = addInput("模型名字")
+        modelRow.addView(
+            etModel,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        val btnFetchModels = Button(context).apply {
+            text = "获取模型"
+            textSize = 11f
+            minWidth = 0
+            minHeight = 0
+            includeFontPadding = false
+            setPadding(20, 10, 20, 10)
+            setOnClickListener {
+                val key = etKey.text?.toString()?.trim().orEmpty()
+                if (key.isEmpty()) {
+                    toast(context, "请先填密钥，再获取模型")
+                    return@setOnClickListener
+                }
+                val entry = ApiEntry(
+                    endpoint = MiyueKeyTester.normalizeEndpoint(
+                        etEndpoint.text?.toString().orEmpty()
+                    ),
+                    model = "",
+                    key = key,
+                    scene = "保存密钥",
+                )
+                showModelsDialog(context, entry) { picked -> etModel.setText(picked) }
+            }
+        }
+        modelRow.addView(
+            btnFetchModels,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = 8; gravity = Gravity.CENTER_VERTICAL }
+        )
+        addSpaced(panelTrad, modelRow)
+        addSpaced(panelTrad, etKey)
+        addSpaced(container, panelTrad)
+
+        // ===== @@方式：一个多行输入框 =====
+        val panelRaw = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val etRaw = addInput(
+            "地址@@模型@@密钥（多组连着写即可；纯密钥只填密钥）",
+            multiLine = true
+        )
+        addSpaced(panelRaw, etRaw, 10)
+        addSpaced(container, panelRaw)
+
+        var traditional = true
+        fun paintMode() {
+            btnModeTrad.backgroundTintList = ColorStateList.valueOf(
+                if (traditional) context.primaryColor else Color.parseColor("#9E9E9E")
+            )
+            btnModeRaw.backgroundTintList = ColorStateList.valueOf(
+                if (traditional) Color.parseColor("#9E9E9E") else context.primaryColor
+            )
+            panelTrad.visibility = if (traditional) View.VISIBLE else View.GONE
+            panelRaw.visibility = if (traditional) View.GONE else View.VISIBLE
+        }
+        btnModeTrad.setOnClickListener { traditional = true; paintMode() }
+        btnModeRaw.setOnClickListener { traditional = false; paintMode() }
+        paintMode()
+
+        val dialog = AlertDialog.Builder(context)
+            .setTitle("保存密钥")
+            .setView(container)
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+
+        // 保存按钮接管点击：校验不过就不关弹窗，免得填的东西全丢
+        dialog.setButton(AlertDialog.BUTTON_POSITIVE, "保存") { _, _ -> }
+        dialog.show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
+            val name = etName.text?.toString()?.trim().orEmpty()
+            if (name.isEmpty()) {
+                toast(context, "密钥名称不能为空")
+                return@setOnClickListener
+            }
+            val content = if (traditional) {
+                val key = etKey.text?.toString()?.trim().orEmpty()
+                if (key.isEmpty()) {
+                    toast(context, "密钥不能为空")
+                    return@setOnClickListener
+                }
+                val endpoint = MiyueKeyTester.normalizeEndpoint(
+                    etEndpoint.text?.toString().orEmpty()
+                )
+                val model = etModel.text?.toString()?.trim().orEmpty()
+                    .ifEmpty { MiyueKeyTester.DEFAULT_MODEL }
+                "$endpoint@@$model@@$key"
+            } else {
+                etRaw.text?.toString()?.trim().orEmpty()
+            }
+            if (content.isEmpty()) {
+                toast(context, "密钥内容不能为空")
+                return@setOnClickListener
+            }
+            saveKeyToJson(name, content)
+            toast(context, "密钥已保存: $name")
+            dialog.dismiss()
+        }
     }
 
     /**
-     * 恢复密钥：可折叠列表。
+     * 密钥管理：可折叠列表 + 顶部「正在使用」分区。
      *
-     * 组 = 一个已保存的密钥（整行点击展开/折叠，右侧可 恢复 / 测试整份 / 修改）；
+     * 顶部 = 当前生效的密钥单独一块（卡片底色 + 粗分隔线与下方隔开，右侧无「使用」按钮）；
+     * 下方组 = 一个已保存的密钥（整行点击展开/折叠，右侧可 恢复 / 测试整份 / 修改）；
      * 子 = 该密钥里解析出来的每一个 API（只显示模型名，右侧可单独 测试 / 取该接口的全部模型）。
      * 底部「测试全部」一次性把所有密钥里的所有 API 都测一遍。
+     * 两个分区共用本适配器，任一区改动后互相刷新，永远显示最新状态。
      */
     fun restoreKey(context: Context) {
         val keyMap = getKeyMap()
@@ -123,33 +307,14 @@ object MiyueKeyManager {
         )
 
         val listView = dialog.findViewById<ExpandableListView>(R.id.lv_keys)
+        val currentListView = dialog.findViewById<ExpandableListView>(R.id.lv_current_key)
+        val tvCurrentMissing = dialog.findViewById<TextView>(R.id.tv_current_missing)
         val btnTestAll = dialog.findViewById<Button>(R.id.btn_test_all)
         val btnDelete = dialog.findViewById<Button>(R.id.btn_delete_key)
-        val btnShowCurrent = dialog.findViewById<Button>(R.id.btn_show_current)
         val btnCancel = dialog.findViewById<Button>(R.id.btn_cancel)
 
         val tvHint = dialog.findViewById<TextView>(R.id.tv_key_hint)
-        val adapter = KeyExpandableAdapter(
-            context = context,
-            names = names,
-            keyMap = keyMap,
-            // 当前生效的是哪一份：组行标「使用中」，删除 API 时才知道要不要同步刷新
-            currentKey = readTxtFile(KEY_FILE),
-            onRestore = { name ->
-                val key = keyMap.optString(name, "")
-                writeTxtFile(KEY_FILE, key)
-                saveKeyToPrefs(context, key)
-                toast(context, "已恢复密钥: $name")
-                dialog.dismiss()
-            },
-            onToggle = { gp ->
-                if (listView.isGroupExpanded(gp)) {
-                    listView.collapseGroup(gp)
-                } else {
-                    listView.expandGroup(gp)
-                }
-            },
-        )
+
         // 分隔线必须显式给成 Drawable：
         // ExpandableListView 画子项分隔线用的是 mChildDivider，而它默认不跟随 divider 属性，
         // 部分 ROM 又不把 @color/divider 解析成 Drawable —— 两者任一为 null，
@@ -158,6 +323,105 @@ object MiyueKeyManager {
         listView.divider = dividerDrawable
         listView.dividerHeight = 1
         listView.setChildDivider(dividerDrawable)
+        // 顶部「正在使用」分区同理，两处列表都可能展开画子项分隔线
+        val currentDivider = ColorDrawable(ContextCompat.getColor(context, R.color.divider))
+        currentListView.divider = currentDivider
+        currentListView.dividerHeight = 1
+        currentListView.setChildDivider(currentDivider)
+
+        var bottomAdapter: KeyExpandableAdapter? = null
+        var topAdapter: KeyExpandableAdapter? = null
+
+        /**
+         * 重建顶部「正在使用的密钥」分区。
+         * 任何一区数据有变（换模型 / 删 API / 改名 / 切换使用中）都从这里走一遍：
+         * 重新按 miyue.txt 的内容匹配当前密钥名，整块重建，保证永远显示最新状态。
+         */
+        fun refreshCurrentSection() {
+            val content = readTxtFile(KEY_FILE)
+            // 底部组行的「使用中」标记跟着当前密钥走
+            bottomAdapter?.updateCurrentKey(content)
+            val freshMap = getKeyMap()
+            val freshNames = getKeyNames(freshMap)
+            val currentName = freshNames.firstOrNull { freshMap.optString(it, "") == content }
+            // 旧适配器的测试协程一并取消，避免换块之后旧结果还往回写
+            topAdapter?.cancel()
+            topAdapter = null
+            if (content.isBlank() || currentName == null) {
+                // txt 里没内容，或内容对不上任何已保存密钥（如整份被删）
+                currentListView.visibility = View.GONE
+                tvCurrentMissing.visibility = View.VISIBLE
+                return
+            }
+            tvCurrentMissing.visibility = View.GONE
+            currentListView.visibility = View.VISIBLE
+            val top = KeyExpandableAdapter(
+                context = context,
+                names = mutableListOf(currentName),
+                keyMap = freshMap,
+                currentKey = content,
+                // 顶部这份本来就在用，「使用」按钮按分区标志隐藏
+                onRestore = { },
+                onToggle = { gp ->
+                    if (currentListView.isGroupExpanded(gp)) {
+                        currentListView.collapseGroup(gp)
+                    } else {
+                        currentListView.expandGroup(gp)
+                    }
+                },
+                isCurrentSection = true,
+                // 顶部改了 → 底部列表同步刷（refresh 内部会再触发底部 onDataChanged
+                // 回调 refreshCurrentSection，顶部最终被整块重建，两侧一致）
+                onDataChanged = { bottomAdapter?.refresh() },
+            )
+            currentListView.setAdapter(top)
+            currentListView.expandGroup(0)
+            topAdapter = top
+            // 与下方列表同款的行级交互：点子行看详情、长按删单个 API
+            currentListView.setOnChildClickListener { _, _, g, c, _ ->
+                top.showDetail(g, c)
+                true
+            }
+            currentListView.setOnItemLongClickListener { _, _, position, _ ->
+                val packed = currentListView.getExpandableListPosition(position)
+                if (ExpandableListView.getPackedPositionType(packed)
+                    == ExpandableListView.PACKED_POSITION_TYPE_CHILD
+                ) {
+                    top.confirmRemoveAt(
+                        ExpandableListView.getPackedPositionGroup(packed),
+                        ExpandableListView.getPackedPositionChild(packed)
+                    )
+                }
+                true
+            }
+        }
+
+        val adapter = KeyExpandableAdapter(
+            context = context,
+            names = names,
+            keyMap = keyMap,
+            // 当前生效的是哪一份：组行标「使用中」，删除 API 时才知道要不要同步刷新
+            currentKey = readTxtFile(KEY_FILE),
+            onRestore = { name ->
+                // 现取现用：列表可能刚被改过，外层 keyMap 引用不保证最新
+                val key = getKeyMap().optString(name, "")
+                writeTxtFile(KEY_FILE, key)
+                saveKeyToPrefs(context, key)
+                toast(context, "已恢复密钥: $name")
+                // 不关窗：顶部「正在使用」立刻跟着换，列表留在原地
+                refreshCurrentSection()
+            },
+            onToggle = { gp ->
+                if (listView.isGroupExpanded(gp)) {
+                    listView.collapseGroup(gp)
+                } else {
+                    listView.expandGroup(gp)
+                }
+            },
+            // 底部列表有任何数据改动，顶部「正在使用」都重建一遍
+            onDataChanged = { refreshCurrentSection() },
+        )
+        bottomAdapter = adapter
 
         // 必须用 ExpandableListView 自己的 setAdapter：
         // 直接赋 .adapter 会解析成父类 AdapterView 的 ListAdapter，类型对不上
@@ -215,14 +479,15 @@ object MiyueKeyManager {
         btnDelete.setOnClickListener {
             selectKeyToDelete(context) { adapter.refresh() }
         }
-        btnShowCurrent.setOnClickListener {
-            showCurrentKeyDialog(context)
-        }
         btnCancel.setOnClickListener {
             dialog.dismiss()
         }
-        dialog.setOnDismissListener { adapter.cancel() }
+        dialog.setOnDismissListener {
+            adapter.cancel()
+            topAdapter?.cancel()
+        }
 
+        refreshCurrentSection()
         dialog.show()
     }
 
@@ -392,26 +657,6 @@ object MiyueKeyManager {
     }
 
     // ==================== 查看 / 删除 / 修改 ====================
-
-    private fun showCurrentKeyDialog(context: Context) {
-        val miyueContent = readTxtFile(KEY_FILE)
-        if (miyueContent.isEmpty()) {
-            toast(context, "当前密钥为空")
-            return
-        }
-
-        AlertDialog.Builder(context)
-            .setTitle("当前密钥内容")
-            .setMessage(miyueContent)
-            .setPositiveButton("复制") { _, _ ->
-                val clipboard =
-                    context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("密钥", miyueContent))
-                toast(context, "已复制到剪贴板")
-            }
-            .setNegativeButton("关闭", null)
-            .show()
-    }
 
     private fun selectKeyToDelete(context: Context, onDone: (() -> Unit)? = null) {
         val keyMap = getKeyMap()
@@ -621,11 +866,15 @@ private class KeyExpandableAdapter(
     /** 可变：改了密钥名字或删掉一份之后要原地更新这个列表 */
     private val names: MutableList<String>,
     private var keyMap: JSONObject,
-    /** 打开界面时当前生效的密钥内容，用于标「使用中」与删除后同步 */
-    private val currentKey: String,
+    /** 打开界面时当前生效的密钥内容，用于标「使用中」与删除后同步；可用 [updateCurrentKey] 更新 */
+    private var currentKey: String,
     private val onRestore: (String) -> Unit,
     /** 展开/折叠某个组，由外部驱动 ExpandableListView */
     private val onToggle: (groupPosition: Int) -> Unit,
+    /** 顶部「正在使用」分区专用：隐藏「使用」按钮（这份本来就在用） */
+    private val isCurrentSection: Boolean = false,
+    /** 数据被改动（换模型/删 API/改名/删除）后回调，调用方用于同步另一个分区 */
+    private val onDataChanged: (() -> Unit)? = null,
 ) : BaseExpandableListAdapter() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -730,7 +979,14 @@ private class KeyExpandableAdapter(
         view.findViewById<View>(R.id.tv_group_name).setOnClickListener(toggle)
         view.findViewById<View>(R.id.view_group_dot).setOnClickListener(toggle)
 
-        view.findViewById<Button>(R.id.btn_group_restore).setOnClickListener { onRestore(name) }
+        view.findViewById<Button>(R.id.btn_group_restore).apply {
+            // 顶部「正在使用」分区：这份本来就在用，不再提供「使用」按钮
+            if (isCurrentSection) {
+                visibility = View.GONE
+            } else {
+                setOnClickListener { onRestore(name) }
+            }
+        }
         view.findViewById<Button>(R.id.btn_group_test).setOnClickListener {
             testGroup(groupPosition)
         }
@@ -863,6 +1119,14 @@ private class KeyExpandableAdapter(
         results.clear()
         testing.clear()
         notifyDataSetChanged()
+        onDataChanged?.invoke()
+    }
+
+    /** 当前生效密钥变了（列表里点了「使用」），组行的「使用中」标记跟着变 */
+    fun updateCurrentKey(content: String) {
+        if (currentKey == content) return
+        currentKey = content
+        notifyDataSetChanged()
     }
 
     /** 从这份密钥里剔除一个 API（只影响它所在的那一小段） */
@@ -889,6 +1153,7 @@ private class KeyExpandableAdapter(
                 entriesCache.remove(name)
                 results.keys.removeAll(results.keys.filter { it.startsWith("$name#") }.toSet())
                 notifyDataSetChanged()
+                onDataChanged?.invoke()
                 Toast.makeText(context, "已删除：${entry.model}", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("取消", null)
@@ -912,6 +1177,7 @@ private class KeyExpandableAdapter(
         // 模型变了，之前这条的测试结果不再代表现状
         results.keys.removeAll(results.keys.filter { it.startsWith("$name#") }.toSet())
         notifyDataSetChanged()
+        onDataChanged?.invoke()
         Toast.makeText(context, "${entry.model} → $newModel（已复制）", Toast.LENGTH_SHORT).show()
     }
 
