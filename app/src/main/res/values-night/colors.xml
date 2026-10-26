@@ -13,6 +13,8 @@
          列表区底色 background_menu 夜间 = #424242，卡片要比它更亮才看得出卡片。 -->
     <color name="tts_config_card_bg">#4A4A4A</color>
     <color name="tts_config_card_stroke">#666666</color>
+    <!-- 密钥管理顶部「正在使用的密钥」卡片底色：夜间用带蓝调的深色，与纯灰列表区分 -->
+    <color name="key_current_bg">#22303F</color>
     <color name="background_menu">@color/md_grey_800</color>
     <color name="background_prefs">#10303030</color>
 

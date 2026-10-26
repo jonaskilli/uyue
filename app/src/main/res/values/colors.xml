@@ -24,6 +24,8 @@
          卡片比底色亮一档，再叠描边和阴影，就是压缩包里那种干净的灰阶列表。 -->
     <color name="tts_config_card_bg">#FAFAFA</color>
     <color name="tts_config_card_stroke">#DCDCDC</color>
+    <!-- 密钥管理顶部「正在使用的密钥」卡片底色：主题色淡蓝，日夜间都比列表底色醒目一档 -->
+    <color name="key_current_bg">#E3F2FD</color>
     <color name="background_menu">@color/md_grey_200</color>
     <color name="background_prefs">#7fffffff</color>
 

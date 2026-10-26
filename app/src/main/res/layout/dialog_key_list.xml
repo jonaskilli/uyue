@@ -1,18 +1,68 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 密钥管理界面：
+     顶部单独一个「正在使用的密钥」分区（卡片底色 + 粗分隔线，一眼可辨），
+     下方是「所有密钥」可折叠列表。两个分区功能一致，共用同一个适配器。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:orientation="vertical"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="@color/background">
 
+    <!-- ===== 分区一：正在使用的密钥 ===== -->
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="选择要恢复的密钥"
-        android:textSize="18sp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="4dp"
+        android:text="正在使用的密钥"
+        android:textSize="13sp"
         android:textStyle="bold"
-        android:padding="16dp"
-        android:gravity="center" />
+        android:textColor="@color/primary" />
+
+    <ExpandableListView
+        android:id="@+id/lv_current_key"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/key_current_bg"
+        android:divider="@color/divider"
+        android:dividerHeight="1dp"
+        android:groupIndicator="@null"
+        android:childIndicator="@null"
+        android:childDivider="@color/divider" />
+
+    <TextView
+        android:id="@+id/tv_current_missing"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:text="尚未启用任何已保存的密钥"
+        android:textSize="12sp"
+        android:textColor="@color/secondaryText"
+        android:visibility="gone" />
+
+    <!-- ===== 分区分隔：比列表内分隔线厚，拉开视觉层次 ===== -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="6dp"
+        android:background="@color/bg_divider_line" />
+
+    <!-- ===== 分区二：所有密钥 ===== -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="4dp"
+        android:text="所有密钥"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="@color/primary" />
 
     <TextView
         android:id="@+id/tv_key_hint"
@@ -20,11 +70,10 @@
         android:layout_height="wrap_content"
         android:paddingStart="16dp"
         android:paddingEnd="16dp"
-        android:paddingBottom="8dp"
-        android:gravity="center"
-        android:text="点击展开可查看该密钥里的每个 API"
+        android:paddingBottom="4dp"
+        android:text="展开密钥可查看并测试其中的 API"
         android:textSize="12sp"
-        android:alpha="0.6" />
+        android:textColor="@color/secondaryText" />
 
     <!-- 组 = 一个已保存的密钥；子 = 该密钥里的每个 API -->
     <ExpandableListView
@@ -73,23 +122,6 @@
             android:paddingStart="4dp"
             android:paddingEnd="4dp"
             android:text="删除密钥"
-            android:paddingTop="2dp"
-            android:paddingBottom="2dp"
-            android:includeFontPadding="false"
-            android:textSize="11sp" />
-
-        <Button
-            android:id="@+id/btn_show_current"
-            style="?android:attr/buttonStyleSmall"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="4dp"
-            android:minWidth="0dp"
-            android:minHeight="32dp"
-            android:paddingStart="4dp"
-            android:paddingEnd="4dp"
-            android:text="当前密钥"
             android:paddingTop="2dp"
             android:paddingBottom="2dp"
             android:includeFontPadding="false"
