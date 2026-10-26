@@ -294,7 +294,12 @@ data class TextLine(
         // 这里将绘制区间钳制到合法范围，避免 indentSize 异常时崩溃（如重排后 text 被截断）。
         val drawStart = indentSize.coerceAtLeast(0).coerceAtMost(text.length)
         if (text.length > drawStart) {
-            canvas.drawText(text, drawStart, text.length, startX + offsetX, lineBase - lineTop, paint)
+            // 起笔位置用排版时记录的第一个可见字符的绝对 x（columns[drawStart].start）。
+            // 不能直接用 startX——它是行起点（缩进之前），跳过缩进字符后再从它起笔，
+            // 缩进就丢了，表现为短段落（单行段落）整体左移。
+            val penX = (columns.getOrNull(drawStart) as? TextColumn)?.start
+                ?: (startX + indentWidth)
+            canvas.drawText(text, drawStart, text.length, penX + offsetX, lineBase - lineTop, paint)
         }
         PaintPool.recycle(paint)
         for (i in columns.indices) {
@@ -515,7 +520,8 @@ data class TextLine(
     }
 
     fun checkFastDraw(): Boolean {
-        if (!AppConfig.optimizeRender || exceed || !onlyTextColumn || textPage.isMsgPage) {
+        // 标题行排除：标题没有缩进字符，且可能居中，快速绘制的跳字逻辑不适用
+        if (!AppConfig.optimizeRender || exceed || isTitle || !onlyTextColumn || textPage.isMsgPage) {
             return false
         }
         if (wordSpacing != 0f && (!atLeastApi26 || !wordSpacingWorking)) {
