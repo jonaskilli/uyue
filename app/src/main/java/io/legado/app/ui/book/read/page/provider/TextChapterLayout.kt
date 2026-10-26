@@ -973,10 +973,12 @@ class TextChapterLayout(
         }
         textLine.paragraphNum = paragraphNum
 
-        // 新段落首行绑定音频段落索引，并强制设置缩进标记
+        // 新段落首行绑定音频段落索引。
+        // 注意：这里不再强制设置 indentSize——标题/居中行没有缩进字符，
+        // 强塞缩进数会让快速绘制把标题正文的前几个字当缩进跳过（少字）。
+        // indentSize 由各排版路径按行内真实缩进自行设置（addCharsToLine* 系列）。
         if (lastLine == null || lastLine.isParagraphEnd) {
             textLine.audioParagraphIndex = paragraphNum
-            textLine.indentSize = paragraphIndent.length
         }
 
         textLine.chapterPosition =
