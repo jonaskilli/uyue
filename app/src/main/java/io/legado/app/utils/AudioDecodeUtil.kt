@@ -3,6 +3,7 @@ package io.legado.app.utils
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessingPipeline
 import androidx.media3.common.audio.AudioProcessor
@@ -44,6 +45,112 @@ object AudioDecodeUtil {
     )
 
     /**
+     * 解码完整性阈值：解出的 PCM 时长低于按源音频估算时长的该比例时，
+     * 判定为「解码中途截断」，按失败处理。
+     *
+     * 背景：各解码兜底层（Exo / MediaExtractor / MediaCodec 裸流）碰到中途坏帧时
+     * 都是"保留已解码部分、静默结束"，残缺 PCM 会以"完全成功"的姿态返回，
+     * 落盘后表现为「只读前几个字就跳下一段」且全程无任何报错。
+     * 0.65 的宽容度可吸收 VBR 波动与个别 WAV 头声明值偏大的情况。
+     */
+    private const val MIN_DECODE_COMPLETENESS_RATIO = 0.65
+
+    /**
+     * 校验解码结果是否完整（是否中途截断）。
+     *
+     * 时长对比基准：源字节数估算时长（MP3 逐帧累加样本数；WAV 用头里声明的
+     * data 长度 / byteRate）。无法估算时返回 true 放行（如 OGG/FLAC/AAC）。
+     * 不完整时打日志并返回 false，调用方继续下一级兜底或判失败。
+     */
+    private fun validateDecodedPcm(
+        source: ByteArray,
+        result: Triple<ByteArray, Int, Int>,
+    ): Triple<ByteArray, Int, Int>? {
+        val (pcm, sampleRate, channels) = result
+        if (sampleRate <= 0 || channels <= 0) return result
+        val expectedSec = estimateAudioDurationSec(source) ?: return result
+        // decodeViaMediaCodec 返回的是源采样率/声道数的 PCM
+        val decodedSec = (pcm.size / 2.0 / channels) / sampleRate
+        if (decodedSec >= expectedSec * MIN_DECODE_COMPLETENESS_RATIO) {
+            return result
+        }
+        val msg = "音频解码不完整: 解出 ${"%.1f".format(decodedSec)}s / 预期 ${"%.1f".format(expectedSec)}s " +
+                "src=${source.size}B，按截断处理"
+        Log.w(TAG, msg)
+        io.legado.app.constant.AppLog.putDebug("[AudioDecodeUtil] $msg")
+        return null
+    }
+
+    /**
+     * 估算源音频的总时长（秒）。
+     * - WAV：遍历 chunk 取 data 声明长度 / fmt 的 byteRate
+     * - MP3：从首个合法帧起逐帧累加样本数（可跨坏帧区继续，VBR 也准确）
+     * - 其他格式：返回 null（跳过完整性校验）
+     */
+    private fun estimateAudioDurationSec(data: ByteArray): Double? {
+        return estimateWavDurationSec(data) ?: estimateMp3DurationSec(data)
+    }
+
+    private fun estimateWavDurationSec(data: ByteArray): Double? {
+        if (data.size < 12 ||
+            String(data.copyOfRange(0, 4)) != "RIFF" ||
+            String(data.copyOfRange(8, 12)) != "WAVE"
+        ) {
+            return null
+        }
+        var pos = 12
+        var byteRate = 0
+        var dataSize = 0L
+        while (pos + 8 <= data.size) {
+            val chunkId = String(data.copyOfRange(pos, pos + 4))
+            val chunkSize = readUint32Le(data, pos + 4)
+            when (chunkId) {
+                "fmt " -> {
+                    if (pos + 20 <= data.size) {
+                        byteRate = readUint32Le(data, pos + 16)
+                    }
+                }
+                "data" -> dataSize = chunkSize.toLong() and 0xFFFFFFFFL
+            }
+            if (byteRate > 0 && dataSize > 0) break
+            pos += 8 + chunkSize + (chunkSize and 1)
+        }
+        if (byteRate <= 0 || dataSize <= 0) return null
+        return dataSize.toDouble() / byteRate
+    }
+
+    private fun estimateMp3DurationSec(data: ByteArray): Double? {
+        val start = indexOfFirstMp3Frame(data) ?: return null
+        var pos = start
+        var samples = 0L
+        var sampleRate = 0
+        while (pos + 4 <= data.size) {
+            val info = parseMp3FrameAt(data, pos)
+            if (info == null) {
+                // 坏帧区：向前扫下一个同步帧（最多 8KB），扫不到当作流尾
+                val limit = minOf(data.size - 4, pos + 8192)
+                var next = -1
+                var scan = pos + 1
+                while (scan <= limit) {
+                    if (parseMp3FrameAt(data, scan) != null) {
+                        next = scan
+                        break
+                    }
+                    scan++
+                }
+                if (next < 0) break
+                pos = next
+                continue
+            }
+            samples += info.samplesPerFrame
+            sampleRate = info.sampleRate
+            pos += if (info.frameLength > 0) info.frameLength else 1
+        }
+        if (samples <= 0L || sampleRate <= 0) return null
+        return samples.toDouble() / sampleRate
+    }
+
+    /**
      * 将任意格式的音频 ByteArray 解码并重采样为标准 WAV PCM。
      *
      * @param audioData 原始音频字节数据
@@ -72,6 +179,10 @@ object AudioDecodeUtil {
             var pcmResult: Triple<ByteArray, Int, Int>? = null
             if (isWav) {
                 pcmResult = extractWavPcm(audioData)
+                if (pcmResult != null) {
+                    // WAV 头声明的数据量远多于实际解出的 PCM（文件被截断）→ 不能当成功
+                    pcmResult = validateDecodedPcm(audioData, pcmResult)
+                }
                 if (pcmResult == null) {
                     pcmResult = decodeViaMediaCodec(audioData)
                 }
@@ -531,7 +642,7 @@ object AudioDecodeUtil {
         // ID3/裸帧/VBR 容忍度高——移植自 TTS_Server_Android，它的合成转码从不
         // 失败就是因为用了这套。失败才回退下面的兜底路径。
         try {
-            ExoAudioDecoder.decode(audioData)?.let { return it }
+            ExoAudioDecoder.decode(audioData)?.let { return validateDecodedPcm(audioData, it) }
         } catch (e: Exception) {
             // Exo 解码异常：静默进入兜底（合成不中断优先）
         }
@@ -543,7 +654,7 @@ object AudioDecodeUtil {
         // （原始 MP3 拿不到 PCM，无法后处理），表现为「调了参数偶尔有一句没反应」。
         sanitizeAudioInput(audioData)?.let { cleaned ->
             try {
-                ExoAudioDecoder.decode(cleaned)?.let { return it }
+                ExoAudioDecoder.decode(cleaned)?.let { return validateDecodedPcm(audioData, it) }
             } catch (e: Exception) {
                 // 同样静默进入下一级兜底
             }
@@ -564,7 +675,7 @@ object AudioDecodeUtil {
         val tempFile = File.createTempFile("audio_decode", ext)
         tempFile.writeBytes(data)
         try {
-            decodeFileViaMediaCodec(tempFile)?.let { return it }
+            decodeFileViaMediaCodec(tempFile)?.let { return validateDecodedPcm(audioData, it) }
         } finally {
             tempFile.delete()
         }
@@ -572,7 +683,7 @@ object AudioDecodeUtil {
         // ★ 兜底二：不经 MediaExtractor，把 MP3 裸流直接喂给 MediaCodec。
         // MediaExtractor 解析失败（封装非标/无 track）时，MediaCodec 本身只认帧，
         // 直喂整块数据往往仍能解出 PCM。
-        return decodeRawMp3ViaMediaCodec(audioData)
+        return decodeRawMp3ViaMediaCodec(audioData)?.let { validateDecodedPcm(audioData, it) }
     }
 
     /**
@@ -628,6 +739,8 @@ object AudioDecodeUtil {
         val channels: Int,
         /** 帧长度（字节）；无法可靠计算时为 0 */
         val frameLength: Int,
+        /** 每帧采样点数，用于按时长估算解码完整性 */
+        val samplesPerFrame: Int,
     )
 
     // MPEG-1 Layer I/II/III 与 MPEG-2/2.5 的比特率表（kbps）
@@ -675,7 +788,7 @@ object AudioDecodeUtil {
             3 -> ((samplesPerFrame / 8) * bitrateKbps * 1000 / sampleRate + padding) * 4
             else -> (samplesPerFrame / 8) * bitrateKbps * 1000 / sampleRate + padding
         }
-        return Mp3FrameInfo(sampleRate, channels, frameLength)
+        return Mp3FrameInfo(sampleRate, channels, frameLength, samplesPerFrame)
     }
 
     /** 找到第一个「连续两帧都合法」的 MPEG 帧头位置，避免误判数据里的伪同步字 */
