@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,6 +54,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,6 +65,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -109,8 +114,10 @@ import androidx.media3.common.Player
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.NotificationId
 import kotlin.math.abs
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 在线剧集播放页（时光播放器）。
@@ -1004,6 +1011,27 @@ internal fun DownloadDialog(
     val itemChecked = remember { mutableStateListOf<String>() }
     val videoChecked = remember { mutableStateListOf<String>() }
 
+    // 「其他缓存」：无下载记录的孤儿缓存。两种来源：
+    // - 记录丢失（tasks.json 损坏/被清），分片与密钥都还在；
+    // - 换源重下每集命名不同（"1、2" vs "第一集"），旧源下的目录对不上任何记录。
+    // 按钮默认灰色（没有孤儿可看），点一下列出这些缓存，再点一下切回下载记录。
+    var showOrphans by remember { mutableStateOf(false) }
+    var orphans by remember { mutableStateOf<List<VideoDownloader.OrphanCache>>(emptyList()) }
+    // 合并/删除孤儿后手动触发一次重扫（这些操作不改下载记录，dlStates 不会变）
+    var orphanTick by remember { mutableIntStateOf(0) }
+    // 非空时正在全屏播放某个孤儿缓存
+    var playingOrphan by remember { mutableStateOf<LocalVideo?>(null) }
+    val orphanScope = rememberCoroutineScope()
+
+    // —— 其他缓存手动排序 ——
+    // 长按条目上下拖动，或用条目菜单里的 置顶 / 上移一位 / 下移一位；
+    // 改完把新顺序写进视频文件夹里的 .order.json（随文件夹走，重装/换设备都在）。
+    // 只作用于「其他缓存」列表；有记录的分集按目录集序号排，两套互不相干。
+    val orphanItemHeights = remember { mutableStateMapOf<Int, Int>() }
+    var orphanDragIndex by remember { mutableStateOf<Int?>(null) }
+    var orphanDragOffset by remember { mutableFloatStateOf(0f) }
+    val orphanSpacingPx = with(LocalDensity.current) { 10.dp.toPx() }
+
     // 主题色：独立页面（视频发现页右上角进来的下载管理）跟随应用主题
     // （应用主题设为"自动"时即跟随系统深浅色 + 应用主题色）；
     // 播放页里的弹窗叠在黑底播放器上，保持黑底白字不变。
@@ -1020,6 +1048,11 @@ internal fun DownloadDialog(
     // 正在看视频列表时（selectorOpen=true）不拦，返回键照常退出页面。
     if (standalone && !selectorOpen) {
         BackHandler {
+            // 正在全屏播孤儿缓存时，返回键先退出播放，再走原有的退回视频列表
+            if (playingOrphan != null) {
+                playingOrphan = null
+                return@BackHandler
+            }
             selectedDir = null
             selectorOpen = true
             tab = 1
@@ -1096,8 +1129,59 @@ internal fun DownloadDialog(
         if (selectedDir != null) tab = 1
     }
 
+    // 孤儿缓存探测：进入某部视频 / 记录变化 / 合并删除后都重扫一遍。
+    // 下载记录的恢复（restoreIfNeeded）是异步的，恢复完 publishStates 会更新 dlStates，
+    // 这里的 LaunchedEffect 随之重算，误报（把有记录的当成孤儿）只是启动后的一瞬。
+    LaunchedEffect(currentDir, dlStates, tab, selectorOpen, orphanTick) {
+        if (tab == 1 && !selectorOpen && currentDir.isNotBlank()) {
+            VideoDownloader.restoreIfNeeded()
+            orphans = withContext(Dispatchers.IO) {
+                VideoDownloader.orphanCaches(currentDir)
+            }
+        }
+    }
+
+    // 播放无记录的缓存：解析成本地文件（mp4 或 local.m3u8）后用同一个全屏播放器播
+    val onPlayOrphan: (VideoDownloader.OrphanCache) -> Unit = { o ->
+        orphanScope.launch {
+            val f = withContext(Dispatchers.IO) {
+                VideoDownloader.findOrphanFile(o.dirName, o.title)
+            }
+            if (f == null || f.length() <= 0L) {
+                context.toastOnUi("缓存文件不存在或已损坏")
+            } else {
+                playingOrphan = LocalVideo(Uri.fromFile(f), o.title, f.absolutePath, f.length(), 0L)
+            }
+        }
+    }
+
+    /** 手动调整「其他缓存」顺序：界面立即生效，并把新顺序写进视频文件夹的 .order.json */
+    fun moveOrphan(from: Int, to: Int) {
+        if (from == to || from !in orphans.indices) return
+        val list = orphans.toMutableList()
+        val item = list.removeAt(from)
+        list.add(to.coerceIn(0, list.size), item)
+        orphans = list
+        VideoDownloader.saveOrphanOrderAsync(currentDir, list.map { it.title })
+    }
+
     // 弹窗与独立页面共用同一份内容，只是外壳不同
     val body: @Composable () -> Unit = {
+        val orphan = playingOrphan
+        if (orphan != null) {
+            // 全屏播无记录的缓存：与正片同一个播放器（本地清单 / 进度 / 手势全都在）。
+            // 单视频固定顺序：playOrderState / currentPageState 是必填的外部状态，这里给孤儿的即可
+            val orphanOrder = remember { mutableStateOf(listOf(0)) }
+            val orphanPage = remember { mutableStateOf(0) }
+            FullscreenVideoPlayer(
+                videos = listOf(orphan),
+                initialIndex = 0,
+                seriesTitle = currentName,
+                onExit = { playingOrphan = null },
+                playOrderState = orphanOrder,
+                currentPageState = orphanPage,
+            )
+        } else {
         Column(modifier = Modifier.padding(16.dp)) {
                 // 顶部：视频名 + 切换指示 + 三点菜单
                 Row(
@@ -1195,6 +1279,16 @@ internal fun DownloadDialog(
                                         }
                                     )
                                 }
+                            }
+                            if (!selectorOpen && tab == 1 && showOrphans) {
+                                DropdownMenuItem(
+                                    text = { Text("恢复默认排序") },
+                                    onClick = {
+                                        menuOpen = false
+                                        VideoDownloader.clearOrphanOrderAsync(currentDir)
+                                        orphanTick++
+                                    }
+                                )
                             }
                             if (!selectorOpen && tab == 0) {
                                 DropdownMenuItem(
@@ -1339,6 +1433,28 @@ internal fun DownloadDialog(
                                 }
                             )
                         }
+                        // 「其他缓存」：默认灰色（当前视频目录下没有无记录的缓存）；
+                        // 有点击后列出孤儿缓存，再点一下切回下载记录
+                        if (tab == 1 && currentDir.isNotBlank()) {
+                            TextButton(
+                                onClick = { showOrphans = !showOrphans },
+                                enabled = orphans.isNotEmpty() || showOrphans,
+                            ) {
+                                Text(
+                                    when {
+                                        showOrphans -> "返回下载记录"
+                                        orphans.isEmpty() -> "其他缓存"
+                                        else -> "其他缓存(${orphans.size})"
+                                    },
+                                    color = when {
+                                        showOrphans -> MaterialTheme.colorScheme.primary
+                                        orphans.isEmpty() -> contentColor.copy(alpha = 0.3f)
+                                        else -> contentColor.copy(alpha = 0.75f)
+                                    },
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
                     }
                 when (tab) {
                     0 -> {
@@ -1411,6 +1527,116 @@ internal fun DownloadDialog(
                     }
 
                     else -> {
+                        if (showOrphans) {
+                            // 「其他缓存」：只显示没有下载记录的孤儿缓存（可播放 / 可合并 / 可删除）
+                            if (orphans.isEmpty()) {
+                                Box(
+                                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "没有发现其他缓存",
+                                        color = contentColor.copy(alpha = 0.5f),
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(top = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    items(orphans.size) { i ->
+                                        val o = orphans[i]
+                                        val dragging = orphanDragIndex == i
+                                        Box(
+                                            modifier = Modifier
+                                                .zIndex(if (dragging) 1f else 0f)
+                                                .graphicsLayer {
+                                                    translationY =
+                                                        if (dragging) orphanDragOffset else 0f
+                                                }
+                                                .onSizeChanged {
+                                                    orphanItemHeights[i] = it.height
+                                                }
+                                                .pointerInput(orphanTick, orphans.size) {
+                                                    // 长按拖动排序：越过相邻条目即交换，
+                                                    // 松手后把新顺序写进文件夹
+                                                    detectDragGesturesAfterLongPress(
+                                                        onDragStart = {
+                                                            orphanDragIndex = i
+                                                            orphanDragOffset = 0f
+                                                        },
+                                                        onDragEnd = {
+                                                            orphanDragIndex = null
+                                                            VideoDownloader.saveOrphanOrderAsync(
+                                                                currentDir,
+                                                                orphans.map { it.title }
+                                                            )
+                                                        },
+                                                        onDragCancel = { orphanDragIndex = null },
+                                                        onDrag = { change, amt ->
+                                                            change.consume()
+                                                            var idx = orphanDragIndex
+                                                                ?: return@detectDragGesturesAfterLongPress
+                                                            orphanDragOffset += amt.y
+                                                            while (idx < orphans.lastIndex &&
+                                                                orphanDragOffset >
+                                                                (orphanItemHeights[idx + 1] ?: 60) +
+                                                                orphanSpacingPx
+                                                            ) {
+                                                                val step =
+                                                                    (orphanItemHeights[idx + 1] ?: 60) +
+                                                                        orphanSpacingPx
+                                                                orphans = orphans
+                                                                    .toMutableList()
+                                                                    .apply {
+                                                                        val t = set(idx, get(idx + 1))
+                                                                        set(idx + 1, t)
+                                                                    }
+                                                                orphanDragOffset -= step
+                                                                idx++
+                                                                orphanDragIndex = idx
+                                                            }
+                                                            while (idx > 0 &&
+                                                                orphanDragOffset <
+                                                                -((orphanItemHeights[idx - 1] ?: 60) +
+                                                                    orphanSpacingPx)
+                                                            ) {
+                                                                val step =
+                                                                    (orphanItemHeights[idx - 1] ?: 60) +
+                                                                        orphanSpacingPx
+                                                                orphans = orphans
+                                                                    .toMutableList()
+                                                                    .apply {
+                                                                        val t = set(idx - 1, get(idx))
+                                                                        set(idx, t)
+                                                                    }
+                                                                orphanDragOffset += step
+                                                                idx--
+                                                                orphanDragIndex = idx
+                                                            }
+                                                        },
+                                                    )
+                                                }
+                                        ) {
+                                            OrphanCacheItem(
+                                                o = o,
+                                                contentColor = contentColor,
+                                                onPlay = { onPlayOrphan(o) },
+                                                onPinTop = { moveOrphan(i, 0) },
+                                                onMoveUp = { if (i > 0) moveOrphan(i, i - 1) },
+                                                onMoveDown = {
+                                                    if (i < orphans.lastIndex) moveOrphan(i, i + 1)
+                                                },
+                                                onChanged = { orphanTick++ },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
                         // 勾选操作条：有选中时出现批量删除
                         if (shownStates.isNotEmpty()) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1480,10 +1706,12 @@ internal fun DownloadDialog(
                                 }
                             }
                         }
+                        }
                     }
                 }
                 }
             }
+        }
     }
     if (standalone) {
         // 独立页面：铺满整屏
@@ -1693,6 +1921,90 @@ private fun DownloadStateItem(
                     onClick = {
                         VideoDownloader.deleteMp4(st)
                         menuOpen = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 「其他缓存」条目：无下载记录的孤儿缓存。功能与下载进度条目对齐——
+ * 右侧播放按钮直接播（mp4 或按分片重建的 local.m3u8），三点菜单里合并为 MP4 / 删除。
+ */
+@Composable
+private fun OrphanCacheItem(
+    o: VideoDownloader.OrphanCache,
+    contentColor: Color,
+    onPlay: () -> Unit,
+    onPinTop: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    /** 合并/删除等改动磁盘的操作完成后回调（界面据此重扫孤儿列表） */
+    onChanged: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                o.title,
+                color = contentColor.copy(alpha = 0.9f),
+                fontSize = 13.sp,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                if (o.isHls) {
+                    "分片缓存 ${o.segDone}/${o.segTotal} 片 · ${formatSize(o.sizeBytes)}"
+                } else {
+                    "本地视频 · ${formatSize(o.sizeBytes)}"
+                },
+                color = contentColor.copy(alpha = 0.6f),
+                fontSize = 11.sp
+            )
+        }
+        IconButton(onClick = onPlay) {
+            Icon(
+                Icons.Filled.PlayArrow,
+                contentDescription = "播放",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+        Box {
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = "更多操作",
+                    tint = contentColor
+                )
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("置顶") },
+                    onClick = { menuOpen = false; onPinTop() }
+                )
+                DropdownMenuItem(
+                    text = { Text("上移一位") },
+                    onClick = { menuOpen = false; onMoveUp() }
+                )
+                DropdownMenuItem(
+                    text = { Text("下移一位") },
+                    onClick = { menuOpen = false; onMoveDown() }
+                )
+                if (o.isHls) {
+                    DropdownMenuItem(
+                        text = { Text("合并为MP4") },
+                        onClick = {
+                            menuOpen = false
+                            VideoDownloader.mergeOrphanToMp4(o.dirName, o.title, onChanged)
+                        }
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("删除") },
+                    onClick = {
+                        menuOpen = false
+                        VideoDownloader.deleteOrphanCache(o.dirName, o.title, o.isHls, onChanged)
                     }
                 )
             }
