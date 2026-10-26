@@ -2,12 +2,18 @@ package io.legado.app.help.audiobook.plugin
 
 import io.legado.app.R
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.content.Context
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.Spinner
 import android.widget.TextView
 import kotlin.math.max
@@ -28,6 +34,15 @@ class JSpinner @JvmOverloads constructor(
 
     companion object {
         const val TAG = "JSpinner"
+
+        /**
+         * 选项数超过该值时，点选择框改弹「带搜索框的列表」而不是原生下拉。
+         * 少量选项（如音效模式 8 项、采样率 3 项）走原生下拉更快，不必加搜索。
+         */
+        const val SEARCH_THRESHOLD = 10
+
+        /** 搜索弹窗里列表的最大高度（dp） */
+        private const val SEARCH_LIST_MAX_HEIGHT_DP = 420
     }
 
     private val mLabelView: TextView
@@ -158,6 +173,91 @@ class JSpinner @JvmOverloads constructor(
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+
+        // ★ 选项数超过 SEARCH_THRESHOLD 时，点选择框改弹「带搜索框的列表」。
+        //   豆包 374/745 音色塞进原生下拉根本没法挑。只拦 ACTION_UP，其余让原生处理；
+        //   未超阈值返回 false，维持原生下拉，观感不变。
+        mSpinner.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_UP && shouldUseSearch()) {
+                openSearchDialog()
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    private fun shouldUseSearch(): Boolean = mItems.size > SEARCH_THRESHOLD
+
+    /**
+     * 带搜索框的选项列表弹窗。
+     *
+     * 只做「过滤 + 选中」，不动 mSpinner 的 adapter —— mSpinner 始终挂完整列表，
+     * 因此 selectedPosition / value / select() 这些对外语义完全不变，
+     * 插件拿到的还是原始 Item（而不是过滤后的子集序号）。
+     */
+    private fun openSearchDialog() {
+        val density = ctx.resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val box = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, pad / 2)
+        }
+        val input = EditText(ctx).apply {
+            hint = "搜索（输入关键词过滤）"
+            setSingleLine(true)
+        }
+        val emptyView = TextView(ctx).apply {
+            text = "无匹配结果"
+            textSize = 13f
+            setPadding(0, pad / 2, 0, pad / 2)
+            visibility = android.view.View.GONE
+        }
+        val listView = ListView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (SEARCH_LIST_MAX_HEIGHT_DP * density).toInt()
+            )
+        }
+        box.addView(input)
+        box.addView(listView)
+        box.addView(emptyView)
+
+        val dialog = AlertDialog.Builder(ctx)
+            .setTitle(hint.ifBlank { "选择" })
+            .setView(box)
+            .create()
+
+        fun refresh(query: String) {
+            val q = query.trim().lowercase()
+            val originalIndexes: List<Int> =
+                if (q.isEmpty()) mItems.indices.toList()
+                else mItems.mapIndexedNotNull { i, it ->
+                    if (it.name.toString().lowercase().contains(q)) i else null
+                }
+            emptyView.visibility = if (originalIndexes.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
+            listView.visibility = if (originalIndexes.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+            listView.adapter = ArrayAdapter(
+                ctx,
+                android.R.layout.simple_list_item_1,
+                originalIndexes.map { mItems[it].name.toString() }
+            )
+            listView.setOnItemClickListener { _, _, pos, _ ->
+                val origin = originalIndexes.getOrNull(pos) ?: return@setOnItemClickListener
+                dialog.dismiss()
+                // mSpinner 挂的是完整列表，直接按原始索引选中；
+                // 随之异步触发的 onItemSelected 会把原始 Item 回调给插件
+                selectedPosition = origin
+            }
+        }
+
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) { refresh(s?.toString().orEmpty()) }
+        })
+        refresh("")
+        dialog.show()
     }
 
     private fun refreshAdapter() {
