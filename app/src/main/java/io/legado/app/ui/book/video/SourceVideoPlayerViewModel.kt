@@ -187,10 +187,20 @@ object SourceVideoPlayerSession {
 
     fun isReverseOrder(bookUrl: String): Boolean = reversePrefs.getBoolean(bookUrl, false)
 
+    /**
+     * 倒序标记的版本号：每次 [setReverseOrder] 自增。
+     * 标记本身在 SharedPreferences 里，不是 Compose 可观察状态——下载管理这类
+     * 直接读它的界面（包括退到后台再回来的），感知不到变化就不会刷新。
+     * 收集这个流，标记一变就触发重组、重新读取，列表立刻跟着翻。
+     */
+    private val _reverseVersion = MutableStateFlow(0)
+    val reverseVersion = _reverseVersion.asStateFlow()
+
     /** 点「倒序」后调用：把新的倒序状态持久化，并同步进 uiState 供界面初始化沿用 */
     fun setReverseOrder(bookUrl: String, reversed: Boolean) {
         reversePrefs.edit().putBoolean(bookUrl, reversed).apply()
         _uiState.update { it.copy(reverseOrder = reversed) }
+        _reverseVersion.value = _reverseVersion.value + 1
     }
     /** 预取到的首集地址：切过去后直接填进剧集列表，省一次正文规则请求 */
     private val prefetchedUrls = ConcurrentHashMap<String, String>()

@@ -998,6 +998,10 @@ internal fun DownloadDialog(
     val context = LocalContext.current
     val dlStates by VideoDownloader.states.collectAsStateWithLifecycle()
     val groups by VideoDownloader.videoGroups.collectAsStateWithLifecycle()
+    // 倒序标记存在 SharedPreferences 里，不是 Compose 状态：播放页点了倒序再返回
+    // 本界面时，没有信号触发重组，进度列表就会停在旧顺序。收集这个版本号，
+    // 倒序一变（或从后台带新值回来）就重组，viewReversed 重新读取，列表立刻跟着翻。
+    val reverseVersion by SourceVideoPlayerSession.reverseVersion.collectAsStateWithLifecycle()
     // null = 当前正在播的这一部；非空 = 切换过去的那部视频的保存目录名
     var selectedDir by remember { mutableStateOf<String?>(null) }
     var selectorOpen by remember { mutableStateOf(standalone) }
@@ -1085,8 +1089,10 @@ internal fun DownloadDialog(
     }
     // 该视频是否设过倒序修正。是的话分集按修正后的顺序（原始集号降序）展示——
     // 「倒序」的本意就是原始第 n 集其实是第 1 集，所以降序即修正序。
-    val viewReversed = viewBookUrl
-        ?.let { SourceVideoPlayerSession.isReverseOrder(it) } == true
+    // 以 reverseVersion 为 key：标记变化时强制重读，列表即时刷新
+    val viewReversed = remember(viewBookUrl, reverseVersion) {
+        viewBookUrl?.let { SourceVideoPlayerSession.isReverseOrder(it) } == true
+    }
 
     // 只显示当前所选视频的条目
     // 永远按目录里的集数顺序展示：先下第 3 集再下第 1 集时，第 1 集也要排在前面，
