@@ -46,7 +46,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             BgmManager.loadBgmFiles()
             if (AppConfig.isBgmEnabled) {
                 BgmManager.play()
-                upPlayState()
             }
         }
     }
@@ -88,7 +87,7 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         binding.run {
             rootView.setBackgroundColor(bg)
             // 【修改】显式设置标题文字
-            tvTitle.text = "背景音乐设置" 
+            tvTitle.text = "背景音乐开关"
             
         switchBgm.setTextColor(textColor)
         tvTitle.setTextColor(textColor)
@@ -101,9 +100,8 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         tvSoundEffectVolumeValue.setTextColor(textColor)
         tvMixBgmOnMerge.setTextColor(textColor)
         tvBgmMinSegmentLabel.setTextColor(textColor)
-        ivPrev.setColorFilter(textColor)
-        ivPlayPause.setColorFilter(textColor)
-        ivNext.setColorFilter(textColor)
+        tvMixBgmOnMerge.setTextColor(textColor)
+        tvBgmMinSegmentLabel.setTextColor(textColor)
         switchBgm.setTextColor(textColor)
         tvAiImageEnable.setTextColor(textColor)
         tvAiImageSave.setTextColor(textColor)
@@ -126,7 +124,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         tvPath.text = AppConfig.bgmPath?.substringAfterLast("/") ?: "未选择"
         seekVolume.progress = AppConfig.bgmVolume
         tvVolumeValue.text = "${AppConfig.bgmVolume}%"
-        upPlayState()
 
         // 初始化音效替换 Spinner
         val soundEffectItems = arrayOf("关闭", "普通音效", "全部音效")
@@ -181,12 +178,10 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
                     BgmManager.refreshBgmNamesFromFolder()
                     withContext(Dispatchers.Main) {
                         BgmManager.play()
-                        upPlayState()
                     }
                 }
             } else {
                 BgmManager.pause()
-                upPlayState()
             }
         }
 
@@ -285,18 +280,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             }
         })
 
-        ivPrev.setOnClickListener { BgmManager.prev(); upPlayState() }
-        ivNext.setOnClickListener { BgmManager.next(); upPlayState() }
-        ivPlayPause.setOnClickListener {
-            if (BgmManager.isPlaying()) {
-                BgmManager.pause()
-                ivPlayPause.setImageResource(R.drawable.ic_play_24dp)
-            } else {
-                BgmManager.play()
-                ivPlayPause.setImageResource(R.drawable.ic_pause_24dp)
-            }
-        }
-        
         binding.rootView.findViewById<View>(R.id.btn_ai_image)?.setOnClickListener {
             AiImageSettingsDialog().show(parentFragmentManager, "aiImageSettingsDialog")
         }
@@ -307,14 +290,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
 
         binding.rootView.findViewById<View>(R.id.btn_download_bgm)?.setOnClickListener {
             BgmDownloadDialog().show(parentFragmentManager, "bgmDownload")
-        }
-    }
-
-    private fun upPlayState() {
-        if (BgmManager.isPlaying()) {
-            binding.ivPlayPause.setImageResource(R.drawable.ic_pause_24dp)
-        } else {
-            binding.ivPlayPause.setImageResource(R.drawable.ic_play_24dp)
         }
     }
 }

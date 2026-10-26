@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 背景音乐设置弹窗。
+     版式：顶部一排功能总开关（各自带文字说明，保持不动）；
+     之后按「音效设置 / 背景音乐设置 / AI生图」三段分区，分隔线 + 主题色小标题
+     让人一眼看出每段在设置什么。控件 id 与旧版一一对应，逻辑层零改动。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
@@ -12,6 +16,7 @@
     android:paddingRight="16dp"
     android:paddingBottom="12dp">
 
+    <!-- ===== 总开关区（功能文字自明，保持平铺） ===== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -22,7 +27,7 @@
             android:id="@+id/tv_title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="背景音乐设置"
+            android:text="背景音乐开关"
             android:textColor="@color/primaryText"
             android:textSize="16sp"
             android:textStyle="bold" />
@@ -131,39 +136,28 @@
             tools:ignore="TouchTargetSizeCheck" />
     </LinearLayout>
 
-    <LinearLayout
+    <!-- ===== 音效设置 ===== -->
+    <View
         android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="14dp"
+        android:background="@color/bg_divider_line" />
+
+    <TextView
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:layout_marginTop="4dp">
-
-        <TextView
-            android:id="@+id/tv_bgm_min_segment_label"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="单首最少时长(毫秒)"
-            android:textColor="@color/primaryText"
-            android:textSize="14sp" />
-
-        <EditText
-            android:id="@+id/et_bgm_min_segment"
-            android:layout_width="80dp"
-            android:layout_height="wrap_content"
-            android:gravity="end"
-            android:inputType="number"
-            android:text="60000"
-            android:textColor="@color/primaryText"
-            android:textSize="14sp" />
-    </LinearLayout>
+        android:layout_marginTop="10dp"
+        android:text="音效设置"
+        android:textColor="@color/primary"
+        android:textSize="13sp"
+        android:textStyle="bold" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:layout_marginTop="8dp">
+        android:layout_marginTop="6dp">
 
         <TextView
             android:layout_width="wrap_content"
@@ -244,7 +238,8 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp">
 
         <TextView
             android:id="@+id/tv_sound_effect_vol_label"
@@ -271,11 +266,55 @@
             android:textSize="14sp" />
     </LinearLayout>
 
+    <!-- ===== 背景音乐设置 ===== -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="14dp"
+        android:background="@color/bg_divider_line" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="背景音乐设置"
+        android:textColor="@color/primary"
+        android:textSize="13sp"
+        android:textStyle="bold" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
+
+        <TextView
+            android:id="@+id/tv_bgm_min_segment_label"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="单首最少时长(毫秒)"
+            android:textColor="@color/primaryText"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/et_bgm_min_segment"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:inputType="number"
+            android:text="60000"
+            android:textColor="@color/primaryText"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp">
 
         <TextView
             android:id="@+id/tv_path_label"
@@ -315,8 +354,7 @@
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp">
+        android:layout_marginTop="8dp">
 
         <TextView
             android:id="@+id/tv_vol_label"
@@ -346,61 +384,8 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center"
-        android:orientation="horizontal"
-        android:paddingTop="10dp">
-
-        <ImageView
-            android:id="@+id/iv_prev"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginEnd="24dp"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:src="@drawable/ic_skip_previous"
-            app:tint="@color/primaryText" />
-
-        <ImageView
-            android:id="@+id/iv_play_pause"
-            android:layout_width="42dp"
-            android:layout_height="42dp"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:src="@drawable/ic_play_24dp"
-            app:tint="@color/primaryText" />
-
-        <ImageView
-            android:id="@+id/iv_next"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginStart="24dp"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:src="@drawable/ic_skip_next"
-            app:tint="@color/primaryText" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:layout_marginTop="8dp">
-
-        <TextView
-            android:id="@+id/btn_ai_image"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center"
-            android:padding="12dp"
-            android:text="AI 生图"
-            android:textColor="@color/primaryText"
-            android:textSize="14sp" />
-
-        <View
-            android:layout_width="1dp"
-            android:layout_height="match_parent"
-            android:background="@color/divider" />
 
         <TextView
             android:id="@+id/btn_ai_config"
@@ -435,5 +420,26 @@
             android:textColor="@color/primaryText"
             android:textSize="14sp" />
     </LinearLayout>
+
+    <!-- ===== AI 生图（按钮自带文字，无需标题） ===== -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="14dp"
+        android:background="@color/bg_divider_line" />
+
+    <TextView
+        android:id="@+id/btn_ai_image"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:padding="12dp"
+        android:text="AI 生图"
+        android:textColor="@color/primaryText"
+        android:textSize="14sp" />
 
 </LinearLayout>

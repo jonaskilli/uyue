@@ -1675,18 +1675,7 @@ class ReadBookActivity : BaseReadBookActivity(),
     ) {
         val context = this
         val dialogRef = AtomicReference<AlertDialog>()
-
-        // 加载相邻角色（跨章节，前4后5凑齐9个，排除当前名字）
         val book = ReadBook.book
-        val chapterTitles = if (book != null) {
-            appDb.bookChapterDao.getChapterList(book.bookUrl).map { it.title }
-        } else {
-            emptyList()
-        }
-        val currentChapterIndex = chapterTitles.indexOf(chapterTitle)
-        val allNeighborRoles = DialogRoleManager.collectNeighborRoles(
-            bookName, chapterTitle, seq, name, chapterTitles, currentChapterIndex
-        )
 
         val scrollView = ScrollView(context)
         val layout = LinearLayout(context).apply {
@@ -1694,6 +1683,13 @@ class ReadBookActivity : BaseReadBookActivity(),
             setPadding(32.dpToPx(), 16.dpToPx(), 32.dpToPx(), 16.dpToPx())
         }
         scrollView.addView(layout)
+        // 相邻角色网格的占位槽：位置先占住（名字行上方），网格由后台算好后填进来。
+        // 原先这些计算（查全书章节列表 + 读约10个章节JSON找相邻角色）都在主线程
+        // 同步跑完才弹窗，点了名字要等一两秒——现在弹窗立刻出，重活后台跑。
+        val neighborSlot = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        layout.addView(neighborSlot)
 
         // 先创建输入控件（供按钮引用）
         val etName = EditText(context).apply {
@@ -1765,13 +1761,65 @@ class ReadBookActivity : BaseReadBookActivity(),
             }
         }
 
+        // 发音人实际配置名（与角色管理列表同款）：标签下方显示该配置的「显示名称」，
+        // 点击进入内置 TTS 配置编辑页（改显示名/标签/插件/音色等）。
+        // 非内置引擎的发音人来自 fayinren.json，与配置列表无对应关系，此时不显示。
+        val voiceTagRefs = CharacterVoiceHelper.getVoiceTagRefsForCurrentEngine()
+        val tvVoiceName = android.widget.TextView(context).apply {
+            textSize = 11f
+            gravity = android.view.Gravity.CENTER
+            setPadding(4.dpToPx(), 2.dpToPx(), 4.dpToPx(), 2.dpToPx())
+            visibility = android.view.View.GONE
+        }
+        fun refreshVoiceName(voiceTag: String) {
+            val tag = voiceTag.trim()
+                .removePrefix("【").removeSuffix("】").trim()
+            val ref = voiceTagRefs[tag]
+            if (ref != null && ref.displayName.isNotBlank()) {
+                tvVoiceName.visibility = android.view.View.VISIBLE
+                tvVoiceName.text = ref.displayName
+                tvVoiceName.setOnClickListener {
+                    if (ref.configId.isNullOrBlank()) {
+                        android.widget.Toast.makeText(
+                            context, "未找到该发音人对应的配置", android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        return@setOnClickListener
+                    }
+                    runCatching {
+                        startActivity(
+                            android.content.Intent(
+                                context,
+                                io.legado.app.ui.tts.plugin.TtsConfigEditorActivity::class.java
+                            ).apply {
+                                putExtra(
+                                    io.legado.app.ui.tts.plugin.TtsConfigEditorActivity.EXTRA_CONFIG_ID,
+                                    ref.configId
+                                )
+                                putExtra(
+                                    io.legado.app.ui.tts.plugin.TtsConfigEditorActivity.EXTRA_IS_NEW,
+                                    false
+                                )
+                            }
+                        )
+                    }.onFailure {
+                        android.widget.Toast.makeText(
+                            context, "无法打开配置编辑页", android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            } else {
+                tvVoiceName.visibility = android.view.View.GONE
+                tvVoiceName.setOnClickListener(null)
+            }
+        }
+
         // 发音人选择按钮
         val btnVoice = Button(context).apply {
             textSize = 12f
             setPadding(6.dpToPx(), 4.dpToPx(), 6.dpToPx(), 4.dpToPx())
             layoutParams = LinearLayout.LayoutParams(96.dpToPx(), LinearLayout.LayoutParams.WRAP_CONTENT)
-            val initialVoice = CharacterVoiceHelper.findCharacterVoice(bookName, name) ?: "未设置"
-            text = initialVoice
+            // 查发音人要读角色音频记录 JSON，放后台跑；先显示"未设置"，查到后刷新
+            text = "未设置"
             setOnClickListener {
                 val currentName = etName.text.toString().trim()
                 if (currentName.isEmpty()) {
@@ -1782,6 +1830,7 @@ class ReadBookActivity : BaseReadBookActivity(),
                     CharacterVoiceHelper.showVoiceListDialog(context, this@ReadBookActivity, category) { voice ->
                         CharacterVoiceHelper.saveCharacterVoice(bookName, currentName, voice)
                         text = voice
+                        refreshVoiceName(voice)
                         Toast.makeText(context, "已保存发音人: $voice", Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -1796,70 +1845,7 @@ class ReadBookActivity : BaseReadBookActivity(),
         nameRow.addView(btnPreview)
         nameRow.addView(btnVoice)
 
-        // 相邻角色按钮（3x3 网格布局）
-        if (allNeighborRoles.isNotEmpty()) {
-            val tvLabel = TextView(context).apply {
-                text = "相邻角色"
-                textSize = 14f
-                setPadding(0, 0, 0, 8.dpToPx())
-            }
-            layout.addView(tvLabel)
-
-            val gridContainer = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-            }
-
-            var currentRow: LinearLayout? = null
-            allNeighborRoles.take(9).forEachIndexed { index, role ->
-                if (index % 3 == 0) {
-                    currentRow = LinearLayout(context).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                    }
-                    gridContainer.addView(
-                        currentRow,
-                        LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT,
-                            LinearLayout.LayoutParams.WRAP_CONTENT
-                        )
-                    )
-                }
-                val btn = Button(context).apply {
-                    text = role.name
-                    textSize = 11f
-                    setPadding(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
-                    setOnClickListener {
-                        etName.setText(role.name)
-                        spGender.setSelection(
-                            genderOptions.indexOf(role.gender).coerceAtLeast(0)
-                        )
-                        spAge.setSelection(
-                            ageOptions.indexOf(role.age).coerceAtLeast(0)
-                        )
-                        val v = CharacterVoiceHelper.findCharacterVoice(bookName, role.name) ?: "未设置"
-                        btnVoice.text = v
-                    }
-                }
-                currentRow?.addView(
-                    btn,
-                    LinearLayout.LayoutParams(
-                        0,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        1f
-                    ).apply {
-                        if (index % 3 != 2) marginEnd = 4.dpToPx()
-                        if (index >= 3) topMargin = 4.dpToPx()
-                    }
-                )
-            }
-
-            layout.addView(
-                gridContainer,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { bottomMargin = 12.dpToPx() }
-            )
-        }
+        // 相邻角色网格由后台加载完成后填进 neighborSlot（见弹窗 show 之后的协程）
 
         layout.addView(
             nameRow,
@@ -1895,8 +1881,6 @@ class ReadBookActivity : BaseReadBookActivity(),
             text = "删除本章同名角色音频"
             textSize = 11f
             setPadding(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                .apply { marginStart = 8.dpToPx() }
             setOnClickListener { _ ->
                 val deleted = AppConfig.deleteCurrentChapterRoleAudioCache(name)
                 android.widget.Toast.makeText(
@@ -1907,8 +1891,24 @@ class ReadBookActivity : BaseReadBookActivity(),
                 ).show()
             }
         }
+        // 右列拆两行：上面是发音人实际配置名（与发音人按钮上下对齐，点击进 TTS 配置编辑页），
+        // 下面才是删除按钮——原来按钮独占右列两行的高度，现在只占下面那行
+        val genderAgeRight = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                .apply { marginStart = 8.dpToPx() }
+        }
+        genderAgeRight.addView(tvVoiceName)
+        genderAgeRight.addView(
+            btnDeleteRoleAudio,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            ).apply { topMargin = 4.dpToPx() }
+        )
         genderAgeRow.addView(genderAgeLeft)
-        genderAgeRow.addView(btnDeleteRoleAudio)
+        genderAgeRow.addView(genderAgeRight)
         layout.addView(genderAgeRow)
 
         // 底部按钮行：保存 / 替换整章 / 替换全书（取消放在 AlertDialog 标准按钮）
@@ -1997,6 +1997,87 @@ class ReadBookActivity : BaseReadBookActivity(),
             .setNegativeButton("取消", null)
             .show()
         dialogRef.set(dialog)
+
+        // 相邻角色与发音人后台加载：查全书章节列表 + 读约10个章节JSON + 角色音频记录，
+        // 都挪到 IO 线程；算好后回主线程填进弹窗。用户等不及先关了弹窗就丢弃结果。
+        lifecycleScope.launch(IO) {
+            val chapterTitles = book?.let {
+                appDb.bookChapterDao.getChapterList(it.bookUrl).map { c -> c.title }
+            } ?: emptyList()
+            val currentChapterIndex = chapterTitles.indexOf(chapterTitle)
+            val neighborRoles = DialogRoleManager.collectNeighborRoles(
+                bookName, chapterTitle, seq, name, chapterTitles, currentChapterIndex
+            )
+            val voice = CharacterVoiceHelper.findCharacterVoice(bookName, name) ?: "未设置"
+            withContext(Main) {
+                val dlg = dialogRef.get() ?: return@withContext
+                if (!dlg.isShowing) return@withContext
+                btnVoice.text = voice
+                refreshVoiceName(voice)
+                if (neighborRoles.isEmpty()) return@withContext
+                val tvLabel = TextView(context).apply {
+                    text = "相邻角色"
+                    textSize = 14f
+                    setPadding(0, 0, 0, 8.dpToPx())
+                }
+                neighborSlot.addView(tvLabel)
+                val gridContainer = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                var currentRow: LinearLayout? = null
+                neighborRoles.take(9).forEachIndexed { index, role ->
+                    if (index % 3 == 0) {
+                        currentRow = LinearLayout(context).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                        }
+                        gridContainer.addView(
+                            currentRow,
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT
+                            )
+                        )
+                    }
+                    val btn = Button(context).apply {
+                        text = role.name
+                        textSize = 11f
+                        setPadding(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
+                        setOnClickListener {
+                            etName.setText(role.name)
+                            spGender.setSelection(
+                                genderOptions.indexOf(role.gender).coerceAtLeast(0)
+                            )
+                            spAge.setSelection(
+                                ageOptions.indexOf(role.age).coerceAtLeast(0)
+                            )
+                            val v =
+                                CharacterVoiceHelper.findCharacterVoice(bookName, role.name)
+                                    ?: "未设置"
+                            btnVoice.text = v
+                            refreshVoiceName(v)
+                        }
+                    }
+                    currentRow?.addView(
+                        btn,
+                        LinearLayout.LayoutParams(
+                            0,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            1f
+                        ).apply {
+                            if (index % 3 != 2) marginEnd = 4.dpToPx()
+                            if (index >= 3) topMargin = 4.dpToPx()
+                        }
+                    )
+                }
+                neighborSlot.addView(
+                    gridContainer,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = 12.dpToPx() }
+                )
+            }
+        }
 
         // 在系统按钮栏「角色管理」右侧追加一个「角色档案」入口。
         // AlertDialog 仅有 3 个按钮槽位，第 4 个按钮通过向按钮栏 LinearLayout 注入实现；
