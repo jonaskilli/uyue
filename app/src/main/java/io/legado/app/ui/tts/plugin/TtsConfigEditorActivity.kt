@@ -45,6 +45,17 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
     private var plugins: List<JReadVoiceEngine.VoicePlugin> = emptyList()
     /** 恢复表单期间为 true：此时音色下拉的选中回调不得改写「显示名称」 */
     private var restoringVoiceSelection = false
+    /**
+     * 本次音色选中是否来自用户主动操作。
+     *
+     * Spinner 的 onItemSelected 是【异步】触发的（setSelection / setAdapter 只请求布局，
+     * 回调在下一次布局时才跑），所以用同步布尔开关挡不住：flag 已经复位，回调才进来。
+     * 本界面音色下拉已被触摸接管（点选择框弹搜索弹窗，不弹原生下拉），
+     * 因此「用户主动换音色」只有 showVoiceSearchDialog 的 onPick 这一条入口，
+     * 程序性恢复（setAdapter 自动回调 / setSelection 恢复选中）不会置这个标记。
+     * 用它作为是否覆盖「显示名称」的判据，才真正可靠。
+     */
+    private var voiceSelectionFromUser = false
     private var mediaPlayer: MediaPlayer? = null
     private var localeOptions: List<JReadVoicePluginRuntime.LocaleOption> = emptyList()
     private var voiceOptions: List<JReadVoicePluginRuntime.VoiceOption> = emptyList()
@@ -381,12 +392,12 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
                 // 恢复当前选中的音色
                 val currentVoice = config.voice
                 val voiceIdx = voiceOptions.indexOfFirst { it.id == currentVoice }
-                // setSelection 会同步触发 onVoiceSelected，而那里会把「显示名称」覆盖成音色名。
-                // 恢复表单期间必须屏蔽，否则打开页面就悄悄改掉用户已保存的显示名，
-                // 与配置列表、角色管理里显示的 displayName 对不上。
+                // setSelection 触发 onVoiceSelected 是【异步】的（下一次布局才回调），
+                // 同步开-关挡不住。这里改成 post 复位，把 flag 撑过异步回调；
+                // 显示名称的覆盖另由 voiceSelectionFromUser 兜底（程序恢复不置位）。
                 restoringVoiceSelection = true
                 if (voiceIdx >= 0) binding.spinnerVoice.setSelection(voiceIdx)
-                restoringVoiceSelection = false
+                binding.spinnerVoice.post { restoringVoiceSelection = false }
             }
         }
     }
@@ -395,8 +406,9 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         if (voiceOptions.isEmpty() || position >= voiceOptions.size) return
         val voice = voiceOptions[position]
         // 仅用户主动切换音色时，才用音色名同步「显示名称」；之后用户可随意手改，
-        // 直到下次切换发音人才再覆盖。恢复表单（打开页面）时不覆盖，保持已保存的名字。
-        if (!restoringVoiceSelection) {
+        // 直到下次切换发音人才再覆盖。恢复表单（打开页面）时 adapter/setSelection
+        // 也会异步触发这里，但 voiceSelectionFromUser 为 false，不会动显示名称。
+        if (!restoringVoiceSelection && voiceSelectionFromUser) {
             binding.etDisplayName.setText(voice.name.ifBlank { voice.id })
         }
         notifyVoiceChanged(voice.id)
@@ -509,8 +521,12 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
             voiceNames,
             onPreview = { originalIndex -> previewVoiceAt(originalIndex) }
         ) { originalIndex ->
+            // 只有这条路径是用户主动换音色。setSelection 的 onItemSelected 异步触发，
+            // 所以用 post 复位，把标记撑过随之而来的那次回调。
+            voiceSelectionFromUser = true
             onVoiceSelected(originalIndex)
             binding.spinnerVoice.setSelection(originalIndex)
+            binding.spinnerVoice.post { voiceSelectionFromUser = false }
         }
     }
 
