@@ -252,7 +252,9 @@ object DialogRoleManager {
         currentSeq: Int,
         currentName: String,
         chapterTitles: List<String>,
-        currentChapterIndex: Int
+        currentChapterIndex: Int,
+        /** 最多跨几个章节找相邻角色：1 = 只看当前章 + 前后各一章（读文件少，出结果快） */
+        maxChapterSpan: Int = Int.MAX_VALUE
     ): List<RoleInfo> {
         val seen = mutableSetOf<String>()
         if (currentName.isNotBlank()) seen.add(currentName)
@@ -289,7 +291,10 @@ object DialogRoleManager {
 
         // 向前跨章节补充（从上一章末尾往前取）
         var chapterIdx = currentChapterIndex - 1
-        while (chapterIdx >= 0 && prevRoles.size < 4) {
+        while (chapterIdx >= 0
+            && chapterIdx >= currentChapterIndex - maxChapterSpan
+            && prevRoles.size < 4
+        ) {
             val prevCache = loadChapterCache(bookName, chapterTitles[chapterIdx])
             if (prevCache.isNotEmpty()) {
                 val prevMaxSeq = prevCache.keys.maxOrNull() ?: 0
@@ -309,7 +314,10 @@ object DialogRoleManager {
 
         // 向后跨章节补充（从下一章开头往后取）
         chapterIdx = currentChapterIndex + 1
-        while (chapterIdx < chapterTitles.size && nextRoles.size < 5) {
+        while (chapterIdx < chapterTitles.size
+            && chapterIdx <= currentChapterIndex + maxChapterSpan
+            && nextRoles.size < 5
+        ) {
             val nextCache = loadChapterCache(bookName, chapterTitles[chapterIdx])
             if (nextCache.isNotEmpty()) {
                 val nextMaxSeq = nextCache.keys.maxOrNull() ?: 0
