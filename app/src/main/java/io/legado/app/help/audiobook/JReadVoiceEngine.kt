@@ -1308,7 +1308,13 @@ object JReadVoiceEngine {
                 it.id == plugin.id || (plugin.pluginId.isNotBlank() && it.pluginId == plugin.pluginId)
             }
             if (existingIndex >= 0) {
-                plugins[existingIndex] = plugin
+                // 升级导入（同 id/pluginId 已存在）：继承旧版已设置的用户变量。
+                // 导出的分享文件默认不含 userVars，整体覆盖会把用户设置的变量清空；
+                // 以旧版变量为底，文件里显式携带的键（includeUserVars 导出的）才覆盖。
+                val existing = plugins[existingIndex]
+                plugins[existingIndex] = plugin.copy(
+                    userVarsJson = mergeUserVars(existing.userVarsJson, plugin.userVarsJson)
+                )
             } else {
                 plugins += plugin
             }
@@ -1326,6 +1332,21 @@ object JReadVoiceEngine {
         } else {
             rawUrl to rawCode
         }
+    }
+
+    /**
+     * 合并导入插件的用户变量：以旧版已设置的变量为底，导入文件里显式携带的键覆盖。
+     * 分享导出默认不含 userVars（避免泄露会话令牌等），因此升级导入时若不合并，
+     * 用户原来设置的变量会被空对象整体覆盖而丢失。
+     */
+    private fun mergeUserVars(oldJson: String, incomingJson: String): String {
+        val incoming = runCatching { JSONObject(incomingJson) }.getOrNull()
+        if (incoming == null || incoming.length() == 0) return oldJson.ifBlank { "{}" }
+        val merged = runCatching { JSONObject(oldJson) }.getOrElse { JSONObject() }
+        for (key in incoming.keys()) {
+            merged.put(key, incoming.opt(key))
+        }
+        return merged.toString()
     }
 
     private fun importedPluginId(obj: JSONObject, name: String): String {
