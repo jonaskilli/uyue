@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -1011,9 +1012,16 @@ internal fun DownloadDialog(
     val checked = remember(episodes) {
         mutableStateListOf(*Array(episodes.size) { false })
     }
-    // 进度条目的勾选 / 视频列表的勾选
+    // 进度条目的勾选 / 视频列表的勾选 / 其他缓存的勾选
     val itemChecked = remember { mutableStateListOf<String>() }
     val videoChecked = remember { mutableStateListOf<String>() }
+    val orphanChecked = remember { mutableStateListOf<String>() }
+
+    // 批量删除的二次确认：first = 确认文案，second = 确认后真正执行的删除动作。
+    // 只拦多选批量删除（误触损失大）；单条删除保持直接执行。
+    var batchDeleteConfirm by remember {
+        mutableStateOf<Pair<String, (() -> Unit)>?>(null)
+    }
 
     // 「其他缓存」：无下载记录的孤儿缓存。两种来源：
     // - 记录丢失（tasks.json 损坏/被清），分片与密钥都还在；
@@ -1024,7 +1032,11 @@ internal fun DownloadDialog(
     // 合并/删除孤儿后手动触发一次重扫（这些操作不改下载记录，dlStates 不会变）
     var orphanTick by remember { mutableIntStateOf(0) }
     // 非空时正在全屏播放某个孤儿缓存
-    var playingOrphan by remember { mutableStateOf<LocalVideo?>(null) }
+    // 「其他缓存」的播放会话：整份列表都交给时光播放器（上下滑可切换全集），
+    // 与正常下载的视频一致。未解析的集 uri 为空，滑到时由 onResolveEpisode 现场解析。
+    var playingOrphanVideos by remember { mutableStateOf<List<LocalVideo>?>(null) }
+    var playingOrphanCaches by remember { mutableStateOf<List<VideoDownloader.OrphanCache>?>(null) }
+    var playingOrphanStart by remember { mutableStateOf(0) }
     val orphanScope = rememberCoroutineScope()
 
     // —— 其他缓存手动排序 ——
@@ -1053,8 +1065,9 @@ internal fun DownloadDialog(
     if (standalone && !selectorOpen) {
         BackHandler {
             // 正在全屏播孤儿缓存时，返回键先退出播放，再走原有的退回视频列表
-            if (playingOrphan != null) {
-                playingOrphan = null
+            if (playingOrphanVideos != null) {
+                playingOrphanVideos = null
+                playingOrphanCaches = null
                 return@BackHandler
             }
             selectedDir = null
@@ -1147,16 +1160,45 @@ internal fun DownloadDialog(
         }
     }
 
-    // 播放无记录的缓存：解析成本地文件（mp4 或 local.m3u8）后用同一个全屏播放器播
+    // 播放无记录的缓存：把整份「其他缓存」列表都交给时光播放器（与正常下载的视频一致，
+    // 上下滑切换全集）；点击的这一集先解析出本地文件直接起播，其余集滑到时再现场解析
     val onPlayOrphan: (VideoDownloader.OrphanCache) -> Unit = { o ->
         orphanScope.launch {
+            val snapshot = orphans.toList()
+            val startIdx = snapshot.indexOfFirst { it.title == o.title }.coerceAtLeast(0)
             val f = withContext(Dispatchers.IO) {
                 VideoDownloader.findOrphanFile(o.dirName, o.title)
             }
             if (f == null || f.length() <= 0L) {
                 context.toastOnUi("缓存文件不存在或已损坏")
-            } else {
-                playingOrphan = LocalVideo(Uri.fromFile(f), o.title, f.absolutePath, f.length(), 0L)
+                return@launch
+            }
+            playingOrphanCaches = snapshot
+            playingOrphanStart = startIdx
+            playingOrphanVideos = snapshot.map { c ->
+                if (c.title == o.title) {
+                    LocalVideo(Uri.fromFile(f), c.title, f.absolutePath, f.length(), 0L)
+                } else {
+                    LocalVideo(Uri.EMPTY, c.title, "", 0L, 0L)
+                }
+            }
+        }
+    }
+
+    /** 播放器滑到未解析的集（或预取下一集）时现场解析本地文件；回填列表后自动起播 */
+    fun resolveOrphanAt(index: Int) {
+        val caches = playingOrphanCaches ?: return
+        val videos = playingOrphanVideos ?: return
+        val c = caches.getOrNull(index) ?: return
+        if (videos.getOrNull(index)?.uri != Uri.EMPTY) return
+        orphanScope.launch {
+            val f = withContext(Dispatchers.IO) {
+                VideoDownloader.findOrphanFile(c.dirName, c.title)
+            }
+            if (f == null || f.length() <= 0L) return@launch
+            if (playingOrphanCaches !== caches) return@launch // 播放会话已换，丢弃结果
+            playingOrphanVideos = (playingOrphanVideos ?: videos).toMutableList().also {
+                it[index] = LocalVideo(Uri.fromFile(f), c.title, f.absolutePath, f.length(), 0L)
             }
         }
     }
@@ -1173,19 +1215,50 @@ internal fun DownloadDialog(
 
     // 弹窗与独立页面共用同一份内容，只是外壳不同
     val body: @Composable () -> Unit = {
-        val orphan = playingOrphan
-        if (orphan != null) {
-            // 全屏播无记录的缓存：与正片同一个播放器（本地清单 / 进度 / 手势全都在）。
-            // 单视频固定顺序：playOrderState / currentPageState 是必填的外部状态，这里给孤儿的即可
-            val orphanOrder = remember { mutableStateOf(listOf(0)) }
-            val orphanPage = remember { mutableStateOf(0) }
+        // 批量删除二次确认框
+        val confirmReq = batchDeleteConfirm
+        if (confirmReq != null) {
+            AlertDialog(
+                onDismissRequest = { batchDeleteConfirm = null },
+                title = { Text("确认删除") },
+                text = { Text(confirmReq.first) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        batchDeleteConfirm = null
+                        confirmReq.second()
+                    }) {
+                        Text("删除", color = Color(0xFFFF6B6B))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { batchDeleteConfirm = null }) {
+                        Text("取消")
+                    }
+                }
+            )
+        }
+        val orphanVideos = playingOrphanVideos
+        if (orphanVideos != null) {
+            // 全屏播「其他缓存」：与正片同一个时光播放器（本地清单 / 进度 / 手势全都在），
+            // 上下滑可在全集之间切换；未解析的集滑到时由 onResolveEpisode 现场补齐后自动起播。
+            // 顺序/页码状态以进入播放时的列表快照为 key：解析回填不会重置分页位置
+            val orphanOrder = remember(playingOrphanCaches) {
+                mutableStateOf(orphanVideos.indices.toList())
+            }
+            val orphanPage = remember(playingOrphanCaches) {
+                mutableStateOf(playingOrphanStart)
+            }
             FullscreenVideoPlayer(
-                videos = listOf(orphan),
-                initialIndex = 0,
+                videos = orphanVideos,
+                initialIndex = playingOrphanStart,
                 seriesTitle = currentName,
-                onExit = { playingOrphan = null },
+                onExit = {
+                    playingOrphanVideos = null
+                    playingOrphanCaches = null
+                },
                 playOrderState = orphanOrder,
                 currentPageState = orphanPage,
+                onResolveEpisode = { index, _ -> resolveOrphanAt(index) },
             )
         } else {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -1336,9 +1409,14 @@ internal fun DownloadDialog(
                         Spacer(modifier = Modifier.weight(1f))
                         if (videoChecked.isNotEmpty()) {
                             TextButton(onClick = {
-                                val n = VideoDownloader.deleteVideos(videoChecked.toSet())
-                                videoChecked.clear()
-                                context.toastOnUi("已删除 $n 部视频及其缓存文件")
+                                val keys = videoChecked.toSet()
+                                val names = groups.filter { it.key in keys }.joinToString("、") { it.name }
+                                batchDeleteConfirm =
+                                    "将删除 ${keys.size} 部视频（$names）的全部下载记录与缓存文件，确定？" to {
+                                        val n = VideoDownloader.deleteVideos(keys)
+                                        videoChecked.clear()
+                                        context.toastOnUi("已删除 $n 部视频及其缓存文件")
+                                    }
                             }) {
                                 Text(
                                     "删除选中(${videoChecked.size})",
@@ -1547,6 +1625,49 @@ internal fun DownloadDialog(
                                     )
                                 }
                             } else {
+                                // 多选删除操作条（与下载进度页同款）：全选 / 取消 / 删除选中（二次确认）
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    TextButton(onClick = {
+                                        orphanChecked.clear()
+                                        orphanChecked.addAll(orphans.map { it.title })
+                                    }) {
+                                        Text(
+                                            "全选",
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    if (orphanChecked.isNotEmpty()) {
+                                        TextButton(onClick = { orphanChecked.clear() }) {
+                                            Text(
+                                                "取消(${orphanChecked.size})",
+                                                color = contentColor.copy(alpha = 0.6f),
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.weight(1f))
+                                        TextButton(onClick = {
+                                            val targets = orphans.filter { it.title in orphanChecked }
+                                            batchDeleteConfirm =
+                                                "将删除选中的 ${targets.size} 个其他缓存（缓存文件夹/成品文件一并删除），确定？" to {
+                                                    targets.forEach {
+                                                        VideoDownloader.deleteOrphanCache(
+                                                            it.dirName, it.title, it.isHls
+                                                        )
+                                                    }
+                                                    orphanChecked.clear()
+                                                    orphanTick++
+                                                    context.toastOnUi("已删除 ${targets.size} 个其他缓存")
+                                                }
+                                        }) {
+                                            Text(
+                                                "删除选中(${orphanChecked.size})",
+                                                color = Color(0xFFFF6B6B),
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                    }
+                                }
                                 LazyColumn(
                                     modifier = Modifier
                                         .weight(1f)
@@ -1629,6 +1750,11 @@ internal fun DownloadDialog(
                                         ) {
                                             OrphanCacheItem(
                                                 o = o,
+                                                checked = orphanChecked.contains(o.title),
+                                                onCheckedChange = { on ->
+                                                    if (on) orphanChecked.add(o.title)
+                                                    else orphanChecked.remove(o.title)
+                                                },
                                                 contentColor = contentColor,
                                                 onPlay = { onPlayOrphan(o) },
                                                 onPinTop = { moveOrphan(i, 0) },
@@ -1666,9 +1792,13 @@ internal fun DownloadDialog(
                                     }
                                     Spacer(modifier = Modifier.weight(1f))
                                     TextButton(onClick = {
-                                        val n = VideoDownloader.deleteTasks(itemChecked.toSet())
-                                        itemChecked.clear()
-                                        context.toastOnUi("已删除 $n 条（含缓存文件）")
+                                        val keys = itemChecked.toSet()
+                                        batchDeleteConfirm =
+                                            "将删除选中的 ${keys.size} 条下载记录及其缓存文件（含成品 MP4），确定？" to {
+                                                val n = VideoDownloader.deleteTasks(keys)
+                                                itemChecked.clear()
+                                                context.toastOnUi("已删除 $n 条（含缓存文件）")
+                                            }
                                     }) {
                                         Text(
                                             "删除选中",
@@ -1941,6 +2071,8 @@ private fun DownloadStateItem(
 @Composable
 private fun OrphanCacheItem(
     o: VideoDownloader.OrphanCache,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
     contentColor: Color,
     onPlay: () -> Unit,
     onPinTop: () -> Unit,
@@ -1951,6 +2083,8 @@ private fun OrphanCacheItem(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
+        // 勾选后配合上方的"删除选中"做批量删除（带二次确认）
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 o.title,
