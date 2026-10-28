@@ -377,10 +377,32 @@ object AudioDecodeUtil {
     }
 
     /**
+     * 保留下来的静音的音量百分比（[SilenceSkippingAudioProcessor] 第 4 个构造参数）。
+     *
+     * Media3 默认是 10，即"判定为静音但仍保留"的部分会被压到 10%（-20dB）。
+     * 移植 tts_server_android 时沿用了默认值，但朗读场景会咬掉每段末尾的尾音：
+     *
+     * 处理器把一段静音切成三块处理——开头 minDuration/2 做 FADE_OUT、中间做 MUTE、
+     * 末尾 minDuration/2 做 FADE_IN。FADE_IN 是为「后面还有一句人声要淡入」设计的，
+     * 而每段音频是独立跑处理器的，流末尾根本没有下一句。结果两头各 100ms 都被
+     * [DEFAULT_MIN_VOLUME_TO_KEEP_PERCENTAGE] 往 10% 压：开头那 100ms 正好压在
+     * 紧接最后一个有效采样之后的【真实尾音衰减】上，末尾那 100ms 反而是衰减早就
+     * 结束的纯静音，却被拉回 100%。方向完全反了，听感就是尾音突然消失。
+     *
+     * 猫箱实测（见 尾音裁剪测试/）：改前输出末尾仅 0~24ms 与原始逐字节相同，
+     * 改后 100~119ms；12 条样本里尾音衰减段与末尾段全部原样保留。
+     *
+     * 【该参数不参与静音判定】——判定只看 silenceThresholdLevel，删除决策与它无关。
+     * 实测改为 100 后删除量逐字节不变，即"该切的静音照样切"，只是不再平白压低。
+     * 因此这一项是纯收益，不会让快节奏失效。
+     */
+    private const val SILENCE_MIN_VOLUME_TO_KEEP_PERCENTAGE = 100
+
+    /**
      * 在 PCM 域裁剪静音段，实现「快节奏播放」（去除静音）。
-     * 原样复刻 tts_server_android 的 DefaultResultProcessor：
+     * 复刻 tts_server_android 的 DefaultResultProcessor：
      * 用 AudioProcessingPipeline 驱动 SilenceSkippingAudioProcessor，
-     * 参数只透传最小静音时长，其余全部用 Media3 默认值，不擅自调整。
+     * 只透传最小静音时长与保留音量，其余用 Media3 默认值。
      *
      * @param pcm 16bit 小端 PCM，单声道
      * @param sampleRate 真实采样率（此处已统一为 TARGET_SAMPLE_RATE）
@@ -391,12 +413,13 @@ object AudioDecodeUtil {
     private fun applySilenceSkip(pcm: ByteArray, sampleRate: Int, minDurationMs: Int): ByteArray {
         if (pcm.isEmpty()) return pcm
         try {
-            // 仅调整最小静音时长，其余参数保持 Media3 默认值（原样复刻）
+            // 只透传最小静音时长与保留音量；阈值、保留比例、保留上限用 Media3 默认值。
+            // 保留音量不用默认的 10（= -20dB），否则每段末尾的尾音会被压没，见常量注释。
             val skipProcessor = SilenceSkippingAudioProcessor(
                 minDurationMs * 1000L,
                 SilenceSkippingAudioProcessor.DEFAULT_SILENCE_RETENTION_RATIO,
                 SilenceSkippingAudioProcessor.DEFAULT_MAX_SILENCE_TO_KEEP_DURATION_US,
-                SilenceSkippingAudioProcessor.DEFAULT_MIN_VOLUME_TO_KEEP_PERCENTAGE,
+                SILENCE_MIN_VOLUME_TO_KEEP_PERCENTAGE,
                 SilenceSkippingAudioProcessor.DEFAULT_SILENCE_THRESHOLD_LEVEL,
             )
             skipProcessor.setEnabled(true)
