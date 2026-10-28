@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/vw_bg"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -14,26 +13,52 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="下载背景音乐"
+        android:text="下载音效和音乐"
         android:textColor="@color/primaryText"
         android:textSize="18sp"
         android:textStyle="bold" />
 
-    <io.legado.app.ui.widget.text.TextInputLayout
+    <RadioGroup
+        android:id="@+id/rgDownloadTarget"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:hint="仓库网址">
+        android:layout_marginTop="8dp"
+        android:orientation="vertical">
 
-        <io.legado.app.lib.theme.view.ThemeEditText
-            android:id="@+id/etUrl"
+        <RadioButton
+            android:id="@+id/rbBgm"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:singleLine="true"
-            android:text="https://cnb.cool/zhangsan33/maotxinxxx/-/tree/bgm/bgm"
+            android:checked="true"
+            android:paddingStart="8dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="背景音乐"
+            android:textColor="@color/primaryText"
             android:textSize="15sp" />
 
-    </io.legado.app.ui.widget.text.TextInputLayout>
+        <RadioButton
+            android:id="@+id/rbAllEffect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="全部音效"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp" />
+
+        <RadioButton
+            android:id="@+id/rbAiEffect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="AI广播剧音效库"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp" />
+    </RadioGroup>
 
     <TextView
         android:id="@+id/tv_progress"
@@ -80,7 +105,7 @@
             android:focusable="true"
             android:gravity="center"
             android:padding="10dp"
-            android:text="确定"
+            android:text="下载"
             android:textColor="@color/primaryText"
             android:textSize="15sp" />
     </LinearLayout>

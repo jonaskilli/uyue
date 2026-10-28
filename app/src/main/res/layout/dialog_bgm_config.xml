@@ -416,7 +416,7 @@
             android:focusable="true"
             android:gravity="center"
             android:padding="12dp"
-            android:text="下载背景音乐"
+            android:text="下载音效和音乐"
             android:textColor="@color/primaryText"
             android:textSize="14sp" />
     </LinearLayout>
