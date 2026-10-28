@@ -41,6 +41,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_download_sound_and_music"
+        android:title="下载音效和音乐"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_expand_all"
         android:title="展开全部分组"
         app:showAsAction="never" />

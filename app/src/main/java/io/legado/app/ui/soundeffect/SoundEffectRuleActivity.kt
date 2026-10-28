@@ -276,6 +276,9 @@ class SoundEffectRuleActivity :
                 allowExtensions = arrayOf("json", "txt")
             }
             R.id.menu_export -> exportCurrent()
+            R.id.menu_download_sound_and_music ->
+                io.legado.app.ui.book.read.config.BgmDownloadDialog()
+                    .show(supportFragmentManager, "soundEffectDownload")
             R.id.menu_expand_all -> adapter.expandAll()
             R.id.menu_collapse_all -> adapter.collapseAll()
         }
