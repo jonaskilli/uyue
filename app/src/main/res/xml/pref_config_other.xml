@@ -54,6 +54,7 @@
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="true"
             android:key="showVideo"
+            android:summary="@string/ps_show_video"
             android:title="@string/show_video"
             app:iconSpaceReserved="false" />
 

@@ -364,6 +364,20 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val showVideo: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.showVideo, true)
 
+    /**
+     * 视频源特性总开关（其他设置 → 显示视频源）。
+     *
+     * 关闭后不只隐藏视频主页：书源侧的「是否视频源」识别（类型/分组/书源名/规则特征）
+     * 与书籍侧的 video 位一并失效，搜索、换源、路由、目录、正文、发现页都不再做视频分流，
+     * 全部按普通书源处理——这样聚合源（同一源里既有小说又有视频/漫画）的文本
+     * 不会再被识别成视频、按视频口径解析而报错。
+     *
+     * 判定处统一读这里，避免各处直接读 [showVideo] 造成口径漂移。
+     * 注意与 [showVideo] 一样是实时读 SharedPreferences，设置里改完立即生效。
+     */
+    val videoFeatureEnabled: Boolean
+        get() = showVideo
+
     val showRSS: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.showRss, true)
 
