@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
 import io.legado.app.constant.BookSourceType
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.source.hasVideoRuleHint
 import io.legado.app.help.source.isVideoGroupName
 import io.legado.app.help.source.isVideoSource
@@ -441,6 +442,8 @@ fun BookSourceDao.flowVideoSources(): Flow<List<BookSource>> =
 
 /** 轻量判定：只看类型/分组/书源名 + 规则 JSON 原文里有没有 m3u8/mp4 */
 private fun VideoSourceRow.isVideo(): Boolean {
+    // 与 BookSource.isVideoSource() 同口径：特性关闭时一律不判视频源
+    if (!AppConfig.videoFeatureEnabled) return false
     if (bookSourceType == BookSourceType.video) return true
     val group = bookSourceGroup ?: ""
     if (group.isVideoGroupName()) return true

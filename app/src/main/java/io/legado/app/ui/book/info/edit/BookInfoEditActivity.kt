@@ -16,7 +16,7 @@ import io.legado.app.help.book.addType
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
-import io.legado.app.help.book.isVideo
+import io.legado.app.help.book.isType
 import io.legado.app.help.book.removeType
 import io.legado.app.ui.book.changecover.ChangeCoverDialog
 import io.legado.app.ui.file.HandleFileContract
@@ -102,7 +102,8 @@ class BookInfoEditActivity :
         tieBookAuthor.setText(book.author)
         spType.setSelection(
             when {
-                book.isVideo -> 4
+                // 读原始类型位，不受视频源特性开关影响（关了也要能看见/改回视频类型）
+                book.isType(BookType.video) -> 4
                 book.isImage -> 2
                 book.isAudio -> 1
                 else -> 0

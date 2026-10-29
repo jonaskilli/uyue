@@ -7,6 +7,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.data.entities.rule.ExploreKind
 import io.legado.app.help.CacheManager
+import io.legado.app.help.config.AppConfig
 import io.legado.app.ui.main.explore.ExploreAdapter.Companion.exploreInfoMapList
 import io.legado.app.utils.ACache
 import io.legado.app.utils.GSON
@@ -168,6 +169,8 @@ private val VIDEO_RULE_HINTS = arrayOf("m3u8", "mp4")
  * 要依次叠加：分组 → 书源名 → 规则特征，与视频主页的选源口径对齐。
  */
 fun BookSource.isVideoSource(): Boolean {
+    // 视频源特性关闭：一律不判视频源，聚合源（小说+视频+漫画）按普通书源走
+    if (!AppConfig.videoFeatureEnabled) return false
     if (bookSourceType == BookSourceType.video) return true
     // 分组优先（用户在书源管理里改一下就能强制收纳），分组为空时再看书源名兜底
     val group = bookSourceGroup ?: ""

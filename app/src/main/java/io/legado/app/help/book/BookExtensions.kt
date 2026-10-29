@@ -40,8 +40,16 @@ import kotlin.math.min
 val Book.isAudio: Boolean
     get() = isType(BookType.audio)
 
+/**
+ * 是否为视频书。
+ *
+ * 受视频源特性总开关控制（其他设置 → 显示视频源）：关闭后一律按非视频处理，
+ * 让聚合源（同一源里既有小说又有视频/漫画）的文本走正常阅读链路，
+ * 而不是被路由到播放器、按视频口径解析。
+ * 书籍类型编辑页不受此影响，那里读的是 [isType] 的原始位。
+ */
 val Book.isVideo: Boolean
-    get() = isType(BookType.video)
+    get() = isType(BookType.video) && AppConfig.videoFeatureEnabled
 
 val Book.isImage: Boolean
     get() = isType(BookType.image)
@@ -332,6 +340,8 @@ fun Book.getBookSource(): BookSource? {
  * 既修当前这一次，也把历史脏数据一并纠过来。
  */
 fun Book.ensureVideoType(): Book {
+    // 视频源特性关闭：不补 video 位，聚合源的文本不再被标成视频书
+    if (!AppConfig.videoFeatureEnabled) return this
     if (isVideo) return this
     val source = getBookSource() ?: return this
     if (!source.isVideoSource()) return this

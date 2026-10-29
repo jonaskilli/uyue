@@ -20,6 +20,7 @@ import io.legado.app.help.book.addType
 import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.book.getBookSource
 import io.legado.app.help.book.removeType
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.source.isVideoSource
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.ui.book.info.BookInfoActivity
@@ -185,8 +186,10 @@ class ExploreShowActivity : VMBaseActivity<ActivityExploreShowBinding, ExploreSh
     override fun showBookInfo(book: SearchBook) {
         lifecycleScope.launch(IO) {
             // 视频源结果：封面即播（复刻时光播放器的交互），不再绕道详情页
-            val isVideo = (book.type and BookType.video > 0) ||
-                appDb.bookSourceDao.getBookSource(book.origin)?.isVideoSource() == true
+            // 视频源特性关闭时不做这个分流，聚合源的结果照常进详情页
+            val isVideo = AppConfig.videoFeatureEnabled &&
+                ((book.type and BookType.video > 0) ||
+                    appDb.bookSourceDao.getBookSource(book.origin)?.isVideoSource() == true)
             if (isVideo) {
                 playVideo(book)
             } else {
