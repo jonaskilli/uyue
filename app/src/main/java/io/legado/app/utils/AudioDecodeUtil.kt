@@ -55,6 +55,40 @@ object AudioDecodeUtil {
      */
     private const val MIN_DECODE_COMPLETENESS_RATIO = 0.65
 
+    // ========== 开头垃圾帧哨兵 ==========
+    // 症状：MP3 解码器吃到损坏的首帧时不报错，而是把乱码比特流解出一段
+    // 满幅削波的啸叫（实测 ~40ms、~1.9kHz、顶到 ±32767），随后恢复正常同步。
+    // 时长恰好等于一个 MP3 帧（16kHz/576 或 32kHz/1152 采样重采样到 24k），
+    // 表现为「合成音频开头偶尔先炸一下再正常」。该垃圾不影响总时长，
+    // [MIN_DECODE_COMPLETENESS_RATIO] 的完整性校验抓不住它，只能在 PCM 出口剥。
+
+    /** 哨兵扫描窗口（毫秒） */
+    private const val GARBAGE_SCAN_MS = 150
+    /** 突发时长下限/上限（毫秒），垃圾帧重采样后约 24~36ms，上限防误吞长音效 */
+    private const val GARBAGE_MIN_BURST_MS = 25
+    private const val GARBAGE_MAX_BURST_MS = 120
+    /** 判定「响」的窗口峰值：满幅的 70% */
+    private const val GARBAGE_LOUD_RATIO = 0.70
+    /** 削波判定：|采样| ≥ 99% 满幅的比例须 ≥ 该百分比 */
+    private const val GARBAGE_CLIP_PERCENT = 1
+    /** 硬切验证：突发结束后须立刻降到满幅的 20% 以下（真实音频不会瞬间消失） */
+    private const val GARBAGE_QUIET_RATIO = 0.20
+
+    /**
+     * 快节奏播放的短音频豁免阈值：转 WAV 后 PCM 低于该 KB 数就跳过去静音。
+     *
+     * 标准 WAV 为 24kHz/16bit/单声道 = 48KB/s，50KB ≈ 1 秒。
+     * 用猫箱插件真实合成样本校准（见 尾音裁剪测试/maoxiang/）：
+     *  - 单字 0.84s ≈ 39KB、短对话 0.82s ≈ 38KB（1~2 字）
+     *  - 短句 1.46s ≈ 69KB（3~5 字）、问号句 1.87s ≈ 88KB（6 字上下）
+     * 即 50KB 以下对应 1~2 字的合成音频，正常短句以上不受影响。
+     *
+     * 背景：字数极少的音频尾音衰减占总时长比例大，去静音把结尾停顿裁掉后
+     * 听感「戛然而止」（缺尾音）；而这类短段去静音最多省 ~0.3s，收益极小，
+     * 不值得冒险，直接整段豁免。
+     */
+    private const val SILENCE_SKIP_MIN_PCM_KB = 50
+
     /**
      * 校验解码结果是否完整（是否中途截断）。
      *
@@ -79,6 +113,95 @@ object AudioDecodeUtil {
         Log.w(TAG, msg)
         io.legado.app.constant.AppLog.putDebug("[AudioDecodeUtil] $msg")
         return null
+    }
+
+    /**
+     * 开头垃圾帧哨兵：剥离解码 PCM 最前面的「满幅削波突发」。
+     *
+     * 背景：解码器（Exo 或平台 MediaCodec）吃到损坏首帧时不报错，而是解出一段
+     * 满幅削波的啸叫，随后恢复正常同步——其余内容完好，只是开头多出 ~40ms 杂音。
+     * 典型触发场景：衔接音效 MP3 的首帧在分段缓冲/缓存中被污染。
+     *
+     * 判定规则（全部满足才剥离，宁漏勿误）：
+     * 1. 起手即响：前 6ms 内峰值 ≥ 满幅 35%（TTS/音效开头通常是淡入，起手很安静）；
+     * 2. 从 0 起有一段 5ms 窗峰值 ≥ 70% 满幅的连续突发，时长 [25, 120]ms、
+     *    中间低峰间隙 ≤ 3ms；
+     * 3. 突发内 ≥ 1% 采样顶到 99% 满幅（硬削波，真实录音几乎不会持续满幅）；
+     * 4. 突发结束后立刻（60ms 内）降到满幅 20% 以下——垃圾帧是「硬切到 0」，
+     *    真实音频不会瞬间消失。
+     *
+     * 剥离动作打 AppLog 调试日志；若误伤了合法的满幅短音效，可凭日志里的
+     * 突发时长/削波数调整 [GARBAGE_MIN_BURST_MS] 等阈值。
+     *
+     * @param pcm 16bit 小端 PCM（调用方保证为 [TARGET_SAMPLE_RATE]、单声道）
+     */
+    private fun stripLeadingGarbage(pcm: ByteArray, sampleRate: Int): ByteArray {
+        if (pcm.size < 4) return pcm
+        val totalSamples = pcm.size / 2
+        val scanSamples = minOf(totalSamples, sampleRate * GARBAGE_SCAN_MS / 1000)
+        if (scanSamples < sampleRate * GARBAGE_MAX_BURST_MS / 1000) return pcm
+
+        fun sampleAt(i: Int): Int =
+            (pcm[2 * i + 1].toInt() shl 8) or (pcm[2 * i].toInt() and 0xFF)
+
+        val loudLevel = (Short.MAX_VALUE * GARBAGE_LOUD_RATIO).toInt()
+        val clipLevel = (Short.MAX_VALUE * 0.99).toInt()
+        val quietLevel = (Short.MAX_VALUE * GARBAGE_QUIET_RATIO).toInt()
+
+        // 规则 1：起手即响
+        val headEnd = minOf(scanSamples, sampleRate * 6 / 1000)
+        var headPeak = 0
+        for (i in 0 until headEnd) {
+            val v = Math.abs(sampleAt(i))
+            if (v > headPeak) headPeak = v
+        }
+        if (headPeak < loudLevel / 2) return pcm
+
+        // 规则 2：从 0 起的连续响突发（允许 ≤3ms 低峰间隙）
+        val win = maxOf(1, sampleRate * 5 / 1000)
+        val maxGap = sampleRate * 3 / 1000
+        var burstEnd = 0
+        var clipped = 0
+        var gap = 0
+        var pos = 0
+        while (pos < scanSamples) {
+            val end = minOf(pos + win, scanSamples)
+            var peak = 0
+            for (i in pos until end) {
+                val v = Math.abs(sampleAt(i))
+                if (v > peak) peak = v
+            }
+            if (peak >= loudLevel) {
+                burstEnd = end
+                gap = 0
+                for (i in pos until end) {
+                    if (Math.abs(sampleAt(i)) >= clipLevel) clipped++
+                }
+            } else {
+                gap += end - pos
+                if (gap > maxGap) break
+            }
+            pos = end
+        }
+        val burstMs = burstEnd * 1000 / sampleRate
+        if (burstMs < GARBAGE_MIN_BURST_MS || burstMs > GARBAGE_MAX_BURST_MS) return pcm
+
+        // 规则 3：硬削波占比
+        if (clipped * 100 < burstEnd * GARBAGE_CLIP_PERCENT) return pcm
+
+        // 规则 4：突发后硬切到静默
+        val afterEnd = minOf(totalSamples, burstEnd + sampleRate * 60 / 1000)
+        var afterPeak = 0
+        for (i in burstEnd until afterEnd) {
+            val v = Math.abs(sampleAt(i))
+            if (v > afterPeak) afterPeak = v
+        }
+        if (afterPeak >= quietLevel) return pcm
+
+        val msg = "检测到开头垃圾帧（满幅削波突发 ${burstMs}ms、削波 $clipped 采样），已剥离"
+        Log.w(TAG, msg)
+        io.legado.app.constant.AppLog.putDebug("[AudioDecodeUtil] $msg")
+        return pcm.copyOfRange(burstEnd * 2, pcm.size)
     }
 
     /**
@@ -203,15 +326,23 @@ object AudioDecodeUtil {
                 resamplePcm(pcm, srcRate, TARGET_SAMPLE_RATE, srcChannels, TARGET_CHANNELS)
             }
 
+            // 开头垃圾帧哨兵：解码器对损坏首帧会输出满幅削波突发，在此剥离
+            val garbageFree = stripLeadingGarbage(resampled, TARGET_SAMPLE_RATE)
+
             // Sonic 后处理（语速/音量/音高，三者独立）
             val processed = if (postParams != null && !postParams.isDefault()) {
-                applySonicProcessing(resampled, TARGET_SAMPLE_RATE, postParams)
+                applySonicProcessing(garbageFree, TARGET_SAMPLE_RATE, postParams)
             } else {
-                resampled
+                garbageFree
             }
 
             // 快节奏播放：在 PCM 域裁剪静音段（对齐 tts_server_android 的 DefaultResultProcessor 流程）
-            val skipped = if (silenceSkip != null && silenceSkip.enabled) {
+            // 短音频豁免：转 WAV 后不足 SILENCE_SKIP_MIN_PCM_KB（约 1~2 字）的段跳过去静音，
+            // 否则尾音衰减占比大的短音频会被裁得「戛然而止」。大小用去静音前、
+            // Sonic 变速前的 PCM（garbageFree）衡量，直接对应合成字数，不受语速设置影响。
+            val skipped = if (silenceSkip != null && silenceSkip.enabled &&
+                garbageFree.size / 1024 >= SILENCE_SKIP_MIN_PCM_KB
+            ) {
                 applySilenceSkip(processed, TARGET_SAMPLE_RATE, silenceSkip.minDurationMs)
             } else {
                 processed
