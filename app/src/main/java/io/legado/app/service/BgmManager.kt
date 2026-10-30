@@ -76,6 +76,12 @@ object BgmManager {
                     if (state == Player.STATE_ENDED) {
                         // 只有 activePlayer 的结束才触发自动切换
                         if (this@apply == activePlayer) {
+                            // 朗读已暂停/停止时不再自动切歌，直接停——
+                            // 否则朗读停了 BGM 还会一首接一首无限播下去
+                            if (!BaseReadAloudService.isPlay()) {
+                                pause()
+                                return
+                            }
                             handlePlaybackEnded()
                         }
                     }
@@ -88,7 +94,9 @@ object BgmManager {
                         Player.MEDIA_ITEM_TRANSITION_REASON_AUTO -> {
                             io.legado.app.constant.AppLog.put("AI背景音乐: BGM自动顺序切换(异常), index=$currentIdx, name=$fileName")
                             pause()
-                            onBgmStarted?.invoke()
+                            if (BaseReadAloudService.isPlay()) {
+                                onBgmStarted?.invoke()
+                            }
                         }
                         Player.MEDIA_ITEM_TRANSITION_REASON_SEEK -> {
                             io.legado.app.constant.AppLog.put("AI背景音乐: BGM切换完成(SEEK), index=$currentIdx, name=$fileName")
@@ -102,6 +110,8 @@ object BgmManager {
                     io.legado.app.utils.LogUtils.d("BgmManager", "❌ BGM播放错误: ${error.message}, index=$currentPlayingIndex, name=$fileName")
                     io.legado.app.constant.AppLog.put("AI背景音乐: 播放错误 $fileName，自动跳过: ${error.localizedMessage}")
                     // 播放出错时自动跳过到下一首
+                    // 朗读已暂停/停止时不再跳歌，避免无人管住 BGM
+                    if (!BaseReadAloudService.isPlay()) return
                     mainScope.launch {
                         // 取局部 size，避免检查与取模之间 bgmNames 被清空导致 % 0
                         val size = bgmNames.size
@@ -742,13 +752,18 @@ object BgmManager {
 
     /**
      * 暂停（带淡出）
+     *
+     * 先无条件暂停两个播放器再做淡出装饰：
+     * 旧的实现只暂停当时的 activePlayer，若恰好撞上交叉淡出切歌的窗口
+     * （standbyPlayer 已 play、角色尚未交换），暂停会落空——新歌淡入后
+     * 无人再管，而朗读已停止，BGM 就一直播下去了。
+     * 恢复播放时 play()/playAudioByIndex() 会重新淡入设置音量，先停无副作用。
      */
     fun pause() {
         mainScope.launch {
-            if (activePlayer?.isPlaying == true) {
-                animateVolume(activePlayer, 0f)
-                activePlayer?.pause()
-            }
+            playerA?.pause()
+            playerB?.pause()
+            animateVolume(activePlayer, 0f)
         }
     }
 
