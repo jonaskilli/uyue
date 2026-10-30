@@ -96,7 +96,7 @@ fun Activity.setStatusBarColorAuto(
     isTransparent: Boolean,
     fullScreen: Boolean
 ) {
-    val isLightBar = ColorUtils.isColorLight(color)
+    val isLightBar = ColorUtils.isLightBackground(color)
     if (fullScreen) {
         if (isTransparent) {
             window.statusBarColor = Color.TRANSPARENT

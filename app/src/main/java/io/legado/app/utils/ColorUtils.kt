@@ -17,6 +17,18 @@ object ColorUtils {
         return ColorUtils.calculateLuminance(color) >= 0.5
     }
 
+    /**
+     * 该背景色上是否应该使用深色文字/图标。
+     *
+     * [isColorLight] 的 0.5 亮度阈值会把 #03A9F4 这类中亮色判成"深背景"，
+     * 于是顶栏套上白色文字/图标，白字压浅底几乎看不见。
+     * 这里改用 WCAG 对比度：白色前景与背景的对比度不足 3:1（大文字/UI 组件
+     * 的最低标准）即视为浅背景，应改用深色前景。
+     */
+    fun isLightBackground(@ColorInt color: Int): Boolean {
+        return ColorUtils.calculateContrast(Color.WHITE, color) < 3.0
+    }
+
     fun intToString(intColor: Int): String {
         return String.format("#%06X", 0xFFFFFF and intColor)
     }

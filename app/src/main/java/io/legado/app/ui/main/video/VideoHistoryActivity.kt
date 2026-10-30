@@ -14,8 +14,11 @@ import io.legado.app.databinding.ActivityVideoHistoryBinding
 import io.legado.app.help.book.addType
 import io.legado.app.help.book.ensureVideoType
 import io.legado.app.help.video.VideoFeedStore
+import io.legado.app.lib.theme.getPrimaryTextColor
+import io.legado.app.lib.theme.primaryColor
 import io.legado.app.ui.book.search.SearchAdapter
 import io.legado.app.ui.book.video.SourceVideoPlayerActivity
+import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.startActivity
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
@@ -77,7 +80,8 @@ class VideoHistoryActivity : BaseActivity<ActivityVideoHistoryBinding>(),
             TextView(this).apply {
                 text = label
                 textSize = 14f
-                setTextColor(Color.WHITE)
+                // 顶栏底色是主题 primary，文字按底色亮度切换深浅，浅色主色下白字会看不清
+                setTextColor(getPrimaryTextColor(ColorUtils.isLightBackground(primaryColor)))
                 setPadding(px(14), px(8), px(14), px(8))
                 setOnClickListener { onClick() }
             }
@@ -119,7 +123,12 @@ class VideoHistoryActivity : BaseActivity<ActivityVideoHistoryBinding>(),
         val on = isIncognitoOn()
         incognitoBtn.text = if (on) "无痕·开" else "无痕"
         incognitoBtn.setTextColor(
-            if (on) Color.parseColor("#FFB300") else Color.WHITE
+            when {
+                // 开启态用警示色：浅底换深琥珀保证可读，深底维持亮琥珀
+                on && ColorUtils.isLightBackground(primaryColor) -> Color.parseColor("#B26A00")
+                on -> Color.parseColor("#FFB300")
+                else -> getPrimaryTextColor(ColorUtils.isLightBackground(primaryColor))
+            }
         )
     }
 

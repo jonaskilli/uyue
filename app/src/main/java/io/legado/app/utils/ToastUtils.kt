@@ -28,7 +28,7 @@ fun Context.toastOnUi(message: CharSequence?, duration: Int = Toast.LENGTH_SHORT
         kotlin.runCatching {
             toast?.cancel()
             toast = Toast(this)
-            val isLight = ColorUtils.isColorLight(bottomBackground)
+            val isLight = ColorUtils.isLightBackground(bottomBackground)
             ViewToastBinding.inflate(layoutInflater).run {
                 toast?.view = root
                 cvToast.setCardBackgroundColor(bottomBackground)
