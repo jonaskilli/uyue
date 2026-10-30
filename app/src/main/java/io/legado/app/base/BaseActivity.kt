@@ -151,7 +151,9 @@ abstract class BaseActivity<VB : ViewBinding>(
             }
 
             else -> {
-                if (ColorUtils.isColorLight(primaryColor)) {
+                // 用 WCAG 对比度判断顶栏 overlay：白字对比不足 3:1 的浅色主色
+                // 也走 Light（深色标题/图标），避免白字压浅底看不清
+                if (ColorUtils.isLightBackground(primaryColor)) {
                     setTheme(R.style.AppTheme_Light)
                 } else {
                     setTheme(R.style.AppTheme_Dark)

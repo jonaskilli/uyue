@@ -31,7 +31,7 @@ class ThemeBottomNavigationVIew(context: Context, attrs: AttributeSet) :
             setBackgroundColor(bgColor)
             elevation = context.elevation
         }
-        val textIsDark = ColorUtils.isColorLight(bgColor)
+        val textIsDark = ColorUtils.isLightBackground(bgColor)
         val textColor = context.getSecondaryTextColor(textIsDark)
         val colorStateList = Selector.colorBuild()
             .setDefaultColor(textColor)
