@@ -140,12 +140,25 @@ object ReadAloud {
         }
     }
 
+    /**
+     * 朗读未开始时设置的定时（分钟），服务 onCreate 里套用后清空。
+     * 解决「面板打开但还没朗读，设了定时却被静默丢弃」的问题。
+     */
+    var pendingTimer: Int? = null
+
     fun setTimer(context: Context, minute: Int) {
         if (BaseReadAloudService.isRun) {
             val intent = Intent(context, aloudClass)
             intent.action = IntentAction.setTimer
             intent.putExtra("minute", minute)
             context.startForegroundServiceCompat(intent)
+        } else {
+            // 服务没起来：先暂存，开始朗读时自动套用，并给出提示，避免"设了没反应"
+            pendingTimer = minute
+            postEvent(EventBus.READ_ALOUD_DS, minute)
+            if (minute > 0) {
+                context.toastOnUi("未开始朗读，定时将在开始朗读后生效")
+            }
         }
     }
 
