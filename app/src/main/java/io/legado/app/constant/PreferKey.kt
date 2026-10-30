@@ -207,6 +207,12 @@ object PreferKey {
     const val dThemeName = "durThemeName"
     const val dNThemeName = "durThemeNameNight"
 
+    /**
+     * 内置主题已补齐到的版本。内置配色有增删时版本号 +1，
+     * 用于给已安装（已存过主题配置）的用户补发新增配色，且不覆盖他自己调过的同名主题。
+     */
+    const val defaultThemeVersion = "defaultThemeVersion"
+
     const val cPrimary = "colorPrimary"
     const val cAccent = "colorAccent"
     const val cBackground = "colorBackground"

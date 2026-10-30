@@ -49,9 +49,30 @@ object ThemeConfig {
     const val configFileName = "themeConfig.json"
     val configFilePath = FileUtils.getPath(appCtx.filesDir, configFileName)
 
+    /**
+     * 内置主题版本号：assets 里的内置配色有增删时 +1。
+     *
+     * configList 只在本地配置文件不存在时才用内置主题，已装用户早就存过自己的配置，
+     * 新增配色不会出现在主题列表里。靠这个版本号做一次性补齐：
+     * 只补本地没有的主题名，用户调过/导入过的同名主题保持原样；
+     * 补完落盘并记版本号，用户随后删除内置主题不会被再次塞回来。
+     */
+    private const val DEFAULT_THEME_VERSION = 1
+
     val configList: ArrayList<Config> by lazy {
         val cList = getConfigs() ?: DefaultData.themeConfigs
-        ArrayList(cList)
+        val list = ArrayList(cList)
+        if (appCtx.getPrefInt(PreferKey.defaultThemeVersion, 0) < DEFAULT_THEME_VERSION) {
+            val names = list.mapTo(hashSetOf()) { it.themeName }
+            DefaultData.themeConfigs.forEach { config ->
+                if (config.themeName !in names) {
+                    list.add(config)
+                }
+            }
+            appCtx.putPrefInt(PreferKey.defaultThemeVersion, DEFAULT_THEME_VERSION)
+            saveList(list)
+        }
+        list
     }
 
     private var needClearImg = true
@@ -143,7 +164,15 @@ object ThemeConfig {
     }
 
     fun save() {
-        val json = GSON.toJson(configList)
+        saveList(configList)
+    }
+
+    /**
+     * 落盘指定列表。与 [save] 分开是因为 configList 初始化过程中就要写一次文件，
+     * 那时再访问 configList 会重入 lazy 初始化。
+     */
+    private fun saveList(list: List<Config>) {
+        val json = GSON.toJson(list)
         FileUtils.delete(configFilePath)
         FileUtils.createFileIfNotExist(configFilePath).writeText(json)
     }

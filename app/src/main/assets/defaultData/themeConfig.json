@@ -16,6 +16,54 @@
     "bottomBackground": "#EEEEEE"
   },
   {
+    "themeName": "竹青",
+    "isNightTheme": false,
+    "primaryColor": "#2F6B5C",
+    "accentColor": "#C75B39",
+    "backgroundColor": "#F2F4F2",
+    "bottomBackground": "#E6EAE7"
+  },
+  {
+    "themeName": "靛蓝",
+    "isNightTheme": false,
+    "primaryColor": "#33527A",
+    "accentColor": "#C0563F",
+    "backgroundColor": "#F4F6F8",
+    "bottomBackground": "#E8EBEE"
+  },
+  {
+    "themeName": "霁蓝",
+    "isNightTheme": false,
+    "primaryColor": "#2C6E8F",
+    "accentColor": "#C0693E",
+    "backgroundColor": "#F3F6F8",
+    "bottomBackground": "#E6EBEF"
+  },
+  {
+    "themeName": "胡桃",
+    "isNightTheme": false,
+    "primaryColor": "#6E4B3A",
+    "accentColor": "#C0753A",
+    "backgroundColor": "#F5F1EA",
+    "bottomBackground": "#E9E2D7"
+  },
+  {
+    "themeName": "石墨",
+    "isNightTheme": false,
+    "primaryColor": "#37474F",
+    "accentColor": "#C0563F",
+    "backgroundColor": "#F5F5F5",
+    "bottomBackground": "#EEEEEE"
+  },
+  {
+    "themeName": "紫檀",
+    "isNightTheme": false,
+    "primaryColor": "#58496E",
+    "accentColor": "#C09A5B",
+    "backgroundColor": "#F4F2F6",
+    "bottomBackground": "#E9E6ED"
+  },
+  {
     "themeName": "黑白",
     "isNightTheme": true,
     "primaryColor": "#303030",
