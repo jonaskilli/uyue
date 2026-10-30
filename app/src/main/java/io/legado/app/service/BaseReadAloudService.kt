@@ -1990,6 +1990,7 @@ abstract class BaseReadAloudService : BaseService(),
             return
         }
         // AI智能切歌关闭：后台匹配BGM，匹配成功后再播放，不阻塞朗读流程
+        // 没有关键词配置文件（背景音乐的关键词.json）或匹配不到时，兜底随机播放一首
         lifecycleScope.launch {
             try {
                 // 先加载BGM文件列表和关键词配置（确保 allAudioFiles、playlist 和 categoryKeywords 可用）
@@ -2015,11 +2016,16 @@ abstract class BaseReadAloudService : BaseService(),
                         if (targetIndex >= 0) {
                             AppLog.put("关键词BGM: 匹配成功=$recommendedFileName, index=$targetIndex")
                             BgmManager.playByIndex(targetIndex)
+                            return@launch
                         }
                     }
                 }
+                // 没配置关键词、或没匹配到推荐曲目：随机播放（BgmManager 内歌单已 shuffle）
+                AppLog.put("关键词BGM: 无匹配结果，随机播放")
+                BgmManager.play()
             } catch (e: Exception) {
                 AppLog.put("关键词BGM匹配失败: ${e.localizedMessage}")
+                BgmManager.play()
             }
         }
     }
