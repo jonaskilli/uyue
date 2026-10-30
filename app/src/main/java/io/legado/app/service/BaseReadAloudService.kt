@@ -1522,9 +1522,12 @@ abstract class BaseReadAloudService : BaseService(),
         initBroadcastReceiver()
         initPhoneStateListener()
         upMediaSessionPlaybackState(PlaybackStateCompat.STATE_PLAYING)
-        setTimer(AppConfig.ttsTimer)
-        if (AppConfig.ttsTimer > 0) {
-            toastOnUi("朗读定时 ${AppConfig.ttsTimer} 分钟")
+        // 优先套用「朗读未开始时」暂存的定时，其次才是「保存设定时间」里的默认值
+        val startTimer = ReadAloud.pendingTimer ?: AppConfig.ttsTimer
+        ReadAloud.pendingTimer = null
+        setTimer(startTimer)
+        if (startTimer > 0) {
+            toastOnUi("朗读定时 ${startTimer} 分钟")
         }
         // 启动 gengxin 信号后台轮询（每秒检测一次）
         startGengxinPolling()
@@ -1600,6 +1603,11 @@ abstract class BaseReadAloudService : BaseService(),
         isRun = false
         isRunFlow.value = false
         pause = true
+        // 服务结束即停掉倒计时并清掉定时残留，
+        // 避免下次开面板还显示上一次的剩余时间、或残留值影响下一次朗读
+        dsJob?.cancel()
+        dsJob = null
+        timeMinute = 0
         instance = null
         abandonFocus()
         unregisterReceiver(broadcastReceiver)
@@ -2951,7 +2959,7 @@ abstract class BaseReadAloudService : BaseService(),
     }
 
     private fun addTimer() {
-        if (timeMinute == 180) {
+        if (timeMinute >= 180 || timeMinute < 0) {
             timeMinute = 0
         } else {
             timeMinute += 10
@@ -2962,20 +2970,26 @@ abstract class BaseReadAloudService : BaseService(),
 
     /**
      * 定时
+     * 只在 timeMinute > 0（真的设了定时）时才启动倒计时；
+     * 归零即停止朗读，不再让 timeMinute 掉到负数卡死。
      */
     @Synchronized
     private fun doDs() {
         postEvent(EventBus.READ_ALOUD_DS, timeMinute)
         upReadAloudNotification()
         dsJob?.cancel()
+        dsJob = null
+        if (timeMinute <= 0) {
+            // 未设置定时（或已归零）：不跑倒计时
+            return
+        }
         dsJob = lifecycleScope.launch {
             while (isActive) {
                 delay(60000)
                 if (!pause) {
-                    if (timeMinute >= 0) {
-                        timeMinute--
-                    }
-                    if (timeMinute == 0) {
+                    timeMinute--
+                    if (timeMinute <= 0) {
+                        timeMinute = 0
                         ReadAloud.stop(this@BaseReadAloudService)
                         postEvent(EventBus.READ_ALOUD_DS, timeMinute)
                         break
