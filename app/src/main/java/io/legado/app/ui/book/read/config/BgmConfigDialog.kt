@@ -1,6 +1,7 @@
 package io.legado.app.ui.book.read.config
 
 import android.content.DialogInterface
+import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -8,20 +9,26 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.SeekBar
+import androidx.appcompat.app.AlertDialog
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.databinding.DialogBgmConfigBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.lib.theme.getPrimaryTextColor
+import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.service.AiEffectIndex
+import io.legado.app.service.BaseReadAloudService
 import io.legado.app.service.BgmManager
+import io.legado.app.service.BookScriptAnalysisService
 import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.widget.seekbar.SeekBarChangeListener
 import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.setLayout
+import io.legado.app.utils.startForegroundServiceCompat
+import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import android.text.Editable
 import android.text.TextWatcher
@@ -284,6 +291,10 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             AiImageSettingsDialog().show(parentFragmentManager, "aiImageSettingsDialog")
         }
 
+        binding.rootView.findViewById<View>(R.id.btn_full_book_analysis)?.setOnClickListener {
+            showFullBookAnalysisDialog()
+        }
+
         binding.rootView.findViewById<View>(R.id.btn_ai_config)?.setOnClickListener {
             BgmAISettingsDialog().show(parentFragmentManager, "bgmAISettings")
         }
@@ -291,5 +302,46 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         binding.rootView.findViewById<View>(R.id.btn_download_bgm)?.setOnClickListener {
             BgmDownloadDialog().show(parentFragmentManager, "bgmDownload")
         }
+    }
+
+    /**
+     * 全书分析：调用朗读脚本把整本书按章节顺序做一遍角色标注/别名合并，
+     * 只分析不合成音频。分析到哪个位置就把 data.json 刷成哪个位置的上下文。
+     */
+    private fun showFullBookAnalysisDialog() {
+        val book = ReadBook.book
+        if (book == null) {
+            toastOnUi("未打开书籍")
+            return
+        }
+        val items = arrayOf(
+            "从当前章开始分析（第${ReadBook.durChapterIndex + 1}章）",
+            "从小说开头开始分析"
+        )
+        // 注意：AlertDialog 的 setMessage 与 setItems 互斥（消息会顶掉选项列表），
+        // 说明文字并进标题，保证两个选项可见
+        AlertDialog.Builder(requireContext())
+            .setTitle("全书分析 · ${book.name}（共${ReadBook.chapterSize}章，不合成音频）")
+            .setItems(items) { _, which ->
+                val startIndex = if (which == 0) ReadBook.durChapterIndex else 0
+                startFullBookAnalysis(startIndex)
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun startFullBookAnalysis(startIndex: Int) {
+        // 分析与朗读互斥（共用 data.json 脚本上下文）：开始分析先停止朗读，
+        // 分析期间朗读启动会被拦截（ReadAloud.play 统一拦截）
+        if (BaseReadAloudService.isRun) {
+            ReadAloud.stop(requireContext())
+            toastOnUi("已停止朗读，开始全书分析")
+        } else {
+            toastOnUi("全书分析已开始")
+        }
+        val intent = Intent(requireContext(), BookScriptAnalysisService::class.java).apply {
+            putExtra(BookScriptAnalysisService.EXTRA_START_INDEX, startIndex)
+        }
+        requireContext().startForegroundServiceCompat(intent)
     }
 }
