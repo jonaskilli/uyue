@@ -257,7 +257,14 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
              * 逐段附加音量增益（与 [segments] 等长）。
              * 音效段取「音效音量」滑块值，其余为 1.0f；与整体音量增益相乘。
              */
-            val perSegmentGain: List<Float?>? = null
+            val perSegmentGain: List<Float?>? = null,
+            /**
+             * 逐段重合成信息（与 [segments] 等长，索引一一对应）。
+             * 「检测尾音」打回时据此**只重新合成不合格的那一段**（旁白或对话），
+             * 不必整段重新合成；null 表示信息缺失（对齐校验未过/单段路径），
+             * 打回时回退整段重新合成。
+             */
+            val segmentInfos: List<io.legado.app.help.audiobook.TtsPluginJsBridge.SegmentInfo>? = null
         ) : TtsSpeakResult()
         data class Url(val url: String) : TtsSpeakResult()
     }
@@ -309,7 +316,17 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
      * 不合格打回重新合成，最多 [AppConfig.ttsTailCheckMaxRetry] 次，用尽后选用历次里尾音最好的一次；
      * 每次打回重合成前若句尾含中文感叹号「！」会先改写为「。」以提高合格率。
      *
-     * 打回会真正重新走一遍插件 / HTTP 合成（重新 [getSpeakStreamResult]），
+     * 打回分两级，共用同一个打回次数预算（[AppConfig.ttsTailCheckMaxRetry]）：
+     * 1. **段级打回（优先）**：MultiSegment 且携带逐段重合成信息（[TtsSpeakResult.MultiSegment.segmentInfos]）
+     *    时，只重新合成被判不合格的那一段（旁白或对话）——不合格包括尾音戛然而止
+     *    **和解码失败/空音频**（如插件返回的 MP3 转 WAV 反复失败），走该段首次合成时
+     *    实际使用的配置（configId），其余段直接复用（解码结果有缓存，不会重复解码）；
+     * 2. **整段打回（回退）**：段级信息缺失（对齐校验未过）、音效段不合格、
+     *    段级重合成失败等场景，退回整段重新走一遍插件 / HTTP 合成（重新 [getSpeakStreamResult]）。
+     *
+     * 打满次数后：有任一次有效转码结果则择优使用；从未得到有效转码结果
+     * （如全段解码失败）则按原始字节兜底，保证朗读不中断。
+     *
      * 坏结果不会写入缓存——落盘只发生在打回结束之后。
      *
      * @param shouldConvert 各调用点原有的「是否走转码」条件；开启尾音检测时强制走转码
@@ -355,8 +372,127 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                 return SynthConvertResult(false, null, null, false, speakResult)
             }
 
+            // ===== 段级打回（优先）：只重新合成尾音不合格的那一段 =====
+            // 条件：MultiSegment 且携带逐段重合成信息（脚本按「合成一次→write 一次」
+            // 产出分段，records 对齐校验通过才有快照）。其余场景回退整段打回。
+            if (speakResult is TtsSpeakResult.MultiSegment &&
+                speakResult.segmentInfos != null
+            ) {
+                var segments = speakResult.segments
+                var segParams = speakResult.perSegmentParams
+                val segGain = speakResult.perSegmentGain
+                // 逐段解码缓存：未变化的段复用首次解码产物，重试趟只解码被替换的段
+                val decodeCache = segments.map {
+                    null as io.legado.app.utils.AudioDecodeUtil.SegmentDecoded?
+                }.toMutableList()
+                var segFallback = false
+                segmentLoop@ while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val checked = io.legado.app.utils.AudioDecodeUtil.mergeSegmentsToWavChecked(
+                        segments,
+                        postParams = speakResult.postAudioParams,
+                        perSegmentParams = segParams,
+                        perSegmentGain = segGain,
+                        silenceSkip = silenceSkip,
+                        tailCheck = tailCheck,
+                        decodeCache = decodeCache,
+                    )
+                    if (checked.wav == null && !checked.abruptTail) {
+                        // 转码整体失败且与段解码无关（合并异常等，未置不合格）：
+                        // 交给下方整段路径按原兜底逻辑返回
+                        segFallback = true
+                        break@segmentLoop
+                    }
+                    if (!checked.abruptTail) {
+                        // 合格：直接使用（含「被替换的段重合成后整段过关」的情况）
+                        return SynthConvertResult(true, checked.wav, null, false, speakResult)
+                    }
+                    // 择优只记录有效合并结果（wav 非 null）；全段解码失败时
+                    // tailQualityDb 为 -240，不能当作「尾音最好」占坑
+                    if (checked.wav != null && checked.tailQualityDb < bestTailQuality) {
+                        bestTailQuality = checked.tailQualityDb
+                        bestTailWav = checked.wav
+                    }
+                    if (attempt >= maxRetry) {
+                        if (bestTailWav == null) {
+                            // 打满次数仍未得到过有效合并结果（如全段解码失败）：
+                            // 退回整段路径按原兜底返回原始字节，不再空转
+                            AppLog.put(
+                                "尾音检测: 已打回 $attempt 次仍未得到有效转码结果，按原始字节兜底 text=${currentText.take(36)}"
+                            )
+                            segFallback = true
+                            break@segmentLoop
+                        }
+                        AppLog.put(
+                            "尾音检测: 已打回 $attempt 次仍戛然而止，选用尾音最好的一次 text=${currentText.take(36)}"
+                        )
+                        return SynthConvertResult(true, bestTailWav, null, true, speakResult)
+                    }
+                    // 定位不合格段；音效段（不经 TTS）/信息缺失无法段级打回
+                    val failIdx = checked.failedSegmentIndex
+                    val info = if (failIdx >= 0) speakResult.segmentInfos?.getOrNull(failIdx) else null
+                    if (info == null || info.isSoundEffect ||
+                        info.configId.isBlank() || info.text.isNullOrBlank()
+                    ) {
+                        AppLog.put(
+                            "尾音检测: 第${failIdx + 1}段不合格但无法段级重合成，回退整段打回 text=${currentText.take(36)}"
+                        )
+                        segFallback = true
+                        break@segmentLoop
+                    }
+                    // 只重合成这一段：用该段首次合成实际使用的配置（configId）与原文，
+                    // 引擎内部自带 10 次失败重试；不重跑朗读脚本，其余段完全不动
+                    val segText = softenTailExclamation(info.text)
+                    if (segText != info.text) {
+                        AppLog.put("尾音检测: 段级打回把该段句尾「！」改写为「。」 tag=${info.voiceTag}")
+                    }
+                    val retried = withContext(Dispatchers.IO) {
+                        io.legado.app.help.audiobook.TtsPluginJsBridge()
+                            .synthesizeByConfigId(info.configId, segText)
+                    }
+                    if (retried == null || retried.isEmpty()) {
+                        AppLog.put(
+                            "尾音检测: 第${failIdx + 1}段(${info.voiceTag})重合成失败，回退整段打回 text=${currentText.take(36)}"
+                        )
+                        segFallback = true
+                        break@segmentLoop
+                    }
+                    attempt++
+                    // 打回原因：该段解码缓存里 pcm 为 null = 解码失败，否则是尾音不合格
+                    val failReason =
+                        if (decodeCache.getOrNull(failIdx)?.pcm == null) "解码失败" else "尾音戛然而止"
+                    AppLog.put(
+                        "尾音检测: 第${failIdx + 1}段(${info.voiceTag})$failReason，" +
+                            "仅重合成该段 (${attempt}/$maxRetry) text=${segText.take(36)}"
+                    )
+                    segments = segments.toMutableList().also { it[failIdx] = retried }
+                    // 桥接层转码成功时返回标准 WAV（后处理已应用），该段不再补做参数
+                    if (isStandardWavBytes(retried)) {
+                        segParams = segParams?.toMutableList()?.also { list ->
+                            if (failIdx < list.size) list[failIdx] = null
+                        }
+                    }
+                    decodeCache[failIdx] = null
+                    kotlinx.coroutines.delay(200)
+                }
+                // segFallback == false 时所有分支已 return，走到这里必然是回退整段
+            }
+
             val checked: io.legado.app.utils.AudioDecodeUtil.TailCheckedWav
             var singleRaw: ByteArray? = null
+            // 原始字节兜底（与原 fallbackSaveMultiSegment / 原始保存一致）
+            fun rawFallback(): SynthConvertResult {
+                val raw = when (speakResult) {
+                    is TtsSpeakResult.MultiSegment -> {
+                        val out = java.io.ByteArrayOutputStream()
+                        speakResult.segments.forEach { out.write(it) }
+                        out.toByteArray()
+                    }
+                    is TtsSpeakResult.Single -> singleRaw
+                    else -> null
+                }
+                return SynthConvertResult(true, null, raw, false, speakResult)
+            }
             when (speakResult) {
                 is TtsSpeakResult.MultiSegment ->
                     checked = io.legado.app.utils.AudioDecodeUtil.mergeSegmentsToWavChecked(
@@ -381,36 +517,36 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                     return SynthConvertResult(false, null, null, false, speakResult)
             }
 
-            if (checked.wav == null) {
-                // 转码失败：原始字节兜底（与原 fallbackSaveMultiSegment / 原始保存一致）
-                val raw = when (speakResult) {
-                    is TtsSpeakResult.MultiSegment -> {
-                        val out = java.io.ByteArrayOutputStream()
-                        speakResult.segments.forEach { out.write(it) }
-                        out.toByteArray()
-                    }
-                    is TtsSpeakResult.Single -> singleRaw
-                    else -> null
-                }
-                return SynthConvertResult(true, null, raw, false, speakResult)
+            if (checked.wav == null && !(tailCheck != null && checked.abruptTail)) {
+                // 转码失败：原始字节兜底。检测开启时若确因「解码失败/空音频」
+                // 置了不合格（abruptTail），不在此兜底，落到下方按不合格打回重合成
+                return rawFallback()
             }
 
-            if (!checked.abruptTail) {
+            if (checked.wav != null && !checked.abruptTail) {
                 // 合格：直接使用本次结果（尾音正常）
                 return SynthConvertResult(true, checked.wav, null, false, speakResult)
             }
 
             // 不合格：记录尾音质量最好（最淡出）的一次，供打满次数后择优使用
-            if (checked.tailQualityDb < bestTailQuality) {
+            // （仅有效合并结果参与；全段解码失败 tailQualityDb=-240 不占坑）
+            if (checked.wav != null && checked.tailQualityDb < bestTailQuality) {
                 bestTailQuality = checked.tailQualityDb
                 bestTailWav = checked.wav
             }
 
             if (attempt >= maxRetry) {
+                if (bestTailWav == null) {
+                    // 打满次数仍未得到有效转码结果（全段解码失败）：原始字节兜底
+                    AppLog.put(
+                        "尾音检测: 已打回 $attempt 次仍未得到有效转码结果，按原始字节兜底 text=${currentText.take(36)}"
+                    )
+                    return SynthConvertResult(true, null, rawFallback().rawBytes, true, speakResult)
+                }
                 AppLog.put(
                     "尾音检测: 已打回 $attempt 次仍戛然而止，选用尾音最好的一次 text=${currentText.take(36)}"
                 )
-                return SynthConvertResult(true, bestTailWav ?: checked.wav, null, true, speakResult)
+                return SynthConvertResult(true, bestTailWav, null, true, speakResult)
             }
 
             AppLog.put(
@@ -441,6 +577,19 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         // 「！」须落在末尾 4 字符内才改写：其后字符数（含自身）≤ 4
         if (text.length - lastExcl > 4) return text
         return text.substring(0, lastExcl) + "。" + text.substring(lastExcl + 1)
+    }
+
+    /**
+     * 是否为带 RIFF/WAVE 头的标准 WAV。
+     * 段级重合成后判断桥接层是否已转码（转码成功返回标准 WAV、后处理已应用，
+     * 该段无需再补做后处理参数；转码失败回退插件原始字节，合并阶段照旧补做）。
+     */
+    private fun isStandardWavBytes(bytes: ByteArray): Boolean {
+        return bytes.size >= 12 &&
+                bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte() &&
+                bytes[2] == 'F'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+                bytes[8] == 'W'.code.toByte() && bytes[9] == 'A'.code.toByte() &&
+                bytes[10] == 'V'.code.toByte() && bytes[11] == 'E'.code.toByte()
     }
 
     private fun getSegInfoFile(fileName: String): File {
@@ -1276,12 +1425,17 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                 // 校验不通过则返回 null，退回整体 postParams。
                                 val segConfigs = io.legado.app.help.audiobook.TtsPluginJsBridge
                                     .buildPerSegmentAudioConfig(segments, ranges)
+                                // 段级重合成信息快照：脚本一旦退出，records 即被下次合成清空，
+                                // 「检测尾音」打回时只能用这份快照定位/重合成不合格的段
+                                val segInfos = io.legado.app.help.audiobook.TtsPluginJsBridge
+                                    .buildSegmentInfos(segments, ranges)
                                 return TtsSpeakResult.MultiSegment(
                                     segments, ranges,
                                     forceConvertToWav = ttsUsed,
                                     postAudioParams = postParams,
                                     perSegmentParams = segConfigs?.map { it.params },
                                     perSegmentGain = segConfigs?.map { it.gain },
+                                    segmentInfos = segInfos,
                                 )
                             }
                             // 兜底：脚本直接拼接的 ByteArray 也做自动拆分
@@ -1353,12 +1507,16 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                                 // 逐段对齐音频参数（同 @js 路径，详见上方说明）
                                 val segConfigs = io.legado.app.help.audiobook.TtsPluginJsBridge
                                     .buildPerSegmentAudioConfig(segments, ranges)
+                                // 段级重合成信息快照（同 @js 路径）
+                                val segInfos = io.legado.app.help.audiobook.TtsPluginJsBridge
+                                    .buildSegmentInfos(segments, ranges)
                                 return TtsSpeakResult.MultiSegment(
                                     segments, ranges,
                                     forceConvertToWav = ttsUsed,
                                     postAudioParams = postParams,
                                     perSegmentParams = segConfigs?.map { it.params },
                                     perSegmentGain = segConfigs?.map { it.gain },
+                                    segmentInfos = segInfos,
                                 )
                             }
                             val splitSegments = splitMixedAudioBytes(jsResult)

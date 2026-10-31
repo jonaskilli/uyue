@@ -76,13 +76,31 @@ object AudioDecodeUtil {
     )
 
     /**
-     * 转码结果 + 尾音检测结论。wav 为 null 表示转码失败（此时 abruptTail / tailQualityDb 无意义）。
-     * tailQualityDb 默认 -240（深度静音=最好），转码失败等路径无需关心质量。
+     * 转码结果 + 尾音检测结论。
+     * wav 为 null 表示转码失败：检测未开启时 abruptTail 无意义（调用方按兜底处理）；
+     * **检测开启时解码失败/空音频同样置位 abruptTail**（视为不合格，打回重合成），
+     * 此时 tailQualityDb 为 -240 不参与择优。
+     *
+     * [failedSegmentIndex] 仅多段合并时有意义：第一个被判不合格的分段索引（从 0 起，
+     * 含尾音硬切与解码失败两种）；-1 表示没有分段不合格（或单段路径）。
+     * 「检测尾音」打回时据此**只重新合成这一段**，而不是整段重新合成。
      */
     class TailCheckedWav(
         val wav: ByteArray?,
         val abruptTail: Boolean,
         val tailQualityDb: Double = -240.0,
+        val failedSegmentIndex: Int = -1,
+    )
+
+    /**
+     * 多段合并时单个分段的解码产物缓存：提取好的 PCM + 尾音检测结论。
+     * 段级打回重合成时，未变化的分段直接复用缓存，只重新解码被替换的那一段。
+     */
+    class SegmentDecoded(
+        /** 该段去掉 WAV 头后的 PCM（标准 24k/16bit/单声道）；null 表示解码失败 */
+        val pcm: ByteArray?,
+        val abruptTail: Boolean,
+        val tailQualityDb: Double,
     )
 
     /** 尾音检测的 10ms 包络窗 */
@@ -411,7 +429,8 @@ object AudioDecodeUtil {
         tailCheck: TailCheckConfig?,
     ): TailCheckedWav {
         if (audioData.isEmpty()) {
-            return TailCheckedWav(null, false)
+            // 空音频 = 合成出了空结果；检测开启时视为不合格（打回重合成）
+            return TailCheckedWav(null, tailCheck != null)
         }
 
         // 先检测是否为 WAV 格式
@@ -435,7 +454,10 @@ object AudioDecodeUtil {
             }
 
             if (pcmResult == null) {
-                return TailCheckedWav(null, false)
+                // 解码失败（MP3 等格式转不出 PCM，含完整性校验拦截）：
+                // 检测开启时视为不合格（abruptTail 置位），上层据此打回重合成该段；
+                // 未开启检测时维持旧行为（wav=null，调用方按兜底处理）
+                return TailCheckedWav(null, tailCheck != null)
             }
 
             val (pcm, srcRate, srcChannels) = pcmResult
@@ -506,17 +528,23 @@ object AudioDecodeUtil {
         perSegmentParams: List<PostAudioParams?>? = null,
         perSegmentGain: List<Float?>? = null,
         silenceSkip: SilenceSkipConfig? = null,
+        decodeCache: MutableList<SegmentDecoded?>? = null,
     ): ByteArray? {
         return mergeSegmentsToWavInternal(
-            segments, gain, postParams, perSegmentParams, perSegmentGain, silenceSkip, null
+            segments, gain, postParams, perSegmentParams, perSegmentGain, silenceSkip, null, decodeCache
         ).wav
     }
 
     /**
      * 同 [mergeSegmentsToWav]，附带尾音戛然而止检测。
      *
-     * 逐段在原始 PCM（变速/去静音前）上检测，任意一段判为硬切即整体不合格
-     * （打回重合成的单位是一次朗读文本的整段合成结果）。
+     * 逐段在原始 PCM（变速/去静音前）上检测，任意一段判为硬切即整体不合格；
+     * 失败分段的索引记录在返回值的 [TailCheckedWav.failedSegmentIndex]，
+     * 供「检测尾音」打回时只重新合成该段。
+     *
+     * @param decodeCache 可选的逐段解码缓存（与 [segments] 等长）。
+     *        命中（元素非 null）则跳过解码直接用缓存；未命中的段解码后回填。
+     *        段级打回替换某段后，调用方把对应下标置 null 即可只重解码该段。
      */
     fun mergeSegmentsToWavChecked(
         segments: List<ByteArray>,
@@ -526,9 +554,10 @@ object AudioDecodeUtil {
         perSegmentGain: List<Float?>? = null,
         silenceSkip: SilenceSkipConfig? = null,
         tailCheck: TailCheckConfig? = null,
+        decodeCache: MutableList<SegmentDecoded?>? = null,
     ): TailCheckedWav {
         return mergeSegmentsToWavInternal(
-            segments, gain, postParams, perSegmentParams, perSegmentGain, silenceSkip, tailCheck
+            segments, gain, postParams, perSegmentParams, perSegmentGain, silenceSkip, tailCheck, decodeCache
         )
     }
 
@@ -540,6 +569,7 @@ object AudioDecodeUtil {
         perSegmentGain: List<Float?>?,
         silenceSkip: SilenceSkipConfig?,
         tailCheck: TailCheckConfig?,
+        decodeCache: MutableList<SegmentDecoded?>? = null,
     ): TailCheckedWav {
         if (segments.isEmpty()) {
             return TailCheckedWav(null, false)
@@ -551,41 +581,55 @@ object AudioDecodeUtil {
 
         val allPcm = mutableListOf<ByteArray>()
         var anyAbruptTail = false
+        var failedSegmentIndex = -1
         var maxTailLevelDb = -240.0
         try {
             segments.forEachIndexed { index, segment ->
-                val segParams = perSegment?.get(index) ?: postParams
-                // 逐段附加增益（音效段非 1.0）。这里只乘段级增益，
-                // 整体 gain 仍由下方合并后统一应用一次，两者相乘不重复
-                val segGain = perGain?.get(index) ?: 1.0f
-                // 每一段合成后立即去除空音频（快节奏），所有处理在合并之前完成。
-                // gain 传 segGain：逐段解码属于中间趟，整体增益由下方合并后应用
-                val decoded = decodeToStandardWavInternal(
-                    segment,
-                    gain = segGain,
-                    postParams = segParams,
-                    silenceSkip = silenceSkip,
-                    tailCheck = tailCheck,
-                )
-                if (decoded.wav == null) {
+                // 命中缓存的段（未变化的分段）直接复用解码产物，只重解码被替换的段
+                val dec = decodeCache?.getOrNull(index) ?: run {
+                    val segParams = perSegment?.get(index) ?: postParams
+                    // 逐段附加增益（音效段非 1.0）。这里只乘段级增益，
+                    // 整体 gain 仍由下方合并后统一应用一次，两者相乘不重复
+                    val segGain = perGain?.get(index) ?: 1.0f
+                    // 每一段合成后立即去除空音频（快节奏），所有处理在合并之前完成。
+                    // gain 传 segGain：逐段解码属于中间趟，整体增益由下方合并后应用
+                    val decoded = decodeToStandardWavInternal(
+                        segment,
+                        gain = segGain,
+                        postParams = segParams,
+                        silenceSkip = silenceSkip,
+                        tailCheck = tailCheck,
+                    )
+                    SegmentDecoded(
+                        pcm = decoded.wav?.let { extractPcmFromWav(it) },
+                        abruptTail = decoded.abruptTail,
+                        tailQualityDb = decoded.tailQualityDb,
+                    ).also { decodeCache?.set(index, it) }
+                }
+                if (dec.abruptTail) {
+                    anyAbruptTail = true
+                    // 记录第一个不合格分段（尾音硬切，或开启检测时的解码失败）：
+                    // 打回时只重合成它
+                    if (failedSegmentIndex < 0) {
+                        failedSegmentIndex = index
+                    }
+                }
+                if (dec.pcm == null) {
+                    // 解码失败：检测开启时已按不合格记入打回，该段跳过合并；
+                    // 未开启检测时维持旧行为（静默跳过）
                     return@forEachIndexed
                 }
-                if (decoded.abruptTail) {
-                    anyAbruptTail = true
-                }
                 // 尾音质量分取各段最差（最高电平）者：任一段尾音差即整体尾音差
-                if (decoded.tailQualityDb > maxTailLevelDb) {
-                    maxTailLevelDb = decoded.tailQualityDb
+                if (dec.tailQualityDb > maxTailLevelDb) {
+                    maxTailLevelDb = dec.tailQualityDb
                 }
-                // 去掉 WAV 头，取 PCM 数据
-                val pcm = extractPcmFromWav(decoded.wav)
-                if (pcm != null) {
-                    allPcm.add(pcm)
-                }
+                allPcm.add(dec.pcm)
             }
 
             if (allPcm.isEmpty()) {
-                return TailCheckedWav(null, false)
+                // 全部段解码失败：把「不合格 + 失败段索引」带出去，
+                // 检测开启时上层据此打回重合成；未开启时 wav=null 走原兜底
+                return TailCheckedWav(null, anyAbruptTail, maxTailLevelDb, failedSegmentIndex)
             }
 
             val totalSize = allPcm.sumOf { it.size }
@@ -608,9 +652,11 @@ object AudioDecodeUtil {
                 writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS),
                 anyAbruptTail,
                 maxTailLevelDb,
+                failedSegmentIndex,
             )
         } catch (e: Exception) {
-            return TailCheckedWav(null, false)
+            // 解码过程异常同样按「转不出 PCM」处理（检测开启 → 不合格）
+            return TailCheckedWav(null, tailCheck != null)
         }
     }
 
