@@ -53,6 +53,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_tail_check"
+        android:title="检测尾音"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_help"
         android:title="帮助"
         app:showAsAction="never" />

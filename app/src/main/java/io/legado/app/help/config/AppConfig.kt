@@ -1448,6 +1448,35 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.bgmAIEnabled, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.bgmAIEnabled, value)
 
+    // ==================== 朗读合成「检测尾音」 ====================
+    // 合成转 WAV 后检测尾音是否「戛然而止」（服务端硬切），不合格打回重合成。
+    // 检测算法见 AudioDecodeUtil.detectAbruptTail，阈值依据 尾音裁剪测试/ 的实测数据。
+
+    /** 总开关，默认关闭 */
+    var ttsTailCheckEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.ttsTailCheckEnabled, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.ttsTailCheckEnabled, value)
+
+    /** 检测不合格后打回重合成的最多次数（0 = 只检测记录、不打回） */
+    var ttsTailCheckMaxRetry: Int
+        get() = appCtx.getPrefInt(PreferKey.ttsTailCheckMaxRetry, 3).coerceIn(0, 5)
+        set(value) = appCtx.putPrefInt(PreferKey.ttsTailCheckMaxRetry, value.coerceIn(0, 5))
+
+    /** 硬切判定阈值：末窗电平高出底噪多少 dB 判为戛然而止。调小更严格（易误判），调大更宽松 */
+    var ttsTailCheckHardCutDb: Int
+        get() = appCtx.getPrefInt(PreferKey.ttsTailCheckHardCutDb, 8).coerceIn(5, 40)
+        set(value) = appCtx.putPrefInt(PreferKey.ttsTailCheckHardCutDb, value.coerceIn(5, 40))
+
+    /** 可听门限：高出底噪多少 dB 算「还能听见」 */
+    var ttsTailCheckAudibleDb: Int
+        get() = appCtx.getPrefInt(PreferKey.ttsTailCheckAudibleDb, 5).coerceIn(3, 30)
+        set(value) = appCtx.putPrefInt(PreferKey.ttsTailCheckAudibleDb, value.coerceIn(3, 30))
+
+    /** 豁免时长：短于该毫秒数的音频不检测（短句尾音占比大，误判率高） */
+    var ttsTailCheckMinDurationMs: Int
+        get() = appCtx.getPrefInt(PreferKey.ttsTailCheckMinDurationMs, 200).coerceIn(100, 2000)
+        set(value) = appCtx.putPrefInt(PreferKey.ttsTailCheckMinDurationMs, value.coerceIn(100, 2000))
+
     /**
      * AI 调用是否保留模型的思考过程。
      *
