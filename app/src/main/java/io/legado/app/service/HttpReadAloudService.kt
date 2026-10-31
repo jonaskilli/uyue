@@ -331,6 +331,10 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         val maxRetry = if (tailCheck != null) AppConfig.ttsTailCheckMaxRetry else 0
 
         var attempt = 0
+        // 记录历次「不合格」合成里尾音质量最好（最淡出）的那次 WAV，
+        // 打满打回次数仍全不合格时择优选它，而非用最后一个（可能尾音最差）。
+        var bestTailWav: ByteArray? = null
+        var bestTailQuality = Double.POSITIVE_INFINITY
         while (true) {
             currentCoroutineContext().ensureActive()
             val speakResult = getSpeakStreamResult(httpTts, speakText)
@@ -388,13 +392,22 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                 return SynthConvertResult(true, null, raw, false, speakResult)
             }
 
-            if (!checked.abruptTail || attempt >= maxRetry) {
-                if (checked.abruptTail) {
-                    AppLog.put(
-                        "尾音检测: 已打回 $attempt 次仍戛然而止，直接使用 text=${speakText.take(36)}"
-                    )
-                }
-                return SynthConvertResult(true, checked.wav, null, checked.abruptTail, speakResult)
+            if (!checked.abruptTail) {
+                // 合格：直接使用本次结果（尾音正常）
+                return SynthConvertResult(true, checked.wav, null, false, speakResult)
+            }
+
+            // 不合格：记录尾音质量最好（最淡出）的一次，供打满次数后择优使用
+            if (checked.tailQualityDb < bestTailQuality) {
+                bestTailQuality = checked.tailQualityDb
+                bestTailWav = checked.wav
+            }
+
+            if (attempt >= maxRetry) {
+                AppLog.put(
+                    "尾音检测: 已打回 $attempt 次仍戛然而止，选用尾音最好的一次 text=${speakText.take(36)}"
+                )
+                return SynthConvertResult(true, bestTailWav ?: checked.wav, null, true, speakResult)
             }
 
             AppLog.put(
