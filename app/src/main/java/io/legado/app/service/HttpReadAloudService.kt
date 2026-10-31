@@ -306,7 +306,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
 
     /**
      * 合成并转码为标准 WAV；开启「检测尾音」时，转码后立刻检测末尾戛然而止，
-     * 不合格打回重新合成，最多 [AppConfig.ttsTailCheckMaxRetry] 次，用尽后直接使用最后一次结果。
+     * 不合格打回重新合成，最多 [AppConfig.ttsTailCheckMaxRetry] 次，用尽后选用历次里尾音最好的一次；
+     * 每次打回重合成前若句尾含中文感叹号「！」会先改写为「。」以提高合格率。
      *
      * 打回会真正重新走一遍插件 / HTTP 合成（重新 [getSpeakStreamResult]），
      * 坏结果不会写入缓存——落盘只发生在打回结束之后。
@@ -335,9 +336,11 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         // 打满打回次数仍全不合格时择优选它，而非用最后一个（可能尾音最差）。
         var bestTailWav: ByteArray? = null
         var bestTailQuality = Double.POSITIVE_INFINITY
+        // 打回重合成时可被改写（句尾「！」→「。」），首次合成仍用原始文本
+        var currentText = speakText
         while (true) {
             currentCoroutineContext().ensureActive()
-            val speakResult = getSpeakStreamResult(httpTts, speakText)
+            val speakResult = getSpeakStreamResult(httpTts, currentText)
             if (speakResult == null) {
                 return SynthConvertResult(false, null, null, false, null)
             }
@@ -405,17 +408,39 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
 
             if (attempt >= maxRetry) {
                 AppLog.put(
-                    "尾音检测: 已打回 $attempt 次仍戛然而止，选用尾音最好的一次 text=${speakText.take(36)}"
+                    "尾音检测: 已打回 $attempt 次仍戛然而止，选用尾音最好的一次 text=${currentText.take(36)}"
                 )
                 return SynthConvertResult(true, bestTailWav ?: checked.wav, null, true, speakResult)
             }
 
             AppLog.put(
-                "尾音检测: 第${attempt + 1}次合成尾音戛然而止，打回重合成 (${attempt + 1}/$maxRetry) text=${speakText.take(36)}"
+                "尾音检测: 第${attempt + 1}次合成尾音戛然而止，打回重合成 (${attempt + 1}/$maxRetry) text=${currentText.take(36)}"
             )
+            // 句尾中文感叹号「！」易使 TTS 尾音硬切：打回重合成时把末尾 4 字符内的
+            // 最后一个「！」改写为句号「。」，提升再次合成的合格率
+            val softened = softenTailExclamation(currentText)
+            if (softened != currentText) {
+                AppLog.put("尾音检测: 打回重合成时把句尾「！」改写为「。」 text=${currentText.take(36)}")
+            }
+            currentText = softened
             attempt++
             kotlinx.coroutines.delay(200)
         }
+    }
+
+    /**
+     * 把末尾 4 字符内的最后一个中文感叹号「！」替换为句号「。」。
+     *
+     * 句尾中文感叹号容易让部分 TTS 引擎在尾音处产生硬切（戛然而止），
+     * 打回重合成时改写可降低再次出错的概率；句中正常的感叹号不受影响
+     * （仅当「！」落在末尾 4 字符内才改写）。
+     */
+    private fun softenTailExclamation(text: String): String {
+        val lastExcl = text.lastIndexOf('！')
+        if (lastExcl < 0) return text
+        // 「！」须落在末尾 4 字符内才改写：其后字符数（含自身）≤ 4
+        if (text.length - lastExcl > 4) return text
+        return text.substring(0, lastExcl) + "。" + text.substring(lastExcl + 1)
     }
 
     private fun getSegInfoFile(fileName: String): File {
