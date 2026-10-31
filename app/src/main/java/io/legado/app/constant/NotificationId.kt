@@ -16,6 +16,7 @@ object NotificationId {
     const val VideoPlayService = 108
     const val ReadAloudFloatService = 109
     const val SourceVideoPlayer = 110
+    const val BookScriptAnalysisService = 111
     const val Download = 10000
     const val ExportBook = 201
 

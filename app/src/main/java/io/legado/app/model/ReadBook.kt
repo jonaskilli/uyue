@@ -1070,21 +1070,7 @@ object ReadBook : CoroutineScope by MainScope() {
                 val ch = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: break
                 val raw = BookHelp.getContent(book, ch)
                 if (!raw.isNullOrBlank()) {
-                    // 先经过 ContentProcessor 替换净化、去重标题、重新分段、简繁转换
-                    val processed = ContentProcessor.get(book).getContent(
-                        book, ch, raw
-                    ).toString()
-                    // 再清理残留的 HTML 标签、图片链接、段评占位符
-                    val clean = processed
-                        .replace(Regex("<br\\s*/?>"), "\n")
-                        .replace(Regex("</p>"), "\n")
-                        .replace(Regex("<[^>]+>"), "")
-                        .replace(Regex("&nbsp;"), " ")
-                        .replace(Regex("&[a-zA-Z#0-9]+;"), "")
-                        .replace(Regex("[袮꧁]"), " ")
-                        // 去掉多余连续空行，但保留缩进和单换行格式
-                        .replace(Regex("\n[ \\t\u3000]*\n+"), "\n")
-                        .trim()
+                    val clean = cleanContentForTts(book, ch, raw)
                     if (clean.isNotBlank()) {
                         if (sb.isNotEmpty()) sb.append("\n")
                         sb.append(clean)
@@ -1117,6 +1103,66 @@ object ReadBook : CoroutineScope by MainScope() {
         }.onFailure {
             AppLog.put("保存 TTS JSON 出错\n$it", it)
         }
+    }
+
+    /**
+     * 全书分析：把「从 [startIndex] 起的上下文窗口」写入 data.json 并返回窗口文本。
+     *
+     * 与 [saveTtsTextJson] 的差异：不节流、不动朗读进度记录（lastSaved*），
+     * 窗口起点由分析位置决定——脚本（locateParagraphInFullText 等）在分析每个
+     * 章节时都能拿到"该位置"的上下文，与朗读时的行为完全一致。
+     *
+     * @return 窗口拼接文本（清洗后），空表示无可分析内容
+     */
+    fun saveTtsTextJsonFrom(startIndex: Int): String? {
+        val book = book ?: return null
+        return kotlin.runCatching {
+            val limit = AppConfig.audioPreDownloadNum + 2
+            val sb = StringBuilder()
+            for (i in 0 until limit) {
+                val idx = startIndex + i
+                if (idx >= chapterSize) break
+                val ch = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: break
+                val raw = BookHelp.getContent(book, ch)
+                if (!raw.isNullOrBlank()) {
+                    val clean = cleanContentForTts(book, ch, raw)
+                    if (clean.isNotBlank()) {
+                        if (sb.isNotEmpty()) sb.append("\n")
+                        sb.append(clean)
+                    }
+                }
+            }
+            if (sb.isEmpty()) return@runCatching null
+            val json = JSONObject()
+            json.put("bookName", book.name)
+            json.put("texts", sb.toString())
+            val dir = File(io.legado.app.help.EngineDataDir.baseDir())
+            dir.mkdirs()
+            FileUtils.writeText(File(dir, "data.json").absolutePath, json.toString())
+            sb.toString()
+        }.onFailure {
+            AppLog.put("全书分析保存 data.json 出错\n$it", it)
+        }.getOrNull()
+    }
+
+    /**
+     * 章节正文朗读口径清洗（ContentProcessor 替换净化 + 清理残留 HTML/实体/占位符）。
+     * data.json 写入与分析器逐段执行脚本共用同一份清洗结果，保证脚本上下文一致。
+     */
+    fun cleanContentForTts(book: Book, ch: BookChapter, raw: String): String {
+        // 先经过 ContentProcessor 替换净化、去重标题、重新分段、简繁转换
+        val processed = ContentProcessor.get(book).getContent(book, ch, raw).toString()
+        // 再清理残留的 HTML 标签、图片链接、段评占位符
+        return processed
+            .replace(Regex("<br\\s*/?>"), "\n")
+            .replace(Regex("</p>"), "\n")
+            .replace(Regex("<[^>]+>"), "")
+            .replace(Regex("&nbsp;"), " ")
+            .replace(Regex("&[a-zA-Z#0-9]+;"), "")
+            .replace(Regex("[袮꧁]"), " ")
+            // 去掉多余连续空行，但保留缩进和单换行格式
+            .replace(Regex("\n[ \\t\u3000]*\n+"), "\n")
+            .trim()
     }
 
     /**
