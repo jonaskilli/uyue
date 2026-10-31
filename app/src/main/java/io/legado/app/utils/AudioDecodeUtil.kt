@@ -122,6 +122,22 @@ object AudioDecodeUtil {
     private const val TAIL_CHECK_PAD_WINDOWS = 3
 
     /**
+     * 规则3「截断尾字」判定：末尾 [TAIL_TRUNCATE_WINDOWS] 窗内仍有清晰可闻的语音
+     * （≥ [TAIL_TRUNCATE_LOUD_DB]），且该响亮窗到下一窗的骤降 ≥ [TAIL_TRUNCATE_DROP_DB]
+     * （瞬时截断，非自然平滑释放）→ 语音正在高潮/响处被掐断，残音只留了一截。
+     *
+     * 这是规则1/2 的漏网之鱼：某些硬切不在「末窗」截断，而是把最后一个字的高潮
+     * 掐掉后，残音只留一截已衰减的短音（故末可听窗电平低于规则2 的 -42dB 门槛），
+     * 于是规则2 漏放。规则3 看「最后一个响亮窗距末尾很近、且与下一窗瞬断」来兜住。
+     *
+     * 与自然收尾的区分：自然收尾的释放约 10~20dB/窗，瞬断则达 30dB 以上。
+     * 实测 file3 骤降 49dB（命中）、vv_uranus「为什么」仅 17dB（放过）。
+     */
+    private const val TAIL_TRUNCATE_LOUD_DB = -35.0
+    private const val TAIL_TRUNCATE_WINDOWS = 4
+    private const val TAIL_TRUNCATE_DROP_DB = 30.0
+
+    /**
      * 解码完整性阈值：解出的 PCM 时长低于按源音频估算时长的该比例时，
      * 判定为「解码中途截断」，按失败处理。
      *
@@ -703,6 +719,22 @@ object AudioDecodeUtil {
         // 且贴尾 ≤30ms → 语音正在响时截断再补静音（绝对电平避免男声正常结尾误判）。
         if (n - 1 - lastAudible <= TAIL_CHECK_PAD_WINDOWS &&
             envDb[lastAudible] >= TAIL_PAD_LOUD_DB
+        ) {
+            return TailCheckResult(true, tailTerminus)
+        }
+
+        // 规则3「截断尾字」：末尾 [TAIL_TRUNCATE_WINDOWS] 窗内仍有清晰可闻语音
+        // （≥ [TAIL_TRUNCATE_LOUD_DB]），且该响亮窗到下一窗骤降 ≥ [TAIL_TRUNCATE_DROP_DB]
+        // （瞬时截断，非自然平滑释放）→ 语音正在高潮/响处被掐断，残音只留一截。
+        // 它兜住规则2 的漏网：某些硬切把末字高潮掐掉后残音只剩已衰减的短音
+        // （末可听窗低于规则2 的 -42dB 门槛），规则2 会漏放。
+        // 区分自然收尾：自然释放约 10~20dB/窗，瞬断达 30dB 以上
+        // （实测 file3 骤降 49dB 命中、vv_uranus「为什么」仅 17dB 放过）。
+        val lastLoud = envDb.indexOfLast { it >= TAIL_TRUNCATE_LOUD_DB }
+        if (lastLoud >= 0 &&
+            (n - 1 - lastLoud) <= TAIL_TRUNCATE_WINDOWS &&
+            lastLoud + 1 < n &&
+            (envDb[lastLoud] - envDb[lastLoud + 1]) >= TAIL_TRUNCATE_DROP_DB
         ) {
             return TailCheckResult(true, tailTerminus)
         }
