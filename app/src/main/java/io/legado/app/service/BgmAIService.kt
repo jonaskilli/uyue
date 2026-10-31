@@ -170,6 +170,15 @@ object BgmAIService {
                 })
             })
             put("temperature", 0.7)
+            // 关闭思考模式：各家服务端认的字段不一样，按朗读脚本的做法整套一起发，
+            // 服务端忽略不认识的字段即可（实测 SiliconFlow 只有 thinking.type 生效）。
+            if (!AppConfig.bgmThinkingEnabled) {
+                put("thinking", JSONObject().apply { put("type", "disabled") })
+                put("thinking_mode", false)
+                put("disable_think", true)
+                put("no_chain_of_thought", true)
+                put("do_sample", false)
+            }
             // 不限制时整个字段都不下发，避免被服务端默认值截断
             if (maxTokens != null && maxTokens > 0) {
                 put("max_tokens", maxTokens)

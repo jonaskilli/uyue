@@ -31,6 +31,7 @@ class BgmAISettingsDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_settings) 
 
     private fun initData() = binding.run {
         switchAI.isChecked = AppConfig.bgmAIEnabled
+        switchThinking.isChecked = AppConfig.bgmThinkingEnabled
         seekAIInterval.progress = charToProgress(AppConfig.bgmAICharInterval)
         tvAIIntervalValue.text = "${AppConfig.bgmAICharInterval}字"
     }
@@ -38,6 +39,11 @@ class BgmAISettingsDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_settings) 
     private fun initView() = binding.run {
         switchAI.setOnCheckedChangeListener { _, isChecked ->
             AppConfig.bgmAIEnabled = isChecked
+        }
+
+        // 思考模式：关闭后请求里带上关闭思考的字段（见 BgmAIService.callOpenAIApi）
+        switchThinking.setOnCheckedChangeListener { _, isChecked ->
+            AppConfig.bgmThinkingEnabled = isChecked
         }
 
         btnAIProvider.setOnClickListener {
