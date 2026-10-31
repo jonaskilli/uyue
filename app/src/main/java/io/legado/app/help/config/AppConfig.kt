@@ -1459,7 +1459,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     /** 检测不合格后打回重合成的最多次数（0 = 只检测记录、不打回） */
     var ttsTailCheckMaxRetry: Int
-        get() = appCtx.getPrefInt(PreferKey.ttsTailCheckMaxRetry, 3).coerceIn(0, 5)
+        get() = appCtx.getPrefInt(PreferKey.ttsTailCheckMaxRetry, 5).coerceIn(0, 5)
         set(value) = appCtx.putPrefInt(PreferKey.ttsTailCheckMaxRetry, value.coerceIn(0, 5))
 
     /** 硬切判定阈值：末窗电平高出底噪多少 dB 判为戛然而止。调小更严格（易误判），调大更宽松 */

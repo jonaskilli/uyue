@@ -64,8 +64,26 @@ object AudioDecodeUtil {
         val minDurationMs: Int = 200,
     )
 
-    /** 转码结果 + 尾音检测结论。wav 为 null 表示转码失败（此时 abruptTail 无意义） */
-    class TailCheckedWav(val wav: ByteArray?, val abruptTail: Boolean)
+    /**
+     * 尾音检测结论：是否戛然而止 + 尾音质量分。
+     * tailLevelDb = 尾部终止处电平（末尾真实电平与最后可听窗电平的较大者，dBFS），
+     * 越低（越接近静音）说明语音尾部淡出越完整、尾音越长越好。
+     * 用于「全部打回仍不合格」时，从多次重合成里挑尾音最好（最淡出）的那次。
+     */
+    data class TailCheckResult(
+        val abruptTail: Boolean,
+        val tailLevelDb: Double,
+    )
+
+    /**
+     * 转码结果 + 尾音检测结论。wav 为 null 表示转码失败（此时 abruptTail / tailQualityDb 无意义）。
+     * tailQualityDb 默认 -240（深度静音=最好），转码失败等路径无需关心质量。
+     */
+    class TailCheckedWav(
+        val wav: ByteArray?,
+        val abruptTail: Boolean,
+        val tailQualityDb: Double = -240.0,
+    )
 
     /** 尾音检测的 10ms 包络窗 */
     private const val TAIL_CHECK_WINDOW_MS = 10
@@ -417,8 +435,9 @@ object AudioDecodeUtil {
             val garbageFree = stripLeadingGarbage(resampled, TARGET_SAMPLE_RATE)
 
             // 尾音检测：在变速/去静音之前的原始 PCM 上做（见 [decodeToStandardWavChecked]）
-            val abruptTail = tailCheck != null &&
-                    detectAbruptTail(garbageFree, TARGET_SAMPLE_RATE, tailCheck)
+            val tailResult = tailCheck?.let {
+                detectAbruptTail(garbageFree, TARGET_SAMPLE_RATE, it)
+            } ?: TailCheckResult(false, -240.0)
 
             // Sonic 后处理（语速/音量/音高，三者独立）
             val processed = if (postParams != null && !postParams.isDefault()) {
@@ -442,7 +461,8 @@ object AudioDecodeUtil {
             val amplified = if (gain != 1.0f) applyVolumeGain(skipped, gain) else skipped
             TailCheckedWav(
                 writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS),
-                abruptTail
+                tailResult.abruptTail,
+                tailResult.tailLevelDb,
             )
         } catch (e: Exception) {
             TailCheckedWav(null, false)
@@ -515,6 +535,7 @@ object AudioDecodeUtil {
 
         val allPcm = mutableListOf<ByteArray>()
         var anyAbruptTail = false
+        var maxTailLevelDb = -240.0
         try {
             segments.forEachIndexed { index, segment ->
                 val segParams = perSegment?.get(index) ?: postParams
@@ -535,6 +556,10 @@ object AudioDecodeUtil {
                 }
                 if (decoded.abruptTail) {
                     anyAbruptTail = true
+                }
+                // 尾音质量分取各段最差（最高电平）者：任一段尾音差即整体尾音差
+                if (decoded.tailQualityDb > maxTailLevelDb) {
+                    maxTailLevelDb = decoded.tailQualityDb
                 }
                 // 去掉 WAV 头，取 PCM 数据
                 val pcm = extractPcmFromWav(decoded.wav)
@@ -565,7 +590,8 @@ object AudioDecodeUtil {
             val amplified = if (gain != 1.0f) applyVolumeGain(processed, gain) else processed
             return TailCheckedWav(
                 writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS),
-                anyAbruptTail
+                anyAbruptTail,
+                maxTailLevelDb,
             )
         } catch (e: Exception) {
             return TailCheckedWav(null, false)
@@ -590,15 +616,15 @@ object AudioDecodeUtil {
      * 不判定的情况：时长不足 [TailCheckConfig.minDurationMs]（短段豁免）、
      * 窗口数过少、找不到任何可听内容（近似静音段，交给 AudioCacheValidator 处理）。
      */
-    fun detectAbruptTail(pcm: ByteArray, sampleRate: Int, cfg: TailCheckConfig): Boolean {
+    fun detectAbruptTail(pcm: ByteArray, sampleRate: Int, cfg: TailCheckConfig): TailCheckResult {
         val bytesPerFrame = 2
         val durationMs = pcm.size * 1000L / (sampleRate * bytesPerFrame)
-        if (durationMs < cfg.minDurationMs) return false
+        if (durationMs < cfg.minDurationMs) return TailCheckResult(false, -240.0)
 
         val win = (sampleRate * TAIL_CHECK_WINDOW_MS / 1000).coerceAtLeast(1)
         val framesPerWin = win * bytesPerFrame
         val n = pcm.size / framesPerWin
-        if (n < 3) return false
+        if (n < 3) return TailCheckResult(false, -240.0)
 
         // 10ms 窗 RMS（线性值），后续统一转 dB
         val envLin = DoubleArray(n)
@@ -655,18 +681,22 @@ object AudioDecodeUtil {
         val audibleDb = floorDb + cfg.audibleAboveFloorDb
         val lastAudible = envDb.indexOfLast { it > audibleDb }
         if (lastAudible < 0) {
-            return false
+            return TailCheckResult(false, -240.0)
         }
 
-        // 规则1「未淡出」：文件真正结尾仍清晰可闻 = 没淡出就被切。
         // 真正结尾电平：有残余段时用残余段（淡出）真实值，否则用末完整窗。
-        // 取「末两完整窗 + 真正结尾」的最小值，避免被单窗噪声抬高。
         val endSignal = if (partialPresent) partialDb else envDb[n - 1]
+        // 规则1「未淡出」：文件真正结尾仍清晰可闻 = 没淡出就被切。
+        // 取「末两完整窗 + 真正结尾」的最小值，避免被单窗噪声抬高。
         val tailMin = minOf(envDb[n - 1], envDb[n - 2], endSignal)
+        // 尾音质量分：尾部终止处电平 = 末尾真实电平与最后可听窗电平的较大者。
+        // 越低（越接近静音）说明语音淡出越完整、尾音越长越好；用于「全部打回仍不合格」
+        // 时从多次重合成里挑尾音最好（最淡出）的那次。
+        val tailTerminus = maxOf(endSignal, envDb[lastAudible])
         // hardCutAboveFloorDb 偏移绝对阈值：默认 8 → -60dBFS；阈值调小→更严厉→更多打回
         val endSilentDb = TAIL_END_SILENT_BASE_DB - (cfg.hardCutAboveFloorDb - 8.0)
         if (tailMin >= endSilentDb) {
-            return true
+            return TailCheckResult(true, tailTerminus)
         }
 
         // 规则2「填充掩盖的截断」：末窗被静音填充盖住，但最后一个可听窗仍明显可闻
@@ -674,9 +704,9 @@ object AudioDecodeUtil {
         if (n - 1 - lastAudible <= TAIL_CHECK_PAD_WINDOWS &&
             envDb[lastAudible] >= TAIL_PAD_LOUD_DB
         ) {
-            return true
+            return TailCheckResult(true, tailTerminus)
         }
-        return false
+        return TailCheckResult(false, tailTerminus)
     }
 
     // ========== 内部方法 ==========
