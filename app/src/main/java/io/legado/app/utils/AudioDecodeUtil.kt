@@ -71,26 +71,37 @@ object AudioDecodeUtil {
     private const val TAIL_CHECK_WINDOW_MS = 10
 
     /**
-     * 尾部残余样本并入末窗的最小长度（毫秒）。
+     * 尾部残余样本（末完整窗之后）参与判定「是否淡出到静音」的最小长度（毫秒）。
      *
-     * 服务端硬切可能恰好落在最后一个完整 10ms 窗之后的几毫秒里：
-     * 此时最后完整窗是静音/衰减态、而被丢弃的残余段却仍可听——按完整窗判定会漏。
-     * 故把尾部残余（≥2ms）并入末窗计算，让检测覆盖到文件的真正末尾。
+     * 自然结束的音频末尾会有一段衰减拖尾（即便很短），而「戛然而止」的硬切
+     * 末尾没有拖尾——即便服务端补了一点静音填充，真正的结尾电平仍清晰可闻。
+     * 残余段 ≥2ms 才纳入，过短的残余是单帧噪声，不具统计意义。
      */
     private const val TAIL_CHECK_MIN_TAIL_MS = 2
 
     /**
-     * 「贴尾截断+静音填充」判定：最后一个可听窗与全段语音峰值的最大落差（dB）。
+     * 规则1「未淡出」判定：文件真正结尾（末完整窗，若有残余段则用残余段真实电平）
+     * 仍 ≥ 该 dBFS，即末尾还在清晰可闻就终止 = 没淡出就被切。
      *
-     * 服务端还有一种硬切：在语音仍响时截断，再补 ~10-20ms 静音填充——
-     * 末窗是静音的，切割痕迹被填充盖住（实测案例：结束电平只比语音峰值低 10dB）。
-     * 自然结束的峰值落差实测 20~69dB；取 30 为偏严厉值——宁多打回不放过，
-     * 会连带打回一部分「衰减偏短」的临界音频（由重合成兜底，无副作用）。
+     * 这是「戛然而止」的本质判据：自然结束会淡出到静音（末尾 ≤ -60dBFS 以下），
+     * 硬切则停在 -20~-56dBFS 的可闻电平。设为绝对电平而非「相对底噪」，
+     * 因为不同音色正常结尾电平差异极大（女声 ≤ -80、男声 -47~-61），
+     * 相对底噪会互相混淆。实测男声正常结尾 -57~-61dBFS，硬切 -22~-42dBFS。
+     *
+     * 该值由 [TailCheckConfig.hardCutAboveFloorDb] 偏移得到（见 detectAbruptTail），
+     * 默认值（阈值 8）→ -60dBFS。阈值调小（更严厉）→ 该值抬高 → 更多打回。
      */
-    private const val TAIL_CHECK_DECAY_GAP_DB = 30.0
+    private const val TAIL_END_SILENT_BASE_DB = -60.0
 
-    /** 「贴尾」判定：最后一个可听窗距文件末尾不超过该窗数（2 窗 = 20ms） */
-    private const val TAIL_CHECK_PAD_WINDOWS = 2
+    /**
+     * 规则2「填充掩盖的截断」判定：末窗被静音填充盖住，但最后一个可听窗
+     * 仍 ≥ 该绝对 dBFS 且贴尾 ≤ [TAIL_CHECK_PAD_WINDOWS] 窗 → 语音正在响时截断再补静音。
+     * 用绝对电平避免男声正常结尾被误判（男声正常结尾 -47~-61dBFS 已低于此值）。
+     */
+    private const val TAIL_PAD_LOUD_DB = -42.0
+
+    /** 规则2 贴尾判定：最后一个可听窗距文件末尾不超过该窗数（3 窗 = 30ms）。 */
+    private const val TAIL_CHECK_PAD_WINDOWS = 3
 
     /**
      * 解码完整性阈值：解出的 PCM 时长低于按源音频估算时长的该比例时，
@@ -564,14 +575,17 @@ object AudioDecodeUtil {
     /**
      * 检测 16bit 单声道 PCM 的末尾是否「戛然而止」。
      *
-     * 算法移植自 尾音裁剪测试/exp7_threshold.py 的分析框架：
-     * 1. 按 [TAIL_CHECK_WINDOW_MS] 毫秒窗计算 RMS 包络（dBFS）
-     * 2. 底噪 = 全段最安静 5% 窗口的电平（即句间真静音的水平）
-     * 3. 规则A：最后一个窗（含尾部残余）的电平仍 ≥ 底噪 +
-     *    [TailCheckConfig.hardCutAboveFloorDb] → 音频在明显可听时直接结束 = 硬切
-     * 4. 规则C：末窗被静音填充盖住的截断 —— 最后一个可听窗贴尾（≤20ms）、
-     *    电平超阈值、且与全段语音峰值落差 ≤ [TAIL_CHECK_DECAY_GAP_DB]
-     *    （衰减远未完成）= 语音正在响时被切再补静音
+     * 「戛然而止」的本质是**文件在仍清晰可闻时就被终止、没有淡出到静音**，
+     * 而非相对底噪或相对峰值的落差（不同音色正常结尾电平差异极大，相对量会混淆）。
+     * 判定：
+     * 1. 按 [TAIL_CHECK_WINDOW_MS] 毫秒窗计算 RMS 包络（dBFS），底噪取最安静 5%
+     * 2. 规则1（无填充截断）：末两完整窗 + 真正结尾（有残余段用残余段真实电平）
+     *    的最小值仍 ≥ [TAIL_END_SILENT_BASE_DB]（默认 -60dBFS）→ 末尾没淡出 = 硬切
+     * 3. 规则2（静音填充掩盖的截断）：末窗被补的静音盖住，但最后一个可听窗仍 ≥
+     *    [TAIL_PAD_LOUD_DB]（-42dBFS）且贴尾 ≤ [TAIL_CHECK_PAD_WINDOWS] 窗 → 硬切
+     *
+     * 绝对阈值 [TAIL_END_SILENT_BASE_DB] 由 [TailCheckConfig.hardCutAboveFloorDb]
+     * 偏移：其默认 8 → -60dBFS；调小（更严厉）→ 阈值抬高 → 更多打回。
      *
      * 不判定的情况：时长不足 [TailCheckConfig.minDurationMs]（短段豁免）、
      * 窗口数过少、找不到任何可听内容（近似静音段，交给 AudioCacheValidator 处理）。
@@ -604,12 +618,14 @@ object AudioDecodeUtil {
             envLin[i] = kotlin.math.sqrt(sum / win)
         }
 
-        // 尾部残余样本并入末窗：硬切可能恰好落在最后一个完整窗之后的几毫秒里，
-        // 只看完整窗会漏掉这种「完整窗已静音、残段仍可听」的切割（实测 4~6ms 残段、
-        // 高出底噪 18~22dB 的真实案例）。残段过短（<2ms）统计不稳，忽略不计。
+        // 残余段（末完整窗之后）单独算电平，不并入末窗——
+        // 它用于判断「末尾是否淡出到静音」：自然结束有衰减拖尾（残余段很安静），
+        // 硬切则残余段（若有）也还在响。残段过短（<2ms）统计不稳，忽略。
         val remFrames = (pcm.size - n * framesPerWin) / bytesPerFrame
         val minTailFrames = sampleRate * TAIL_CHECK_MIN_TAIL_MS / 1000
-        if (remFrames >= minTailFrames) {
+        val partialPresent = remFrames >= minTailFrames
+        var partialDb = -240.0
+        if (partialPresent) {
             var sum = 0.0
             var count = 0
             val base = n * framesPerWin
@@ -624,11 +640,9 @@ object AudioDecodeUtil {
                 count++
                 j += 2
             }
-            val remLin = kotlin.math.sqrt(sum / count)
-            val remDb = 20 * kotlin.math.ln(remLin + 1e-12) / kotlin.math.ln(10.0)
-            // 残余段电平取「完整末窗与残余段中较高者」：切割痕迹体现在任何一段都算
-            val lastDbFull = 20 * kotlin.math.ln(envLin[n - 1] + 1e-12) / kotlin.math.ln(10.0)
-            envLin[n - 1] = kotlin.math.exp(maxOf(lastDbFull, remDb) * kotlin.math.ln(10.0) / 20.0)
+            if (count > 0) {
+                partialDb = 20 * kotlin.math.ln(kotlin.math.sqrt(sum / count) + 1e-12) / kotlin.math.ln(10.0)
+            }
         }
 
         val floorIdx = ((n - 1) * 0.05).toInt()
@@ -644,22 +658,23 @@ object AudioDecodeUtil {
             return false
         }
 
-        // 规则A：末窗电平仍显著高于底噪 → 高幅度处直接结束 = 硬切（无填充的截断）
-        if (envDb[n - 1] >= floorDb + cfg.hardCutAboveFloorDb) {
+        // 规则1「未淡出」：文件真正结尾仍清晰可闻 = 没淡出就被切。
+        // 真正结尾电平：有残余段时用残余段（淡出）真实值，否则用末完整窗。
+        // 取「末两完整窗 + 真正结尾」的最小值，避免被单窗噪声抬高。
+        val endSignal = if (partialPresent) partialDb else envDb[n - 1]
+        val tailMin = minOf(envDb[n - 1], envDb[n - 2], endSignal)
+        // hardCutAboveFloorDb 偏移绝对阈值：默认 8 → -60dBFS；阈值调小→更严厉→更多打回
+        val endSilentDb = TAIL_END_SILENT_BASE_DB - (cfg.hardCutAboveFloorDb - 8.0)
+        if (tailMin >= endSilentDb) {
             return true
         }
 
-        // 规则C：末窗被静音填充盖住的硬切 —— 服务端在语音仍响时截断再补 ~10-20ms 静音，
-        // 切割痕迹被填充掩盖（真实案例：结束电平只比语音峰值低 10dB，其余全是底噪/零）。
-        // 此时看最后一个可听窗：贴着文件末尾（≤20ms）、电平仍超阈值、
-        // 且与全段语音峰值的落差极小（自然结束衰减充分，实测最小落差 20.3dB）→ 判硬切
+        // 规则2「填充掩盖的截断」：末窗被静音填充盖住，但最后一个可听窗仍明显可闻
+        // 且贴尾 ≤30ms → 语音正在响时截断再补静音（绝对电平避免男声正常结尾误判）。
         if (n - 1 - lastAudible <= TAIL_CHECK_PAD_WINDOWS &&
-            envDb[lastAudible] - floorDb >= cfg.hardCutAboveFloorDb
+            envDb[lastAudible] >= TAIL_PAD_LOUD_DB
         ) {
-            val peakDb = envDb.max()
-            if (peakDb - envDb[lastAudible] <= TAIL_CHECK_DECAY_GAP_DB) {
-                return true
-            }
+            return true
         }
         return false
     }
