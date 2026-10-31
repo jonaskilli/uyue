@@ -1448,6 +1448,16 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.bgmAIEnabled, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.bgmAIEnabled, value)
 
+    /**
+     * AI 调用是否保留模型的思考过程。
+     *
+     * 默认开启（保持原行为）。推理型模型会先输出大段思考再给结论，
+     * 关闭后请求里带上朗读脚本那套关闭思考字段，直接出结果。
+     */
+    var bgmThinkingEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.bgmThinkingEnabled, true)
+        set(value) = appCtx.putPrefBoolean(PreferKey.bgmThinkingEnabled, value)
+
     var bgmAICharInterval: Int
         get() = appCtx.getPrefInt(PreferKey.bgmAICharInterval, 350)
         set(value) = appCtx.putPrefInt(PreferKey.bgmAICharInterval, value)

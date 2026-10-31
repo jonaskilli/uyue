@@ -36,6 +36,40 @@
             android:layout_height="wrap_content" />
     </LinearLayout>
 
+    <!-- 思考模式：推理型模型会先输出大段思考再给结论，慢且费 token。
+         关闭后按朗读脚本的做法把常见的关闭思考字段一并发给服务端。 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="思考模式"
+            android:textColor="@color/primaryText"
+            android:textSize="14sp" />
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <io.legado.app.lib.theme.view.ThemeSwitch
+            android:id="@+id/switchThinking"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="推理型模型（DeepSeek-R1、QwQ、Xing4.0 等）会先思考再回答，慢且费 token；关闭后直接出结果，实测可快十倍。BGM选曲与AI音效分析同时生效"
+        android:textColor="@color/secondaryText"
+        android:textSize="12sp" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

@@ -243,6 +243,7 @@ object PreferKey {
     const val bgmPath = "bgmPath"
     const val bgmVolume = "bgmVolume"
     const val bgmAIEnabled = "bgmAIEnabled"
+    const val bgmThinkingEnabled = "bgmThinkingEnabled"
     const val bgmAICharInterval = "bgmAICharInterval"
     const val soundEffectMode = "soundEffectMode"
     // 当前书籍音效模式：key = bookSoundEffectMode_${bookUrl}，value = follow/off/normal/all
