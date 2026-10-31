@@ -4,6 +4,7 @@ import io.legado.app.data.appDb
 import io.legado.app.data.dao.BgmAIProviderDao
 import io.legado.app.data.dao.BgmAIPromptDao
 import io.legado.app.data.entities.BgmAIProvider
+import io.legado.app.help.config.AppConfig
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,12 +31,6 @@ object BgmAIService {
         .readTimeout(120, TimeUnit.SECONDS)
         .callTimeout(180, TimeUnit.SECONDS)
         .build()
-
-    /**
-     * BGM 选曲的输出上限：只返回一个文件名，100 足够。
-     * AI 音效分析返回的是整批段落的 JSON，不能用这个值，见 [callOpenAIApi]。
-     */
-    private const val DEFAULT_MAX_TOKENS = 100
 
     /** 默认整体超时（秒）：从请求发起到响应结束的总时限 */
     const val DEFAULT_CALL_TIMEOUT_SECONDS = 180L
@@ -71,8 +66,8 @@ object BgmAIService {
             io.legado.app.utils.LogUtils.d("BgmAIService", "API返回结果: $result")
             io.legado.app.constant.AppLog.putDebug("AI背景音乐: API返回=$result")
             
-            // 解析AI返回的结果，提取文件名
-            val fileName = extractFileName(result)
+            // 解析AI返回的结果，提取文件名（带上可用文件列表，便于在整段回复里直接命中）
+            val fileName = extractFileName(result, BgmManager.getAudioFileList())
             io.legado.app.utils.LogUtils.d("BgmAIService", "提取的文件名: $fileName")
             io.legado.app.constant.AppLog.putDebug("AI背景音乐: 提取文件名=$fileName")
             fileName
@@ -145,16 +140,19 @@ object BgmAIService {
      *
      * 供 BGM 选曲与本文件的 AI 音效分析共用，故开放为 internal。
      *
-     * @param maxTokens 输出 token 上限。**传 null 表示不限制**：不下发 max_tokens 字段，
-     * 由模型自行决定输出长度。AI 音效分析一次要返回整批段落的 JSON，
-     * 必须传 null，否则输出会被截断成半截 JSON 导致解析失败。
+     * @param maxTokens 输出 token 上限。**传 null（默认）表示不限制**：不下发 max_tokens 字段，
+     * 由模型自行决定输出长度。
+     * 推理型模型（DeepSeek-R1、QwQ、Xing4.0 等）会先输出大段思考内容再给结论，
+     * 一旦给上限，预算很容易被思考吃光（finish_reason=length、正文为空），
+     * 结果连一个文件名/半截 JSON 都拿不到。AI 音效分析一次要返回整批段落的 JSON，
+     * 同理不能限制。
      * @param callTimeoutSeconds 单次请求的整体超时（秒，从发起到响应结束的总时限），
      * 可按调用场景调大（如长章节的 AI 分析生成较慢）。
      */
     internal suspend fun callOpenAIApi(
         provider: BgmAIProvider,
         prompt: String,
-        maxTokens: Int? = DEFAULT_MAX_TOKENS,
+        maxTokens: Int? = null,
         callTimeoutSeconds: Long = DEFAULT_CALL_TIMEOUT_SECONDS
     ): String = withContext(Dispatchers.IO) {
         val url = if (provider.url.endsWith("/")) {
@@ -204,33 +202,92 @@ object BgmAIService {
         val jsonResponse = JSONObject(responseBody)
         val choices = jsonResponse.optJSONArray("choices")
         if (choices != null && choices.length() > 0) {
-            val firstChoice = choices.getJSONObject(0)
-            val message = firstChoice.optJSONObject("message")
-            message?.optString("content")?.trim() ?: ""
+            val message = choices.getJSONObject(0).optJSONObject("message")
+                ?: throw Exception("无法解析API响应")
+            val content = message.optString("content").orEmpty().trim()
+            // 推理型模型把正文写在 reasoning_content，content 是空串。
+            // 此时回退取思考内容，避免"有响应却判成空结果"。
+            val reasoning = message.optString("reasoning_content").orEmpty().trim()
+            content.ifEmpty { reasoning }
         } else {
             throw Exception("无法解析API响应")
         }
     }
 
     /**
-     * 从AI返回的结果中提取文件名
+     * 从AI返回的结果中提取文件名。
+     *
+     * 兼容多种返回形态，尽量别匹配不到：
+     * - 推理模型带 `<think>…` 思考块 / `<|...|>` 特殊标记
+     * - markdown 代码块与反引号包裹
+     * - 序号前缀（1. / 1、/ - / *）与文字前缀（文件名：/ 推荐：/ 答案：/ Answer:）
+     * - 引号、书名号《》、方括号、括号等包裹符号
+     * - 整段话里夹着文件名（直接在 [candidates] 里命中）
+     *
+     * @param result AI 返回的原文
+     * @param candidates 当前可用的音频文件名；传入时优先在其中命中，命中不了再返回清洗后的文本
      */
-    private fun extractFileName(result: String): String? {
-        // 清理结果，去除引号、多余空格等
-        var fileName = result.trim()
-        
-        // 移除可能的引号
-        fileName = fileName.removeSurrounding("\"").removeSurrounding("'").trim()
-        
-        // 移除文件扩展名（如果有）
-        fileName = fileName.substringBeforeLast(".").trim()
-        
-        // 如果结果为空或太短，返回null
-        if (fileName.length < 2) {
-            return null
-        }
-        
-        return fileName
+    private fun extractFileName(result: String, candidates: List<String> = emptyList()): String? {
+        if (result.isBlank()) return null
+
+        // 去掉思考块、特殊标记与 markdown 符号
+        val cleaned = result
+            .replace(Regex("(?s)<think>.*?</think>"), " ")
+            .replace(Regex("(?s)<\\|.*?\\|>"), " ")
+            .replace("```", " ")
+            .replace("`", "")
+
+        // 优先：原文里只要出现某个可用文件名就直接用它（取最长匹配，避免短名误命中）
+        matchInCandidates(cleaned, candidates)?.let { return it }
+
+        // 逐行清洗，从后往前找最像文件名的（模型常在最后一句给结论）
+        val lines = cleaned.lines().map { cleanLine(it) }.filter { it.length >= 2 }
+        val picked = lines.lastOrNull { isLikelyFileName(it) } ?: lines.lastOrNull()
+
+        // 整段没有换行时按整段清洗
+        return (picked ?: cleanLine(cleaned)).takeIf { it.length >= 2 }
+    }
+
+    /** 在候选文件名里找被原文包含的那个，取名字最长的匹配项 */
+    private fun matchInCandidates(text: String, candidates: List<String>): String? {
+        if (candidates.isEmpty()) return null
+        val lower = text.lowercase()
+        return candidates
+            .filter { it.isNotBlank() }
+            .map { it to it.substringBeforeLast(".").trim().lowercase() }
+            .filter { (_, name) -> name.length >= 2 && lower.contains(name) }
+            .maxByOrNull { (_, name) -> name.length }
+            ?.first
+    }
+
+    /** 清洗单行：去序号/文字前缀、包裹符号、句末标点与扩展名 */
+    private fun cleanLine(line: String): String {
+        var s = line.trim()
+        // 序号前缀：1. / 1、/ 1) / - / * / •
+        s = s.replace(Regex("^(\\d+[.、)]|[\\-*•])\\s*"), "")
+        // 文字前缀：文件名：/ 推荐音乐：/ 答案：/ Answer: / filename: ...
+        s = s.replace(
+            Regex(
+                "^(推荐(的)?(背景音乐|音乐|曲目|文件)?|文件名|文件|答案|结果|选择|music|answer|filename|file)\\s*[:：]?\\s*",
+                RegexOption.IGNORE_CASE
+            ),
+            ""
+        )
+        // 包裹符号与句末标点
+        s = s.trim().trim(
+            '"', '\'', '`', '《', '》', '〈', '〉', '【', '】',
+            '[', ']', '（', '）', '(', ')', '，', ',', '。', '、',
+            '！', '!', '？', '?', '；', ';', '：', ':'
+        )
+        // 去掉扩展名
+        s = s.substringBeforeLast(".").trim()
+        return s.trim()
+    }
+
+    /** 是否像文件名：长度合理且不是一整句解释性文字 */
+    private fun isLikelyFileName(s: String): Boolean {
+        if (s.length < 2 || s.length > 60) return false
+        return !s.contains("。") && !s.contains("，") && !s.contains("！") && !s.contains("？")
     }
 
     /**
