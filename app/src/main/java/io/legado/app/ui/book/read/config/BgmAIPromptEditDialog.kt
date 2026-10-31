@@ -20,6 +20,8 @@ class BgmAIPromptEditDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_prompt_e
     private val binding by viewBinding(DialogBgmAiPromptEditBinding::bind)
     private var prompt: BgmAIPrompt? = null
     private var onSavedCallback: (() -> Unit)? = null
+    /** 编辑既有提示词时传入的 id；0 表示新建 */
+    private var editPromptId = 0L
 
     companion object {
         private const val ARG_PROMPT_ID = "prompt_id"
@@ -58,6 +60,7 @@ class BgmAIPromptEditDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_prompt_e
         val promptId = arguments?.getLong(ARG_PROMPT_ID, 0) ?: 0
         val showAudioList = arguments?.getBoolean(ARG_SHOW_AUDIO_LIST, true) ?: true
         val lockName = arguments?.getBoolean(ARG_LOCK_NAME, false) ?: false
+        editPromptId = promptId
         binding.etName.isEnabled = !lockName
         if (promptId > 0) {
             execute {
@@ -115,14 +118,22 @@ class BgmAIPromptEditDialog : BaseDialogFragment(R.layout.dialog_bgm_ai_prompt_e
             promptText = promptText.substring(0, audioFileListSectionIndex).trim()
         }
 
-        val newPrompt = BgmAIPrompt(
-            id = prompt?.id ?: System.currentTimeMillis(),
-            name = name,
-            prompt = promptText,
-            isDefault = prompt?.isDefault ?: false
-        )
-
         execute {
+            // 目标记录兜底：异步加载未完成（用户秒点保存）或加载失败时，
+            // 按 id 重新查一次；查得到必须沿用原记录的 id/isDefault 走 REPLACE 更新。
+            // 否则 id 落到 System.currentTimeMillis()，编辑旧提示词会被存成
+            // 一条全新的记录，列表里凭空多出重复条目。
+            var target = prompt
+            if (target == null && editPromptId > 0) {
+                target = appDb.bgmAIPromptDao.getById(editPromptId)
+            }
+            val newPrompt = BgmAIPrompt(
+                id = target?.id ?: System.currentTimeMillis(),
+                name = name,
+                prompt = promptText,
+                isDefault = target?.isDefault ?: false
+            )
+
             // 如果设置为默认，取消其他提示词的默认状态
             if (newPrompt.isDefault) {
                 val all = appDb.bgmAIPromptDao.getAllList()
