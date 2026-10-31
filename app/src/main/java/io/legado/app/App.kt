@@ -301,6 +301,18 @@ class App : Application() {
      */
     private fun initDefaultBgmAIPrompts() {
         Coroutine.async {
+            // 先清理历史重复记录：旧版本恢复备份（按 id REPLACE，id 对不上就变新增）
+            // 和编辑弹窗异步竞态都会在表里留下同名重复条目，同名只保留更新时间最新的
+            val all = appDb.bgmAIPromptDao.getAllList()
+            all.groupBy { it.name }.forEach { (_, rows) ->
+                if (rows.size > 1) {
+                    val keep = rows.maxByOrNull { it.lastUpdateTime } ?: return@forEach
+                    rows.filter { it.id != keep.id }.forEach {
+                        appDb.bgmAIPromptDao.deleteById(it.id)
+                    }
+                    LogUtils.d("App", "已清理重复AI提示词: ${keep.name} x${rows.size - 1}")
+                }
+            }
             // 检查是否已有提示词
             val existingPrompts = appDb.bgmAIPromptDao.getAllList()
             if (existingPrompts.isEmpty()) {

@@ -425,8 +425,14 @@ object TtsBackup {
         }
         currentCoroutineContext().ensureActive()
         if (K_BGM_PROMPT in keys) {
-            readList<BgmAIPrompt>(path, FILE_BGM_PROMPT)?.let {
-                appDb.bgmAIPromptDao.insert(*it.toTypedArray())
+            readList<BgmAIPrompt>(path, FILE_BGM_PROMPT)?.let { incoming ->
+                val dao = appDb.bgmAIPromptDao
+                // 先删同名旧记录再插入：插入是按 id REPLACE，而本机的提示词
+                // （如启动时自动种下的"默认提示词"）与备份里的 id 几乎必然不同，
+                // 直接插入会越恢复越多（同名提示词翻倍）。提示词以 name 为业务键。
+                val names = incoming.mapTo(hashSetOf()) { it.name }
+                dao.getAllList().filter { it.name in names }.forEach { dao.delete(it) }
+                dao.insert(*incoming.toTypedArray())
             }
         }
         currentCoroutineContext().ensureActive()
