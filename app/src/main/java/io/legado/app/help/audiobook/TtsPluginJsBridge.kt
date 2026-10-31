@@ -27,6 +27,24 @@ import java.util.UUID
 @Keep
 class TtsPluginJsBridge {
 
+    /**
+     * 段级重合成信息（与 [SynthesisRecord] 对齐后的只读快照）。
+     * 供「检测尾音」打回时**只重新合成不合格的那一段**使用，避免整段
+     * （旁白 + 全部对话）重新合成。
+     *
+     * 注意：声明在类体而非 companion 内，外部可通过 `TtsPluginJsBridge.SegmentInfo` 引用。
+     */
+    class SegmentInfo(
+        /** 该段的语音标签（旁白 / 男性青年…） */
+        val voiceTag: String,
+        /** 该段实际使用的配置 id（重合成直接用它，避免按标签反查命中同名配置） */
+        val configId: String,
+        /** 该段合成时的原文；null 表示无法段级重合成 */
+        val text: String?,
+        /** 是否为音效段（不走 TTS 合成，不可重合成） */
+        val isSoundEffect: Boolean,
+    )
+
     companion object {
         private const val TAG = "TtsPluginJsBridge"
 
@@ -84,6 +102,12 @@ class TtsPluginJsBridge {
              * 音效没有角色参数，音量单独跟随背景音乐界面的「音效音量」滑块。
              */
             val isSoundEffect: Boolean = false,
+            /**
+             * 该段合成时的原文。脚本已退出后（调用栈销毁）只有音频字节跨层传回，
+             * 想在「检测尾音」打回时只重新合成不合格的那一段，必须在合成时把
+             * 配方（文本）预先记录下来；音效段不可重合成，为 null。
+             */
+            val text: String? = null,
         )
 
         /**
@@ -139,13 +163,34 @@ class TtsPluginJsBridge {
         }
 
         /**
+         * 「索引 + 字节长度」双重校验：把合成记录按顺序对齐到分段。
+         *
+         * @return 对齐成功的记录列表（顺序即分段顺序）；
+         *         数量或长度对不上（脚本改过音频、或不是分段缓冲区路径）时返回 null，
+         *         调用方应退回整体参数 / 放弃段级操作，**绝不猜测对应关系**
+         */
+        private fun alignedRecords(
+            segments: List<ByteArray>,
+            ranges: List<Pair<Int, Int>>,
+        ): List<SynthesisRecord>? {
+            val recs = records
+            if (recs.isEmpty() || segments.size <= 1) return null
+            if (recs.size != segments.size || ranges.size != segments.size) return null
+            recs.forEachIndexed { i, r ->
+                // 长度必须完全一致：脚本若对音频做过裁剪/再编码，对应关系即不可信
+                if (r.byteSize != segments[i].size) return null
+                if (ranges[i].second != segments[i].size) return null
+            }
+            return recs
+        }
+
+        /**
          * 按「索引 + 字节长度」双重校验，把每次合成的音频参数对齐到对应分段。
          *
          * @param segments 分段缓冲区切出来的音频段
          * @param ranges   每段的 (起始偏移, 长度)
          * @return 与 [segments] 等长的参数列表，元素为 null 表示该段已处理过、无需补；
-         *         数量或长度对不上（脚本改过音频、或不是分段缓冲区路径）时返回 null，
-         *         调用方应退回整体参数，**绝不猜测对应关系**
+         *         数量或长度对不上时返回 null，调用方应退回整体参数，**绝不猜测对应关系**
          */
         @JvmStatic
         fun buildPerSegmentParams(
@@ -163,14 +208,7 @@ class TtsPluginJsBridge {
             segments: List<ByteArray>,
             ranges: List<Pair<Int, Int>>,
         ): List<SegmentAudioConfig>? {
-            val recs = records
-            if (recs.isEmpty() || segments.size <= 1) return null
-            if (recs.size != segments.size || ranges.size != segments.size) return null
-            recs.forEachIndexed { i, r ->
-                // 长度必须完全一致：脚本若对音频做过裁剪/再编码，对应关系即不可信
-                if (r.byteSize != segments[i].size) return null
-                if (ranges[i].second != segments[i].size) return null
-            }
+            val recs = alignedRecords(segments, ranges) ?: return null
             val sfxGain = soundEffectGain()
             return recs.map { r ->
                 if (r.isSoundEffect) {
@@ -185,6 +223,29 @@ class TtsPluginJsBridge {
                 }
             }
         }
+
+        /**
+         * 生成与分段对齐的段级重合成信息快照（校验规则同 [buildPerSegmentAudioConfig]）。
+         *
+         * 快照在脚本执行结束、返回分段时立即生成——`records` 是全局可变状态，
+         * 下一次合成（[resetSynthesizeFlag]）会清空它，之后只能用快照。
+         *
+         * @return 与 [segments] 等长的信息列表；对不上时返回 null，
+         *         调用方（尾音打回）应回退整段重新合成
+         */
+        @JvmStatic
+        fun buildSegmentInfos(
+            segments: List<ByteArray>,
+            ranges: List<Pair<Int, Int>>,
+        ): List<SegmentInfo>? =
+            alignedRecords(segments, ranges)?.map { r ->
+                SegmentInfo(
+                    voiceTag = r.voiceTag,
+                    configId = r.configId,
+                    text = r.text,
+                    isSoundEffect = r.isSoundEffect,
+                )
+            }
 
         /**
          * 没有任何一段需要补参数时返回 true（用于 Single 这类无法分段的场景）。
@@ -255,6 +316,7 @@ class TtsPluginJsBridge {
                     params = PostAudioParams(),
                     converted = true,
                     byteSize = silentPcm02s().size,
+                    text = text,
                 )
             )
             return silentPcm02s()
@@ -298,6 +360,7 @@ class TtsPluginJsBridge {
                         params = outcome.params,
                         converted = outcome.converted,
                         byteSize = outcome.bytes.size,
+                        text = text,
                     )
                 )
             }
@@ -338,6 +401,7 @@ class TtsPluginJsBridge {
                     params = PostAudioParams(),
                     converted = true,
                     byteSize = silentPcm02s().size,
+                    text = text,
                 )
             )
             return silentPcm02s()
@@ -361,6 +425,7 @@ class TtsPluginJsBridge {
                         params = outcome.params,
                         converted = outcome.converted,
                         byteSize = outcome.bytes.size,
+                        text = text,
                     )
                 )
             }
