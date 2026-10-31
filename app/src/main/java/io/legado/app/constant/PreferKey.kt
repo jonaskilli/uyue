@@ -244,6 +244,13 @@ object PreferKey {
     const val bgmVolume = "bgmVolume"
     const val bgmAIEnabled = "bgmAIEnabled"
     const val bgmThinkingEnabled = "bgmThinkingEnabled"
+
+    // --- 朗读合成「检测尾音」相关 ---
+    const val ttsTailCheckEnabled = "ttsTailCheckEnabled"
+    const val ttsTailCheckMaxRetry = "ttsTailCheckMaxRetry"
+    const val ttsTailCheckHardCutDb = "ttsTailCheckHardCutDb"
+    const val ttsTailCheckAudibleDb = "ttsTailCheckAudibleDb"
+    const val ttsTailCheckMinDurationMs = "ttsTailCheckMinDurationMs"
     const val bgmAICharInterval = "bgmAICharInterval"
     const val soundEffectMode = "soundEffectMode"
     // 当前书籍音效模式：key = bookSoundEffectMode_${bookUrl}，value = follow/off/normal/all

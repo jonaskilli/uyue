@@ -45,6 +45,54 @@ object AudioDecodeUtil {
     )
 
     /**
+     * 尾音检测参数：检测合成音频末尾是否「戛然而止」（服务端硬切，
+     * 波形在可听电平处直接归零、没有自然衰减），不合格由调用方打回重合成。
+     *
+     * 阈值依据 仓库根目录 尾音裁剪测试/、尾音波形分析/ 的实测数据标定：
+     * 硬切发生在 PCM 层（图2_PCM也硬切_说明是服务端行为），正常尾音存在
+     * 自然衰减段，末窗电平会降到远低于语音电平。
+     *
+     * @param audibleAboveFloorDb 可听门限：高出底噪多少 dB 算「还能听见」。
+     *        调小 → 更容易认定还在出声（打回变多）；调大 → 更容易认定已结束
+     * @param hardCutAboveFloorDb 硬切判定阈值：末窗电平高出底噪多少 dB 判为戛然而止。
+     *        调小 → 更严格，打回更多（可能误判正常尾音）；调大 → 更宽松，漏判变多
+     * @param minDurationMs 豁免时长：短于该毫秒数的音频不检测（短句尾音占比大，误判率高）
+     */
+    data class TailCheckConfig(
+        val audibleAboveFloorDb: Double = 5.0,
+        val hardCutAboveFloorDb: Double = 8.0,
+        val minDurationMs: Int = 200,
+    )
+
+    /** 转码结果 + 尾音检测结论。wav 为 null 表示转码失败（此时 abruptTail 无意义） */
+    class TailCheckedWav(val wav: ByteArray?, val abruptTail: Boolean)
+
+    /** 尾音检测的 10ms 包络窗 */
+    private const val TAIL_CHECK_WINDOW_MS = 10
+
+    /**
+     * 尾部残余样本并入末窗的最小长度（毫秒）。
+     *
+     * 服务端硬切可能恰好落在最后一个完整 10ms 窗之后的几毫秒里：
+     * 此时最后完整窗是静音/衰减态、而被丢弃的残余段却仍可听——按完整窗判定会漏。
+     * 故把尾部残余（≥2ms）并入末窗计算，让检测覆盖到文件的真正末尾。
+     */
+    private const val TAIL_CHECK_MIN_TAIL_MS = 2
+
+    /**
+     * 「贴尾截断+静音填充」判定：最后一个可听窗与全段语音峰值的最大落差（dB）。
+     *
+     * 服务端还有一种硬切：在语音仍响时截断，再补 ~10-20ms 静音填充——
+     * 末窗是静音的，切割痕迹被填充盖住（实测案例：结束电平只比语音峰值低 10dB）。
+     * 自然结束的峰值落差实测 20~69dB；取 30 为偏严厉值——宁多打回不放过，
+     * 会连带打回一部分「衰减偏短」的临界音频（由重合成兜底，无副作用）。
+     */
+    private const val TAIL_CHECK_DECAY_GAP_DB = 30.0
+
+    /** 「贴尾」判定：最后一个可听窗距文件末尾不超过该窗数（2 窗 = 20ms） */
+    private const val TAIL_CHECK_PAD_WINDOWS = 2
+
+    /**
      * 解码完整性阈值：解出的 PCM 时长低于按源音频估算时长的该比例时，
      * 判定为「解码中途截断」，按失败处理。
      *
@@ -289,8 +337,36 @@ object AudioDecodeUtil {
         postParams: PostAudioParams? = null,
         silenceSkip: SilenceSkipConfig? = null,
     ): ByteArray? {
+        return decodeToStandardWavInternal(audioData, gain, postParams, silenceSkip, null).wav
+    }
+
+    /**
+     * 同 [decodeToStandardWav]，附带尾音戛然而止检测。
+     *
+     * 检测在重采样并剥离开头垃圾帧之后、Sonic 变速与去静音**之前**的原始 PCM 上进行：
+     * 此时的波形就是合成服务给出的原始形状，不受后续处理干扰，判定最可靠。
+     *
+     * @param tailCheck 尾音检测参数，null 表示不检测（abruptTail 恒为 false）
+     */
+    fun decodeToStandardWavChecked(
+        audioData: ByteArray,
+        gain: Float = AppConfig.convertCacheToWavGain,
+        postParams: PostAudioParams? = null,
+        silenceSkip: SilenceSkipConfig? = null,
+        tailCheck: TailCheckConfig? = null,
+    ): TailCheckedWav {
+        return decodeToStandardWavInternal(audioData, gain, postParams, silenceSkip, tailCheck)
+    }
+
+    private fun decodeToStandardWavInternal(
+        audioData: ByteArray,
+        gain: Float,
+        postParams: PostAudioParams?,
+        silenceSkip: SilenceSkipConfig?,
+        tailCheck: TailCheckConfig?,
+    ): TailCheckedWav {
         if (audioData.isEmpty()) {
-            return null
+            return TailCheckedWav(null, false)
         }
 
         // 先检测是否为 WAV 格式
@@ -314,7 +390,7 @@ object AudioDecodeUtil {
             }
 
             if (pcmResult == null) {
-                return null
+                return TailCheckedWav(null, false)
             }
 
             val (pcm, srcRate, srcChannels) = pcmResult
@@ -328,6 +404,10 @@ object AudioDecodeUtil {
 
             // 开头垃圾帧哨兵：解码器对损坏首帧会输出满幅削波突发，在此剥离
             val garbageFree = stripLeadingGarbage(resampled, TARGET_SAMPLE_RATE)
+
+            // 尾音检测：在变速/去静音之前的原始 PCM 上做（见 [decodeToStandardWavChecked]）
+            val abruptTail = tailCheck != null &&
+                    detectAbruptTail(garbageFree, TARGET_SAMPLE_RATE, tailCheck)
 
             // Sonic 后处理（语速/音量/音高，三者独立）
             val processed = if (postParams != null && !postParams.isDefault()) {
@@ -349,9 +429,12 @@ object AudioDecodeUtil {
             }
 
             val amplified = if (gain != 1.0f) applyVolumeGain(skipped, gain) else skipped
-            writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS)
+            TailCheckedWav(
+                writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS),
+                abruptTail
+            )
         } catch (e: Exception) {
-            null
+            TailCheckedWav(null, false)
         }
     }
 
@@ -377,8 +460,42 @@ object AudioDecodeUtil {
         perSegmentGain: List<Float?>? = null,
         silenceSkip: SilenceSkipConfig? = null,
     ): ByteArray? {
+        return mergeSegmentsToWavInternal(
+            segments, gain, postParams, perSegmentParams, perSegmentGain, silenceSkip, null
+        ).wav
+    }
+
+    /**
+     * 同 [mergeSegmentsToWav]，附带尾音戛然而止检测。
+     *
+     * 逐段在原始 PCM（变速/去静音前）上检测，任意一段判为硬切即整体不合格
+     * （打回重合成的单位是一次朗读文本的整段合成结果）。
+     */
+    fun mergeSegmentsToWavChecked(
+        segments: List<ByteArray>,
+        gain: Float = AppConfig.convertCacheToWavGain,
+        postParams: PostAudioParams? = null,
+        perSegmentParams: List<PostAudioParams?>? = null,
+        perSegmentGain: List<Float?>? = null,
+        silenceSkip: SilenceSkipConfig? = null,
+        tailCheck: TailCheckConfig? = null,
+    ): TailCheckedWav {
+        return mergeSegmentsToWavInternal(
+            segments, gain, postParams, perSegmentParams, perSegmentGain, silenceSkip, tailCheck
+        )
+    }
+
+    private fun mergeSegmentsToWavInternal(
+        segments: List<ByteArray>,
+        gain: Float,
+        postParams: PostAudioParams?,
+        perSegmentParams: List<PostAudioParams?>?,
+        perSegmentGain: List<Float?>?,
+        silenceSkip: SilenceSkipConfig?,
+        tailCheck: TailCheckConfig?,
+    ): TailCheckedWav {
         if (segments.isEmpty()) {
-            return null
+            return TailCheckedWav(null, false)
         }
 
         // 逐段参数不可信（数量不符）时退回整体参数，避免张冠李戴
@@ -386,6 +503,7 @@ object AudioDecodeUtil {
         val perGain = perSegmentGain?.takeIf { it.size == segments.size }
 
         val allPcm = mutableListOf<ByteArray>()
+        var anyAbruptTail = false
         try {
             segments.forEachIndexed { index, segment ->
                 val segParams = perSegment?.get(index) ?: postParams
@@ -394,24 +512,28 @@ object AudioDecodeUtil {
                 val segGain = perGain?.get(index) ?: 1.0f
                 // 每一段合成后立即去除空音频（快节奏），所有处理在合并之前完成。
                 // gain 传 segGain：逐段解码属于中间趟，整体增益由下方合并后应用
-                val wavBytes = decodeToStandardWav(
+                val decoded = decodeToStandardWavInternal(
                     segment,
                     gain = segGain,
                     postParams = segParams,
                     silenceSkip = silenceSkip,
+                    tailCheck = tailCheck,
                 )
-                if (wavBytes == null) {
+                if (decoded.wav == null) {
                     return@forEachIndexed
                 }
+                if (decoded.abruptTail) {
+                    anyAbruptTail = true
+                }
                 // 去掉 WAV 头，取 PCM 数据
-                val pcm = extractPcmFromWav(wavBytes)
+                val pcm = extractPcmFromWav(decoded.wav)
                 if (pcm != null) {
                     allPcm.add(pcm)
                 }
             }
 
             if (allPcm.isEmpty()) {
-                return null
+                return TailCheckedWav(null, false)
             }
 
             val totalSize = allPcm.sumOf { it.size }
@@ -430,10 +552,116 @@ object AudioDecodeUtil {
             }
 
             val amplified = if (gain != 1.0f) applyVolumeGain(processed, gain) else processed
-            return writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS)
+            return TailCheckedWav(
+                writeWavHeaderAndData(amplified, TARGET_SAMPLE_RATE, TARGET_CHANNELS, TARGET_BITS),
+                anyAbruptTail
+            )
         } catch (e: Exception) {
-            return null
+            return TailCheckedWav(null, false)
         }
+    }
+
+    /**
+     * 检测 16bit 单声道 PCM 的末尾是否「戛然而止」。
+     *
+     * 算法移植自 尾音裁剪测试/exp7_threshold.py 的分析框架：
+     * 1. 按 [TAIL_CHECK_WINDOW_MS] 毫秒窗计算 RMS 包络（dBFS）
+     * 2. 底噪 = 全段最安静 5% 窗口的电平（即句间真静音的水平）
+     * 3. 规则A：最后一个窗（含尾部残余）的电平仍 ≥ 底噪 +
+     *    [TailCheckConfig.hardCutAboveFloorDb] → 音频在明显可听时直接结束 = 硬切
+     * 4. 规则C：末窗被静音填充盖住的截断 —— 最后一个可听窗贴尾（≤20ms）、
+     *    电平超阈值、且与全段语音峰值落差 ≤ [TAIL_CHECK_DECAY_GAP_DB]
+     *    （衰减远未完成）= 语音正在响时被切再补静音
+     *
+     * 不判定的情况：时长不足 [TailCheckConfig.minDurationMs]（短段豁免）、
+     * 窗口数过少、找不到任何可听内容（近似静音段，交给 AudioCacheValidator 处理）。
+     */
+    fun detectAbruptTail(pcm: ByteArray, sampleRate: Int, cfg: TailCheckConfig): Boolean {
+        val bytesPerFrame = 2
+        val durationMs = pcm.size * 1000L / (sampleRate * bytesPerFrame)
+        if (durationMs < cfg.minDurationMs) return false
+
+        val win = (sampleRate * TAIL_CHECK_WINDOW_MS / 1000).coerceAtLeast(1)
+        val framesPerWin = win * bytesPerFrame
+        val n = pcm.size / framesPerWin
+        if (n < 3) return false
+
+        // 10ms 窗 RMS（线性值），后续统一转 dB
+        val envLin = DoubleArray(n)
+        for (i in 0 until n) {
+            var sum = 0.0
+            val base = i * framesPerWin
+            var j = 0
+            while (j < framesPerWin) {
+                val lo = pcm[base + j].toInt() and 0xFF
+                val hi = pcm[base + j + 1].toInt()
+                var s = lo or (hi shl 8)
+                if (s > 32767) s -= 65536
+                val v = s / 32768.0
+                sum += v * v
+                j += 2
+            }
+            envLin[i] = kotlin.math.sqrt(sum / win)
+        }
+
+        // 尾部残余样本并入末窗：硬切可能恰好落在最后一个完整窗之后的几毫秒里，
+        // 只看完整窗会漏掉这种「完整窗已静音、残段仍可听」的切割（实测 4~6ms 残段、
+        // 高出底噪 18~22dB 的真实案例）。残段过短（<2ms）统计不稳，忽略不计。
+        val remFrames = (pcm.size - n * framesPerWin) / bytesPerFrame
+        val minTailFrames = sampleRate * TAIL_CHECK_MIN_TAIL_MS / 1000
+        if (remFrames >= minTailFrames) {
+            var sum = 0.0
+            var count = 0
+            val base = n * framesPerWin
+            var j = 0
+            while (j + 1 < pcm.size - base) {
+                val lo = pcm[base + j].toInt() and 0xFF
+                val hi = pcm[base + j + 1].toInt()
+                var s = lo or (hi shl 8)
+                if (s > 32767) s -= 65536
+                val v = s / 32768.0
+                sum += v * v
+                count++
+                j += 2
+            }
+            val remLin = kotlin.math.sqrt(sum / count)
+            val remDb = 20 * kotlin.math.ln(remLin + 1e-12) / kotlin.math.ln(10.0)
+            // 残余段电平取「完整末窗与残余段中较高者」：切割痕迹体现在任何一段都算
+            val lastDbFull = 20 * kotlin.math.ln(envLin[n - 1] + 1e-12) / kotlin.math.ln(10.0)
+            envLin[n - 1] = kotlin.math.exp(maxOf(lastDbFull, remDb) * kotlin.math.ln(10.0) / 20.0)
+        }
+
+        val floorIdx = ((n - 1) * 0.05).toInt()
+        val envDb = DoubleArray(n) { i ->
+            20 * kotlin.math.ln(envLin[i] + 1e-12) / kotlin.math.ln(10.0)
+        }
+        val floorDb = 20 * kotlin.math.ln(envLin.copyOf().also { it.sort() }[floorIdx] + 1e-12) / kotlin.math.ln(10.0)
+
+        // 找不到任何可听内容（整段近似静音）→ 不判
+        val audibleDb = floorDb + cfg.audibleAboveFloorDb
+        val lastAudible = envDb.indexOfLast { it > audibleDb }
+        if (lastAudible < 0) {
+            return false
+        }
+
+        // 规则A：末窗电平仍显著高于底噪 → 高幅度处直接结束 = 硬切（无填充的截断）
+        if (envDb[n - 1] >= floorDb + cfg.hardCutAboveFloorDb) {
+            return true
+        }
+
+        // 规则C：末窗被静音填充盖住的硬切 —— 服务端在语音仍响时截断再补 ~10-20ms 静音，
+        // 切割痕迹被填充掩盖（真实案例：结束电平只比语音峰值低 10dB，其余全是底噪/零）。
+        // 此时看最后一个可听窗：贴着文件末尾（≤20ms）、电平仍超阈值、
+        // 且与全段语音峰值的落差极小（自然结束衰减充分，实测最小落差 20.3dB）→ 判硬切
+        if (n - 1 - lastAudible <= TAIL_CHECK_PAD_WINDOWS &&
+            envDb[lastAudible] - floorDb >= cfg.hardCutAboveFloorDb
+        ) {
+            val peakDb = envDb.max()
+            if (peakDb - envDb[lastAudible] <= TAIL_CHECK_DECAY_GAP_DB) {
+                return true
+            }
+        }
+        return false
     }
 
     // ========== 内部方法 ==========

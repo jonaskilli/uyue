@@ -707,6 +707,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
             }
             R.id.menu_global_audio_params -> showGlobalAudioParamsDialog()
             R.id.menu_fast_play -> showFastPlayDialog()
+            R.id.menu_tail_check -> showTailCheckDialog()
             R.id.menu_help -> showHelp("ttsPluginHelp")
         }
         return super.onCompatOptionsItemSelected(item)
@@ -1519,6 +1520,86 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 AppConfig.ttsSilenceSkipEnabled = switch.isChecked
                 AppConfig.ttsSilenceSkipMinMs = parsed.coerceIn(150, 2000)
                 toastOnUi("已更新快节奏播放设置")
+            }
+            cancelButton()
+        }.show()
+    }
+
+    /** 竖排说明文字 */
+    private fun tailCheckDesc(text: String): TextView = TextView(this@TtsPluginActivity).apply {
+        this.text = text
+        textSize = 12f
+        setPadding(48, 2, 48, 8)
+    }
+
+    /**
+     * 检测尾音设置弹窗。
+     *
+     * 插件合成 → 转 WAV 时立刻检测末尾是否「戛然而止」（服务端硬切），
+     * 不合格打回重新合成，打回次数用尽仍不合格则直接使用最后一次结果。
+     * 检测算法与阈值依据见 AudioDecodeUtil.detectAbruptTail 的注释
+     * （仓库根目录 尾音裁剪测试/、尾音波形分析/）。
+     */
+    private fun showTailCheckDialog() {
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        // 总开关
+        val switchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(48, 16, 48, 8)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        val switchText = TextView(this).apply {
+            text = "启用检测尾音"
+            textSize = 15f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val switch = android.widget.Switch(this).apply { isChecked = AppConfig.ttsTailCheckEnabled }
+        switchRow.addView(switchText)
+        switchRow.addView(switch)
+        container.addView(switchRow)
+        container.addView(tailCheckDesc("合成转 WAV 后立刻检测末尾是否戛然而止，不合格打回重新合成；打回次数用尽仍不合格则直接使用。仅插件 / HTTP 合成链路生效"))
+
+        fun addNumberRow(label: String, value: Int, hint: String): EditText {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(48, 12, 48, 0)
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            row.addView(TextView(this).apply {
+                text = label
+                textSize = 15f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            val et = EditText(this).apply {
+                setText(value.toString())
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            row.addView(et)
+            container.addView(row)
+            container.addView(tailCheckDesc(hint))
+            return et
+        }
+
+        val etRetry = addNumberRow("打回次数", AppConfig.ttsTailCheckMaxRetry,
+            "检测到尾音不合格后重新合成的最多次数。调大 = 更可能等到合格的尾音，但该段朗读要等更久；0 = 只检测记录、不打回")
+        val etHardCut = addNumberRow("硬切判定阈值（dB）", AppConfig.ttsTailCheckHardCutDb,
+            "末尾电平高出底噪多少 dB 判为戛然而止。调小 = 更严格，打回更多（可能误判正常尾音）；调大 = 更宽松，漏判变多")
+        val etAudible = addNumberRow("可听门限（dB）", AppConfig.ttsTailCheckAudibleDb,
+            "高出底噪多少 dB 算「还能听见」。调小 = 更容易认定还在出声（打回变多）；调大 = 更容易认定已结束")
+        val etMinDuration = addNumberRow("豁免时长（毫秒）", AppConfig.ttsTailCheckMinDurationMs,
+            "短于该时长的音频不检测。调大 = 更多短句跳过检测（短句尾音占比大，误判率高）")
+
+        alert("检测尾音") {
+            customView { container }
+            okButton {
+                AppConfig.ttsTailCheckEnabled = switch.isChecked
+                AppConfig.ttsTailCheckMaxRetry = etRetry.text.toString().toIntOrNull() ?: 3
+                AppConfig.ttsTailCheckHardCutDb = etHardCut.text.toString().toIntOrNull() ?: 15
+                AppConfig.ttsTailCheckAudibleDb = etAudible.text.toString().toIntOrNull() ?: 10
+                AppConfig.ttsTailCheckMinDurationMs = etMinDuration.text.toString().toIntOrNull() ?: 300
+                toastOnUi("已更新检测尾音设置")
             }
             cancelButton()
         }.show()
