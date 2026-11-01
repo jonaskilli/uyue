@@ -1174,6 +1174,16 @@ internal fun DownloadDialog(
     }
 
     LaunchedEffect(Unit) { VideoDownloader.refreshVideoGroups() }
+    // 任务记录数/完成数变化时同步刷新视频分组统计：
+    // 「继续」补全新集、有集下载完成时，条目上的「x/y 集」、缓存进度条与
+    // 播放按钮（completedCount>0 才显示）都要跟着变，否则必须退出重进才能刷出来。
+    // 只在两个计数变化时触发，下载进度的跳动（progress 变化）不会引起重扫。
+    LaunchedEffect(
+        dlStates.size,
+        dlStates.count { it.status == VideoDownloader.DlStatus.COMPLETED },
+    ) {
+        VideoDownloader.refreshVideoGroups()
+    }
 
     val currentBook = if (standalone) null else SourceVideoPlayerSession.getBook()
     val isCurrentVideo = !standalone && selectedDir == null
@@ -1730,12 +1740,30 @@ internal fun DownloadDialog(
                                                             fontSize = 11.sp
                                                         )
                                                     } else if (!videoSelectMode) {
+                                                        // 下载/排队中显示红色「停止」，
+                                                        // 点击全部暂停（可续传）；空闲未完成显示「继续」
+                                                        val anyRunning = groupStates.any {
+                                                            it.status == VideoDownloader.DlStatus.QUEUED ||
+                                                                it.status == VideoDownloader.DlStatus.RUNNING
+                                                        }
                                                         Text(
-                                                            "继续",
-                                                            color = MaterialTheme.colorScheme.primary,
+                                                            if (anyRunning) "停止" else "继续",
+                                                            color = if (anyRunning) {
+                                                                Color(0xFFFF6B6B)
+                                                            } else {
+                                                                MaterialTheme.colorScheme.primary
+                                                            },
                                                             fontSize = 11.sp,
                                                             modifier = Modifier.clickable {
-                                                                onContinueGroup(g)
+                                                                if (anyRunning) {
+                                                                    val n = VideoDownloader
+                                                                        .pauseAll(g.dirName)
+                                                                    context.toastOnUi(
+                                                                        "已暂停 $n 个任务"
+                                                                    )
+                                                                } else {
+                                                                    onContinueGroup(g)
+                                                                }
                                                             }
                                                         )
                                                     }
