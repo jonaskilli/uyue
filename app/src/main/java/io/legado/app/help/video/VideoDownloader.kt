@@ -268,6 +268,9 @@ object VideoDownloader {
             synchronized(statesMap) {
                 statesMap[key] = TaskState(key, task, title, state.second, state.first, dir.name)
             }
+            // 恢复历史下载记录时，本地还没有封面的补存一份（幂等），
+            // 老视频重启后下载记录里的封面也因此能稳定刷出来
+            saveCoverAsync(task)
         }
         publishStates()
     }
@@ -371,6 +374,8 @@ object VideoDownloader {
      * 已有完整 mp4 的直接标记完成，不再重复下载。
      */
     fun enqueue(tasks: List<Task>) {
+        // 入队时顺手把封面落到视频目录（幂等，已存过不产生流量）
+        tasks.distinctBy { dirOf(it).name }.forEach { saveCoverAsync(it) }
         tasks.forEach { task ->
             val key = watchKey(task)
             if (File(dirOf(task), "${titleOf(task)}.mp4").exists()) {
@@ -516,6 +521,10 @@ object VideoDownloader {
         val episodeCount: Int,
         val completedCount: Int,
         val sizeBytes: Long,
+        /** 封面（下载记录里有对应书籍时才有；只有目录、无记录的为 null） */
+        val coverUrl: String? = null,
+        /** 封面所属书源地址：部分封面要带来源 Referer 才拉得到 */
+        val origin: String? = null,
     )
 
     private val _videoGroups = MutableStateFlow<List<VideoGroup>>(emptyList())
@@ -568,6 +577,9 @@ object VideoDownloader {
         snapshot.forEach { s ->
             val dirName = dirOf(s.task).name
             val old = map[dirName]
+            // 本地已保存的封面优先：URL 封面有防盗链/时效问题，重启后联网重拉经常失败；
+            // 本地文件跟视频走，永远能刷出来
+            val localCover = localCoverOf(dirName)
             map[dirName] = VideoGroup(
                 key = s.task.book.bookUrl,
                 name = s.task.book.name,
@@ -576,13 +588,19 @@ object VideoDownloader {
                 completedCount = (old?.completedCount ?: 0) +
                     if (s.status == DlStatus.COMPLETED) 1 else 0,
                 sizeBytes = 0L,
+                coverUrl = localCover ?: s.task.book.getDisplayCover(),
+                origin = if (localCover == null) s.task.book.origin else null,
             )
         }
         // 目录还在、但下载记录已经没了的（记录被清过 / 手动放进去的）
         root.listFiles()?.filter { it.isDirectory }?.forEach { d ->
             if (!map.containsKey(d.name)) {
                 val mp4 = d.listFiles()?.count { it.isFile && it.name.endsWith(".mp4") } ?: 0
-                map[d.name] = VideoGroup("dir:${d.name}", d.name, d.name, mp4, mp4, 0L)
+                // 只有目录没有记录的视频：封面也尝试用目录里存过的本地封面
+                map[d.name] = VideoGroup(
+                    "dir:${d.name}", d.name, d.name, mp4, mp4, 0L,
+                    coverUrl = localCoverOf(d.name),
+                )
             }
         }
         return map.values.map { g ->
@@ -687,6 +705,8 @@ object VideoDownloader {
      */
     fun watchStart(task: Task, knownUrl: String? = null) {
         if (!isWatchSaveEnabled()) return
+        // 边看边存同样是"这个视频有下载目录"的信号，封面一并落地
+        saveCoverAsync(task)
         if (File(dirOf(task), "${titleOf(task)}.mp4").exists()) {
             // 已经下完了：不再重复下载，让会话直接播本地文件
             notifyCompleted(task)
@@ -771,6 +791,49 @@ object VideoDownloader {
 
     private fun titleOf(task: Task): String =
         task.chapter.title.replace(AppPattern.fileNameRegex, "").ifBlank { "第${task.index + 1}集" }
+
+    // ---------- 封面本地化 ----------
+    // 线上封面 URL 常带防盗链/时效签名，APP 重启后重新联网拉经常失败
+    // （表现为下载记录里多集视频刷不出封面）。所以封面一旦拿到就存进
+    // 视频自己的下载目录，之后一律优先用本地文件，跟着视频走、永远刷得出来。
+
+    /** 封面在下载目录里的落地文件：Download/保存视频/<dirName>/cover.jpg */
+    private fun coverFileOf(dirName: String): File = File(rootDir(), "$dirName/cover.jpg")
+
+    /** 已保存的本地封面（存在且非空），返回绝对路径供图片加载器直接读 */
+    private fun localCoverOf(dirName: String): String? = runCatching {
+        coverFileOf(dirName).takeIf { it.isFile && it.length() > 0L }?.absolutePath
+    }.getOrNull()
+
+    /**
+     * 把封面保存到视频的下载目录（幂等：已保存过直接跳过，不产生流量）。
+     * 入队下载、边看边存、恢复下载记录时各调一次，尽早把封面落成本地文件。
+     */
+    fun saveCoverAsync(task: Task) {
+        val coverUrl = task.book.getDisplayCover()?.takeIf { it.isNotBlank() } ?: return
+        val target = coverFileOf(dirOf(task).name)
+        if (target.isFile && target.length() > 0L) return
+        scope.launch {
+            runCatching {
+                val request = okhttp3.Request.Builder().url(coverUrl).apply {
+                    getHeaders(task.source).forEach { (k, v) -> header(k, v) }
+                }.build()
+                okHttpClient.newCall(request).execute().use { resp ->
+                    check(resp.isSuccessful) { "HTTP ${resp.code}" }
+                    val body = resp.body ?: return@use
+                    target.parentFile?.mkdirs()
+                    val tmp = File(target.parentFile, "cover.jpg.part")
+                    FileOutputStream(tmp).use { out -> body.byteStream().copyTo(out) }
+                    if (tmp.length() > 0L) {
+                        if (!tmp.renameTo(target)) tmp.copyTo(target, overwrite = true)
+                    }
+                    tmp.delete()
+                }
+            }.onFailure { AppLog.put("保存视频封面失败：${task.book.name}", it) }
+            // 落地成功才刷新：让下载记录列表立刻换用本地封面
+            if (target.isFile && target.length() > 0L) refreshVideoGroups()
+        }
+    }
 
     private fun watchKey(task: Task): String =
         "${dirOf(task).absolutePath}/${titleOf(task)}"
