@@ -179,6 +179,13 @@ object BgmKeywordMatcher {
     }
 
     /**
+     * 最近播放的BGM快照（新→旧，最多 MAX_RECENT_BGMS 首，不含扩展名）。
+     * 供 AI 选曲路径做"排除最近播放"用——之前只有关键词路径有排除，AI 路径
+     * 只排除当前一首，导致反复推荐同一首。
+     */
+    fun getRecentBgms(): List<String> = recentBgms.toList()
+
+    /**
      * 分析文本内容，返回推荐的音乐文件名（不含扩展名）
      * @param content 小说文本内容
      * @param currentBgm 当前正在播放的BGM文件名（用于排除当前音乐）

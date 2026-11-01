@@ -1544,13 +1544,16 @@ abstract class BaseReadAloudService : BaseService(),
         }
         // 注册BGM回调：提供下一首索引，BGM播放/切换后触发预分析
         BgmManager.getNextBgmIndex = { pendingNextBgmIndex }
-        BgmManager.onBgmStarted = { 
-            // 更新BgmManager中的预存索引
-            BgmManager.pendingNextBgmIndex = pendingNextBgmIndex
+        BgmManager.onBgmStarted = {
+            // 注意：这里【不能】把 service 侧 pendingNextBgmIndex 写回 BgmManager——
+            // 旧实现每次切歌都写回，预分析一旦没跑成（防抖/收集失败/AI失败），
+            // 旧推荐就永久残留，BGM 每次播完都切同一首（死循环）。
+            // 预分析成功时 triggerBgmAnalysis 会主动写入 BgmManager.pendingNextBgmIndex，
+            // 失败时 handlePlaybackEnded 已用完即弃走随机，无需在此同步。
             // 记录本次切歌：新歌从当前段落开始放
             recordBgmAtCurrentPara()
             // BGM预分析（仅推荐下一首BGM，AI生图已改为字数独立驱动）
-            triggerBgmAnalysis() 
+            triggerBgmAnalysis()
         }
     }
 
@@ -2181,11 +2184,17 @@ abstract class BaseReadAloudService : BaseService(),
                     }
                     if (!recommendedFileName.isNullOrEmpty()) {
                         val index = BgmManager.findMediaItemIndexByName(recommendedFileName)
-                        pendingNextBgmIndex = if (index >= 0) {
+                        var resolved = if (index >= 0) {
                             index
                         } else {
                             BgmManager.findMediaItemIndexFuzzy(recommendedFileName)
                         }
+                        // 推荐结果不得是当前正在播放的这首（AI 返回被排除歌名时的最后防线）
+                        if (resolved == BgmManager.getCurrentPlayingIndex()) {
+                            AppLog.put("AI背景音乐: 推荐与当前播放相同，弃用本轮推荐")
+                            resolved = -1
+                        }
+                        pendingNextBgmIndex = resolved
                         BgmManager.pendingNextBgmIndex = pendingNextBgmIndex
                         AppLog.put("AI背景音乐: 预分析下一首=$recommendedFileName, index=$pendingNextBgmIndex")
                         if (pendingNextBgmIndex >= 0 && !BgmManager.isPlaying()) {
@@ -2239,11 +2248,17 @@ abstract class BaseReadAloudService : BaseService(),
                 }
                 if (!recommendedFileName.isNullOrEmpty()) {
                     val index = BgmManager.findMediaItemIndexByName(recommendedFileName)
-                    pendingNextBgmIndex = if (index >= 0) {
+                    var resolved = if (index >= 0) {
                         index
                     } else {
                         BgmManager.findMediaItemIndexFuzzy(recommendedFileName)
                     }
+                    // 与 AI 路径同款防线：推荐不得与当前播放相同
+                    if (resolved == BgmManager.getCurrentPlayingIndex()) {
+                        AppLog.put("关键词BGM: 推荐与当前播放相同，弃用本轮推荐")
+                        resolved = -1
+                    }
+                    pendingNextBgmIndex = resolved
                     BgmManager.pendingNextBgmIndex = pendingNextBgmIndex
                     AppLog.put("关键词BGM: 预分析下一首=$recommendedFileName, index=$pendingNextBgmIndex")
                     if (pendingNextBgmIndex >= 0 && !BgmManager.isPlaying()) {
