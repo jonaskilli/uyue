@@ -556,6 +556,24 @@ object VideoDownloader {
                 ?.task?.index
         }
 
+    /**
+     * 续播集号：上次看到的那一集（book.durChapterIndex，与书架续播同源）。
+     * - 那一集已下载完成 → 直接续它（集内进度由播放器从 durChapterPos 恢复）；
+     * - 上次看的那集没下载（或从没看过）→ 回落到第一集已下载的集；
+     * - 一集都没下完 → null（调用方不显示播放按钮）。
+     */
+    fun resumeIndexFor(bookUrl: String): Int? {
+        val last = appDb.bookDao.getBook(bookUrl)?.durChapterIndex
+        val completed = synchronized(statesMap) {
+            statesMap.values
+                .filter { it.task.book.bookUrl == bookUrl && it.status == DlStatus.COMPLETED }
+                .map { it.task.index }
+                .toSet()
+        }
+        if (completed.isEmpty()) return null
+        return if (last != null && last in completed) last else completed.min()
+    }
+
     /** 某部视频的下载条目（按保存目录名过滤） */
     fun tasksOfDir(dirName: String): List<TaskState> =
         synchronized(statesMap) {
