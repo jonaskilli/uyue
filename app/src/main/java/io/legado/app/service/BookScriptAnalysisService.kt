@@ -67,6 +67,16 @@ class BookScriptAnalysisService : BaseService() {
         @Volatile
         var runningBookName: String? = null
             private set
+
+        /** 当前状态详情（与通知栏内容一致，供界面实时展示） */
+        @Volatile
+        var statusText: String? = null
+            private set
+
+        /** 当前正在分析的章节标题（含段内进度等，界面展示用） */
+        @Volatile
+        var currentChapterTitle: String? = null
+            private set
     }
 
     private var analyzeJob: Job? = null
@@ -154,6 +164,7 @@ class BookScriptAnalysisService : BaseService() {
             }
 
             val ch = appDb.bookChapterDao.getChapter(bookUrl, idx) ?: continue
+            currentChapterTitle = ch.title
             val raw = BookHelp.getContent(book, ch)
             val clean = if (raw.isNullOrBlank()) "" else ReadBook.cleanContentForTts(book, ch, raw)
             if (clean.isBlank()) {
@@ -162,17 +173,21 @@ class BookScriptAnalysisService : BaseService() {
                 continue
             }
 
-            // 提速：脚本章节缓存已完整覆盖本章对话的（results 数 >= 对话数），
-            // 整章直接跳过，不逐段重跑 JS/AI。部分覆盖的章节仍会跑——
-            // 脚本内部对已缓存对话会命中缓存，只对新增名字调 AI
-            val cachedResults = readScriptChapterCacheResults(book.name, ch.title)
+            // 提速：
+            // 1. 本章无任何对话（纯旁白）→ 脚本跑不出任何新结果，整章跳过；
+            // 2. 脚本章节缓存已完整覆盖本章对话（连续缓存数 >= 对话数）→ 整章跳过；
+            // 3. 部分覆盖的章节仍会跑，但下面段落循环会跳过已缓存覆盖的段落，
+            //    从第一个未缓存对话的段落才开始真正执行脚本（段级断点续析）
+            val cachedSeq = readScriptChapterCacheMaxSeq(book.name, ch.title)
             val dialogueCount = countDialogues(clean)
-            if (cachedResults != null && dialogueCount > 0 && cachedResults >= dialogueCount) {
-                AppLog.putDebug(
-                    "全书分析: 第${idx + 1}章「${ch.title}」已有完整缓存($cachedResults/$dialogueCount)，跳过"
-                )
+            if (dialogueCount == 0 || (cachedSeq != null && cachedSeq >= dialogueCount)) {
+                val reason = if (dialogueCount == 0) "无对话" else "已有完整缓存($cachedSeq/$dialogueCount)"
+                AppLog.putDebug("全书分析: 第${idx + 1}章「${ch.title}」$reason，跳过")
                 progressIndex = idx + 1
-                upNotification(progressText(idx, total, "已有缓存，跳过"), idx + 1)
+                upNotification(
+                    progressText(idx, total, if (dialogueCount == 0) "无对话，跳过" else "已有缓存，跳过"),
+                    idx + 1
+                )
                 continue
             }
 
@@ -180,6 +195,14 @@ class BookScriptAnalysisService : BaseService() {
             ReadBook.saveTtsTextJsonFrom(idx)
 
             val paragraphs = clean.split("\n").filter { it.isNotBlank() }
+            // 段级断点续析：skipBefore = 章节缓存里连续已缓存的对话序号数。
+            // 在此之前的段落（对话全部命中缓存，或纯旁白）直接跳过不跑脚本，
+            // 重跑从第一个未缓存对话的段落开始。脚本对跳过的段落本来也只会
+            // 命中缓存原样返回，跳过是纯收益；就算序号预测失配，脚本自身有
+            // 全文定位（locateParagraphInFullText）兜底，正确性不受影响。
+            val skipBefore = cachedSeq ?: 0
+            var cumDialogues = 0
+            var analyzedCount = 0
             var pIdx = 0
             while (pIdx < paragraphs.size) {
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
@@ -191,8 +214,19 @@ class BookScriptAnalysisService : BaseService() {
                     continue
                 }
 
+                val para = paragraphs[pIdx]
+                val paraDialogues = para.count { it == '“' }
+                if (cumDialogues + paraDialogues <= skipBefore) {
+                    // 本段所有对话都已连续命中脚本章节缓存（或本段无对话），直接跳过
+                    cumDialogues += paraDialogues
+                    pIdx++
+                    continue
+                }
+
                 // 只分析不合成：标注结果直接丢弃
-                applyTtsScripts(paragraphs[pIdx])
+                applyTtsScripts(para)
+                cumDialogues += paraDialogues
+                analyzedCount++
                 // 每段刷新一次：一章内的 AI 请求可能耗时数分钟，
                 // 不刷新会像卡死（进度条按章节粒度，文字带段内进度）
                 upNotification(
@@ -205,7 +239,10 @@ class BookScriptAnalysisService : BaseService() {
             progressIndex = idx + 1
             upNotification(progressText(idx, total, ch.title.take(16)), idx + 1)
             if (idx % 10 == 0) {
-                AppLog.putDebug("全书分析: 已完成第${idx + 1}章，本章${paragraphs.size}段")
+                AppLog.putDebug(
+                    "全书分析: 已完成第${idx + 1}章，本章${paragraphs.size}段" +
+                        "（缓存跳过${paragraphs.size - analyzedCount}段，实际分析${analyzedCount}段）"
+                )
             }
         }
         AppLog.put("全书分析: 《$bookName》全部分析完成，角色与别名结果已写入脚本章节缓存")
@@ -226,10 +263,13 @@ class BookScriptAnalysisService : BaseService() {
     }
 
     /**
-     * 读脚本的章节缓存结果条数（xiaoshuo/<书名>/<章节标题>.json 的 results 数）。
-     * null 表示无缓存。文件命名与清洗规则复用 [AiCacheFileUtil]（与脚本一致）。
+     * 读脚本的章节缓存（xiaoshuo/<书名>/<章节标题>.json 的 results），
+     * 返回「从 1 开始连续已缓存的对话序号数」（如 results 有 01/02/03 → 3）。
+     * 中间有缺口的序号不算；一条都没缓存返回 0；无缓存文件返回 null。
+     * 用于段级断点续析：连续缓存数之前的段落无需重跑脚本。
+     * 文件命名与清洗规则复用 [AiCacheFileUtil]（与脚本一致）。
      */
-    private fun readScriptChapterCacheResults(bookName: String, chapterTitle: String): Int? {
+    private fun readScriptChapterCacheMaxSeq(bookName: String, chapterTitle: String): Int? {
         return runCatching {
             val bookDir = AiCacheFileUtil.getBookDirByName(bookName)
             val file = File(
@@ -238,7 +278,14 @@ class BookScriptAnalysisService : BaseService() {
             )
             if (!file.isFile) return null
             val obj = JSONObject(file.readText())
-            obj.optJSONObject("results")?.length()
+            val results = obj.optJSONObject("results") ?: return@runCatching 0
+            val seqs = mutableSetOf<Int>()
+            for (key in results.keys()) {
+                key.toString().toIntOrNull()?.let { seqs.add(it) }
+            }
+            var contiguous = 0
+            while (contiguous + 1 in seqs) contiguous++
+            contiguous
         }.getOrNull()
     }
 
@@ -272,6 +319,7 @@ class BookScriptAnalysisService : BaseService() {
     }
 
     private fun upNotification(text: String, doneChapters: Int = -1) {
+        statusText = text
         // 进度条：doneChapters >= 0 时按章节总数显示确定进度，否则转圈
         if (doneChapters >= 0 && totalCount > 0) {
             notificationBuilder.setProgress(totalCount, doneChapters, false)
