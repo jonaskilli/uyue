@@ -66,8 +66,10 @@ object BgmAIService {
             io.legado.app.utils.LogUtils.d("BgmAIService", "API返回结果: $result")
             io.legado.app.constant.AppLog.putDebug("AI背景音乐: API返回=$result")
             
-            // 解析AI返回的结果，提取文件名（带上可用文件列表，便于在整段回复里直接命中）
-            val fileName = extractFileName(result, BgmManager.getAudioFileList())
+            // 解析AI返回的结果，提取文件名。
+            // 候选列表必须与提示词一致（已排除当前播放+最近播放）：如果用全量列表兜底，
+            // AI 回复里只要沾到被排除的歌名就又会命中切回去，排除机制等于白做
+            val fileName = extractFileName(result, candidateFiles())
             io.legado.app.utils.LogUtils.d("BgmAIService", "提取的文件名: $fileName")
             io.legado.app.constant.AppLog.putDebug("AI背景音乐: 提取文件名=$fileName")
             fileName
@@ -80,6 +82,24 @@ object BgmAIService {
     }
 
     /**
+     * 参与选曲的候选文件列表：全量列表排除「当前播放 + 最近播放（最多3首）」。
+     * getPrompt 与 analyzeContent 的提取兜底共用同一份，保证"提示词里没有的歌，
+     * 结果解析也不会命中"。
+     */
+    private fun candidateFiles(currentBgm: String? = null): List<String> {
+        val excluded = mutableSetOf<String>()
+        currentBgm?.takeIf { it.isNotBlank() }?.let {
+            excluded.add(it.substringBeforeLast(".").trim())
+        }
+        // 最近播放（关键词路径维护的记录，AI 路径此前完全没接，导致反复推荐同一首）
+        io.legado.app.service.BgmKeywordMatcher.getRecentBgms().forEach { excluded.add(it) }
+        return BgmManager.getAudioFileList().filter { name ->
+            val base = name.substringBeforeLast(".").trim()
+            excluded.none { it.equals(base, ignoreCase = true) }
+        }
+    }
+
+    /**
      * 获取完整的提示词
      * @param currentBgm 当前正在播放的BGM文件名（主线程传入，避免在IO线程访问ExoPlayer）
      */
@@ -87,14 +107,12 @@ object BgmAIService {
         val customPrompt = appDb.bgmAIPromptDao.getDefault()
         val basePrompt = customPrompt?.prompt ?: getDefaultPrompt()
 
-        // 获取实际可用的音频文件列表，排除当前正在播放的
-        val audioFileList = BgmManager.getAudioFileList().filter { 
-            !it.equals(currentBgm, ignoreCase = true)
-        }
+        // 获取实际可用的音频文件列表，排除当前播放与最近播放
+        val audioFileList = candidateFiles(currentBgm)
 
         // 将音频文件列表添加到提示词中
         val audioFilesSection = if (audioFileList.isNotEmpty()) {
-            "\n\n可用文件列表（已排除当前播放）：\n${audioFileList.joinToString("、")}"
+            "\n\n可用文件列表（已排除当前播放与最近播放）：\n${audioFileList.joinToString("、")}"
         } else {
             ""
         }

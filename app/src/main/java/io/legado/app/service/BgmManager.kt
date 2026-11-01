@@ -42,6 +42,9 @@ object BgmManager {
     // 当前实际播放的索引
     private var currentPlayingIndex = -1
 
+    /** 当前播放索引（供朗读服务做"推荐不得与当前相同"校验） */
+    fun getCurrentPlayingIndex(): Int = currentPlayingIndex
+
     // 协程控制音量动画
     private var fadeJob: Job? = null
     private val mainScope = CoroutineScope(Dispatchers.Main)
@@ -129,26 +132,46 @@ object BgmManager {
     private fun handlePlaybackEnded() {
         io.legado.app.constant.AppLog.put("AI背景音乐: BGM播完，handlePlaybackEnded触发")
         mainScope.launch {
-            // 使用AI预存的推荐结果
+            // 使用AI预存的推荐结果。
+            // 【用完即弃】：不管本轮播什么，推荐值先清掉——否则预分析一旦没跑成
+            // （防抖/文本收集失败/AI失败），旧推荐会残留，每次播完都切同一首死循环
             val nextIndex = pendingNextBgmIndex
-            val isAIRecommended = nextIndex >= 0 && nextIndex < bgmNames.size
+            pendingNextBgmIndex = -1
+            // 推荐必须有效且不能和刚播完这首相同（相同说明是残留的旧推荐）
+            val isAIRecommended = nextIndex >= 0 && nextIndex < bgmNames.size &&
+                nextIndex != currentPlayingIndex
             if (isAIRecommended) {
                 val fileName = bgmNames.getOrNull(nextIndex) ?: "未知"
                 io.legado.app.utils.LogUtils.d("BgmManager", "🎵 BGM结束，AI推荐切换: index=$nextIndex, name=$fileName")
                 io.legado.app.constant.AppLog.put("AI背景音乐: BGM结束自动切换，AI推荐: $fileName (index=$nextIndex)")
                 playAudioByIndex(nextIndex)
             } else {
-                // 无AI推荐：随机播放下一首
+                if (nextIndex >= 0) {
+                    io.legado.app.constant.AppLog.put("AI背景音乐: AI推荐与新播BGM相同或无效，改随机")
+                }
+                // 无有效AI推荐：随机播放，且排除最近播放（避免随机也连着重复）
                 // 清单为空时 random() 会抛 NoSuchElementException，先判断是否为空
                 if (bgmNames.isEmpty()) {
                     io.legado.app.constant.AppLog.put("AI背景音乐: BGM清单为空，无法随机播放下一首")
                     return@launch
                 }
-                val nextIndex = (0 until bgmNames.size).random()
-                val fileName = bgmNames.getOrNull(nextIndex) ?: "未知"
-                io.legado.app.utils.LogUtils.d("BgmManager", "🎵 BGM结束，无AI推荐，随机播放: index=$nextIndex, name=$fileName")
+                val recent = BgmKeywordMatcher.getRecentBgms().toSet()
+                var nextRandom = -1
+                // 最多尝试10次找一首不在最近播放里的；全被排除就完全随机
+                repeat(10) {
+                    if (nextRandom < 0) {
+                        val cand = (0 until bgmNames.size).random()
+                        val base = bgmNames[cand].substringBeforeLast(".").trim()
+                        if (recent.none { it.equals(base, ignoreCase = true) }) {
+                            nextRandom = cand
+                        }
+                    }
+                }
+                if (nextRandom < 0) nextRandom = (0 until bgmNames.size).random()
+                val fileName = bgmNames.getOrNull(nextRandom) ?: "未知"
+                io.legado.app.utils.LogUtils.d("BgmManager", "🎵 BGM结束，无AI推荐，随机播放: index=$nextRandom, name=$fileName")
                 io.legado.app.constant.AppLog.put("AI背景音乐: BGM结束，无AI推荐，随机播放: $fileName")
-                playAudioByIndex(nextIndex)
+                playAudioByIndex(nextRandom)
             }
             // onBgmStarted 由 playAudioByIndex 末尾统一触发
         }
