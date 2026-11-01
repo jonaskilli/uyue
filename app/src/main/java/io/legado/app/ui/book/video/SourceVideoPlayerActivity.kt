@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -77,6 +78,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.legado.app.R
@@ -90,6 +92,7 @@ import io.legado.app.ui.timetech.player.ErrorNotice
 import io.legado.app.ui.timetech.player.FullscreenVideoPlayer
 import io.legado.app.ui.timetech.player.LocalVideo
 import io.legado.app.ui.browser.WebViewActivity
+import io.legado.app.ui.widget.image.CoverImageView
 import io.legado.app.utils.toastOnUi
 import android.graphics.drawable.Drawable
 import com.bumptech.glide.Glide
@@ -976,6 +979,43 @@ private fun HomePanel(
 }
 
 /**
+ * 下载记录列表的封面缩略图。
+ *
+ * 与观看历史/搜索列表是**同一套封面控件**（[CoverImageView]）：同样的加载链路
+ * （带书源 Referer 头、仅 WiFi 下载开关、共享缓存）、同样的书名占位图与圆角裁切。
+ * 封面拉不到或本就无封面（只有目录、没有下载记录的视频）时，
+ * 显示书名占位图而不是一块空白，一眼仍能认出是哪部。
+ */
+@Composable
+private fun DownloadRecordCover(
+    coverUrl: String?,
+    origin: String?,
+    name: String,
+    modifier: Modifier = Modifier,
+) {
+    AndroidView(
+        factory = { ctx -> CoverImageView(ctx) },
+        update = { view ->
+            // update 在每次重组都会跑，勾选框切换这类无关重组不该重触发加载；
+            // tag 记住上次加载的内容，没变就跳过
+            val key = "${coverUrl.orEmpty()}|$name"
+            if (view.tag != key) {
+                view.tag = key
+                view.load(
+                    path = coverUrl,
+                    name = name,
+                    author = null,
+                    loadOnlyWifi = AppConfig.loadCoverOnlyWifi,
+                    sourceOrigin = origin,
+                )
+            }
+        },
+        // 与观看历史/搜索列表的封面同一尺寸（item_search.xml 80×110dp）
+        modifier = modifier.size(80.dp, 110.dp),
+    )
+}
+
+/**
  * 下载管理界面。
  *
  * - 顶部是**当前视频名**，点开可切换到「已缓存视频列表」：每部视频都能勾选、可全选、
@@ -986,6 +1026,7 @@ private fun HomePanel(
  * @param standalone true = 作为独立页面铺满整屏（视频发现页右上角入口进来的那种），
  *   没有"当前视频"这一概念，默认停在视频列表上；false = 播放页里的弹窗。
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 internal fun DownloadDialog(
     episodes: List<LocalVideo>,
@@ -1016,6 +1057,9 @@ internal fun DownloadDialog(
     val itemChecked = remember { mutableStateListOf<String>() }
     val videoChecked = remember { mutableStateListOf<String>() }
     val orphanChecked = remember { mutableStateListOf<String>() }
+    // 视频列表多选模式：平时不显示勾选框（列表更清爽），长按任一视频进入多选；
+    // 点「取消」或删完后自动退出
+    var videoSelectMode by remember { mutableStateOf(false) }
 
     // 批量删除的二次确认：first = 确认文案，second = 确认后真正执行的删除动作。
     // 只拦多选批量删除（误触损失大）；单条删除保持直接执行。
@@ -1390,39 +1434,55 @@ internal fun DownloadDialog(
                 }
 
                 if (selectorOpen) {
-                    // 已缓存视频列表：每部视频可勾选、可全选批量删，点名字切过去管理
-                    Text(
-                        "已缓存视频（${groups.size}）",
-                        color = contentColor.copy(alpha = 0.6f),
-                        fontSize = 12.sp
-                    )
+                    // 已缓存视频列表：点名字切过去管理；长按进入多选批量删
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = {
-                            videoChecked.clear()
-                            videoChecked.addAll(groups.map { it.key })
-                        }) {
-                            Text("全选", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                        Text(
+                            "已缓存视频（${groups.size}）",
+                            color = contentColor.copy(alpha = 0.6f),
+                            fontSize = 12.sp
+                        )
+                        if (!videoSelectMode && groups.isNotEmpty()) {
+                            Text(
+                                "长按多选",
+                                color = contentColor.copy(alpha = 0.4f),
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
                         }
-                        TextButton(onClick = { videoChecked.clear() }) {
-                            Text("取消", color = contentColor.copy(alpha = 0.6f), fontSize = 12.sp)
-                        }
-                        Spacer(modifier = Modifier.weight(1f))
-                        if (videoChecked.isNotEmpty()) {
+                    }
+                    if (videoSelectMode) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(onClick = {
-                                val keys = videoChecked.toSet()
-                                val names = groups.filter { it.key in keys }.joinToString("、") { it.name }
-                                batchDeleteConfirm =
-                                    "将删除 ${keys.size} 部视频（$names）的全部下载记录与缓存文件，确定？" to {
-                                        val n = VideoDownloader.deleteVideos(keys)
-                                        videoChecked.clear()
-                                        context.toastOnUi("已删除 $n 部视频及其缓存文件")
-                                    }
+                                videoChecked.clear()
+                                videoChecked.addAll(groups.map { it.key })
                             }) {
-                                Text(
-                                    "删除选中(${videoChecked.size})",
-                                    color = Color(0xFFFF6B6B),
-                                    fontSize = 12.sp
-                                )
+                                Text("全选", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                            }
+                            TextButton(onClick = {
+                                videoChecked.clear()
+                                videoSelectMode = false
+                            }) {
+                                Text("取消", color = contentColor.copy(alpha = 0.6f), fontSize = 12.sp)
+                            }
+                            Spacer(modifier = Modifier.weight(1f))
+                            if (videoChecked.isNotEmpty()) {
+                                TextButton(onClick = {
+                                    val keys = videoChecked.toSet()
+                                    val names = groups.filter { it.key in keys }.joinToString("、") { it.name }
+                                    batchDeleteConfirm =
+                                        "将删除 ${keys.size} 部视频（$names）的全部下载记录与缓存文件，确定？" to {
+                                            val n = VideoDownloader.deleteVideos(keys)
+                                            videoChecked.clear()
+                                            videoSelectMode = false
+                                            context.toastOnUi("已删除 $n 部视频及其缓存文件")
+                                        }
+                                }) {
+                                    Text(
+                                        "删除选中(${videoChecked.size})",
+                                        color = Color(0xFFFF6B6B),
+                                        fontSize = 12.sp
+                                    )
+                                }
                             }
                         }
                     }
@@ -1445,18 +1505,40 @@ internal fun DownloadDialog(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable {
-                                            selectedDir = g.dirName
-                                            selectorOpen = false
-                                            tab = 1
-                                        }
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (videoSelectMode) {
+                                                    // 多选模式下点条目就是切换勾选，不再进入详情
+                                                    if (g.key in videoChecked) videoChecked.remove(g.key)
+                                                    else videoChecked.add(g.key)
+                                                } else {
+                                                    selectedDir = g.dirName
+                                                    selectorOpen = false
+                                                    tab = 1
+                                                }
+                                            },
+                                            // 长按进入多选，并把长按的这条直接勾上
+                                            onLongClick = {
+                                                videoSelectMode = true
+                                                if (g.key !in videoChecked) videoChecked.add(g.key)
+                                            }
+                                        )
                                 ) {
-                                    Checkbox(
-                                        checked = videoChecked.contains(g.key),
-                                        onCheckedChange = { on ->
-                                            if (on) videoChecked.add(g.key)
-                                            else videoChecked.remove(g.key)
-                                        }
+                                    // 勾选框只在多选模式下出现
+                                    if (videoSelectMode) {
+                                        Checkbox(
+                                            checked = videoChecked.contains(g.key),
+                                            onCheckedChange = { on ->
+                                                if (on) videoChecked.add(g.key)
+                                                else videoChecked.remove(g.key)
+                                            }
+                                        )
+                                    }
+                                    DownloadRecordCover(
+                                        coverUrl = g.coverUrl,
+                                        origin = g.origin,
+                                        name = g.name,
+                                        modifier = Modifier.padding(end = 8.dp),
                                     )
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
@@ -1471,11 +1553,13 @@ internal fun DownloadDialog(
                                             fontSize = 11.sp
                                         )
                                     }
-                                    TextButton(onClick = {
-                                        VideoDownloader.deleteVideos(setOf(g.key))
-                                        context.toastOnUi("已删除《${g.name}》及其缓存文件")
-                                    }) {
-                                        Text("删除", color = Color(0xFFFF6B6B), fontSize = 12.sp)
+                                    if (!videoSelectMode) {
+                                        TextButton(onClick = {
+                                            VideoDownloader.deleteVideos(setOf(g.key))
+                                            context.toastOnUi("已删除《${g.name}》及其缓存文件")
+                                        }) {
+                                            Text("删除", color = Color(0xFFFF6B6B), fontSize = 12.sp)
+                                        }
                                     }
                                 }
                             }

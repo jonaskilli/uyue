@@ -1509,12 +1509,20 @@ internal fun VideoPlayerPage(
             )
         }
 
-        if (!playing && !buffering && errorText == null && !dragging) {
+        // 暂停状态的大播放图标：只在锁定模式下显示作为提示。
+        // 非锁定时播放/暂停按钮（下方那个半透明方钮）暂停时本来就会亮着，
+        // 这个 64dp 大图标与它叠在同一位置，看起来就是"大三角里套了个小三角"。
+        if (locked && !playing && !buffering && errorText == null && !dragging) {
             Icon(
                 Icons.Filled.PlayArrow,
                 contentDescription = "播放",
                 tint = Color.White.copy(alpha = 0.85f),
-                modifier = Modifier.align(Alignment.Center).size(64.dp)
+                // 固定在底部进度条上方，与播放/暂停按钮同一位置
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .safeBottom()
+                    .padding(bottom = 96.dp)
+                    .size(64.dp)
             )
         }
 
@@ -1631,11 +1639,17 @@ internal fun VideoPlayerPage(
             )
         }
 
-        // 中间正方形播放/暂停区：显示控制条或暂停时可见，点一下即切换
+        // 播放/暂停按钮：固定在底部进度条上方，点一下即切换。
+        // 不放屏幕中央：横版视频在竖屏里画面只占中间一条，居中按钮正好压在画面上；
+        // 固定挪到底部后横竖屏都不会挡画面。
+        // 96dp 与底部提示条同一基准：底部控制条（进度行 + 按钮行 + 内边距）
+        // 约 88dp 高，按钮底边落在控制条上沿再高一点的位置。
         if (!locked && (showControls || !playing)) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.Center)
+                    .align(Alignment.BottomCenter)
+                    .safeBottom()
+                    .padding(bottom = 96.dp)
                     .size(72.dp)
                     .clip(RoundedCornerShape(14.dp))
                     .background(Color.Black.copy(alpha = 0.4f))
