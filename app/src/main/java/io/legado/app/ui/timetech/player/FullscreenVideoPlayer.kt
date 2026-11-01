@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.BatteryManager
 import android.media.MediaMetadataRetriever
 import android.os.Build
+import android.provider.Settings
 import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -50,6 +51,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.FitScreen
@@ -158,6 +160,7 @@ import io.legado.app.help.video.VideoCache
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.utils.isWifiConnect
 import io.legado.app.utils.toastOnUi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -166,6 +169,7 @@ import java.util.Locale
 import java.text.SimpleDateFormat
 import java.util.Date
 import kotlin.math.abs
+import kotlin.math.max
 
 /** 循环模式：列表循环 → 随机播放 → 单个循环 → 回到列表循环 */
 enum class LoopMode(val label: String) {
@@ -310,6 +314,20 @@ fun FullscreenVideoPlayer(
     val scope = rememberCoroutineScope()
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, videos.lastIndex)) {
         videos.size
+    }
+    // 播放器退出时把窗口亮度交还系统：左侧竖滑调的亮度只是会话级覆盖
+    //（BRIGHTNESS_OVERRIDE_NONE = 不覆盖，恢复跟随系统/自动亮度），
+    // 不写系统设置，也不会带去别的页面
+    DisposableEffect(activity) {
+        onDispose {
+            runCatching {
+                activity?.window?.attributes =
+                    activity?.window?.attributes?.apply {
+                        screenBrightness =
+                            WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                    }
+            }
+        }
     }
     // 本次会话内记录每个视频的播放进度，切回来时续播
     val positions = remember { HashMap<String, Long>() }
@@ -986,6 +1004,8 @@ internal fun VideoPlayerPage(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val activity = context as? Activity
+    val window = activity?.window
     // 播放器的监听在整个页面存活期间只注册一次，用 updatedState 保证它读到的是最新的回调，
     // 否则用户中途改了循环模式后，回调仍停留在首次组合时的版本
     val currentAutoOrientation = rememberUpdatedState(onAutoOrientation)
@@ -1137,6 +1157,25 @@ internal fun VideoPlayerPage(
     var dragTarget by remember { mutableLongStateOf(0L) }
     var accumDx by remember { mutableFloatStateOf(0f) }
     var sliderValue by remember { mutableFloatStateOf(0f) }
+
+    // ===== 左侧 20% 竖滑调亮度 =====
+    // 与其他视频播放器一致：上滑变亮、下滑变暗。只改当前窗口的 screenBrightness
+    //（会话级覆盖，不动系统设置）；亮度值跟着窗口走，切集/切视频后再次拖动
+    // 会以当前窗口亮度为基准继续调。退出播放器时由外层把窗口亮度交还系统。
+    /** 拖动起点亮度基准 */
+    var brightnessBase by remember { mutableFloatStateOf(0.5f) }
+    /** 非空 = 正在调亮度（或刚调完待隐藏），显示中央指示器 */
+    var brightnessHud by remember { mutableStateOf<Float?>(null) }
+    var brightnessHudJob by remember { mutableStateOf<Job?>(null) }
+
+    /** 当前基准亮度：窗口已设置过覆盖值就用它，否则读系统亮度 */
+    fun currentBrightness(): Float =
+        window?.attributes?.screenBrightness?.takeIf { it >= 0f }
+            ?: runCatching {
+                Settings.System.getInt(
+                    context.contentResolver, Settings.System.SCREEN_BRIGHTNESS
+                ) / 255f
+            }.getOrDefault(0.5f).coerceIn(0.02f, 1f)
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -1471,6 +1510,28 @@ internal fun VideoPlayerPage(
                             },
                             onFeedDrag = onFeedDrag,
                             onFeedCancel = onFeedCancel,
+                            // 左侧竖滑调亮度：上滑变亮、下滑变暗，跟手实时改窗口亮度
+                            onBrightnessStart = {
+                                brightnessHudJob?.cancel()
+                                brightnessBase = currentBrightness()
+                                brightnessHud = brightnessBase
+                            },
+                            onBrightnessDrag = { dy ->
+                                // 整屏高度 ≈ 一次全程调节（0→1），上滑（dy<0）变亮
+                                val v = (brightnessBase - dy / size.height)
+                                    .coerceIn(0.02f, 1f)
+                                window?.attributes = window?.attributes?.apply {
+                                    screenBrightness = v
+                                }
+                                brightnessHud = v
+                            },
+                            onBrightnessEnd = {
+                                // 松手后指示器停留片刻再消失
+                                brightnessHudJob = scope.launch {
+                                    delay(600)
+                                    brightnessHud = null
+                                }
+                            },
                             // 整部只有一集时两个方向都没有集可切
                             noPrevEpisode = total <= 1 || noPrevEpisode,
                             noNextEpisode = total <= 1 || noNextEpisode,
@@ -1548,6 +1609,32 @@ internal fun VideoPlayerPage(
                 duration = duration,
                 modifier = Modifier.align(Alignment.Center)
             )
+        }
+
+        // 亮度调节指示器：与其他播放器一致，中央显示太阳图标 + 百分比
+        brightnessHud?.let { v ->
+            Surface(
+                color = Color.Black.copy(alpha = 0.65f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.BrightnessHigh,
+                        contentDescription = "亮度",
+                        tint = Color.White
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "${(v * 100).toInt()}%",
+                        color = Color.White,
+                        fontSize = 14.sp
+                    )
+                }
+            }
         }
 
         if (longPressBoost) {
@@ -2754,12 +2841,19 @@ private suspend fun PointerInputScope.detectPlayerGestures(
     onFeedSwitch: ((Int) -> Unit)? = null,
     onFeedDrag: ((Float) -> Unit)? = null,
     onFeedCancel: (() -> Unit)? = null,
+    /** 左侧 20% 竖滑调亮度：接管手势后回调（null = 不启用，竖滑照旧切集） */
+    onBrightnessStart: (() -> Unit)? = null,
+    onBrightnessDrag: ((Float) -> Unit)? = null,
+    onBrightnessEnd: (() -> Unit)? = null,
     /** 播放顺序上前面没有集可切（第一集，或整部只有一集）：下滑改为切换列表里的上一个视频 */
     noPrevEpisode: Boolean = false,
     /** 播放顺序上后面没有集可切（最后一集，或整部只有一集）：上滑改为切换列表里的下一个视频 */
     noNextEpisode: Boolean = false,
 ) {
     val slop = viewConfiguration.touchSlop
+    // 纵向手势的有效距离：比触摸 slop 高得多，避免横向调进度时带上的一点纵向抖动
+    // 就误触「上下滑切集 / 右侧竖滑切视频」——横向滑动必须能"盖住"纵向分量才触发纵向
+    val verticalSlop = max(slop * 3f, 40.dp.toPx())
     val longPressTimeout = viewConfiguration.longPressTimeoutMillis
     val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
     var lastTapUpTime = 0L
@@ -2800,11 +2894,15 @@ private suspend fun PointerInputScope.detectPlayerGestures(
         var feedTaken = false
         /** 跟手起点：越过 slop 那一刻的位移，避免刚起步画面就跳一下 */
         var feedDragBase = 0f
+        // 左侧 20% 竖滑调亮度：手势由本层消费，不再交给外层分页器切集
+        var brightTaken = false
+        var brightDragBase = 0f
         var accumDx = 0f
         var accumDy = 0f
         // 右侧 20% 区域且存在列表：竖滑切换列表里的视频（不是切集），手势由本层消费。
         // 收窄到 20% 是为了减少误触：30% 时正常握持/调音量的落点常常落在区内。
         val inFeedZone = down.position.x >= size.width * 0.8f
+        val inBrightZone = down.position.x <= size.width * 0.2f
 
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Main)
@@ -2814,20 +2912,41 @@ private suspend fun PointerInputScope.detectPlayerGestures(
             accumDy += change.position.y - change.previousPosition.y
 
             if (!seeking && !verticalTaken) {
-                if (abs(accumDx) > slop && abs(accumDx) > abs(accumDy)) {
-                    seeking = true
-                    onSeekStart()
-                } else if (abs(accumDy) > slop) {
-                    // 纵向滑动：默认交给外层分页器切集；
-                    // 但该方向已经没有集可切时（最后一集再上滑、第一集再下滑），
-                    // 分页器本来也不会动，这时整屏都改为切列表里的下一个/上一个视频。
-                    verticalTaken = true
-                    val up = accumDy < 0
-                    val feedMode = onFeedSwitch != null &&
-                        (inFeedZone || (up && noNextEpisode) || (!up && noPrevEpisode))
-                    if (feedMode) {
-                        feedTaken = true
-                        feedDragBase = accumDy
+                val dx = abs(accumDx)
+                val dy = abs(accumDy)
+                when {
+                    // 横向：过 slop 且横向主导 → 调进度。判定成立后本层开始消费事件，
+                    // 外层分页器再也收不到位移，横滑调进度的全程绝不会触发切集/切视频
+                    dx > slop && dx > dy -> {
+                        seeking = true
+                        onSeekStart()
+                    }
+                    // 纵向且由本层接管（左侧 20% 调亮度 / 右侧 20% 竖滑切视频 /
+                    // 该方向已没有集可切）：必须在分页器（它的阈值就是触摸 slop）反应
+                    // 之前接管，所以距离门槛仍是 slop，但要求纵向位移明显主导（2 倍于
+                    // 横向）——斜着横滑时纵向分量追不上，永远不会误进跟手拖动
+                    dy > slop && dy > dx * 2f &&
+                        ((onBrightnessDrag != null && inBrightZone) ||
+                            inFeedZone ||
+                            (accumDy < 0 && noNextEpisode) ||
+                            (accumDy > 0 && noPrevEpisode)) -> {
+                        verticalTaken = true
+                        when {
+                            onBrightnessDrag != null && inBrightZone -> {
+                                brightTaken = true
+                                brightDragBase = accumDy
+                                onBrightnessStart?.invoke()
+                            }
+                            else -> {
+                                feedTaken = true
+                                feedDragBase = accumDy
+                            }
+                        }
+                    }
+                    // 普通纵向（交给外层分页器跟手切集）：有效距离提到 verticalSlop
+                    // 且纵向主导，横向调进度时带起的纵向抖动不再够格
+                    dy > verticalSlop && dy > dx * 2f -> {
+                        verticalTaken = true
                     }
                 }
             }
@@ -2837,7 +2956,15 @@ private suspend fun PointerInputScope.detectPlayerGestures(
                 // 跟手：手指移动多少画面就跟着移动多少（与上下滑切集时分页器跟手一致）
                 onFeedDrag?.invoke(accumDy - feedDragBase)
             }
+            if (brightTaken) {
+                // 消费纵向位移：左侧竖滑只调亮度，不切集
+                change.consume()
+                onBrightnessDrag?.invoke(accumDy - brightDragBase)
+            }
             if (seeking) {
+                // 消费掉全部位移（尤其纵向分量）：不让外层分页器看到任何移动，
+                // 横滑调进度期间抖动再大也不可能切集
+                change.consume()
                 onSeek(change.position.x - change.previousPosition.x)
             }
             if (!seeking && !verticalTaken && !longPressFired &&
@@ -2856,6 +2983,7 @@ private suspend fun PointerInputScope.detectPlayerGestures(
                 onFeedCancel?.invoke()
             }
         }
+        if (brightTaken) onBrightnessEnd?.invoke()
         if (longPressFired) onLongPressEnd()
         if (seeking) onSeekEnd()
 

@@ -1126,23 +1126,38 @@ internal fun DownloadDialog(
     val pageBg = if (dark) Color(0xFF101010) else MaterialTheme.colorScheme.background
     val dialogBg = if (dark) Color(0xFF1C1C1E) else MaterialTheme.colorScheme.surface
 
-    // 下载管理页（standalone）：已从「全部视频」进入某一部视频的详情时，
-    // 系统返回键先退回视频列表，而不是直接退出整个页面——
-    // 用户点进一部视频看完分集，按返回的预期是回去挑下一部，
-    // 原先这里没拦，返回键直接把页面关了，只能重新进来。
-    // 正在看视频列表时（selectorOpen=true）不拦，返回键照常退出页面。
-    if (standalone && !selectorOpen) {
+    // 返回键逐层退出，先退"临时状态"再退界面层级，最后才是关页面/关弹窗：
+    // 1. 批量删除二次确认框 → 关确认框
+    // 2. 长按进入的视频多选 → 退多选（清勾选），不退出界面
+    // 3. 下载进度/其他缓存的勾选 → 清勾选
+    // 4. 正在全屏播孤儿缓存 → 退出播放
+    // 5. 独立页面停在视频详情 → 退回视频列表（原逻辑）
+    // 独立页面看视频列表时（selectorOpen=true）且无以上状态，不拦，返回键照常退出页面；
+    // 播放页弹窗只在有 1-3 的临时状态时才拦截，否则返回键照常关弹窗。
+    if (standalone || batchDeleteConfirm != null || videoSelectMode ||
+        itemChecked.isNotEmpty() || orphanChecked.isNotEmpty()
+    ) {
         BackHandler {
-            // 正在全屏播孤儿缓存时，返回键先退出播放，再走原有的退回视频列表
-            if (playingOrphanVideos != null) {
-                playingOrphanVideos = null
-                playingOrphanCaches = null
-                return@BackHandler
+            when {
+                batchDeleteConfirm != null -> batchDeleteConfirm = null
+                videoSelectMode -> {
+                    videoChecked.clear()
+                    videoSelectMode = false
+                }
+                itemChecked.isNotEmpty() -> itemChecked.clear()
+                orphanChecked.isNotEmpty() -> orphanChecked.clear()
+                playingOrphanVideos != null -> {
+                    playingOrphanVideos = null
+                    playingOrphanCaches = null
+                }
+                else -> {
+                    // 原独立页面逻辑：详情退回视频列表
+                    selectedDir = null
+                    selectorOpen = true
+                    tab = 1
+                    itemChecked.clear()
+                }
             }
-            selectedDir = null
-            selectorOpen = true
-            tab = 1
-            itemChecked.clear()
         }
     }
 
@@ -1209,6 +1224,34 @@ internal fun DownloadDialog(
                 SourceVideoPlayerActivity.createIntent(context, task.book.bookUrl, task.index)
             )
             if (!standalone) onDismiss()
+        }
+    }
+
+    // 播放「已缓存视频」列表里的某一部：从上次看到的集续播（与书架续播同源）。
+    // - 播放页里（当前这部剧）：切集并关掉弹窗；
+    // - 别的视频 / 独立页面：拉起播放页续播，已下载视频之间竖滑切换；
+    // - 一集都没下完的（dir: 前缀无记录）返回 null，调用方不显示播放按钮。
+    val onPlayGroup: (VideoDownloader.VideoGroup) -> Unit = { g ->
+        val idx = VideoDownloader.resumeIndexFor(g.key)
+        if (idx == null) {
+            context.toastOnUi("这部视频还没有下载完成的集")
+        } else {
+            val curBook = SourceVideoPlayerSession.getBook()
+            if (!standalone && curBook != null && curBook.bookUrl == g.key) {
+                onDismiss()
+                SourceVideoPlayerSession.selectEpisode(idx)
+            } else {
+                // 竖滑列表里每部视频也各自从上次的集续播
+                VideoFeedStore.put(
+                    provider = { VideoDownloader.downloadedBookUrls() },
+                    currentBookUrl = g.key,
+                    startIndexOf = { url -> VideoDownloader.resumeIndexFor(url) ?: 0 },
+                )
+                context.startActivity(
+                    SourceVideoPlayerActivity.createIntent(context, g.key, idx)
+                )
+                if (!standalone) onDismiss()
+            }
         }
     }
 
@@ -1578,12 +1621,16 @@ internal fun DownloadDialog(
                                             fontSize = 11.sp
                                         )
                                     }
-                                    if (!videoSelectMode) {
-                                        TextButton(onClick = {
-                                            VideoDownloader.deleteVideos(setOf(g.key))
-                                            context.toastOnUi("已删除《${g.name}》及其缓存文件")
-                                        }) {
-                                            Text("删除", color = Color(0xFFFF6B6B), fontSize = 12.sp)
+                                    // 播放按钮：直接从上次的集续播（与书架续播同源），
+                                    // 省得先进详情再挑集；一集都没下完的不显示。
+                                    // 单个删除不再放条目上——长按进多选勾一条删即可，避免误触。
+                                    if (!videoSelectMode && g.completedCount > 0) {
+                                        IconButton(onClick = { onPlayGroup(g) }) {
+                                            Icon(
+                                                Icons.Filled.PlayArrow,
+                                                contentDescription = "继续播放",
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
                                         }
                                     }
                                 }
