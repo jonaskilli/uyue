@@ -800,19 +800,46 @@ object VideoDownloader {
     /** 封面在下载目录里的落地文件：Download/保存视频/<dirName>/cover.jpg */
     private fun coverFileOf(dirName: String): File = File(rootDir(), "$dirName/cover.jpg")
 
-    /** 已保存的本地封面（存在且非空），返回绝对路径供图片加载器直接读 */
+    /**
+     * 校验文件头是不是真图片（JPEG / PNG / GIF / WEBP 魔数）。
+     * 有些站点的封面地址返回 200 但内容是防盗链 HTML 页或空壳，
+     * 不校验就会把垃圾字节存成 cover.jpg——之后列表优先用它、解码失败，
+     * 表现为"历史记录有封面、下载记录没有"。所以本地封面采用前必须过这道检查。
+     */
+    private fun isImageFile(f: File): Boolean = runCatching {
+        if (!f.isFile || f.length() < 12L) return false
+        RandomAccessFile(f, "r").use { r ->
+            val b = ByteArray(12)
+            r.readFully(b)
+            val g = { i: Int -> b[i].toInt() and 0xFF }
+            when {
+                g(0) == 0xFF && g(1) == 0xD8 -> true                                    // JPEG
+                g(0) == 0x89 && g(1) == 0x50 && g(2) == 0x4E && g(3) == 0x47 -> true    // PNG
+                g(0) == 0x47 && g(1) == 0x49 && g(2) == 0x46 -> true                    // GIF
+                g(0) == 0x52 && g(1) == 0x49 && g(8) == 0x57 && g(9) == 0x45 -> true    // WEBP
+                else -> false
+            }
+        }
+    }.getOrDefault(false)
+
+    /**
+     * 已保存的本地封面（必须是真图片），返回绝对路径供图片加载器直接读；
+     * 文件不存在或不是有效图片一律返回 null——回退到线上 URL 方式取封面
+     * （与历史记录同一链路，历史里能显示的这里也能显示）。
+     */
     private fun localCoverOf(dirName: String): String? = runCatching {
-        coverFileOf(dirName).takeIf { it.isFile && it.length() > 0L }?.absolutePath
+        coverFileOf(dirName).takeIf { isImageFile(it) }?.absolutePath
     }.getOrNull()
 
     /**
-     * 把封面保存到视频的下载目录（幂等：已保存过直接跳过，不产生流量）。
+     * 把封面保存到视频的下载目录（幂等：已存过有效图片直接跳过，不产生流量）。
      * 入队下载、边看边存、恢复下载记录时各调一次，尽早把封面落成本地文件。
+     * 下载结果必须通过图片魔数校验才落地，防止把防盗链页面存成封面。
      */
     fun saveCoverAsync(task: Task) {
         val coverUrl = task.book.getDisplayCover()?.takeIf { it.isNotBlank() } ?: return
         val target = coverFileOf(dirOf(task).name)
-        if (target.isFile && target.length() > 0L) return
+        if (isImageFile(target)) return
         scope.launch {
             runCatching {
                 val request = okhttp3.Request.Builder().url(coverUrl).apply {
@@ -824,14 +851,14 @@ object VideoDownloader {
                     target.parentFile?.mkdirs()
                     val tmp = File(target.parentFile, "cover.jpg.part")
                     FileOutputStream(tmp).use { out -> body.byteStream().copyTo(out) }
-                    if (tmp.length() > 0L) {
+                    if (isImageFile(tmp)) {
                         if (!tmp.renameTo(target)) tmp.copyTo(target, overwrite = true)
                     }
                     tmp.delete()
                 }
             }.onFailure { AppLog.put("保存视频封面失败：${task.book.name}", it) }
             // 落地成功才刷新：让下载记录列表立刻换用本地封面
-            if (target.isFile && target.length() > 0L) refreshVideoGroups()
+            if (isImageFile(target)) refreshVideoGroups()
         }
     }
 
