@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -519,7 +520,11 @@ fun App(vm: ProxyViewModel) {
                     onProviderChange = { provider = it; vm.setProvider(it) },
                     onClearCredentials = { vm.clearProviderCredentials(it) },
                     onLongCatCaptured = { m, t, c, u -> vm.setLongCatFromRequest(m, t, c, u) },
-                    onBailianCaptured = { c, ua, et, um -> vm.setBailianFromRequest(c, ua, et, um, "") },
+                    onBailianCaptured = { c, ua, et, um, mid -> vm.setBailianFromRequest(c, ua, et, um, mid) },
+                    bailianModel = runCatching {
+                        org.json.JSONObject(bailianConfigFlow).optString("model_id", "qwen3.8-max")
+                    }.getOrNull()?.ifBlank { null } ?: "qwen3.8-max",
+                    bailianCount = bailianConfigsFlow.count { it.isNotBlank() },
                     onCookieExtracted = {
                         vm.updateSelectedCookie(it)
                         cookieText = it
@@ -1048,7 +1053,9 @@ fun BrowserScreen(
     onProviderChange: (String) -> Unit,
     onClearCredentials: (String) -> Unit,
     onLongCatCaptured: (String, String, String, String) -> Unit,
-    onBailianCaptured: (String, String, String, String) -> Unit,
+    onBailianCaptured: (String, String, String, String, String) -> Unit,
+    bailianModel: String = "qwen3.8-max",
+    bailianCount: Int = 0,
     onCookieExtracted: (String) -> Unit,
     onDeepSeekTokenExtracted: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -1068,6 +1075,15 @@ fun BrowserScreen(
     val capturedToken = remember { mutableStateOf<String?>(null) }
     val capturedLongCat = remember { mutableStateOf<LongCatCaptured?>(null) }
     val capturedBailian = remember { mutableStateOf<BailianCaptured?>(null) }
+    // 百炼模型名：默认 qwen3.8-max，可手动改；自动/手动捕获时随凭证一起写入配置
+    var bailianModelInput by remember { mutableStateOf(bailianModel) }
+    LaunchedEffect(bailianModel) { if (bailianModel.isNotBlank()) bailianModelInput = bailianModel }
+    // 自动捕获去重：同一个 bx 指纹（ua+et）只自动写入一次，避免每个 RPC 请求都触发保存
+    val lastAutoBailianKey = remember { mutableStateOf<String?>(null) }
+    // 自动捕获写入节流：bx-ua 每个请求都会变，光靠指纹去重挡不住刷屏，再加最小间隔
+    val lastAutoBailianWriteAt = remember { mutableStateOf(0L) }
+    // 一键获取的快速游客重置：清 Cookie 后首载页面 → 清 localStorage/sessionStorage → 重载一次
+    val bailianGuestReset = remember { mutableStateOf(false) }
     var url by remember(provider) {
         mutableStateOf(
             when (provider) {
@@ -1106,7 +1122,7 @@ fun BrowserScreen(
         } catch (_: Throwable) {
         }
         view.loadUrl(wipeTarget.value ?: url)
-        toast = "已清空各源存储与全部 Cookie，点「提取」写入新的游客配置"
+        LogStore.i("Bailian", "深度清理完成：各源存储与全部 Cookie 已清空")
     }
 
     // 驱动跨源清理：清当前源（含 IndexedDB/Cache/SW）→ 完成后跳下一个源；队列空了就收尾
@@ -1119,6 +1135,56 @@ fun BrowserScreen(
                 view.post { finishBailianWipe(view) }
             }
         }
+    }
+
+    // ── 一键获取排队机制 ──
+    // 连点不刷屏：每次点击只入队计数，当前周期（重置游客→刷新页面→捕获→写入槽位）
+    // 完整跑完之后，才从队列取下一次点击执行。周期完成 = 自动捕获成功写入；
+    // 另有 45 秒看门狗兜底：页面加载失败/捕获超时也放行下一轮，队列不会卡死。
+    val bailianQueuePending = remember { mutableStateOf(0) }
+    val bailianCycleRunning = remember { mutableStateOf(false) }
+    val bailianCycleGen = remember { mutableStateOf(0) }
+
+    fun handleBailianQueue(captureDone: Boolean) {
+        if (captureDone) {
+            // 当前周期完成：队列里还有排队的 → 稍作间隔后开始下一轮；没有 → 结束
+            if (bailianQueuePending.value > 0) {
+                LogStore.i("Bailian", "本轮获取完成，队列剩余 ${bailianQueuePending.value} 轮，稍后继续")
+                webViewRef.value?.postDelayed({ handleBailianQueue(false) }, 800)
+            } else {
+                bailianCycleRunning.value = false
+                LogStore.i("Bailian", "一键获取队列已全部完成")
+            }
+            return
+        }
+        // 开始一个新周期
+        if (bailianQueuePending.value <= 0) {
+            bailianCycleRunning.value = false
+            return
+        }
+        bailianQueuePending.value -= 1
+        bailianCycleGen.value += 1
+        val gen = bailianCycleGen.value
+        onClearCredentials("bailian")   // 新开一条空白槽位并选中（本轮凭证写进新槽位）
+        lastAutoBailianKey.value = null
+        lastAutoBailianWriteAt.value = 0L
+        val cm = CookieManager.getInstance()
+        cm.removeAllCookies(null)
+        cm.removeSessionCookies(null)
+        cm.flush()
+        webViewRef.value?.settings?.userAgentString = randomMobileUa()
+        bailianGuestReset.value = true
+        val target = "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
+        url = target
+        LogStore.i("Bailian", "开始新一轮获取（队列剩余 ${bailianQueuePending.value} 轮）")
+        webViewRef.value?.loadUrl(target)
+        // 看门狗：本轮 45 秒内没等到捕获成功也按完成处理，防止页面挂掉卡死整个队列
+        webViewRef.value?.postDelayed({
+            if (bailianCycleRunning.value && bailianCycleGen.value == gen) {
+                LogStore.i("Bailian", "本轮 45 秒未捕获成功，跳到队列下一轮")
+                handleBailianQueue(true)
+            }
+        }, 45000)
     }
 
     // 切换服务商时跳转到对应站点
@@ -1294,7 +1360,7 @@ fun BrowserScreen(
                             ).forEach { wipeQueue.add(it) }
                             wipeTarget.value = url
                             wiping.value = true
-                            toast = "已新开一条百炼配置，正在清各源存储与 Cookie…"
+                            LogStore.i("Bailian", "已新开一条百炼配置，正在清各源存储与 Cookie")
                             // 先清当前页所在源，再走队列
                             wipeCurrentThenNext(wv)
                             // 兜底：个别埋点源可能加载不出来（onPageFinished 迟迟不触发），
@@ -1385,31 +1451,7 @@ fun BrowserScreen(
                     Text("提取", fontSize = CompactBtnFont)
                 }
             } else if (provider == "bailian") {
-                Button(onClick = {
-                    val cap = capturedBailian.value
-                    if (cap == null || cap.bxUa.isBlank()) {
-                        toast = "请先在百炼模型体验页登录并发一条消息，以便捕获无痕验证头"
-                        return@Button
-                    }
-                    val cm = CookieManager.getInstance()
-                    cm.flush()
-                    val cookie = listOf(
-                        "https://bailian.console.aliyun.com",
-                        "https://bailian-cs.console.aliyun.com",
-                        "https://aliyun.com"
-                    )
-                        .flatMap { cm.getCookie(it).orEmpty().split(';') }
-                        .map { it.trim() }.filter { it.isNotBlank() }
-                        .distinct().joinToString("; ")
-                    if (cookie.isBlank()) {
-                        toast = "未获取到 Cookie，请先登录百炼控制台"
-                        return@Button
-                    }
-                    onBailianCaptured(cookie, cap.bxUa, cap.bxEt, cap.bxUmidToken)
-                    toast = "已提取百炼配置（Cookie + 无痕验证三件套）"
-                }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
-                    Text("提取", fontSize = CompactBtnFont)
-                }
+                // 百炼的一键获取 / 模型名 / 提取控件放在下方独立一行（顶行已挤不下）
             } else {
                 Button(onClick = {
                     val cm = CookieManager.getInstance()
@@ -1460,6 +1502,77 @@ fun BrowserScreen(
                 }
             }
         }
+        // 百炼专属行：一键获取（打开页面即被动捕获，游客身份免登录）+ 模型名 + 手动提取兜底
+        if (provider == "bailian") {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                Button(onClick = {
+                    // 排队机制：连点只累计次数，当前周期（刷新→捕获→写入）完成后
+                    // 才执行下一轮——避免点快了导致页面不停重载、始终走不到捕获那一步
+                    bailianQueuePending.value += 1
+                    LogStore.i("Bailian", "一键获取点击入队（当前队列 ${bailianQueuePending.value} 轮）")
+                    if (!bailianCycleRunning.value) {
+                        bailianCycleRunning.value = true
+                        handleBailianQueue(false)
+                    }
+                }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
+                    Text("一键获取", fontSize = CompactBtnFont)
+                }
+                Spacer(Modifier.width(6.dp))
+                // 模型名：捕获的凭证不带模型名（在 RPC 请求体里，拦截器看不到），手动设定
+                CField(
+                    value = bailianModelInput, onValueChange = { bailianModelInput = it },
+                    placeholder = "模型名",
+                    singleLine = true,
+                    modifier = Modifier.width(100.dp).heightIn(min = CompactBtnHeight)
+                )
+                Spacer(Modifier.width(6.dp))
+                // 已成功提取的配置数（非空条数）：每成功捕获一条立即 +1，替代弹窗提示；
+                // 排队中的点击次数实时显示，连点也能看到都记下了
+                Text(
+                    if (bailianQueuePending.value > 0) {
+                        "已提取:$bailianCount · 排队:${bailianQueuePending.value}"
+                    } else {
+                        "已提取:$bailianCount"
+                    },
+                    fontSize = CompactBtnFont,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(6.dp))
+                Button(onClick = {
+                    // 手动兜底：从最近一次拦截结果提取（正常情况用不到，自动捕获已完成）
+                    val cap = capturedBailian.value
+                    if (cap == null || cap.bxUa.isBlank()) {
+                        LogStore.i("Bailian", "手动提取：尚无拦截结果，请用一键获取")
+                        return@Button
+                    }
+                    val cm = CookieManager.getInstance()
+                    cm.flush()
+                    val cookie = listOf(
+                        "https://bailian.console.aliyun.com",
+                        "https://bailian-cs.console.aliyun.com",
+                        "https://aliyun.com"
+                    )
+                        .flatMap { cm.getCookie(it).orEmpty().split(';') }
+                        .map { it.trim() }.filter { it.isNotBlank() }
+                        .distinct().joinToString("; ")
+                    if (cookie.isBlank()) {
+                        LogStore.i("Bailian", "手动提取：未获取到 Cookie")
+                        return@Button
+                    }
+                    onBailianCaptured(cookie, cap.bxUa, cap.bxEt, cap.bxUmidToken, bailianModelInput)
+                }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
+                    Text("提取", fontSize = CompactBtnFont)
+                }
+            }
+            Text(
+                "点「一键获取」后全自动：新开一个空白槽位 → 重置游客身份 → 页面加载即捕获写入新槽位，" +
+                    "无需登录、无需发消息，已保存的配置原样保留。连点只排队（看「排队：N」），" +
+                    "每轮完整走完（捕获写入成功）才进行下一轮，不会不停刷新页面。",
+                fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
         if (progress in 1..99) {
             LinearProgressIndicator(
                 progress = progress / 100f,
@@ -1503,6 +1616,18 @@ fun BrowserScreen(
 
                         override fun onPageFinished(view: WebView?, urlStr: String?) {
                             progress = 0
+                            // 一键获取的快速游客重置：首载完成后清本地存储（指纹备份在
+                            // localStorage 里），再重载一次——重载后分配的就是全新游客，
+                            // 只有一次额外加载，不是「清空」按钮那种逐源慢速清理。
+                            if (view != null && bailianGuestReset.value) {
+                                bailianGuestReset.value = false
+                                view.evaluateJavascript(
+                                    "try{localStorage.clear();sessionStorage.clear();}catch(e){};true",
+                                    null
+                                )
+                                view.postDelayed({ view.loadUrl(url) }, 300)
+                                LogStore.i("Bailian", "游客身份已重置，重载页面等待自动捕获")
+                            }
                             // 跨源清理流程：每加载完一个源就清该源的本地存储/缓存，然后加载下一个；
                             // 队列空了说明「最后一个源」也加载完了——此时必须先清它的存储，
                             // 再 removeAllCookies，最后才回到目标页。
@@ -1557,7 +1682,9 @@ fun BrowserScreen(
                                     capturedLongCat.value = LongCatCaptured(mg, tid, request.url.toString())
                                 }
                             }
-                            // 百炼：拦截控制台 RPC 请求，记下无痕验证三件套（Cookie 由「提取」按钮从 CookieManager 取）。
+                            // 百炼：拦截控制台 RPC 请求，记下无痕验证三件套；
+                            // 捕获到即自动读 Cookie 写入当前槽位（仿混元 MultiWeb 的"一键获取"），
+                            // 用户只需打开百炼页面发一条消息，无需再点「提取」。
                             if (request?.url?.host?.contains("bailian-cs.console.aliyun.com") == true) {
                                 val h = request?.requestHeaders
                                 val ua = h?.get("bx-ua") ?: h?.get("Bx-Ua") ?: ""
@@ -1565,6 +1692,38 @@ fun BrowserScreen(
                                 val um = h?.get("bx-umidtoken") ?: h?.get("Bx-Umidtoken") ?: ""
                                 if (ua.isNotBlank() && et.isNotBlank()) {
                                     capturedBailian.value = BailianCaptured(ua, et, um)
+                                    // 写入条件：指纹变化 + 距上次写入 ≥4 秒（bx-ua 每个请求都
+                                    // 不同，光靠指纹去重会每个请求都写一次、toast 刷屏）
+                                    val key = "$ua|$et"
+                                    val now = System.currentTimeMillis()
+                                    if (lastAutoBailianKey.value != key &&
+                                        now - lastAutoBailianWriteAt.value > 4000L
+                                    ) {
+                                        lastAutoBailianKey.value = key
+                                        lastAutoBailianWriteAt.value = now
+                                        try {
+                                            val cm = CookieManager.getInstance()
+                                            cm.flush()
+                                            val cookie = listOf(
+                                                "https://bailian.console.aliyun.com",
+                                                "https://bailian-cs.console.aliyun.com",
+                                                "https://aliyun.com"
+                                            )
+                                                .flatMap { cm.getCookie(it).orEmpty().split(';') }
+                                                .map { it.trim() }.filter { it.isNotBlank() }
+                                                .distinct().joinToString("; ")
+                                            if (cookie.isNotBlank()) {
+                                                onBailianCaptured(cookie, ua, et, um, bailianModelInput)
+                                                LogStore.i("Bailian", "已自动捕获百炼凭证并写入当前槽位")
+                                                // 捕获写入成功 = 本轮周期完成，放行排队中的下一轮
+                                                handleBailianQueue(true)
+                                            } else {
+                                                LogStore.i("Bailian", "已捕获无痕验证头但无 Cookie，等待登录后再捕获")
+                                            }
+                                        } catch (e: Exception) {
+                                            LogStore.e("Browser", "百炼自动捕获失败: $e")
+                                        }
+                                    }
                                 }
                             }
                             return null

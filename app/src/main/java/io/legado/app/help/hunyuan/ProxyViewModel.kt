@@ -211,7 +211,12 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         if (bxUa.isNotBlank()) o.put("bx_ua", bxUa)
         if (bxEt.isNotBlank()) o.put("bx_et", bxEt)
         if (bxUmidToken.isNotBlank()) o.put("bx_umidtoken", bxUmidToken)
-        if (!o.has("model_id")) o.put("model_id", modelId.ifBlank { "qwen3.8-max" })
+        // 模型名：浏览器页显式传入了非空值 → 覆盖；否则保留配置里已有的（首次给默认值）
+        if (modelId.isNotBlank()) {
+            o.put("model_id", modelId)
+        } else if (!o.has("model_id")) {
+            o.put("model_id", "qwen3.8-max")
+        }
         setBailianConfig(o.toString())
     }
 
