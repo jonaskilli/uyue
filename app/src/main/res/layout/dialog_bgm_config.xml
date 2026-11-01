@@ -470,4 +470,43 @@
             android:textSize="14sp" />
     </LinearLayout>
 
+    <!-- 全书分析进行时的实时状态区（默认隐藏，分析中显示） -->
+    <LinearLayout
+        android:id="@+id/ll_analysis_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@color/bg_divider_line"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="10dp"
+        android:paddingTop="8dp"
+        android:paddingRight="10dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tv_analysis_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="3"
+            android:textColor="@color/primaryText"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/btn_stop_analysis"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="10dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:padding="6dp"
+            android:text="停止"
+            android:textColor="@color/primary"
+            android:textSize="14sp" />
+    </LinearLayout>
+
 </LinearLayout>

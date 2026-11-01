@@ -33,7 +33,10 @@ import io.legado.app.utils.viewbindingdelegate.viewBinding
 import android.text.Editable
 import android.text.TextWatcher
 import androidx.lifecycle.lifecycleScope
+import io.legado.app.constant.IntentAction
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -44,6 +47,8 @@ import kotlinx.coroutines.withContext
 class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
 
     private val binding by viewBinding(DialogBgmConfigBinding::bind)
+
+    private var analysisStatusJob: Job? = null
 
     // SAF 目录选择
     private val selectDir = registerForActivityResult(HandleFileContract()) {
@@ -112,6 +117,7 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         switchBgm.setTextColor(textColor)
         tvAiImageEnable.setTextColor(textColor)
         tvAiImageSave.setTextColor(textColor)
+        tvAnalysisStatus.setTextColor(textColor)
         }
 
         initData()
@@ -295,6 +301,14 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             showFullBookAnalysisDialog()
         }
 
+        binding.rootView.findViewById<View>(R.id.btn_stop_analysis)?.setOnClickListener {
+            val intent = Intent(requireContext(), BookScriptAnalysisService::class.java).apply {
+                action = IntentAction.stop
+            }
+            requireContext().startService(intent)
+            toastOnUi("已请求停止全书分析")
+        }
+
         binding.rootView.findViewById<View>(R.id.btn_ai_config)?.setOnClickListener {
             BgmAISettingsDialog().show(parentFragmentManager, "bgmAISettings")
         }
@@ -302,6 +316,32 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         binding.rootView.findViewById<View>(R.id.btn_download_bgm)?.setOnClickListener {
             BgmDownloadDialog().show(parentFragmentManager, "bgmDownload")
         }
+
+        startAnalysisStatusPolling()
+    }
+
+    /** 实时展示全书分析进度：每 500ms 轮询服务暴露的状态（分析中才显示状态区） */
+    private fun startAnalysisStatusPolling() {
+        analysisStatusJob?.cancel()
+        analysisStatusJob = lifecycleScope.launch {
+            while (true) {
+                refreshAnalysisStatus()
+                delay(500)
+            }
+        }
+    }
+
+    private fun refreshAnalysisStatus() = binding.run {
+        if (!BookScriptAnalysisService.isRun) {
+            llAnalysisStatus.visibility = View.GONE
+            return@run
+        }
+        llAnalysisStatus.visibility = View.VISIBLE
+        val parts = mutableListOf<String>()
+        BookScriptAnalysisService.runningBookName?.let { parts.add("《$it》") }
+        BookScriptAnalysisService.currentChapterTitle?.let { parts.add("「${it.take(16)}」") }
+        BookScriptAnalysisService.statusText?.let { parts.add(it) }
+        tvAnalysisStatus.text = parts.joinToString(" · ").ifBlank { "分析中…" }
     }
 
     /**
