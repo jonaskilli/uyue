@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
@@ -89,6 +91,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.legado.app.R
 import io.legado.app.base.BaseComposeActivity
+import io.legado.app.data.appDb
+import io.legado.app.help.book.getBookSource
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.help.video.InfiniteSwipeFeed
@@ -1078,6 +1082,10 @@ internal fun DownloadDialog(
     val checked = remember(episodes) {
         mutableStateListOf(*Array(episodes.size) { false })
     }
+    // 「已缓存视频」列表的滚动状态：列表在 selectorOpen 切换时整个离开组合，
+    // 状态必须提升到这里（本界面始终在组合中）才能跨"进详情→返回"保住位置，
+    // 否则每次返回列表都滚回顶部，长列表又要重新拖一遍
+    val videoListState = rememberLazyListState()
     // 进度条目的勾选 / 视频列表的勾选 / 其他缓存的勾选
     val itemChecked = remember { mutableStateListOf<String>() }
     val videoChecked = remember { mutableStateListOf<String>() }
@@ -1132,10 +1140,14 @@ internal fun DownloadDialog(
     // 3. 下载进度/其他缓存的勾选 → 清勾选
     // 4. 正在全屏播孤儿缓存 → 退出播放
     // 5. 独立页面停在视频详情 → 退回视频列表（原逻辑）
-    // 独立页面看视频列表时（selectorOpen=true）且无以上状态，不拦，返回键照常退出页面；
-    // 播放页弹窗只在有 1-3 的临时状态时才拦截，否则返回键照常关弹窗。
-    if (standalone || batchDeleteConfirm != null || videoSelectMode ||
-        itemChecked.isNotEmpty() || orphanChecked.isNotEmpty()
+    // 关键：拦截条件必须精确到"有可退的东西"，独立页面停在视频列表
+    //（selectorOpen=true）且无临时状态时**不挂 BackHandler**，
+    // 返回键走系统默认直接退出页面——否则兜底分支永远出不了这个页面。
+    // 播放页弹窗（非 standalone）只在有 1-3 的临时状态时才拦截，
+    // 否则返回键照常关弹窗。
+    if (batchDeleteConfirm != null || videoSelectMode ||
+        itemChecked.isNotEmpty() || orphanChecked.isNotEmpty() ||
+        (standalone && (!selectorOpen || playingOrphanVideos != null))
     ) {
         BackHandler {
             when {
@@ -1151,7 +1163,7 @@ internal fun DownloadDialog(
                     playingOrphanCaches = null
                 }
                 else -> {
-                    // 原独立页面逻辑：详情退回视频列表
+                    // 独立页面视频详情：退回视频列表（走到这里时上面各状态都已清空）
                     selectedDir = null
                     selectorOpen = true
                     tab = 1
@@ -1252,6 +1264,45 @@ internal fun DownloadDialog(
                 )
                 if (!standalone) onDismiss()
             }
+        }
+    }
+
+    // 「继续」：把这部视频的全部集数补全缓存。
+    // - 已有下载记录里未完成的（暂停/失败/跟随中/排队）→ resumeAll 重跑（自带去重，
+    //   正在下载的不会被重复入队撞 .part）；
+    // - 还没有记录的集 → 按书库里的章节目录整部入队；成品文件已存在的集
+    //   enqueue 会直接标记完成，不会产生流量。
+    // 需要书籍记录与章节目录：只有目录没有记录的（dir: 前缀）无法补全，不显示继续。
+    val onContinueGroup: (VideoDownloader.VideoGroup) -> Unit = { g ->
+        orphanScope.launch {
+            val book = withContext(Dispatchers.IO) { appDb.bookDao.getBook(g.key) }
+            if (book == null) {
+                context.toastOnUi("这部视频没有书籍记录，无法自动补全缓存")
+                return@launch
+            }
+            val source = withContext(Dispatchers.IO) { book.getBookSource() }
+            if (source == null) {
+                context.toastOnUi("书源已失效，无法自动补全缓存")
+                return@launch
+            }
+            val chapters = withContext(Dispatchers.IO) {
+                appDb.bookChapterDao.getChapterList(book.bookUrl)
+            }
+            if (chapters.isEmpty()) {
+                context.toastOnUi("剧集目录还没有加载，先在播放页里打开这部视频再试")
+                return@launch
+            }
+            val n = VideoDownloader.resumeAll(g.dirName)
+            // 还没有下载记录的集整部入队；成品文件已存在的集 enqueue 会直接
+            // 标记完成，不产生流量。index 必须对应章节序号（保存目录/进度都基于它）
+            val tasks = chapters.mapIndexed { i, ch ->
+                VideoDownloader.Task(book, source, i, ch)
+            }
+            VideoDownloader.enqueue(tasks)
+            context.toastOnUi(
+                "已把《${book.name}》全部 ${chapters.size} 集加入缓存队列" +
+                    if (n > 0) "（重跑未完成 $n 集）" else ""
+            )
         }
     }
 
@@ -1566,7 +1617,10 @@ internal fun DownloadDialog(
                             )
                         }
                     } else {
-                        LazyColumn(modifier = Modifier.weight(1f)) {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f),
+                            state = videoListState,
+                        ) {
                             items(groups.size) { i ->
                                 val g = groups[i]
                                 Row(
@@ -1608,7 +1662,14 @@ internal fun DownloadDialog(
                                         name = g.name,
                                         modifier = Modifier.padding(end = 8.dp),
                                     )
-                                    Column(modifier = Modifier.weight(1f)) {
+                                    // 标题区整体往上挪（比封面中线略高），
+                                    // 给下面的缓存进度条留出层次
+                                    Column(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(bottom = 14.dp),
+                                        verticalArrangement = Arrangement.Center
+                                    ) {
                                         Text(
                                             g.name,
                                             color = contentColor.copy(alpha = 0.9f),
@@ -1620,12 +1681,77 @@ internal fun DownloadDialog(
                                             color = contentColor.copy(alpha = 0.5f),
                                             fontSize = 11.sp
                                         )
+                                        // 缓存进度条 + 状态：只有目录没有记录的（dir: 前缀）
+                                        // 算不出进度，不显示
+                                        if (!g.key.startsWith("dir:")) {
+                                            val groupStates =
+                                                dlStates.filter { it.dirName == g.dirName }
+                                            if (groupStates.isNotEmpty()) {
+                                                Spacer(modifier = Modifier.height(5.dp))
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    // 进度：单集直接用该集进度；
+                                                    // 多集取全部记录的平均进度（继续缓存全部后
+                                                    // 记录会铺满整部，平均即整部缓存进度）
+                                                    val pct = if (groupStates.size == 1) {
+                                                        groupStates[0].progress
+                                                    } else {
+                                                        groupStates.sumOf { it.progress } /
+                                                            groupStates.size
+                                                    }
+                                                    val allDone = groupStates
+                                                        .all { it.status == VideoDownloader.DlStatus.COMPLETED }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(5.dp)
+                                                            .clip(RoundedCornerShape(3.dp))
+                                                            .background(
+                                                                contentColor.copy(alpha = 0.15f)
+                                                            )
+                                                    ) {
+                                                        if (pct > 0) {
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth(pct / 100f)
+                                                                    .fillMaxHeight()
+                                                                    .clip(RoundedCornerShape(3.dp))
+                                                                    .background(
+                                                                        if (allDone) Color(0xFF34C759)
+                                                                        else MaterialTheme.colorScheme.primary
+                                                                    )
+                                                            )
+                                                        }
+                                                    }
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    if (allDone) {
+                                                        Text(
+                                                            "完成",
+                                                            color = Color(0xFF34C759),
+                                                            fontSize = 11.sp
+                                                        )
+                                                    } else if (!videoSelectMode) {
+                                                        Text(
+                                                            "继续",
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            fontSize = 11.sp,
+                                                            modifier = Modifier.clickable {
+                                                                onContinueGroup(g)
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     // 播放按钮：直接从上次的集续播（与书架续播同源），
                                     // 省得先进详情再挑集；一集都没下完的不显示。
                                     // 单个删除不再放条目上——长按进多选勾一条删即可，避免误触。
+                                    // 也跟着标题区一起往上挪一点
                                     if (!videoSelectMode && g.completedCount > 0) {
-                                        IconButton(onClick = { onPlayGroup(g) }) {
+                                        IconButton(
+                                            onClick = { onPlayGroup(g) },
+                                            modifier = Modifier.padding(bottom = 14.dp),
+                                        ) {
                                             Icon(
                                                 Icons.Filled.PlayArrow,
                                                 contentDescription = "继续播放",
