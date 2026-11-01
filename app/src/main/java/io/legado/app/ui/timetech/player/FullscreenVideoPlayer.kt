@@ -426,8 +426,17 @@ fun FullscreenVideoPlayer(
             controller.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         } else {
-            controller.show(WindowInsetsCompat.Type.systemBars())
-            WindowCompat.setDecorFitsSystemWindows(window, true)
+            // 首页压缩模式：同样保持边到边并隐藏系统栏。
+            // 视频贴顶显示，若显示状态栏会压住画面上沿（Android 15 起边到边强制
+            // 生效，setDecorFitsSystemWindows(true) 已无法把内容压到状态栏之下）；
+            // 且与全屏模式保持一致，放大/缩小来回切换时页面不跳动。
+            // 时钟/电量播放时本就不重要（全屏同样没有），下滑可临时呼出系统栏。
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
     }
     DisposableEffect(Unit) {
@@ -570,6 +579,7 @@ fun FullscreenVideoPlayer(
                 onAddShelf = onAddShelf,
                 activePlayer = activePlayer,
                 onPlaybackError = onPlaybackError,
+                compactMode = compactMode,
                 // 首/末集：该方向没有集可切，竖滑改为切列表里的上一个/下一个视频
                 noPrevEpisode = page == 0 || videos.size <= 1,
                 noNextEpisode = page == videos.lastIndex || videos.size <= 1,
@@ -698,6 +708,8 @@ private fun VideoPage(
     activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
     // 播放阶段出错回调，透传给 VideoPlayerPage
     onPlaybackError: ((PlaybackException) -> Unit)? = null,
+    // 首页压缩模式：控制条只保留进度条与播放三键，不显示顶部功能栏
+    compactMode: Boolean = false,
     // 播放顺序上前一集/后一集是否存在。为 false 时该方向的竖滑改为切换列表视频
     noPrevEpisode: Boolean = false,
     noNextEpisode: Boolean = false,
@@ -739,6 +751,7 @@ private fun VideoPage(
         onAddShelf = onAddShelf,
         activePlayer = activePlayer,
         onPlaybackError = onPlaybackError,
+        compactMode = compactMode,
         noPrevEpisode = noPrevEpisode,
         noNextEpisode = noNextEpisode,
     )
@@ -968,6 +981,8 @@ internal fun VideoPlayerPage(
     activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
     // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）回调
     onPlaybackError: ((PlaybackException) -> Unit)? = null,
+    // 首页压缩模式：控制条只保留进度条与播放三键，不显示顶部功能栏
+    compactMode: Boolean = false,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1635,6 +1650,7 @@ internal fun VideoPlayerPage(
                 onOpenHome = onOpenHome,
                 onLock = { locked = true },
                 onExit = onExit,
+                compactMode = compactMode,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -1644,7 +1660,9 @@ internal fun VideoPlayerPage(
         // 固定挪到底部后横竖屏都不会挡画面。
         // 96dp 与底部提示条同一基准：底部控制条（进度行 + 按钮行 + 内边距）
         // 约 88dp 高，按钮底边落在控制条上沿再高一点的位置。
-        if (!locked && (showControls || !playing)) {
+        // 首页压缩模式下隐藏：视频只有 240dp 高，这颗悬浮钮会压在画面上，
+        // 而且暂停/继续在下面的三键里已经有了。
+        if (!locked && !compactMode && (showControls || !playing)) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -2168,6 +2186,10 @@ private fun PlayerControls(
     onOpenHome: () -> Unit = {},
     onLock: () -> Unit,
     onExit: () -> Unit,
+    // 首页压缩模式：视频只有 240dp 高，顶部功能栏（返回/集数/倍速/循环/锁定/书架
+    // 两行）一出来就把画面全盖住。该模式下点屏幕只显示进度条与播放三键，
+    // 功能按钮回全屏播放页再操作。
+    compactMode: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val sliderPosition = if (dragging) {
@@ -2178,7 +2200,10 @@ private fun PlayerControls(
         0f
     }
     Box(modifier = modifier) {
-        Column(
+        // 顶部功能栏（标题/时间电量 + 返回/集数/倍速/循环/锁竖屏/锁定/书架）：
+        // 首页压缩模式下整个隐藏——视频只有 240dp 高，这两行一出来画面就全被挡住；
+        // 需要这些功能时点 HomePanel 的「放大」回全屏播放页操作
+        if (!compactMode) Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
@@ -2378,7 +2403,8 @@ private fun PlayerControls(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 左下角：首页（经典播放页，上方视频 + 下方选集方块）
-                IconButton(onClick = onOpenHome) {
+                // 左下角「首页」在压缩模式下没有意义（当前就在主页），一并隐藏
+                if (!compactMode) IconButton(onClick = onOpenHome) {
                     Icon(
                         Icons.Filled.Home,
                         contentDescription = "首页",
@@ -2417,8 +2443,8 @@ private fun PlayerControls(
                         )
                     }
                 }
-                // 右：画面缩放
-                IconButton(onClick = { onScaleModeChange(scaleMode.next()) }) {
+                // 右：画面缩放（压缩模式下隐藏，回全屏播放页再切）
+                if (!compactMode) IconButton(onClick = { onScaleModeChange(scaleMode.next()) }) {
                     Icon(
                         scaleMode.icon,
                         contentDescription = scaleMode.label,
