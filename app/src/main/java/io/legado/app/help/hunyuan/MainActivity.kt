@@ -1082,8 +1082,6 @@ fun BrowserScreen(
     val lastAutoBailianKey = remember { mutableStateOf<String?>(null) }
     // 自动捕获写入节流：bx-ua 每个请求都会变，光靠指纹去重挡不住刷屏，再加最小间隔
     val lastAutoBailianWriteAt = remember { mutableStateOf(0L) }
-    // 一键获取的快速游客重置：清 Cookie 后首载页面 → 清 localStorage/sessionStorage → 重载一次
-    val bailianGuestReset = remember { mutableStateOf(false) }
     var url by remember(provider) {
         mutableStateOf(
             when (provider) {
@@ -1137,13 +1135,73 @@ fun BrowserScreen(
         }
     }
 
-    // ── 一键获取排队机制 ──
-    // 连点不刷屏：每次点击只入队计数，当前周期（重置游客→刷新页面→捕获→写入槽位）
+    // ── 一键获取排队状态 ──
+    // 连点不刷屏：每次点击只入队计数，当前周期（深度清空→刷新页面→捕获→写入槽位）
     // 完整跑完之后，才从队列取下一次点击执行。周期完成 = 自动捕获成功写入；
-    // 另有 45 秒看门狗兜底：页面加载失败/捕获超时也放行下一轮，队列不会卡死。
+    // 另有 60 秒看门狗兜底：页面加载失败/捕获超时也放行下一轮，队列不会卡死。
     val bailianQueuePending = remember { mutableStateOf(0) }
     val bailianCycleRunning = remember { mutableStateOf(false) }
     val bailianCycleGen = remember { mutableStateOf(0) }
+
+    /**
+     * 百炼深度清空（与「清空」按钮完全同款）：逐源清理 cna/umid 备份
+     * （localStorage/IndexedDB/Cache/SW，8 个埋点源）→ 收尾清全部 Cookie +
+     * WebStorage + HTTP 缓存 → 回百炼页。
+     *
+     * 【必须用这个，不能用"只清 Cookie + 清当前源 localStorage"的快速版】：
+     * cna/umid 设备指纹的备份散在多个埋点源里，快速版清不干净——Aplus 会从
+     * IndexedDB 备份把指纹写回，官方按指纹判定「同一个游客」，攒的多份
+     * cookie 实际是同一个身份。
+     *
+     * @param cancelQueue true = 手动「清空」触发：作废正在排队的获取周期，
+     *        避免看门狗/捕获回调在清理过程中 loadUrl 把页面拽走（清到一半不回百炼）
+     */
+    fun startBailianDeepWipe(cancelQueue: Boolean) {
+        if (cancelQueue) {
+            // 手动清空优先：作废排队周期（gen 自增让 45/60 秒看门狗失效）
+            bailianQueuePending.value = 0
+            bailianCycleRunning.value = false
+            bailianCycleGen.value += 1
+        }
+        lastAutoBailianKey.value = null
+        lastAutoBailianWriteAt.value = 0L
+        if (wiping.value) {
+            LogStore.i("Bailian", "深度清理进行中，忽略重复触发")
+            return
+        }
+        val wv = webViewRef.value
+        if (wv == null) {
+            LogStore.i("Bailian", "浏览器未就绪，无法深度清空")
+            return
+        }
+        wv.settings.userAgentString = randomMobileUa()
+        CookieManager.getInstance().flush()
+        val target = "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
+        url = target
+        wipeQueue.clear()
+        listOf(
+            // cna 备份实测所在：www / account / 百炼自身
+            "https://www.aliyun.com/",
+            "https://account.aliyun.com/",
+            // umid / 设备指纹埋点源：实测 IndexedDB、Cache Storage 也在这几个上
+            "https://ynuf.aliapp.org/",
+            "https://gm.mmstat.com/",
+            "https://log.mmstat.com/",
+            "https://wgo.mmstat.com/",
+            "https://fourier.taobao.com/",
+            "https://fourier.alibaba.com/"
+        ).forEach { wipeQueue.add(it) }
+        wipeTarget.value = target
+        wiping.value = true
+        LogStore.i("Bailian", "开始深度清空游客身份（逐源清理 cna/umid 备份），完成后自动捕获")
+        // 先清当前页所在源，再走队列
+        wipeCurrentThenNext(wv)
+        // 兜底：个别埋点源可能加载不出来（onPageFinished 迟迟不触发），
+        // 20 秒后不管队列剩多少都强制收尾，避免流程卡死在空白页
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (wiping.value) finishBailianWipe(wv)
+        }, 20000)
+    }
 
     fun handleBailianQueue(captureDone: Boolean) {
         if (captureDone) {
@@ -1166,25 +1224,18 @@ fun BrowserScreen(
         bailianCycleGen.value += 1
         val gen = bailianCycleGen.value
         onClearCredentials("bailian")   // 新开一条空白槽位并选中（本轮凭证写进新槽位）
-        lastAutoBailianKey.value = null
-        lastAutoBailianWriteAt.value = 0L
-        val cm = CookieManager.getInstance()
-        cm.removeAllCookies(null)
-        cm.removeSessionCookies(null)
-        cm.flush()
-        webViewRef.value?.settings?.userAgentString = randomMobileUa()
-        bailianGuestReset.value = true
-        val target = "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
-        url = target
+        // 每轮都做一次深度清空（与「清空」按钮同款）：只有逐源清掉 cna/umid 备份，
+        // 官方才会分配全新游客——之前用快速重置清不干净，多份 cookie 都是同一个身份
+        startBailianDeepWipe(cancelQueue = false)
         LogStore.i("Bailian", "开始新一轮获取（队列剩余 ${bailianQueuePending.value} 轮）")
-        webViewRef.value?.loadUrl(target)
-        // 看门狗：本轮 45 秒内没等到捕获成功也按完成处理，防止页面挂掉卡死整个队列
+        // 看门狗：60 秒内没等到捕获成功也按完成处理
+        // （深度清理本身约需 8~20 秒，留足页面加载与捕获时间）
         webViewRef.value?.postDelayed({
             if (bailianCycleRunning.value && bailianCycleGen.value == gen) {
-                LogStore.i("Bailian", "本轮 45 秒未捕获成功，跳到队列下一轮")
+                LogStore.i("Bailian", "本轮 60 秒未捕获成功，跳到队列下一轮")
                 handleBailianQueue(true)
             }
-        }, 45000)
+        }, 60000)
     }
 
     // 切换服务商时跳转到对应站点
@@ -1335,40 +1386,9 @@ fun BrowserScreen(
                 Handler(Looper.getMainLooper()).postDelayed({
                     cm.flush()
                     if (p == "bailian") {
-                        // 百炼的顺序不能反：cna/umid 的备份散在多个源的 localStorage +
-                        // IndexedDB + Cache Storage 里。若先清 Cookie，Aplus 会立刻从备份
-                        // 写回 Cookie 与 localStorage，后面再清存储就白清了。
-                        // 所以：先清当前源（通常就是百炼自己）→ 逐源清其余源 → 全部清完后
-                        // removeAllCookies + WebStorage.deleteAllData + clearCache → 回目标页。
-                        val wv = webViewRef.value
-                        if (wv == null) {
-                            toast = "浏览器未就绪，请重试"
-                        } else {
-                            wv.settings.userAgentString = randomMobileUa()
-                            wipeQueue.clear()
-                            listOf(
-                                // cna 备份实测所在：www / account / 百炼自身
-                                "https://www.aliyun.com/",
-                                "https://account.aliyun.com/",
-                                // umid / 设备指纹埋点源：实测 IndexedDB、Cache Storage 也在这几个上
-                                "https://ynuf.aliapp.org/",
-                                "https://gm.mmstat.com/",
-                                "https://log.mmstat.com/",
-                                "https://wgo.mmstat.com/",
-                                "https://fourier.taobao.com/",
-                                "https://fourier.alibaba.com/"
-                            ).forEach { wipeQueue.add(it) }
-                            wipeTarget.value = url
-                            wiping.value = true
-                            LogStore.i("Bailian", "已新开一条百炼配置，正在清各源存储与 Cookie")
-                            // 先清当前页所在源，再走队列
-                            wipeCurrentThenNext(wv)
-                            // 兜底：个别埋点源可能加载不出来（onPageFinished 迟迟不触发），
-                            // 15 秒后不管队列剩多少都强制收尾，避免流程卡死在空白页
-                            Handler(Looper.getMainLooper()).postDelayed({
-                                if (wiping.value) finishBailianWipe(wv)
-                            }, 15000)
-                        }
+                        // 百炼深度清空：与一键获取共用同一套逐源清理（cancelQueue=true
+                        // 作废正在排队的获取周期，防止两条流程互相抢页面）
+                        startBailianDeepWipe(cancelQueue = true)
                     } else {
                         webViewRef.value?.evaluateJavascript(WIPE_STORAGE_JS, null)
                         webViewRef.value?.loadUrl(url)
@@ -1616,18 +1636,6 @@ fun BrowserScreen(
 
                         override fun onPageFinished(view: WebView?, urlStr: String?) {
                             progress = 0
-                            // 一键获取的快速游客重置：首载完成后清本地存储（指纹备份在
-                            // localStorage 里），再重载一次——重载后分配的就是全新游客，
-                            // 只有一次额外加载，不是「清空」按钮那种逐源慢速清理。
-                            if (view != null && bailianGuestReset.value) {
-                                bailianGuestReset.value = false
-                                view.evaluateJavascript(
-                                    "try{localStorage.clear();sessionStorage.clear();}catch(e){};true",
-                                    null
-                                )
-                                view.postDelayed({ view.loadUrl(url) }, 300)
-                                LogStore.i("Bailian", "游客身份已重置，重载页面等待自动捕获")
-                            }
                             // 跨源清理流程：每加载完一个源就清该源的本地存储/缓存，然后加载下一个；
                             // 队列空了说明「最后一个源」也加载完了——此时必须先清它的存储，
                             // 再 removeAllCookies，最后才回到目标页。
