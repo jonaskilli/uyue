@@ -180,10 +180,16 @@ object AudioDecodeUtil {
     private const val GARBAGE_MAX_BURST_MS = 120
     /** 判定「响」的窗口峰值：满幅的 70% */
     private const val GARBAGE_LOUD_RATIO = 0.70
-    /** 削波判定：|采样| ≥ 99% 满幅的比例须 ≥ 该百分比 */
+    /** 削波判定：|采样| ≥ 98% 满幅的比例须 ≥ 该百分比 */
     private const val GARBAGE_CLIP_PERCENT = 1
     /** 硬切验证：突发结束后须立刻降到满幅的 20% 以下（真实音频不会瞬间消失） */
     private const val GARBAGE_QUIET_RATIO = 0.20
+    /**
+     * 起手爬升容忍（毫秒）：MP3 有损编码的 pre-echo 会把满幅突发"拖尾"到前面几 ms
+     * （实测低幅爬升 ~6ms、峰值 10%），导致突发不是从采样 0 精确起爆。
+     * 规则 1 的起手窗口与规则 2 的突发间隙都按此放宽。
+     */
+    private const val GARBAGE_PRE_ECHO_MS = 12
 
     /**
      * 快节奏播放的短音频豁免阈值：转 WAV 后 PCM 低于该 KB 数就跳过去静音。
@@ -234,10 +240,11 @@ object AudioDecodeUtil {
      * 典型触发场景：衔接音效 MP3 的首帧在分段缓冲/缓存中被污染。
      *
      * 判定规则（全部满足才剥离，宁漏勿误）：
-     * 1. 起手即响：前 6ms 内峰值 ≥ 满幅 35%（TTS/音效开头通常是淡入，起手很安静）；
-     * 2. 从 0 起有一段 5ms 窗峰值 ≥ 70% 满幅的连续突发，时长 [25, 120]ms、
-     *    中间低峰间隙 ≤ 3ms；
-     * 3. 突发内 ≥ 1% 采样顶到 99% 满幅（硬削波，真实录音几乎不会持续满幅）；
+     * 1. 起手即响：前 12ms 内峰值 ≥ 满幅 35%（TTS/音效开头通常是淡入，起手很安静；
+     *    MP3 pre-echo 可能把突发拖尾出几 ms 低幅爬升，窗口按 [GARBAGE_PRE_ECHO_MS] 放宽）；
+     * 2. 起手有一段 5ms 窗峰值 ≥ 70% 满幅的连续突发，时长 [25, 120]ms、
+     *    中间低峰间隙 ≤ 12ms；
+     * 3. 突发内 ≥ 1% 采样顶到 98% 满幅（硬削波，真实录音几乎不会持续满幅）；
      * 4. 突发结束后立刻（60ms 内）降到满幅 20% 以下——垃圾帧是「硬切到 0」，
      *    真实音频不会瞬间消失。
      *
@@ -256,11 +263,12 @@ object AudioDecodeUtil {
             (pcm[2 * i + 1].toInt() shl 8) or (pcm[2 * i].toInt() and 0xFF)
 
         val loudLevel = (Short.MAX_VALUE * GARBAGE_LOUD_RATIO).toInt()
-        val clipLevel = (Short.MAX_VALUE * 0.99).toInt()
+        val clipLevel = (Short.MAX_VALUE * 0.98).toInt()
         val quietLevel = (Short.MAX_VALUE * GARBAGE_QUIET_RATIO).toInt()
 
-        // 规则 1：起手即响
-        val headEnd = minOf(scanSamples, sampleRate * 6 / 1000)
+        // 规则 1：起手即响（窗口放宽到 12ms——MP3 pre-echo 会让突发前有几 ms 低幅爬升，
+        // 实测污染帧编码后前 6ms 峰值仅 10%，按原 6ms 窗会漏判）
+        val headEnd = minOf(scanSamples, sampleRate * GARBAGE_PRE_ECHO_MS / 1000)
         var headPeak = 0
         for (i in 0 until headEnd) {
             val v = Math.abs(sampleAt(i))
@@ -268,9 +276,9 @@ object AudioDecodeUtil {
         }
         if (headPeak < loudLevel / 2) return pcm
 
-        // 规则 2：从 0 起的连续响突发（允许 ≤3ms 低峰间隙）
+        // 规则 2：起手连续响突发（允许 ≤12ms 低峰间隙，容忍 pre-echo 爬升）
         val win = maxOf(1, sampleRate * 5 / 1000)
-        val maxGap = sampleRate * 3 / 1000
+        val maxGap = sampleRate * GARBAGE_PRE_ECHO_MS / 1000
         var burstEnd = 0
         var clipped = 0
         var gap = 0
