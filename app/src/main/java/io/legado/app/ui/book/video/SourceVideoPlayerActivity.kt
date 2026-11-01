@@ -25,7 +25,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -601,6 +607,18 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // 主页模式：系统栏隐藏后画面贴顶，顶部摄像头挖孔会压住画面上沿，
+                    // 按挖孔 inset 把整个播放器（连同下方面板）下移让开；
+                    // 无挖孔设备该 inset 为 0，不受影响。全屏模式铺满不避让。
+                    .then(
+                        if (homeMode) {
+                            Modifier.windowInsetsPadding(
+                                WindowInsets.displayCutout.only(WindowInsetsSides.Top)
+                            )
+                        } else {
+                            Modifier
+                        }
+                    )
                     .then(
                         if (homeMode) {
                             Modifier.height(240.dp)
@@ -879,7 +897,14 @@ private fun HomePanel(
     val currentOrigIndex = playOrder.getOrNull(currentPage)
         ?: state.currentIndex.coerceIn(0, episodes.lastIndex.coerceAtLeast(0))
 
-    Column(modifier = Modifier.fillMaxSize().background(Color(0xFF101010))) {
+    // 底部避开手势导航栏：主页模式播放器现在也是边到边（系统栏隐藏），
+    // 不加这条的话选集网格最后一行会压进导航条区域
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF101010))
+            .navigationBarsPadding()
+    ) {
         // 标题行：剧名 + 集数 + 边看边存 + 下载 + 放大
         Row(
             modifier = Modifier
