@@ -39,6 +39,7 @@
 
         <!-- 用 ScrollView 包裹可变内容，防止超出屏幕 -->
         <androidx.core.widget.NestedScrollView
+            android:id="@+id/sv_read_aloud_top"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"

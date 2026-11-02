@@ -19,6 +19,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.Animatable
 import android.graphics.drawable.TransitionDrawable
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.SeekBar
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
@@ -42,7 +43,9 @@ import com.bumptech.glide.RequestBuilder
 import com.bumptech.glide.request.target.CustomTarget
 import com.bumptech.glide.request.target.Target
 import com.bumptech.glide.request.transition.Transition
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.doOnNextLayout
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import android.graphics.Color
@@ -705,21 +708,30 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         // 其不透明背景（applyTint 中设置的 bg）将整屏遮挡下方阅读页。
         llReadAloudTop.gone(!show)
         if (show) {
-            // 用户设定尺寸：不再限制图片最大高度，图片完全按设定宽度与比例显示，可设得更大。
-            // llReadAloudTop 使用 layout_weight=1 自动占据屏幕剩余空间，下方内容不会被挤掉。
-            val widthDp = AppConfig.readAloudCoverWidth.coerceIn(80, 600)
-            val heightDp = (widthDp * 340f / 240f).toInt()
-            val widthPx = widthDp.dpToPx()
-            val heightPx = heightDp.dpToPx()
+            if (AppConfig.readAloudCoverAutoFit) {
+                // 自动适应：先把布局换成确定性的一套（面板铺满整屏，
+                // 主题色盖住状态栏，不再露出背景图条），再算封面尺寸
+                applyDeterministicLayout(true)
+                applyAutoFitCover()
+            } else {
+                // 手动模式恢复 XML 原始布局参数
+                applyDeterministicLayout(false)
+                // 用户设定尺寸：不再限制图片最大高度，图片完全按设定宽度与比例显示，可设得更大。
+                // llReadAloudTop 使用 layout_weight=1 自动占据屏幕剩余空间，下方内容不会被挤掉。
+                val widthDp = AppConfig.readAloudCoverWidth.coerceIn(80, 600)
+                val heightDp = (widthDp * 340f / 240f).toInt()
+                val widthPx = widthDp.dpToPx()
+                val heightPx = heightDp.dpToPx()
 
-            ivBookCover.layoutParams = ivBookCover.layoutParams.apply {
-                width = widthPx
-                height = heightPx
-            }
-            // 应用「图片与顶部的距离」设置（dp）
-            val topMarginPx = AppConfig.readAloudCoverTopMargin.coerceAtLeast(0).dpToPx()
-            (ivBookCover.layoutParams as? ViewGroup.MarginLayoutParams)?.apply {
-                topMargin = topMarginPx
+                ivBookCover.layoutParams = ivBookCover.layoutParams.apply {
+                    width = widthPx
+                    height = heightPx
+                }
+                // 应用「图片与顶部的距离」设置（dp）
+                val topMarginPx = AppConfig.readAloudCoverTopMargin.coerceAtLeast(0).dpToPx()
+                (ivBookCover.layoutParams as? ViewGroup.MarginLayoutParams)?.apply {
+                    topMargin = topMarginPx
+                }
             }
 
             // 初始化跑马灯边框（直接画在封面 View 上，避免层级遮挡问题）
@@ -777,6 +789,108 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             // 模式可能已切换（全屏 ↔ 底部面板），同步重装窗口手势
             installWindowGestures()
         }
+    }
+
+    /**
+     * 自动模式下把布局换成**确定性**的一套（手动模式恢复 XML 原参数）。
+     *
+     * XML 原布局是 content_panel(wrap_content) → ll_read_aloud_top(wrap_content)
+     * → NestedScrollView(0dp+weight=1)：weight 嵌在两层 wrap_content 里，
+     * 面板实际高度"晃"——实测自动模式下面板顶不到屏幕最上面，刚好差一个
+     * 状态栏高度，把顶部一条让给了背后的全屏背景图（iv_fullscreen_bg），
+     * 状态栏就露出一条放大的图片背景。
+     *
+     * 确定性布局：面板直接 MATCH_PARENT 铺满整屏（主题底色盖住状态栏，
+     * 不再露背景图），上半区 0dp+weight=1 占面板内剩余空间，
+     * 滚动区 MATCH_PARENT 填满上半区——这时滚动区高度 = 屏幕减按钮区，
+     * 与封面大小完全无关，量出来才是准的。
+     */
+    private fun applyDeterministicLayout(auto: Boolean) = binding.run {
+        val panelLp = contentPanel.layoutParams
+        val topLp = llReadAloudTop.layoutParams as? LinearLayout.LayoutParams ?: return@run
+        val scrollLp = svReadAloudTop.layoutParams
+        if (auto) {
+            if (panelLp.height == ViewGroup.LayoutParams.MATCH_PARENT &&
+                topLp.height == 0 && topLp.weight == 1f &&
+                scrollLp.height == ViewGroup.LayoutParams.MATCH_PARENT
+            ) return@run
+            panelLp.height = ViewGroup.LayoutParams.MATCH_PARENT
+            topLp.height = 0
+            topLp.weight = 1f
+            scrollLp.height = ViewGroup.LayoutParams.MATCH_PARENT
+        } else {
+            // 恢复 XML 原始值：面板 wrap_content、上半区 wrap_content、滚动区 0dp+weight=1
+            if (panelLp.height == ViewGroup.LayoutParams.WRAP_CONTENT &&
+                topLp.height == ViewGroup.LayoutParams.WRAP_CONTENT && topLp.weight == 0f &&
+                scrollLp.height == 0
+            ) return@run
+            panelLp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            topLp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            topLp.weight = 0f
+            scrollLp.height = 0
+        }
+        contentPanel.layoutParams = panelLp
+        llReadAloudTop.layoutParams = topLp
+        svReadAloudTop.layoutParams = scrollLp
+        root.requestLayout()
+    }
+
+    /**
+     * 封面自动适应：忽略手动宽度/顶部距离，按滚动区实际可用高度算出最大可放大小。
+     * 依赖 [applyDeterministicLayout] 先把布局换成确定性的一套，
+     * 这时滚动区高度与封面无关，量一次就准。
+     *
+     * - 顶部：状态栏（摄像头挖孔）下方再留 8dp 呼吸空间；
+     * - 可用高度 = 滚动区高度 − 标题/章节/字幕/进度条等固定内容及其边距；
+     * - 封面按 240:340 比例缩放进这个空间（宽也受滚动区宽度约束），
+     *   底部按钮永远在屏内，最下面一层不会再被挤掉。
+     */
+    private fun applyAutoFitCover() = binding.run {
+        // 布局已就绪就立刻算；否则挂一次性布局监听，
+        // 等确定性布局生效、各部分完成首次布局后再算
+        if (llReadAloudTop.visibility == View.VISIBLE && svReadAloudTop.height > 0) {
+            computeAutoFitCover()
+        }
+        root.doOnNextLayout {
+            if (llReadAloudTop.visibility == View.VISIBLE) computeAutoFitCover()
+        }
+    }
+
+    /** 真正的自动适应计算：仅在滚动区已完成后调用 */
+    private fun computeAutoFitCover() = binding.run {
+        if (!isAdded || llReadAloudTop.visibility != View.VISIBLE) return@run
+        val scroll = svReadAloudTop
+        if (scroll.width <= 0 || scroll.height <= 0) return@run
+        // 顶部从状态栏（摄像头）下方开始，再留 8dp
+        val statusTop = ViewCompat.getRootWindowInsets(root)
+            ?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
+        val topMarginPx = statusTop + 8.dpToPx()
+        val content = scroll.getChildAt(0) as? ViewGroup ?: return@run
+        // 封面以外的固定内容（书名/章节/字幕/进度条/分隔线）及其外边距，
+        // 与封面大小无关（确定性布局下滚动区高度不随封面变）
+        var fixed = 0
+        for (i in 0 until content.childCount) {
+            val child = content.getChildAt(i)
+            if (child.id == R.id.iv_book_cover || child.visibility == View.GONE) continue
+            val lp = child.layoutParams as? ViewGroup.MarginLayoutParams
+            fixed += child.height + (lp?.topMargin ?: 0) + (lp?.bottomMargin ?: 0)
+        }
+        val availH = scroll.height - fixed - topMarginPx
+        // 可用空间异常小（切换动画中/极端屏幕）时不折腾
+        if (availH < 120.dpToPx()) return@run
+        var w = scroll.width
+        var h = w * 340 / 240
+        if (h > availH) {
+            h = availH
+            w = h * 240 / 340
+        }
+        val lp = ivBookCover.layoutParams as? ViewGroup.MarginLayoutParams ?: return@run
+        // 参数没变化就不重设，避免"改→布局→监听又触发→再改"的循环
+        if (lp.width == w && lp.height == h && lp.topMargin == topMarginPx) return@run
+        lp.width = w
+        lp.height = h
+        lp.topMargin = topMarginPx
+        ivBookCover.requestLayout()
     }
 
     /**
@@ -1319,6 +1433,10 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
      * 保存后重新布局上半部分以应用新宽度。
      */
     private fun showCoverWidthSetting() {
+        if (AppConfig.readAloudCoverAutoFit) {
+            toastOnUi("已开启「封面自动适应屏幕」，手动宽度暂不生效")
+            return
+        }
         val editText = android.widget.EditText(requireContext()).apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText(AppConfig.readAloudCoverWidth.toString())
@@ -1342,6 +1460,10 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
      * 保存后重新布局上半部分以应用新顶部距离。
      */
     private fun showCoverTopMarginSetting() {
+        if (AppConfig.readAloudCoverAutoFit) {
+            toastOnUi("已开启「封面自动适应屏幕」，顶部距离会自动对齐摄像头下方")
+            return
+        }
         val editText = android.widget.EditText(requireContext()).apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText(AppConfig.readAloudCoverTopMargin.toString())
