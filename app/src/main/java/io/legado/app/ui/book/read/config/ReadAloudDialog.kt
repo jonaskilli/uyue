@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.DialogInterface
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.View
@@ -355,6 +356,14 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
                 statusBarColor = Color.TRANSPARENT
                 navigationBarColor = Color.TRANSPARENT
+                // 允许窗口延伸进挖孔/刘海区（封面自己用 displayCutout 安全区躲避摄像头），
+                // 否则部分机型隐藏状态栏后拿不到挖孔 inset
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val cutoutAttrs = attributes
+                    cutoutAttrs.layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    attributes = cutoutAttrs
+                }
                 val attr = attributes
                 attr.gravity = Gravity.FILL
                 attr.dimAmount = 0.0f
@@ -840,7 +849,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
      * 依赖 [applyDeterministicLayout] 先把布局换成确定性的一套，
      * 这时滚动区高度与封面无关，量一次就准。
      *
-     * - 顶部：状态栏（摄像头挖孔）下方再留 8dp 呼吸空间；
+     * - 顶部：紧贴摄像头底部（状态栏/挖孔安全区边界，不留空隙）；
      * - 可用高度 = 滚动区高度 − 标题/章节/字幕/进度条等固定内容及其边距；
      * - 封面按 240:340 比例缩放进这个空间（宽也受滚动区宽度约束），
      *   底部按钮永远在屏内，最下面一层不会再被挤掉。
@@ -861,10 +870,14 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         if (!isAdded || llReadAloudTop.visibility != View.VISIBLE) return@run
         val scroll = svReadAloudTop
         if (scroll.width <= 0 || scroll.height <= 0) return@run
-        // 顶部从状态栏（摄像头）下方开始，再留 8dp
-        val statusTop = ViewCompat.getRootWindowInsets(root)
-            ?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
-        val topMarginPx = statusTop + 8.dpToPx()
+        // 顶部避开摄像头：状态栏 inset 和挖孔（displayCutout）安全区取较大者。
+        // 隐藏状态栏时 statusBars.top 为 0，摄像头位置只有 displayCutout 能拿到；
+        // 显示状态栏时挖孔一般含在状态栏内，两者取大不会多让。
+        // 不额外留空隙：图片顶部紧贴摄像头底部（正好在安全区边界上），图片能显示得更大
+        val insets = ViewCompat.getRootWindowInsets(root)
+        val statusTop = insets?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
+        val cutoutTop = insets?.displayCutout?.safeInsetTop ?: 0
+        val topMarginPx = maxOf(statusTop, cutoutTop)
         val content = scroll.getChildAt(0) as? ViewGroup ?: return@run
         // 封面以外的固定内容（书名/章节/字幕/进度条/分隔线）及其外边距，
         // 与封面大小无关（确定性布局下滚动区高度不随封面变）

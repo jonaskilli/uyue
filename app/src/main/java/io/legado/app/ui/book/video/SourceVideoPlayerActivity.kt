@@ -91,8 +91,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.legado.app.R
 import io.legado.app.base.BaseComposeActivity
-import io.legado.app.data.appDb
-import io.legado.app.help.book.getBookSource
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.help.video.InfiniteSwipeFeed
@@ -1277,43 +1275,17 @@ internal fun DownloadDialog(
         }
     }
 
-    // 「继续」：把这部视频的全部集数补全缓存。
-    // - 已有下载记录里未完成的（暂停/失败/跟随中/排队）→ resumeAll 重跑（自带去重，
-    //   正在下载的不会被重复入队撞 .part）；
-    // - 还没有记录的集 → 按书库里的章节目录整部入队；成品文件已存在的集
-    //   enqueue 会直接标记完成，不会产生流量。
-    // 需要书籍记录与章节目录：只有目录没有记录的（dir: 前缀）无法补全，不显示继续。
+    // 「继续」：只继续**已有下载记录**里未完成的集（用户当时勾选加入下载的那些，
+    // 含暂停/失败/跟随中/排队，以及下了一半的——断点续传会补齐缺失分片）。
+    // 自带去重，正在下载的不会被重复入队撞 .part。
+    // 不再把整部视频的全部集拉进来：没勾选下载的集与"继续"无关，
+    // 想加新集去播放页的选集下载里勾。
     val onContinueGroup: (VideoDownloader.VideoGroup) -> Unit = { g ->
-        orphanScope.launch {
-            val book = withContext(Dispatchers.IO) { appDb.bookDao.getBook(g.key) }
-            if (book == null) {
-                context.toastOnUi("这部视频没有书籍记录，无法自动补全缓存")
-                return@launch
-            }
-            val source = withContext(Dispatchers.IO) { book.getBookSource() }
-            if (source == null) {
-                context.toastOnUi("书源已失效，无法自动补全缓存")
-                return@launch
-            }
-            val chapters = withContext(Dispatchers.IO) {
-                appDb.bookChapterDao.getChapterList(book.bookUrl)
-            }
-            if (chapters.isEmpty()) {
-                context.toastOnUi("剧集目录还没有加载，先在播放页里打开这部视频再试")
-                return@launch
-            }
-            val n = VideoDownloader.resumeAll(g.dirName)
-            // 还没有下载记录的集整部入队；成品文件已存在的集 enqueue 会直接
-            // 标记完成，不产生流量。index 必须对应章节序号（保存目录/进度都基于它）
-            val tasks = chapters.mapIndexed { i, ch ->
-                VideoDownloader.Task(book, source, i, ch)
-            }
-            VideoDownloader.enqueue(tasks)
-            context.toastOnUi(
-                "已把《${book.name}》全部 ${chapters.size} 集加入缓存队列" +
-                    if (n > 0) "（重跑未完成 $n 集）" else ""
-            )
-        }
+        val n = VideoDownloader.resumeAll(g.dirName)
+        context.toastOnUi(
+            if (n > 0) "已继续缓存《${g.name}》未完成的 $n 集"
+            else "没有需要继续的任务"
+        )
     }
 
     // 切到别的视频后没有"选集下载"可勾（目录要联网拉），强制留在进度页
