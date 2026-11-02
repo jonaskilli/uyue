@@ -534,6 +534,13 @@ object VideoDownloader {
     fun dirNameOf(book: Book): String =
         book.name.replace(AppPattern.fileNameRegex, "").ifBlank { "未命名" }
 
+    /**
+     * 视频的"添加时间"：用保存目录的 mtime 近似。
+     * 新建目录（首次下载）与写入新集都会刷新它——最新添加/最新有动静的视频排最上。
+     */
+    fun groupAddTime(dirName: String): Long =
+        runCatching { File(rootDir(), dirName).lastModified() }.getOrDefault(0L)
+
     private fun rootDir(): File = File(
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
         "保存视频"

@@ -91,6 +91,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.legado.app.R
 import io.legado.app.base.BaseComposeActivity
+import io.legado.app.data.appDb
 import io.legado.app.help.video.VideoDownloader
 import io.legado.app.help.video.VideoFeedStore
 import io.legado.app.help.video.InfiniteSwipeFeed
@@ -1098,6 +1099,19 @@ internal fun DownloadDialog(
     // 状态必须提升到这里（本界面始终在组合中）才能跨"进详情→返回"保住位置，
     // 否则每次返回列表都滚回顶部，长列表又要重新拖一遍
     val videoListState = rememberLazyListState()
+    // 「已缓存视频」排序：0=添加时间（保存目录 mtime，最新在上） 1=观看记录（最近观看在上）。
+    // 持久化在播放器的偏好里，重进保持上次的选择
+    var groupSort by remember {
+        mutableStateOf(
+            context.getSharedPreferences("timetech_video_player", Context.MODE_PRIVATE)
+                .getInt("downloadGroupSort", DL_SORT_ADD_TIME)
+        )
+    }
+    var sortedGroups by remember(groups) { mutableStateOf(groups) }
+    LaunchedEffect(groups, groupSort) {
+        // 观看记录排序要查库（durChapterTime），放后台线程算
+        sortedGroups = withContext(Dispatchers.IO) { sortVideoGroups(groups, groupSort) }
+    }
     // 进度条目的勾选 / 视频列表的勾选 / 其他缓存的勾选
     val itemChecked = remember { mutableStateListOf<String>() }
     val videoChecked = remember { mutableStateListOf<String>() }
@@ -1552,11 +1566,11 @@ internal fun DownloadDialog(
                     // 已缓存视频列表：点名字切过去管理；长按进入多选批量删
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "已缓存视频（${groups.size}）",
+                            "已缓存视频（${sortedGroups.size}）",
                             color = contentColor.copy(alpha = 0.6f),
                             fontSize = 12.sp
                         )
-                        if (!videoSelectMode && groups.isNotEmpty()) {
+                        if (!videoSelectMode && sortedGroups.isNotEmpty()) {
                             Text(
                                 "长按多选",
                                 color = contentColor.copy(alpha = 0.4f),
@@ -1564,12 +1578,33 @@ internal fun DownloadDialog(
                                 modifier = Modifier.padding(start = 8.dp)
                             )
                         }
+                        Spacer(modifier = Modifier.weight(1f))
+                        // 排序切换：添加时间（新下载在最上）↔ 观看记录（最近观看在最上）
+                        if (!videoSelectMode && sortedGroups.isNotEmpty()) {
+                            TextButton(onClick = {
+                                val next = if (groupSort == DL_SORT_WATCH) {
+                                    DL_SORT_ADD_TIME
+                                } else {
+                                    DL_SORT_WATCH
+                                }
+                                groupSort = next
+                                context.getSharedPreferences(
+                                    "timetech_video_player", Context.MODE_PRIVATE
+                                ).edit().putInt("downloadGroupSort", next).apply()
+                            }) {
+                                Text(
+                                    if (groupSort == DL_SORT_WATCH) "排序：观看记录" else "排序：添加时间",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
                     }
                     if (videoSelectMode) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(onClick = {
                                 videoChecked.clear()
-                                videoChecked.addAll(groups.map { it.key })
+                                videoChecked.addAll(sortedGroups.map { it.key })
                             }) {
                                 Text("全选", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
                             }
@@ -1583,7 +1618,7 @@ internal fun DownloadDialog(
                             if (videoChecked.isNotEmpty()) {
                                 TextButton(onClick = {
                                     val keys = videoChecked.toSet()
-                                    val names = groups.filter { it.key in keys }.joinToString("、") { it.name }
+                                    val names = sortedGroups.filter { it.key in keys }.joinToString("、") { it.name }
                                     batchDeleteConfirm =
                                         "将删除 ${keys.size} 部视频（$names）的全部下载记录与缓存文件，确定？" to {
                                             val n = VideoDownloader.deleteVideos(keys)
@@ -1601,7 +1636,7 @@ internal fun DownloadDialog(
                             }
                         }
                     }
-                    if (groups.isEmpty()) {
+                    if (sortedGroups.isEmpty()) {
                         Box(
                             modifier = Modifier.weight(1f).fillMaxWidth(),
                             contentAlignment = Alignment.Center
@@ -1617,8 +1652,8 @@ internal fun DownloadDialog(
                             modifier = Modifier.weight(1f),
                             state = videoListState,
                         ) {
-                            items(groups.size) { i ->
-                                val g = groups[i]
+                            items(sortedGroups.size) { i ->
+                                val g = sortedGroups[i]
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier
@@ -2263,6 +2298,31 @@ private fun formatSize(bytes: Long): String {
         i++
     }
     return if (i == 0) "${bytes}B" else "%.1f${units[i]}".format(value)
+}
+
+/** 「已缓存视频」排序模式：按添加时间（保存目录 mtime，新在上） */
+private const val DL_SORT_ADD_TIME = 0
+/** 「已缓存视频」排序模式：按观看记录（durChapterTime 最近观看在上） */
+private const val DL_SORT_WATCH = 1
+
+/**
+ * 已缓存视频列表排序。
+ *
+ * - [DL_SORT_ADD_TIME]：按保存目录的 mtime 倒序——新添加下载 / 最新写入新集
+ *   的视频排最上，一打开下载管理就能看到最新动作；
+ * - [DL_SORT_WATCH]：按观看历史（books.durChapterTime，播放进度每次落库都会刷新）
+ *   倒序——最近在看的排最上。没有书籍记录的目录（dir: 前缀）没有观看时间，
+ *   一律沉底。
+ */
+private fun sortVideoGroups(
+    groups: List<VideoDownloader.VideoGroup>,
+    mode: Int,
+): List<VideoDownloader.VideoGroup> = when (mode) {
+    DL_SORT_WATCH -> groups.sortedByDescending { g ->
+        if (g.key.startsWith("dir:")) 0L
+        else runCatching { appDb.bookDao.getBook(g.key)?.durChapterTime ?: 0L }.getOrDefault(0L)
+    }
+    else -> groups.sortedByDescending { g -> VideoDownloader.groupAddTime(g.dirName) }
 }
 
 /** 下载进度条目：浅色轨道 + 深色进度条 + 百分比 + 暂停/继续 + 三点菜单（删除已缓存/已生成mp4） */
