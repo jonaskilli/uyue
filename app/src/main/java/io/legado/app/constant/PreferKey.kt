@@ -294,6 +294,9 @@ object PreferKey {
     const val readAloudHideChapterProgress = "readAloudHideChapterProgress"
     // 朗读界面小图（封面/本地图）与顶部的距离，单位 dp，默认 16
     const val readAloudCoverTopMargin = "readAloudCoverTopMargin"
+    // 朗读界面封面自动适应：忽略手动宽度/顶部距离，按屏幕实时算出最大可放大小，
+    // 顶部对齐状态栏（摄像头）下方，底部给标题/字幕/按钮留足空间
+    const val readAloudCoverAutoFit = "readAloudCoverAutoFit"
 
     // 保存为视频时的字幕样式设置
     const val videoSubtitleFontSizeScale = "videoSubtitleFontSizeScale" // 字号相对默认比例，1.0=默认

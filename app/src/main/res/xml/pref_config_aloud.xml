@@ -338,6 +338,14 @@
 
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="true"
+            android:title="封面自动适应屏幕"
+            android:summary="开启后忽略手动宽度与顶部距离：封面自动缩放到最大放得下的大小，顶部对齐状态栏（摄像头）下方，底部给标题/字幕/按钮留足空间，不会被挤掉"
+            android:key="readAloudCoverAutoFit"
+            android:dependency="showReadAloudCoverSubtitle"
+            app:iconSpaceReserved="false" />
+
+        <io.legado.app.lib.prefs.SwitchPreference
+            android:defaultValue="true"
             android:title="@string/read_aloud_hide_chapter_progress"
             android:summary="@string/read_aloud_hide_chapter_progress_summary"
             android:key="readAloudHideChapterProgress"

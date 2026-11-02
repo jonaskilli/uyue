@@ -293,6 +293,7 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
                 }
 
                 PreferKey.showReadAloudCoverSubtitle, PreferKey.readAloudCoverWidth,
+                PreferKey.readAloudCoverAutoFit,
                 PreferKey.readAloudCoverMarqueeEnabled, PreferKey.readAloudCoverMarqueeSpeed,
                 PreferKey.marqueeBgmLinkEnabled,
                 PreferKey.readAloudImageInReadPageWidth -> {

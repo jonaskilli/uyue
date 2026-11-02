@@ -1163,6 +1163,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.defaultSharedPreferences.edit()
             .putString(PreferKey.readAloudCoverWidth, value.toString()).apply()
 
+    // 朗读界面封面自动适应：开启后忽略手动宽度/顶部距离，
+    // 按屏幕实时算出封面最大可放大小（顶部对齐状态栏下方，不挤压下方按钮）
+    var readAloudCoverAutoFit: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.readAloudCoverAutoFit, true)
+        set(value) = appCtx.putPrefBoolean(PreferKey.readAloudCoverAutoFit, value)
+
     /**
      * 手动清理 TTS 缓存
      * 同时清理转发器缓存和系统TTS缓存
