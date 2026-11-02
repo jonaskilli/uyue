@@ -54,10 +54,10 @@ import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.ScreenLockPortrait
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -288,6 +288,8 @@ fun FullscreenVideoPlayer(
     compactMode: Boolean = false,
     // 加入书架（null 则不显示按钮）
     onAddShelf: (() -> Unit)? = null,
+    // 打开当前视频的下载管理（null 则不显示下载按钮）
+    onOpenDownload: (() -> Unit)? = null,
     // 播放顺序（显示顺序）：由外层 Activity 持有并传给「选集面板」与「主页下方目录」共用，
     // 点「倒序」/切循环模式时整条顺序一起变，主页目录也跟着反。分页第 page 页播 videos[playOrder[page]]。
     playOrderState: MutableState<List<Int>>,
@@ -595,6 +597,7 @@ fun FullscreenVideoPlayer(
                 bookUrl = bookUrl,
                 coverDrawable = coverDrawable,
                 onAddShelf = onAddShelf,
+                onOpenDownload = onOpenDownload,
                 activePlayer = activePlayer,
                 onPlaybackError = onPlaybackError,
                 compactMode = compactMode,
@@ -722,6 +725,8 @@ private fun VideoPage(
     // 预加载好的封面 drawable：同步铺到播放器内部封面，避免解析↔缓冲交界那 1 帧黑屏
     coverDrawable: Drawable? = null,
     onAddShelf: (() -> Unit)? = null,
+    // 打开当前视频的下载管理（null 则不显示下载按钮）
+    onOpenDownload: (() -> Unit)? = null,
     // 当前正在播放的播放器实例，透传给 VideoPlayerPage 上报给 Activity
     activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
     // 播放阶段出错回调，透传给 VideoPlayerPage
@@ -767,6 +772,7 @@ private fun VideoPage(
         bookUrl = bookUrl,
         coverDrawable = coverDrawable,
         onAddShelf = onAddShelf,
+        onOpenDownload = onOpenDownload,
         activePlayer = activePlayer,
         onPlaybackError = onPlaybackError,
         compactMode = compactMode,
@@ -995,6 +1001,8 @@ internal fun VideoPlayerPage(
     // 预加载好的封面 drawable：同步铺到内部封面，避免解析↔缓冲交界那 1 帧黑屏
     coverDrawable: Drawable? = null,
     onAddShelf: (() -> Unit)? = null,
+    // 打开当前视频的下载管理（null 则不显示下载按钮）
+    onOpenDownload: (() -> Unit)? = null,
     // 当前正在播放的播放器实例（由本页在成为当前页 active 时上报给 Activity）
     activePlayer: MutableState<Player?> = mutableStateOf<Player?>(null),
     // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）回调
@@ -1735,7 +1743,7 @@ internal fun VideoPlayerPage(
                 lockedPortrait = lockedPortrait,
                 onLockPortraitChange = onLockPortraitChange,
                 onOpenHome = onOpenHome,
-                onLock = { locked = true },
+                onOpenDownload = onOpenDownload,
                 onExit = onExit,
                 compactMode = compactMode,
                 modifier = Modifier.fillMaxSize()
@@ -2255,6 +2263,8 @@ private fun PlayerControls(
     episodeTotal: Int = 0,
     // 加入书架（null 则不显示按钮）
     onAddShelf: (() -> Unit)? = null,
+    // 打开当前视频的下载管理（null 则不显示下载按钮）
+    onOpenDownload: (() -> Unit)? = null,
     onSliderValueChange: (Float) -> Unit,
     onSliderFinished: () -> Unit,
     onTogglePlay: () -> Unit,
@@ -2271,7 +2281,6 @@ private fun PlayerControls(
     onLockPortraitChange: (Boolean) -> Unit = {},
     // 跳转经典播放页（首页形态：上方视频 + 下方选集方块）
     onOpenHome: () -> Unit = {},
-    onLock: () -> Unit,
     onExit: () -> Unit,
     // 首页压缩模式：视频只有 240dp 高，顶部功能栏（返回/集数/倍速/循环/锁定/书架
     // 两行）一出来就把画面全盖住。该模式下点屏幕只显示进度条与播放三键，
@@ -2405,13 +2414,16 @@ private fun PlayerControls(
                         }
                     )
                 }
-                // 锁定：与加入书架横向排列，和其余按钮同处一行（标题上移后已腾出空间）
-                IconButton(onClick = onLock) {
-                    Icon(
-                        Icons.Filled.LockOpen,
-                        contentDescription = "锁定",
-                        tint = Color.White
-                    )
+                // 下载：与加入书架横向排列，点击直接打开当前视频的下载管理
+                //（原「锁定屏幕」功能无人使用，已移除；已锁定的仍可从底部解锁按钮解锁）
+                if (onOpenDownload != null) {
+                    IconButton(onClick = { onOpenDownload?.invoke() }) {
+                        Icon(
+                            Icons.Filled.Download,
+                            contentDescription = "下载",
+                            tint = Color.White
+                        )
+                    }
                 }
                 if (onAddShelf != null) {
                     IconButton(

@@ -503,8 +503,9 @@ object SourceVideoPlayerSession {
     /**
      * 重新进入同一部时把目录追到最新：先用库里的补上（不联网、即时），
      * 再后台联网确认一次，两步都由 [appendNewChapters] 收敛成"只增不减"。
+     * 公开给下载管理：打开下载界面时也刷一次，视频更新了新集能立刻选到。
      */
-    private fun refreshChaptersIfNeeded() {
+    fun refreshChaptersIfNeeded() {
         val b = book ?: return
         appendNewChapters(appDb.bookChapterDao.getChapterList(b.bookUrl))
         val s = source ?: return

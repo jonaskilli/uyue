@@ -300,6 +300,21 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
             )
         }
         var playOrder by playOrderState
+        // —— 下载管理（播放器顶栏下载图标与主页下载按钮共用）——
+        var showDownload by remember { mutableStateOf(false) }
+        // 打开弹窗时：当前视频已有下载任务则直接进下载进度页，否则进选集勾选页
+        var downloadShowManage by remember { mutableStateOf(false) }
+        // 判断只看**当前视频**的下载任务——有任务/记录直接进下载进度页，
+        // 一个都没有直接进选集勾选页；别的视频的任务不算数。
+        // 顺手刷新一次选集目录（库里补 + 后台联网确认）：视频更新了新集，
+        // 打开下载界面立刻就能选到，不用退出播放器重进
+        val openDownload: () -> Unit = {
+            SourceVideoPlayerSession.refreshChaptersIfNeeded()
+            val dir = SourceVideoPlayerSession.getBook()?.let { VideoDownloader.dirNameOf(it) }
+            downloadShowManage = dir != null &&
+                VideoDownloader.states.value.any { it.dirName == dir }
+            showDownload = true
+        }
         /**
          * 分页器当前页码。主页那排选集方块的高亮直接用它，
          * 与选集面板同源——点一下就变色，不需要和进度上报抢状态。
@@ -690,6 +705,7 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                                 SourceVideoPlayerSession.setReverseOrder(state.bookUrl, reversed)
                             },
                             onAddShelf = { SourceVideoPlayerSession.addToShelf() },
+                            onOpenDownload = openDownload,
                             onPlaybackError = { err ->
                                 SourceVideoPlayerSession.setPlaybackError(err.localizedMessage ?: "播放出错")
                             },
@@ -718,8 +734,20 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
                     // 也要按修正后的顺序编号，与播放器顶栏/目录面板一致
                     episodeOrder = if (state.reverseOrder) playOrder else null,
                     onExpand = { homeMode = false },
+                    onOpenDownload = openDownload,
                 )
             }
+            }
+
+            // 下载管理弹窗（播放器顶栏下载图标 / 主页下载按钮共用）
+            if (showDownload) {
+                DownloadDialog(
+                    episodes = state.episodes,
+                    bookName = state.bookName,
+                    showManageFirst = downloadShowManage,
+                    episodeOrder = if (state.reverseOrder) playOrder else null,
+                    onDismiss = { showDownload = false }
+                )
             }
 
             // 播放器没渲染出来时（解析中、或解析失败），播放器内部那套右侧竖滑手势
@@ -886,12 +914,11 @@ private fun HomePanel(
     /** 倒序修正后的显示顺序；null = 未倒序，按原始编号显示 */
     episodeOrder: List<Int>?,
     onExpand: () -> Unit,
+    // 打开当前视频的下载管理（状态与弹窗都提升在主 Composable）
+    onOpenDownload: () -> Unit,
 ) {
     val episodes = state.episodes
     val context = LocalContext.current
-    var showDownload by remember { mutableStateOf(false) }
-    // 打开弹窗时：已有下载任务则直接进下载进度页，否则进选集勾选页
-    var downloadShowManage by remember { mutableStateOf(false) }
     var watchSave by remember { mutableStateOf(VideoDownloader.isWatchSaveEnabled()) }
     // 当前正在播的那一集的**原始下标**：由分页页码经 playOrder 映射而来。
     // 不用 state.currentIndex —— 那个字段同时被「用户选中」和 saveProgress 的
@@ -947,10 +974,7 @@ private fun HomePanel(
                     fontSize = 12.sp
                 )
             }
-            IconButton(onClick = {
-                downloadShowManage = VideoDownloader.states.value.isNotEmpty()
-                showDownload = true
-            }) {
+            IconButton(onClick = onOpenDownload) {
                 Icon(
                     Icons.Filled.Download,
                     contentDescription = "下载选集",
@@ -992,16 +1016,6 @@ private fun HomePanel(
                 )
             }
         }
-    }
-
-    if (showDownload) {
-        DownloadDialog(
-            episodes = episodes,
-            bookName = state.bookName,
-            showManageFirst = downloadShowManage,
-            episodeOrder = if (state.reverseOrder) playOrder else null,
-            onDismiss = { showDownload = false }
-        )
     }
 }
 
@@ -1798,6 +1812,25 @@ internal fun DownloadDialog(
                                     contentColor.copy(alpha = 0.6f)
                                 }
                             )
+                        }
+                        // 倒序：与播放页目录面板同一套持久化标记，点一下直接切换，
+                        // 选集列表与播放顺序（修正后的第1集在最上面）立刻跟着翻。
+                        // 只对当前视频显示——别的视频没有"选集下载"页签
+                        if (isCurrentVideo && viewBookUrl != null) {
+                            TextButton(onClick = {
+                                SourceVideoPlayerSession.setReverseOrder(
+                                    viewBookUrl, !viewReversed
+                                )
+                            }) {
+                                Text(
+                                    "倒序",
+                                    color = if (viewReversed) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        contentColor.copy(alpha = 0.6f)
+                                    }
+                                )
+                            }
                         }
                         // 「其他缓存」：默认灰色（当前视频目录下没有无记录的缓存）；
                         // 有点击后列出孤儿缓存，再点一下切回下载记录
