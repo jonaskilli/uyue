@@ -547,6 +547,36 @@ object VideoDownloader {
     )
 
     /**
+     * 每部视频体积缓存：存到该视频目录下的 [SIZE_CACHE_FILE]（随缓存走，重装/换设备都在）。
+     * 这样打开下载管理时不必每次递归遍历整目录算体积（几千个切片文件能卡 1 秒），
+     * 直接读记录即可。记录目录 mtime：目录有变动（新增/删除/改名集）时判定过期，
+     * 重新算并把结果写回，下次再开又变"直接读"。
+     */
+    private const val SIZE_CACHE_FILE = ".size_cache.json"
+
+    private data class DirSizeMeta(val sizeBytes: Long, val mtime: Long)
+
+    private fun readDirSize(dirName: String): DirSizeMeta? {
+        val f = File(File(rootDir(), dirName), SIZE_CACHE_FILE)
+        return runCatching {
+            val text = f.readText().takeIf { it.isNotBlank() } ?: return null
+            val o = org.json.JSONObject(text)
+            DirSizeMeta(o.optLong("size", -1), o.optLong("mtime", -1))
+        }.getOrNull()
+    }
+
+    private fun writeDirSize(dirName: String, sizeBytes: Long, mtime: Long) {
+        runCatching {
+            File(File(rootDir(), dirName), SIZE_CACHE_FILE).writeText(
+                org.json.JSONObject().apply {
+                    put("size", sizeBytes)
+                    put("mtime", mtime)
+                }.toString()
+            )
+        }
+    }
+
+    /**
      * 已下载视频的 bookUrl 列表，顺序与"已缓存视频"列表一致。
      * 供播放器在这些已下载视频之间切换（右侧 30% 竖滑）时用；
      * 只有目录、没有下载记录的（key 为 "dir:" 前缀）无法定位书籍，直接跳过。
@@ -631,8 +661,19 @@ object VideoDownloader {
         return map.values.map { g ->
             val dir = File(root, g.dirName)
             val size = if (dir.exists()) {
-                runCatching { dir.walkTopDown().filter { it.isFile }.sumOf { it.length() } }
-                    .getOrDefault(0L)
+                val mtime = dir.lastModified()
+                // 直接读记录：目录没变动就跳过整目录遍历，打开列表瞬间出数据
+                val cached = readDirSize(g.dirName)
+                if (cached != null && cached.mtime == mtime) {
+                    cached.sizeBytes
+                } else {
+                    // 记录缺失或目录已变（新增/删除了集）：算一次并写回记录
+                    val real = runCatching {
+                        dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                    }.getOrDefault(0L)
+                    writeDirSize(g.dirName, real, mtime)
+                    real
+                }
             } else 0L
             g.copy(sizeBytes = size)
         }.sortedWith(compareByDescending<VideoGroup> { it.sizeBytes }.thenBy { it.name })
