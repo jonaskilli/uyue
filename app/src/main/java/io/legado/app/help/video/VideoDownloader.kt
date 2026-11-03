@@ -7,6 +7,8 @@ import android.widget.Toast
 import androidx.media3.common.C
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.AppPattern
+import io.legado.app.model.download.FfmpegMerger
+import kotlinx.coroutines.sync.withLock
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
@@ -71,7 +73,7 @@ object VideoDownloader {
      * [COLLECTING]：跟随播放收集中——只搬缓存里已有的分片，进度会随播放推进，
      * 剩余缺口要等切集/退出后由收尾补齐。它不是"卡住"，也不需要用户干预。
      */
-    enum class DlStatus { QUEUED, RUNNING, PAUSED, COMPLETED, FAILED, COLLECTING }
+    enum class DlStatus { QUEUED, RUNNING, PAUSED, COMPLETED, FAILED, COLLECTING, MERGING }
 
     /**
      * 单条下载的实时状态（供界面实时展示进度条/暂停续传）。
@@ -85,6 +87,8 @@ object VideoDownloader {
         val status: DlStatus,
         /** 保存目录名（Download/保存视频/<dirName>）：界面按它把条目归到各视频名下 */
         val dirName: String = "",
+        /** 合并 MP4 进度（0-100）；-1 = 未在合并。界面在播放按钮左侧的圆圈上显示 */
+        val mergeProgress: Int = -1,
     )
 
     /** 暂停用异常：从下载循环安全退出，已写入部分保留供续传 */
@@ -446,7 +450,10 @@ object VideoDownloader {
         val tasks = synchronized(statesMap) {
             statesMap.values
                 .filter { dirName == null || it.dirName == dirName }
-                .filter { it.status != DlStatus.COMPLETED && it.status != DlStatus.RUNNING }
+                .filter {
+                    it.status != DlStatus.COMPLETED && it.status != DlStatus.RUNNING &&
+                        it.status != DlStatus.MERGING
+                }
                 .map { it.task }
         }
         tasks.forEach { task ->
@@ -504,6 +511,11 @@ object VideoDownloader {
     }
 
     /** 删除已生成的 mp4 成品，并从下载列表移除该条目（分片文件夹缓存保留） */
+    /** 该集是否已合并出 mp4 成品（界面的合并状态圈据此显示） */
+    fun hasMp4(task: Task, title: String): Boolean =
+        runCatching { File(dirOf(task), "$title.mp4").exists() && File(dirOf(task), "$title.mp4").length() > 0 }
+            .getOrDefault(false)
+
     fun deleteMp4(state: TaskState) {
         File(dirOf(state.task), "${state.title}.mp4").delete()
         removeState(state.key)
@@ -1041,8 +1053,11 @@ object VideoDownloader {
                     AppLog.putDebug("已收集 $written/$total，剩余待补齐：${titleOf(task)}")
                     return null
                 }
-                notifyCompleted(task) // 分片已全部落盘：播放走本地分片，无需合并
-                return epFolder
+                // 分片已全部落盘：自动合并为 MP4 并清理分片文件夹
+                // （成品 <标题>.mp4 优先于分片播放，缓存体积直接减半以上）
+                val merged = mergeSegFolder(dir, title, key, deleteSegments = true)
+                notifyCompleted(task)
+                return merged ?: epFolder
             } else {
                 // 单文件直链：先写 <标题>.mp4.part，写满再改名成 <标题>.mp4。
                 //
@@ -1773,32 +1788,64 @@ object VideoDownloader {
      * 合并与播放互不干扰：合并在后台协程跑，原分片文件夹始终保留（合并失败也只是没产出 mp4）。
      */
     fun mergeToMp4(task: Task) {
+        val key = watchKey(task)
         scope.launch {
-            runCatching { mergeEpisode(task) }
-                .onSuccess { mp4 ->
-                    // 合并是在后台协程里跑的，界面上原本没有任何反馈：
-                    // 成功/无分片都弹一下，否则点完「合并为MP4」完全不知道结果
-                    if (mp4 != null) {
-                        appCtx.toastOnUi("已合并为 MP4：${mp4.name}", Toast.LENGTH_LONG)
-                    } else {
-                        appCtx.toastOnUi("合并失败：${titleOf(task)} 没有可合并的分片", Toast.LENGTH_LONG)
+            // FFmpeg 统计回调是全局静态的，多集同时合并会互相污染进度，
+            // 这里串行化：逐集合并在后台跑，进度归当前正在合并的那一集
+            mergeMutex.withLock {
+                val prevState = synchronized(statesMap) { statesMap[key] }
+                runCatching { mergeEpisode(task, key) }
+                    .onSuccess { mp4 ->
+                        // 合并是在后台协程里跑的，界面上原本没有任何反馈：
+                        // 成功/无分片都弹一下，否则点完「合并为MP4」完全不知道结果
+                        if (mp4 != null) {
+                            appCtx.toastOnUi("已合并为 MP4：${mp4.name}", Toast.LENGTH_LONG)
+                        } else {
+                            appCtx.toastOnUi("合并失败：${titleOf(task)} 没有可合并的分片", Toast.LENGTH_LONG)
+                        }
                     }
-                }
-                .onFailure {
-                    AppLog.put("合并为 MP4 失败：${titleOf(task)}", it)
-                    appCtx.toastOnUi("合并失败：${titleOf(task)}", Toast.LENGTH_LONG)
-                }
+                    .onFailure {
+                        AppLog.put("合并为 MP4 失败：${titleOf(task)}", it)
+                        appCtx.toastOnUi("合并失败：${titleOf(task)}", Toast.LENGTH_LONG)
+                        // 恢复合并前的状态，界面上的合并圆圈退回原样
+                        if (prevState != null) {
+                            updateState(key) { prevState.copy(mergeProgress = -1) }
+                        }
+                    }
+            }
         }
     }
 
-    private fun mergeEpisode(task: Task): File? {
-        val mp4 = mergeSegFolder(dirOf(task), titleOf(task)) ?: return null
+    /** 合并互斥：见 [mergeToMp4] 内的说明（FFmpeg 统计回调是全局的） */
+    private val mergeMutex = kotlinx.coroutines.sync.Mutex()
+
+    private fun mergeEpisode(task: Task, key: String? = null): File? {
+        val mp4 = mergeSegFolder(dirOf(task), titleOf(task), key) ?: return null
         notifyCompleted(task) // mp4 已生成：会话可切到本地 mp4 播放
+        if (key != null) {
+            updateState(key) { it.copy(status = DlStatus.COMPLETED, progress = 100, mergeProgress = -1) }
+        }
         return mp4
     }
 
-    /** 分片文件夹 → mp4 的合并核心：有记录的任务与「其他缓存」孤儿共用同一套 */
-    private fun mergeSegFolder(dir: File, title: String): File? {
+    /**
+     * 分片文件夹 → mp4 的合并核心：有记录的任务与「其他缓存」孤儿共用同一套。
+     *
+     * 两步走（shiguangyuedu 同款）：
+     * 1. 分片解密按序拼接为原始流临时文件（.ts.part）——进度 0~50%（按字节）；
+     * 2. FFmpeg `-c copy` 转封装为标准 MP4（moov 索引，可拖动、秒出首帧）——50~100%
+     *    （按 FFmpeg 统计的已处理时长换算，总时长取 playlist.m3u8 的 EXTINF 之和）。
+     *    FFmpeg 不可用或转换失败时回退旧行为：拼接流直接改名 .mp4（功能不退化）。
+     *
+     * @param key 下载记录 key；非空时把 [DlStatus.MERGING] 与 mergeProgress 写进状态
+     * @param deleteSegments 合并成功后删除整个分片文件夹（自动合并流程用，省空间）
+     */
+    private fun mergeSegFolder(
+        dir: File,
+        title: String,
+        key: String? = null,
+        deleteSegments: Boolean = false,
+    ): File? {
         val epFolder = epFolderOf(dir, title)
         if (!epFolder.isDirectory) return null
         val mp4 = File(dir, "$title.mp4")
@@ -1812,7 +1859,20 @@ object VideoDownloader {
         val keyFile = File(epFolder, "key.bin").takeIf { it.exists() }
         val keyBytes = keyFile?.readBytes()
         val initFile = File(epFolder, "init.bin").takeIf { it.exists() }
-        FileOutputStream(mp4).use { out ->
+
+        fun report(percent: Int) {
+            if (key == null) return
+            updateState(key) {
+                it.copy(status = DlStatus.MERGING, mergeProgress = percent.coerceIn(0, 100))
+            }
+        }
+        report(0)
+
+        // 第一步：解密 + 按序拼接原始流（进度 0~50，按已写字节占比）
+        val raw = File(dir, "$title.ts.part")
+        val totalBytes = segs.sumOf { it.length() }.coerceAtLeast(1L)
+        var written = 0L
+        FileOutputStream(raw).use { out ->
             initFile?.inputStream()?.use { ins -> ins.copyTo(out) }
             segs.forEach { seg ->
                 // 序号必须取**文件名里记录的原始分片序号**，不能用"第几个存在的文件"。
@@ -1832,11 +1892,48 @@ object VideoDownloader {
                         }
                     }
                 }
+                written += seg.length()
+                report((written * 50 / totalBytes).toInt())
             }
         }
         File(epFolder, "index.idx").delete()
+
+        // 第二步：FFmpeg -c copy 转封装（进度 50~100，按已处理时长占比）；失败回退直写
+        val durationMs = playlistDurationMs(epFolder)
+        val remuxed = runCatching {
+            FfmpegMerger.remux(raw, mp4, durationMs) { p -> report(50 + p / 2) }
+        }.getOrDefault(false)
+        if (remuxed && mp4.length() > 0) {
+            raw.delete()
+            AppLog.put("合并MP4: $title 已转封装为标准 MP4")
+        } else {
+            runCatching { mp4.delete() }
+            if (!raw.renameTo(mp4)) {
+                runCatching { raw.copyTo(mp4, overwrite = true); raw.delete() }
+            }
+            AppLog.put("合并MP4: $title 转封装失败，回退直写模式")
+        }
+        // 成品已生成：按需清理分片文件夹（自动合并流程开启；手动合并不清理）
+        if (deleteSegments && mp4.exists() && mp4.length() > 0) {
+            runCatching { epFolder.deleteRecursively() }
+                .onSuccess { AppLog.put("合并MP4: $title 分片文件夹已清理") }
+        }
         return mp4
     }
+
+    /** playlist.m3u8 里 EXTINF 时长之和（毫秒），用作 FFmpeg 转封装进度的分母 */
+    private fun playlistDurationMs(epFolder: File): Long = runCatching {
+        val f = File(epFolder, "playlist.m3u8")
+        if (!f.exists()) return 0L
+        var seconds = 0.0
+        f.readLines().forEach { line ->
+            if (line.startsWith("#EXTINF")) {
+                line.substringAfter(':').substringBefore(',').trim()
+                    .toDoubleOrNull()?.let { seconds += it }
+            }
+        }
+        (seconds * 1000).toLong()
+    }.getOrDefault(0L)
 
     // ---------- 其他缓存（无下载记录的磁盘缓存） ----------
 

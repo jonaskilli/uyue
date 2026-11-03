@@ -51,8 +51,12 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import android.graphics.Color
 import io.legado.app.model.AiImageGenerator
+import io.legado.app.model.DanmakuItem
+import io.legado.app.model.DanmakuReady
+import io.legado.app.model.DanmakuStore
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
+import io.legado.app.model.VnParagraph
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.service.BgmManager
 import kotlinx.coroutines.CoroutineScope
@@ -96,6 +100,15 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     private val binding by viewBinding(DialogReadAloudBinding::bind)
     private var isSeekingChapterProgress = false
     private var oldBgmStartedCallback: (() -> Unit)? = null
+
+    /** 当前章节的 AI 弹幕（DANMAKU_READY 事件写入；按段落锚点在 VN_PARAGRAPH 时发射） */
+    private var currentDanmaku: List<DanmakuItem> = emptyList()
+
+    /** 弹幕章节 key（识别切章用） */
+    private var danmakuKey: String? = null
+
+    /** 已发射过的段落锚点：区间生成晚于朗读时，读到锚点段照样补发 */
+    private val firedAnchors = mutableSetOf<Int>()
     private var imageTimer: Timer? = null
     private var currentImageIndex = 0
     private var bookImageFiles: List<File> = emptyList()
@@ -348,6 +361,9 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             if (showImage) {
                 // 全屏延伸模式
                 decorView.setPadding(0, 0, 0, 0)
+                // 恢复弹幕层（半屏模式已按下方说明移除）
+                binding.danmakuView.visibility =
+                    if (AppConfig.danmakuEnabled) View.VISIBLE else View.GONE
                 // 清掉半屏模式加的穿透标记：全屏时窗口铺满整屏，触摸应只由本窗口处理，
                 // 否则运行时由半屏切回全屏会残留该标记
                 clearFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
@@ -394,6 +410,11 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 // 放在此处（窗口模式的唯一入口）可确保任何调用顺序下都成立。
                 binding.llReadAloudTop.gone()
                 binding.ivFullscreenBg.gone()
+                // 弹幕层同为 match_parent，若保持可见会把 WRAP_CONTENT 的半屏窗口
+                // 重新撑满整屏、面板错位（与上方 iv_fullscreen_bg 必须移除同理），
+                // 因此半屏模式彻底移除弹幕层并清空在屏弹幕
+                binding.danmakuView.clearDanmaku()
+                binding.danmakuView.gone()
                 WindowCompat.setDecorFitsSystemWindows(this, true)
                 decorView.setPadding(0, 0, 0, 0)
                 statusBarColor = Color.TRANSPARENT
@@ -477,6 +498,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         applyChapterProgressVisibility()
         initData()
         initEvent()
+        initDanmaku()
         // 注意：窗口手势不在此挂载。onFragmentCreated 由 onViewCreated 调用，
         // 早于 onStart，此时 isFullscreen 还没被 applyWindowMode 赋值，挂上去会直接 return。
         // 统一在 onStart 的 applyWindowMode 之后由 installWindowGestures 挂载。
@@ -1808,6 +1830,20 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         }
     }
 
+    /**
+     * 弹幕层初始化：按开关显示浮层；弹窗重建（重开朗读面板）时
+     * 直接从 DanmakuStore 恢复本章弹幕，无需等服务重新生成。
+     */
+    private fun initDanmaku() {
+        binding.danmakuView.visibility =
+            if (AppConfig.danmakuEnabled) View.VISIBLE else View.GONE
+        if (!AppConfig.danmakuEnabled) return
+        val book = ReadBook.book ?: return
+        val title = ReadBook.curTextChapter?.title ?: return
+        danmakuKey = DanmakuStore.key
+        currentDanmaku = DanmakuStore.get("${book.name}|$title")
+    }
+
     override fun observeLiveBus() {
         observeEvent<Int>(EventBus.ALOUD_STATE) { upPlayState() }
         observeEvent<Int>(EventBus.READ_ALOUD_DS) { binding.seekTimer.progress = it }
@@ -1826,6 +1862,26 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         observeEvent<String>(EventBus.READ_ALOUD_CHAPTER_CHANGED) {
             // 章节变化时更新章节名
             binding.tvChapterName.text = ReadBook.curTextChapter?.title ?: it
+            // 切章后上一章的弹幕锚点已失效，清空待发射列表与在屏弹幕
+            currentDanmaku = emptyList()
+            firedAnchors.clear()
+            binding.danmakuView.clearDanmaku()
+        }
+        observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
+            if (ready.key != danmakuKey) {
+                // 切章：重置已发射记录与在屏弹幕
+                danmakuKey = ready.key
+                firedAnchors.clear()
+                binding.danmakuView.clearDanmaku()
+            }
+            // 区间增量结果全量下发，只更新列表，不打断在屏弹幕
+            currentDanmaku = ready.items
+        }
+        observeEvent<VnParagraph>(EventBus.VN_PARAGRAPH) { p ->
+            if (!AppConfig.danmakuEnabled || currentDanmaku.isEmpty()) return@observeEvent
+            // 锚点 <= 当前段落即发射（追发错过的），firedAnchors 保证每条只发一次
+            currentDanmaku.filter { it.para <= p.index && firedAnchors.add(it.para) }
+                .forEach { binding.danmakuView.show(it.text) }
         }
         observeEvent<String>(EventBus.AI_IMAGE_CHANGED) { imagePath ->
             if (imagePath.isNotBlank() && File(imagePath).exists()) {

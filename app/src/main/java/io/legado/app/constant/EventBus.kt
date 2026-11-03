@@ -54,4 +54,6 @@ object EventBus {
     const val UP_VIDEO_INFO = "upVideoInfo"
     const val AI_IMAGE_CHANGED = "aiImageChanged"
     const val AI_IMAGE_REQUEST = "aiImageRequest"
+    // AI 弹幕：区间生成完毕（增量全量下发），value = DanmakuReady
+    const val DANMAKU_READY = "danmakuReady"
 }

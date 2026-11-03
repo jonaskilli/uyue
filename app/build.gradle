@@ -58,6 +58,11 @@ android {
         targetSdk 36
         versionCode Math.max(37499, 30000 + gitCommits)
         versionName version
+        // 只保留 64 位 ARM（用户的骁龙 8s Gen 3 为 arm64-v8a）：mobile-ffmpeg 默认带
+        // 4 种 ABI，全打包会让 APK 多出 ~24M；本机自用不需要模拟器/32 位兼容
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         project.ext.set("archivesBaseName", name + "_" + version)
 
@@ -354,4 +359,8 @@ dependencies {
     implementation('io.ktor:ktor-client-content-negotiation:3.0.3')
     implementation('io.ktor:ktor-client-websockets:3.0.3')
     implementation('org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3')
+
+    // FFmpeg 精简包（shiguangyuedu 同款）：分片合并转封装 MP4（-c copy 不重编码），
+    // 产物带 moov 索引可拖动、秒出首帧；concat demuxer / mov muxer / aac_adtstoasc 均在 min 包内
+    implementation('com.arthenica:mobile-ffmpeg-min:4.4.LTS')
 }
