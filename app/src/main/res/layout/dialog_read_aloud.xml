@@ -729,4 +729,12 @@
 
     </LinearLayout>
 
+    <!-- AI 弹幕浮层：整章按剧情生成，朗读到对应段落时从顶部多轨道错开飘过。
+         放在最后一位确保绘制在最上层；不设 clickable，触摸穿透给下层控制面板 -->
+    <io.legado.app.ui.book.read.config.DanmakuView
+        android:id="@+id/danmaku_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
 </FrameLayout>

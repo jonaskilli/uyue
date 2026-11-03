@@ -2192,6 +2192,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         // AI 音效：按字数区间调度，永远多备一个区间，
         // 保证读到某一段时它的音效早已分析完
         scheduleAiEffects()
+        // AI 弹幕：同一套区间调度（按字数切区间、领先预排、到位触发）
+        scheduleDanmaku()
     }
 
     /**

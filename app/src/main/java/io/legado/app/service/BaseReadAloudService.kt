@@ -49,6 +49,8 @@ import io.legado.app.lib.permission.Permissions
 import io.legado.app.lib.permission.PermissionsCompat
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.AiImagePersistentCache
+import io.legado.app.model.DanmakuReady
+import io.legado.app.model.DanmakuStore
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.receiver.MediaButtonReceiver
@@ -1468,6 +1470,8 @@ abstract class BaseReadAloudService : BaseService(),
         lastNowSpeak = -1
         // 记录文件可能已被外部改动（如设置里清除本章记录），下次重新载入
         aiEffectCacheKey = ""
+        // AI 弹幕：同步清空调度状态（记录保留在缓存文件，重读复用）
+        clearDanmakuRuntime()
     }
 
     /**
@@ -2272,6 +2276,176 @@ abstract class BaseReadAloudService : BaseService(),
                 AppLog.put("关键词BGM预分析失败：${e.localizedMessage}")
             }
         }
+    }
+
+    // ==================== AI 弹幕（与 AI 音效同款区间调度） ====================
+
+    /**
+     * 待分析的区间队列，元素为 (起始段落, 结束段落)，串行处理。
+     * 区间按 [AppConfig.aiEffectCharInterval]（沿用 AI 音效/BGM 的分析字数）切分，
+     * 队列始终比朗读领先一个区间，实现「提前生成、到位触发」。
+     */
+    private val danmakuPending = ArrayDeque<Pair<Int, Int>>()
+    private var danmakuWorker: Job? = null
+
+    /** 首次进入是否已启动 */
+    private var danmakuStarted = false
+
+    /** 已安排过分析的区间终点（含） */
+    private var danmakuScheduledMaxPara = -1
+
+    /** 当前正在朗读的区间 [start, end] */
+    private var danmakuCurrentStartPara = -1
+    private var danmakuCurrentEndPara = -1
+
+    /** 缓存对应的 "bookUrl/chapterIndex"，章节切换时重置调度 */
+    private var danmakuChapterKey = ""
+
+    /** 章节 key（书名|章节标题）：Store/事件/缓存文件共用的章节标识 */
+    private var danmakuNameKey = ""
+    private var danmakuBookName = ""
+    private var danmakuChapterTitle = ""
+
+    /** 整章内容 hash（写入弹幕缓存，章节更新后缓存自动失效） */
+    private var danmakuContentHash = ""
+    private var danmakuChapterTotalChars = 0
+
+    /**
+     * 每段朗读开始时调用（prepareSubtitles），驱动弹幕区间的提前调度：
+     * - 首段：从当前位置开区间并入队，再预排下一个区间；
+     * - 正常往下读：把已备好的下一个区间转为当前区间，继续预排；
+     * - 跳段/回退：从当前位置重开区间（重复段落命中记录缓存，不重复问 AI）。
+     */
+    protected fun scheduleDanmaku() {
+        if (!AppConfig.danmakuEnabled) return
+        val book = ReadBook.book ?: return
+        val title = textChapter?.title ?: ReadBook.curTextChapter?.title ?: return
+        val chapterKey = "${book.bookUrl}/${ReadBook.durChapterIndex}"
+        val nameKey = "${book.name}|$title"
+        if (chapterKey != danmakuChapterKey) {
+            danmakuChapterKey = chapterKey
+            danmakuNameKey = nameKey
+            danmakuBookName = book.name
+            danmakuChapterTitle = title
+            danmakuContentHash = contentList.joinToString("\n").hashCode().toString()
+            danmakuChapterTotalChars = contentList.sumOf { it.length + 1 }
+            danmakuStarted = false
+            danmakuScheduledMaxPara = -1
+            danmakuCurrentStartPara = -1
+            danmakuCurrentEndPara = -1
+            synchronized(danmakuPending) { danmakuPending.clear() }
+            // 切章后旧锚点全部作废（同章 seek 重入时 key 不变，保留已生成结果）
+            if (DanmakuStore.key != null && DanmakuStore.key != nameKey) {
+                DanmakuStore.clear()
+            }
+        }
+        when {
+            !danmakuStarted -> {
+                danmakuStarted = true
+                startDanmakuRangeAt(nowSpeak)
+                enqueueNextDanmakuRange()
+            }
+
+            danmakuCurrentStartPara in 0..danmakuCurrentEndPara &&
+                nowSpeak !in danmakuCurrentStartPara..danmakuCurrentEndPara -> {
+                if (nowSpeak == danmakuCurrentEndPara + 1 &&
+                    danmakuScheduledMaxPara > danmakuCurrentEndPara
+                ) {
+                    danmakuCurrentStartPara = danmakuCurrentEndPara + 1
+                    danmakuCurrentEndPara = danmakuScheduledMaxPara
+                } else {
+                    startDanmakuRangeAt(nowSpeak)
+                }
+                enqueueNextDanmakuRange()
+            }
+        }
+        ensureDanmakuWorker()
+    }
+
+    /** 以 from 为起点开一个新区间并入队 */
+    private fun startDanmakuRangeAt(from: Int) {
+        if (from < 0 || from >= contentList.size) return
+        val end = calculateEndParagraphByCharCount(AppConfig.aiEffectCharInterval, from)
+        if (end < from) return
+        danmakuCurrentStartPara = from
+        danmakuCurrentEndPara = end
+        enqueueDanmakuRange(from, end)
+    }
+
+    /** 安排「下一个还没安排过的区间」，使队列始终比朗读领先一个区间 */
+    private fun enqueueNextDanmakuRange() {
+        val start = danmakuScheduledMaxPara + 1
+        if (start >= contentList.size) return
+        val end = calculateEndParagraphByCharCount(AppConfig.aiEffectCharInterval, start)
+        if (end < start) return
+        enqueueDanmakuRange(start, end)
+    }
+
+    private fun enqueueDanmakuRange(start: Int, end: Int) {
+        if (start < 0 || end < start) return
+        synchronized(danmakuPending) { danmakuPending.addLast(start to end) }
+        if (end > danmakuScheduledMaxPara) danmakuScheduledMaxPara = end
+    }
+
+    /**
+     * 串行 worker：逐区间生成弹幕。
+     * 每区间条数按「总条数 × 区间字数占比」分摊；区间结果合并进
+     * [DanmakuStore] 并全量广播 DANMAKU_READY（弹窗据此增量刷新）。
+     */
+    private fun ensureDanmakuWorker() {
+        if (danmakuWorker?.isActive == true) return
+        danmakuWorker = lifecycleScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                val range = synchronized(danmakuPending) {
+                    danmakuPending.removeFirstOrNull()
+                } ?: break
+                val bookName = danmakuBookName
+                val title = danmakuChapterTitle
+                if (bookName.isEmpty() || title.isEmpty()) continue
+                // 快照区间段落（与章节切换并发改写 contentList 的窗口极小，且可重入）
+                val paras = ArrayList<Pair<Int, String>>()
+                for (i in range.first..range.second) {
+                    val text = contentList.getOrNull(i)
+                    if (!text.isNullOrBlank() && !text.matches(AppPattern.notReadAloudRegex)) {
+                        paras.add(i to text)
+                    }
+                }
+                if (paras.isEmpty()) continue
+                val count = if (danmakuChapterTotalChars > 0) {
+                    (AppConfig.danmakuCount.toDouble() *
+                        AppConfig.aiEffectCharInterval / danmakuChapterTotalChars)
+                        .coerceAtLeast(1.0).toInt()
+                } else 1
+                val items = DanmakuGenerator.generateRange(
+                    bookName, title, danmakuContentHash, paras, count
+                )
+                if (items.isNotEmpty()) {
+                    val all = DanmakuStore.merge(danmakuNameKey, items)
+                    postEvent(EventBus.DANMAKU_READY, DanmakuReady(danmakuNameKey, all))
+                }
+            }
+        }
+    }
+
+    /** 章节切换/停止时清空调度状态；生成记录保留在缓存文件中，重读直接复用 */
+    private fun clearDanmakuRuntime() {
+        danmakuWorker?.cancel()
+        danmakuWorker = null
+        synchronized(danmakuPending) { danmakuPending.clear() }
+        danmakuStarted = false
+        danmakuScheduledMaxPara = -1
+        danmakuCurrentStartPara = -1
+        danmakuCurrentEndPara = -1
+        danmakuChapterKey = ""
+    }
+
+    /**
+     * 供设置界面在朗读运行中手动触发弹幕生成：
+     * 重置调度状态后立即从当前位置开始排区间（命中缓存不重复请求）。
+     */
+    fun triggerDanmakuGenerationManual() {
+        clearDanmakuRuntime()
+        scheduleDanmaku()
     }
 
     /**

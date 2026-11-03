@@ -2386,17 +2386,22 @@ private fun DownloadStateItem(
                 VideoDownloader.DlStatus.FAILED -> "失败"
                 VideoDownloader.DlStatus.COLLECTING ->
                     if (st.progress > 0) "跟随播放 ${st.progress}%" else "跟随播放"
+                VideoDownloader.DlStatus.MERGING -> "合并中 ${st.mergeProgress.coerceAtLeast(0)}%"
             },
             color = when (st.status) {
                 VideoDownloader.DlStatus.FAILED -> Color(0xFFFF6B6B)
                 VideoDownloader.DlStatus.COMPLETED -> Color(0xFF34C759)
+                VideoDownloader.DlStatus.MERGING -> MaterialTheme.colorScheme.primary
                 else -> contentColor.copy(alpha = 0.6f)
             },
             fontSize = 11.sp
         )
+        // 自动合并（转封装 MP4）进行中：播放/暂停按钮不动作，避免和转封装抢文件
+        val merging = st.status == VideoDownloader.DlStatus.MERGING
         // 暂停 / 继续 / 播放：已完成的一集该按钮变成"播放"，点一下直接播这一集
         IconButton(onClick = {
             when {
+                merging -> Unit
                 completed -> onPlay(st)
                 running -> VideoDownloader.pause(st.key)
                 else -> VideoDownloader.resume(st.key)

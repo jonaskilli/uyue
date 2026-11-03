@@ -27,7 +27,11 @@ import io.legado.app.constant.PreferKey
 import io.legado.app.databinding.DialogFullscreenImageBinding
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.BookCover
+import io.legado.app.model.DanmakuItem
+import io.legado.app.model.DanmakuReady
+import io.legado.app.model.DanmakuStore
 import io.legado.app.model.ReadBook
+import io.legado.app.model.VnParagraph
 import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
@@ -56,6 +60,15 @@ import java.util.TimerTask
 class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_image) {
 
     private val binding by viewBinding(DialogFullscreenImageBinding::bind)
+
+    /** 当前章节的 AI 弹幕（与朗读弹窗同一事件源，本界面打开时接管显示） */
+    private var currentDanmaku: List<DanmakuItem> = emptyList()
+
+    /** 弹幕章节 key（识别切章用） */
+    private var danmakuKey: String? = null
+
+    /** 已发射过的段落锚点：区间生成晚于朗读时，读到锚点段照样补发 */
+    private val firedAnchors = mutableSetOf<Int>()
 
     /** 当前显示的图片文件，进入时从最新生图取，后续随 AI_IMAGE_CHANGED 更新 */
     private var currentImageFile: File? = null
@@ -145,6 +158,19 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
 
         // 图片手势：左右滑动切换 + 单击保存 + 长按保存全部
         setupAiImageGesture()
+
+        initDanmaku()
+    }
+
+    /** 弹幕层初始化：按开关显示浮层；弹窗重建时从 DanmakuStore 恢复本章弹幕 */
+    private fun initDanmaku() {
+        binding.danmakuView.visibility =
+            if (AppConfig.danmakuEnabled) View.VISIBLE else View.GONE
+        if (!AppConfig.danmakuEnabled) return
+        val book = ReadBook.book ?: return
+        val title = ReadBook.curTextChapter?.title ?: return
+        danmakuKey = DanmakuStore.key
+        currentDanmaku = DanmakuStore.get("${book.name}|$title")
     }
 
     override fun observeLiveBus() {
@@ -170,6 +196,19 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 aiHistoryImages = AiImageGenerator.getDisplayGallery()
                 aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
             }
+        }
+        observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
+            if (ready.key != danmakuKey) {
+                danmakuKey = ready.key
+                firedAnchors.clear()
+                binding.danmakuView.clearDanmaku()
+            }
+            currentDanmaku = ready.items
+        }
+        observeEvent<VnParagraph>(EventBus.VN_PARAGRAPH) { p ->
+            if (!AppConfig.danmakuEnabled || currentDanmaku.isEmpty()) return@observeEvent
+            currentDanmaku.filter { it.para <= p.index && firedAnchors.add(it.para) }
+                .forEach { binding.danmakuView.show(it.text) }
         }
     }
 

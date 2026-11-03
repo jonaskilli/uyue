@@ -1420,6 +1420,25 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val aiEffectCharInterval: Int
         get() = bgmAICharInterval
 
+    // ==================== AI 弹幕 ====================
+    // 朗读时让大模型按章节剧情生成若干条弹幕，朗读到对应段落时
+    // 从朗读弹窗屏幕上方多轨道错开飘过。大模型通道复用 BGM 的 AI 提供商。
+
+    /** 弹幕总开关，默认关闭 */
+    var danmakuEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.danmakuEnabled, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.danmakuEnabled, value)
+
+    /** 每章生成的弹幕条数 */
+    var danmakuCount: Int
+        get() = appCtx.getPrefInt(PreferKey.danmakuCount, 6).coerceIn(1, 20)
+        set(value) = appCtx.putPrefInt(PreferKey.danmakuCount, value.coerceIn(1, 20))
+
+    /** 屏幕上方同时可用的弹幕轨道数（错开用） */
+    var danmakuTrackCount: Int
+        get() = appCtx.getPrefInt(PreferKey.danmakuTrackCount, 3).coerceIn(1, 6)
+        set(value) = appCtx.putPrefInt(PreferKey.danmakuTrackCount, value.coerceIn(1, 6))
+
     /** 导出章节音频时是否混入 AI 选中的音效 */
     var aiEffectMixOnMerge: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.aiEffectMixOnMerge, false)
