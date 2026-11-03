@@ -396,8 +396,30 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
                 // 同步开-关挡不住。这里改成 post 复位，把 flag 撑过异步回调；
                 // 显示名称的覆盖另由 voiceSelectionFromUser 兜底（程序恢复不置位）。
                 restoringVoiceSelection = true
-                if (voiceIdx >= 0) binding.spinnerVoice.setSelection(voiceIdx)
+                if (voiceIdx >= 0) {
+                    binding.spinnerVoice.setSelection(voiceIdx)
+                } else {
+                    // 新增配置（无预选音色）：列表加载完毕（含千问这类需联网获取的插件）
+                    // 默认选中第一个发音人。
+                    binding.spinnerVoice.setSelection(0)
+                }
                 binding.spinnerVoice.post { restoringVoiceSelection = false }
+                // 显示名称规则（列表加载完统一处理，不依赖选中事件时序）：
+                // 1) 用户切换到不同插件 → 不同插件名字不同，旧名无意义，直接用新插件第一个发音人名字覆盖；
+                // 2) 新增配置且框为空 → 兜底填第一个发音人名字；
+                // 3) 打开已有配置（恢复，config.pluginId 与选中插件一致）则不动，保留手填名字。
+                if (voiceOptions.isNotEmpty()) {
+                    val selPluginIdx = binding.spinnerPlugin.selectedItemPosition
+                    val selPlugin = if (selPluginIdx > 0) plugins.getOrNull(selPluginIdx - 1) else null
+                    val isPluginSwitch = selPlugin != null
+                        && selPlugin.id != config.pluginId
+                        && selPlugin.pluginId != config.pluginId
+                    if (isPluginSwitch) {
+                        binding.etDisplayName.setText(voiceOptions[0].name.ifBlank { voiceOptions[0].id })
+                    } else if (voiceIdx < 0 && binding.etDisplayName.text.isBlank()) {
+                        binding.etDisplayName.setText(voiceOptions[0].name.ifBlank { voiceOptions[0].id })
+                    }
+                }
             }
         }
     }
@@ -407,8 +429,14 @@ class TtsConfigEditorActivity : BaseActivity<ActivityTtsConfigEditorBinding>() {
         val voice = voiceOptions[position]
         // 仅用户主动切换音色时，才用音色名同步「显示名称」；之后用户可随意手改，
         // 直到下次切换发音人才再覆盖。恢复表单（打开页面）时 adapter/setSelection
-        // 也会异步触发这里，但 voiceSelectionFromUser 为 false，不会动显示名称。
+        // 也会异步触发这里，但 voiceSelectionFromUser 为 false，不会动显示名称，
+        // 避免把用户手动设置的名字覆盖掉。
         if (!restoringVoiceSelection && voiceSelectionFromUser) {
+            // 用户主动切换音色：用音色名同步「显示名称」（之后可手改，下次主动换才再覆盖）。
+            binding.etDisplayName.setText(voice.name.ifBlank { voice.id })
+        } else if (binding.etDisplayName.text.isBlank()) {
+            // 显示名称为空才兜底：空判断保证不会覆盖用户手填的名字；
+            // 打开已有配置（恢复）或列表加载完都属于此情形，避免保存落空成音色ID。
             binding.etDisplayName.setText(voice.name.ifBlank { voice.id })
         }
         notifyVoiceChanged(voice.id)
