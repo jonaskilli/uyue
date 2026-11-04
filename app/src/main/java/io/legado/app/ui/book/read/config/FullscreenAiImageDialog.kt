@@ -30,6 +30,9 @@ import io.legado.app.model.BookCover
 import io.legado.app.model.DanmakuItem
 import io.legado.app.model.DanmakuReady
 import io.legado.app.model.DanmakuStore
+import io.legado.app.model.SceneEffectCue
+import io.legado.app.model.SceneEffectReady
+import io.legado.app.model.SceneEffectStore
 import io.legado.app.model.ReadBook
 import io.legado.app.model.VnParagraph
 import io.legado.app.ui.book.read.page.DialogRoleManager
@@ -69,6 +72,11 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
 
     /** 已发射过的段落锚点：区间生成晚于朗读时，读到锚点段照样补发 */
     private val firedAnchors = mutableSetOf<Int>()
+
+    /** 当前章节场景特效（SCENE_EFFECT_READY 写入；VN_PARAGRAPH 按锚点播放） */
+    private var currentSceneEffects: List<SceneEffectCue> = emptyList()
+    private var sceneEffectKey: String? = null
+    private val firedSceneAnchors = mutableSetOf<Int>()
 
     /** 当前显示的图片文件，进入时从最新生图取，后续随 AI_IMAGE_CHANGED 更新 */
     private var currentImageFile: File? = null
@@ -160,6 +168,7 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
         setupAiImageGesture()
 
         initDanmaku()
+        initSceneEffect()
     }
 
     /** 弹幕层初始化：按开关显示浮层；弹窗重建时从 DanmakuStore 恢复本章弹幕 */
@@ -171,6 +180,17 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
         val title = ReadBook.curTextChapter?.title ?: return
         danmakuKey = DanmakuStore.key
         currentDanmaku = DanmakuStore.get("${book.name}|$title")
+    }
+
+    /** 场景特效层初始化：按开关显示；弹窗重建时从 Store 恢复本章结果 */
+    private fun initSceneEffect() {
+        binding.sceneEffectView.visibility =
+            if (AppConfig.sceneEffectEnabled) View.VISIBLE else View.GONE
+        if (!AppConfig.sceneEffectEnabled) return
+        val book = ReadBook.book ?: return
+        val title = ReadBook.curTextChapter?.title ?: return
+        sceneEffectKey = SceneEffectStore.key
+        currentSceneEffects = SceneEffectStore.get("${book.name}|$title")
     }
 
     override fun observeLiveBus() {
@@ -196,6 +216,32 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 aiHistoryImages = AiImageGenerator.getDisplayGallery()
                 aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
             }
+        }
+        observeEvent<SceneEffectReady>(EventBus.SCENE_EFFECT_READY) { ready ->
+            if (ready.key != sceneEffectKey) {
+                sceneEffectKey = ready.key
+                firedSceneAnchors.clear()
+                binding.sceneEffectView.clearSceneEffects()
+            }
+            currentSceneEffects = ready.items
+        }
+        observeEvent<VnParagraph>(EventBus.VN_PARAGRAPH) { p ->
+            // 新章第一段：清掉上一章可能还在播的特效
+            if (p.index == 0) {
+                firedSceneAnchors.clear()
+                binding.sceneEffectView.clearSceneEffects()
+            }
+            if (!AppConfig.sceneEffectEnabled || currentSceneEffects.isEmpty()) return@observeEvent
+            currentSceneEffects.filter { it.para <= p.index && firedSceneAnchors.add(it.para) }
+                .forEach { cue ->
+                    val keyAtSchedule = sceneEffectKey
+                    // 与弹幕一致延后 1 秒：读到描写时才出现，不提前剧透
+                    binding.sceneEffectView.postDelayed({
+                        if (sceneEffectKey == keyAtSchedule && AppConfig.sceneEffectEnabled) {
+                            binding.sceneEffectView.show(cue)
+                        }
+                    }, 1000L)
+                }
         }
         observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
             if (ready.key != danmakuKey) {

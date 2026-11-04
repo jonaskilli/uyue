@@ -54,6 +54,9 @@ import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.DanmakuItem
 import io.legado.app.model.DanmakuReady
 import io.legado.app.model.DanmakuStore
+import io.legado.app.model.SceneEffectCue
+import io.legado.app.model.SceneEffectReady
+import io.legado.app.model.SceneEffectStore
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.model.VnParagraph
@@ -112,6 +115,11 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     /** 已发射过的段落锚点：区间生成晚于朗读时，读到锚点段照样补发 */
     private val firedAnchors = mutableSetOf<Int>()
+
+    /** 当前章节场景特效（SCENE_EFFECT_READY 写入；VN_PARAGRAPH 按锚点播放） */
+    private var currentSceneEffects: List<SceneEffectCue> = emptyList()
+    private var sceneEffectKey: String? = null
+    private val firedSceneAnchors = mutableSetOf<Int>()
     private var imageTimer: Timer? = null
     private var currentImageIndex = 0
     private var bookImageFiles: List<File> = emptyList()
@@ -367,6 +375,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 // 恢复弹幕层（半屏模式已按下方说明移除）
                 binding.danmakuView.visibility =
                     if (AppConfig.danmakuEnabled) View.VISIBLE else View.GONE
+                binding.sceneEffectView.visibility =
+                    if (AppConfig.sceneEffectEnabled) View.VISIBLE else View.GONE
                 // 清掉半屏模式加的穿透标记：全屏时窗口铺满整屏，触摸应只由本窗口处理，
                 // 否则运行时由半屏切回全屏会残留该标记
                 clearFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
@@ -418,6 +428,9 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 // 因此半屏模式彻底移除弹幕层并清空在屏弹幕
                 binding.danmakuView.clearDanmaku()
                 binding.danmakuView.gone()
+                // 场景特效层同样 match_parent，半屏模式必须彻底移除，否则撑满窗口
+                binding.sceneEffectView.clearSceneEffects()
+                binding.sceneEffectView.gone()
                 WindowCompat.setDecorFitsSystemWindows(this, true)
                 decorView.setPadding(0, 0, 0, 0)
                 statusBarColor = Color.TRANSPARENT
@@ -502,6 +515,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         initData()
         initEvent()
         initDanmaku()
+        initSceneEffect()
         // 注意：窗口手势不在此挂载。onFragmentCreated 由 onViewCreated 调用，
         // 早于 onStart，此时 isFullscreen 还没被 applyWindowMode 赋值，挂上去会直接 return。
         // 统一在 onStart 的 applyWindowMode 之后由 installWindowGestures 挂载。
@@ -1859,6 +1873,17 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         currentDanmaku = DanmakuStore.get("${book.name}|$title")
     }
 
+    /** 场景特效层初始化：按开关显示；弹窗重建时从 Store 恢复本章结果 */
+    private fun initSceneEffect() {
+        binding.sceneEffectView.visibility =
+            if (AppConfig.sceneEffectEnabled) View.VISIBLE else View.GONE
+        if (!AppConfig.sceneEffectEnabled) return
+        val book = ReadBook.book ?: return
+        val title = ReadBook.curTextChapter?.title ?: return
+        sceneEffectKey = SceneEffectStore.key
+        currentSceneEffects = SceneEffectStore.get("${book.name}|$title")
+    }
+
     override fun observeLiveBus() {
         observeEvent<Int>(EventBus.ALOUD_STATE) { upPlayState() }
         observeEvent<Int>(EventBus.READ_ALOUD_DS) { binding.seekTimer.progress = it }
@@ -1881,6 +1906,35 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             currentDanmaku = emptyList()
             firedAnchors.clear()
             binding.danmakuView.clearDanmaku()
+            currentSceneEffects = emptyList()
+            firedSceneAnchors.clear()
+            binding.sceneEffectView.clearSceneEffects()
+        }
+        observeEvent<SceneEffectReady>(EventBus.SCENE_EFFECT_READY) { ready ->
+            if (ready.key != sceneEffectKey) {
+                sceneEffectKey = ready.key
+                firedSceneAnchors.clear()
+                binding.sceneEffectView.clearSceneEffects()
+            }
+            currentSceneEffects = ready.items
+        }
+        observeEvent<VnParagraph>(EventBus.VN_PARAGRAPH) { p ->
+            // 新章第一段：清掉上一章可能还在播的特效
+            if (p.index == 0) {
+                firedSceneAnchors.clear()
+                binding.sceneEffectView.clearSceneEffects()
+            }
+            if (!AppConfig.sceneEffectEnabled || currentSceneEffects.isEmpty()) return@observeEvent
+            currentSceneEffects.filter { it.para <= p.index && firedSceneAnchors.add(it.para) }
+                .forEach { cue ->
+                    val keyAtSchedule = sceneEffectKey
+                    // 与弹幕一致延后 1 秒：读到描写时才出现，不提前剧透
+                    binding.sceneEffectView.postDelayed({
+                        if (sceneEffectKey == keyAtSchedule && AppConfig.sceneEffectEnabled) {
+                            binding.sceneEffectView.show(cue)
+                        }
+                    }, 1000L)
+                }
         }
         observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
             if (ready.key != danmakuKey) {

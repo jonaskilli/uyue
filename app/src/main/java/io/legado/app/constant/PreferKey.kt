@@ -270,6 +270,8 @@ object PreferKey {
     // --- AI 弹幕（朗读时按剧情在屏幕上方飘弹幕）---
     const val danmakuEnabled = "danmakuEnabled"
     const val danmakuTrackCount = "danmakuTrackCount"
+    // --- 场景特效（朗读时按场景描写播放雪/雨/落叶/闪电）---
+    const val sceneEffectEnabled = "sceneEffectEnabled"
     // 阅读界面顶部AI图片「手势开关」：开启后才允许用顶部下滑/图片上滑来开关图片
     const val readAloudImageInReadPage = "readAloudImageInReadPage"
     // 阅读界面顶部AI图片「当前是否正在显示」：由手势打开/关闭，与上面的手势开关解耦

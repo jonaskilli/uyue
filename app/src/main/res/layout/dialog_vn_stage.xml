@@ -24,6 +24,13 @@
         android:scaleType="centerCrop"
         android:contentDescription="场景背景" />
 
+    <!-- 场景特效层：绘制在背景之上、台词与弹幕之下；触摸穿透给下层 -->
+    <io.legado.app.ui.book.read.config.SceneEffectView
+        android:id="@+id/scene_effect_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
     <!-- 底部演出区：整体上移（不再紧贴屏幕底） -->
     <LinearLayout
         android:layout_width="match_parent"

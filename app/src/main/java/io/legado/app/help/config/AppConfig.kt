@@ -1438,6 +1438,14 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefInt(PreferKey.danmakuTrackCount, 3).coerceIn(1, 6)
         set(value) = appCtx.putPrefInt(PreferKey.danmakuTrackCount, value.coerceIn(1, 6))
 
+    // ==================== 场景特效 ====================
+    // 复用 AI 弹幕的区间调度/段落锚点，遇到场景描写时朗读界面播放一段时间的特效。
+
+    /** 场景特效总开关，默认关闭 */
+    var sceneEffectEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.sceneEffectEnabled, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.sceneEffectEnabled, value)
+
     /** 导出章节音频时是否混入 AI 选中的音效 */
     var aiEffectMixOnMerge: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.aiEffectMixOnMerge, false)
