@@ -11,16 +11,31 @@ package io.legado.app.model
 
 /** 场景特效类型 */
 enum class SceneEffectKind {
-    RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND;
+    // 原有 8 种：按 tftgamer 原版 s_()/Xg()/Cn() 实现
+    RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND,
+    // 站点「环境系统 / 人物表现」中的屏幕实体类（Cn() ambient、Xg()、Kg()）
+    FOG, SMOKE, BUBBLES, RAYS, DUST, BUTTERFLIES,
+    BIRDS_GULL, BIRDS_CROW, BIRD_FLOCK,
+    SPARKLES, QUESTION, SWEAT, HEART, ANGER, ZZZ, LIGHTBULB, COMIC,
+    // tsParticles（MIT）预设中适合小说场景的效果，按通用粒子算法独立实现
+    STARS, METEORS, FIREWORKS, FIRE, CONFETTI, FOUNTAIN, BOKEH,
+    FEATHERS, DANDELION;
 
     companion object {
         fun from(name: String?): SceneEffectKind? =
             values().firstOrNull { it.name.equals(name?.trim(), ignoreCase = true) }
 
-        /** 是否属于「室外才有」的天气/植物类特效 */
+        /** 由 SceneEffectExtraRenderer 绘制（主 View 只保留原 8 种的老实现） */
+        fun isExtra(kind: SceneEffectKind): Boolean = kind !in setOf(
+            RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND
+        )
+
+        /** 是否属于「室外才有」的天气/植物/天象类特效 */
         fun isOutdoorOnly(kind: SceneEffectKind): Boolean = when (kind) {
-            RAIN, SNOW, PETALS, LEAVES, LIGHTNING -> true
-            FIREFLIES, EMBERS, WIND -> false
+            RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FOG, DUST,
+            BIRDS_GULL, BIRDS_CROW, BIRD_FLOCK, BUTTERFLIES,
+            STARS, METEORS, FIREWORKS, FEATHERS, DANDELION -> true
+            else -> false
         }
     }
 }
@@ -41,7 +56,9 @@ data class SceneEffectCue(
     /** 是否叠加闪电轨道（与雨雪同时出现） */
     val lightning: Boolean = false,
     /** 来源：local（关键词规则）/ ai（大模型增强），便于排查 */
-    val source: String = "local"
+    val source: String = "local",
+    /** 拟声文字/符号类特效显示的内容（COMIC 用） */
+    val text: String? = null
 )
 
 /** 事件 EventBus.SCENE_EFFECT_READY 的载荷：章节 key + 该章当前全部特效 */

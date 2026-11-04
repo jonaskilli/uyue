@@ -273,6 +273,7 @@ class SceneEffectView @JvmOverloads constructor(
         style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
     }
     private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val extraRenderer = SceneEffectExtraRenderer()
 
     private var currentCue: SceneEffectCue? = null
     private var startMs = 0L
@@ -362,6 +363,7 @@ class SceneEffectView @JvmOverloads constructor(
             SceneEffectKind.FIREFLIES -> drawFireflies(canvas, cue, t, dur, w, h, k)
             SceneEffectKind.EMBERS -> drawEmbers(canvas, cue, t, dur, w, h, k)
             SceneEffectKind.WIND -> drawWind(canvas, cue, t, dur, w, h, k)
+            else -> extraRenderer.draw(canvas, cue, t, dur, w, h, k)
         }
         if (cue.lightning && cue.kind != SceneEffectKind.LIGHTNING) {
             drawLightning(canvas, t, dur, w, h, k, 0.5)
@@ -386,6 +388,7 @@ class SceneEffectView @JvmOverloads constructor(
             SceneEffectKind.FIREFLIES, SceneEffectKind.EMBERS -> intArrayOf(20, 35, 50, 70)[lv]
             SceneEffectKind.WIND -> intArrayOf(10, 16, 24, 32)[lv]
             SceneEffectKind.LIGHTNING -> 0
+            else -> 40
         }.coerceAtMost(600)
     }
 
