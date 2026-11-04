@@ -22,10 +22,10 @@ import java.util.concurrent.TimeUnit
  *   - 鉴权：Cookie 里的 hunyuan_user / hunyuan_token / hunyuan_source
  *   - 模型由 chatModelId 决定，思考开关由 effort 决定
  *
- * chatModelId 实测结论（2026-10 验证，其余 id 一律返回 40100 通用错误）：
- *   - "hy3"         → 混元3   （funcName: Hy3）
- *   - "hy4-preview" → 混元4   （funcName: Hy4 preview，modelId=327）
- * effort: "no_think" 快速回答，"high" 深度思考
+ * chatModelId 实测结论（2026-11-04 抓包）：
+ *   - "hy3" → 混元3（funcName: Hy3）
+ *   - "hy4" → 混元4（funcName: Hy4，modelId=328）
+ * 普通模式与思考模式共用 chatModelId，靠 effort 区分："no_think" / "high"
  */
 object HunyuanStudioClient {
     private val client = OkHttpClient.Builder()
@@ -49,8 +49,8 @@ object HunyuanStudioClient {
 
     /** 混元3 的 chatModelId。 */
     const val MODEL_ID_HY3 = "hy3"
-    /** 混元4 的 chatModelId（实测唯一可用入口，hy4 / hy4-pro 等均不可用）。 */
-    const val MODEL_ID_HY4 = "hy4-preview"
+    /** 混元4 的 chatModelId（2026-11-04 抓包为 hy4；旧 hy4-preview 已失效）。普通/思考模式共用。 */
+    const val MODEL_ID_HY4 = "hy4"
 
     /** effort：快速回答（关闭深度思考）。 */
     const val EFFORT_FAST = "no_think"

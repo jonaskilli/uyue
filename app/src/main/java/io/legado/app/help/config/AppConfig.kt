@@ -1346,7 +1346,11 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefString(PreferKey.aiChapterFixPrompt) ?: ""
         set(value) = appCtx.putPrefString(PreferKey.aiChapterFixPrompt, value)
 
-    /** AI 章节处理：自动处理开关。开启后每次切换章节，自动处理后续章节 */
+    /**
+     * 旧版全局自动处理开关：仅保留常量兼容历史备份，读取时会被清理。
+     * 新逻辑一律走 [io.legado.app.service.AiChapterFixService] 的按书存储，
+     * 界面保存时绝不要再写这个全局值，否则新书会默认继承开启状态。
+     */
     var aiChapterFixAuto: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.aiChapterFixAuto, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.aiChapterFixAuto, value)

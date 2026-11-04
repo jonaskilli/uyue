@@ -6,18 +6,23 @@ import android.view.ViewGroup
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import io.legado.app.R
 import io.legado.app.data.entities.AiChapterFixTemplate
 import io.legado.app.databinding.ItemAiImageTemplateBinding
-import io.legado.app.service.AiChapterFixService
+import io.legado.app.lib.theme.accentColor
+import io.legado.app.utils.getCompatColor
 
 /**
  * AI 章节处理模板列表 adapter。
- * 与生图模板不同：一本书只能绑定一个模板（单选语义），未绑定时使用默认模板。
+ *
+ * 每项两行：第一行单选 + 模板标题 + 更多，第二行提示 + 绑定开关。
+ * radioButton = 当前正在编辑的模板；switchBind = 当前书显式绑定的模板。
+ * 标题只显示模板名，不再把「编辑中」塞进标题导致折行。
  */
 class AiChapterFixTemplateListAdapter(
     private val selectedId: Long,
-    private val bookName: String,
-    private val bookUrl: String,
+    private val boundId: Long,
+    private val bindVisible: Boolean,
     private val onSelect: (AiChapterFixTemplate) -> Unit,
     /** 点击更多按钮，第二参数为锚点 View，用于挂载 PopupMenu */
     private val onMore: (AiChapterFixTemplate, View) -> Unit,
@@ -45,20 +50,25 @@ class AiChapterFixTemplateListAdapter(
         RecyclerView.ViewHolder(binding.root) {
 
         fun bind(template: AiChapterFixTemplate) {
-            binding.tvName.text = if (template.isDefault) "${template.name}（默认）" else template.name
-            binding.radioButton.isChecked = template.id == selectedId
+            val selected = template.id == selectedId
+            val context = binding.root.context
+            binding.tvName.text = buildString {
+                append(template.name)
+                if (template.isDefault) append("（默认）")
+            }
+            binding.tvName.setTextColor(
+                if (selected) context.accentColor
+                else context.getCompatColor(R.color.primaryText)
+            )
+            binding.radioButton.isChecked = selected
+            binding.radioButton.contentDescription = "编辑模板：${template.name}"
 
-            // 绑定开关：未打开书籍时隐藏
-            val bindVisible = bookName.isNotBlank() || bookUrl.isNotBlank()
-            binding.tvBindLabel.visibility = if (bindVisible) View.VISIBLE else View.GONE
-            binding.switchBind.visibility = if (bindVisible) View.VISIBLE else View.GONE
-            // 绑定状态：显式绑定了该模板，或未绑定任何模板且这是默认模板（默认模板兜底生效）
-            val boundId = AiChapterFixService.getBoundTemplateId(bookName, bookUrl)
-            val bound = bindVisible &&
-                (boundId == template.id || (boundId == 0L && template.isDefault))
+            binding.bindRow.visibility = if (bindVisible) View.VISIBLE else View.GONE
+            binding.tvBindLabel.text = if (selected) "编辑中 · 绑定本书" else "绑定本书"
+            binding.switchBind.contentDescription = "绑定本书：${template.name}"
             // 避免复用触发回调
             binding.switchBind.setOnCheckedChangeListener(null)
-            binding.switchBind.isChecked = bound
+            binding.switchBind.isChecked = bindVisible && boundId == template.id
             binding.switchBind.setOnCheckedChangeListener { _, isChecked ->
                 onBindToggle(template, isChecked)
             }

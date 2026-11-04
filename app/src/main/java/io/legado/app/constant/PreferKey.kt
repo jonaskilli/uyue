@@ -392,7 +392,7 @@ object PreferKey {
     const val aiChapterFixApi = "aiChapterFixApi"
     // AI 章节修复提示词，为空时用内置默认
     const val aiChapterFixPrompt = "aiChapterFixPrompt"
-    // 自动处理开关：切换章节时自动处理后续章节
+    // 旧版全局自动处理开关：保留常量用于识别并清理历史误写值；界面不再写入、读取时不再回退
     const val aiChapterFixAuto = "aiChapterFixAuto"
     // 每次处理的章节数量（自动处理与批量处理共用）
     const val aiChapterFixCount = "aiChapterFixCount"
@@ -408,6 +408,8 @@ object PreferKey {
     const val aiChapterFixTemplateBindPrefix = "aiChapterFixTemplateBind_"
     // AI 章节处理自动处理开关（按书生效），key = 前缀 + 书名
     const val aiChapterFixAutoBookPrefix = "aiChapterFixAutoBook_"
+    // AI 章节处理「上次编辑的模板 id」：与 AI 生图 aiImageLastEditTemplateId 同机制
+    const val aiChapterFixLastEditTemplateId = "aiChapterFixLastEditTemplateId"
 
     // --- AI 生图「按书名」绑定（新版）---
     // 旧版按 bookUrl 存储，换书源后 bookUrl 变化会导致绑定失效；新版改按书名存储。

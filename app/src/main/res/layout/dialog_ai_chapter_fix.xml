@@ -21,7 +21,29 @@
             app:popupTheme="@style/AppTheme.PopupOverlay"
             app:title="AI处理章节"
             app:titleTextAppearance="@style/ToolbarTitle"
-            app:titleTextColor="@android:color/black" />
+            app:titleTextColor="@color/primaryText">
+
+            <TextView
+                android:id="@+id/btn_save"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/bg_role_chat_send"
+                android:clickable="true"
+                android:contentDescription="@string/action_save"
+                android:focusable="true"
+                android:foreground="?android:attr/selectableItemBackground"
+                android:gravity="center"
+                android:minWidth="72dp"
+                android:paddingHorizontal="18dp"
+                android:paddingVertical="8dp"
+                android:text="@string/action_save"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+        </androidx.appcompat.widget.Toolbar>
 
         <androidx.core.widget.NestedScrollView
             android:layout_width="match_parent"
@@ -45,7 +67,9 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="当前模板：默认模板"
+                        android:ellipsize="end"
+                        android:maxLines="2"
+                        android:text="编辑模板：加载中…"
                         android:textColor="@color/primaryText"
                         android:textSize="15sp"
                         android:textStyle="bold" />
@@ -62,6 +86,15 @@
                         android:textColor="?attr/colorAccent"
                         android:textSize="14sp" />
                 </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tv_binding_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="自动处理模板：加载中…"
+                    android:textColor="@color/secondaryText"
+                    android:textSize="12sp" />
 
                 <io.legado.app.ui.widget.text.TextInputLayout
                     android:layout_width="match_parent"
@@ -81,7 +114,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
-                    android:hint="提示词">
+                    android:hint="提示词（留空使用内置默认）">
 
                     <io.legado.app.lib.theme.view.ThemeEditText
                         android:id="@+id/etPrompt"
@@ -230,7 +263,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="数量为 1 时处理单章（没缓存会自动下载）；大于 1 时批量处理，只处理已缓存的章节。改完正文会同步刷新朗读文本。所有设置在输入时即已自动保存，也可点右上角保存按钮确认。超过拆分阈值的章节会按阈值均分成多块分别处理，切分不破坏段落；0 表示不拆分。AI 请求失败或返回无法解析时按重试次数自动重试；超时时间为单次请求从发起到响应结束的总时限，章节大、AI 生成慢时可调大（如 600 秒）。上下文参考字数大于 0 时，会在正文上、下附上上一章结尾 / 下一章开头（仅限已缓存章节）；拆分成多块时，每一块也会带上前一块结尾 / 后一块开头，供 AI 理解情节，上下文不会被修改。"
+                    android:text="数量为 1 时处理单章（没缓存会自动下载）；大于 1 时批量处理，只处理已缓存的章节。改完正文会同步刷新朗读文本。修改后请点右上角「保存」写入当前编辑模板（保存后关闭）；点下方处理按钮会先保存再处理，取消/返回不保存。自动处理开关只作用于当前书籍且拨动后立即生效。超过拆分阈值的章节会按阈值均分成多块分别处理，切分不破坏段落；0 表示不拆分。AI 请求失败或返回无法解析时按重试次数自动重试；超时时间为单次请求从发起到响应结束的总时限，章节大、AI 生成慢时可调大（如 600 秒）。上下文参考字数大于 0 时，会在正文上、下附上上一章结尾 / 下一章开头（仅限已缓存章节）；拆分成多块时，每一块也会带上前一块结尾 / 后一块开头，供 AI 理解情节，上下文不会被修改。"
                     android:textColor="@color/secondaryText"
                     android:textSize="12sp" />
 
