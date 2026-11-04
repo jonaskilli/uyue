@@ -9,7 +9,9 @@ import androidx.media3.common.audio.AudioProcessingPipeline
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.SilenceSkippingAudioProcessor
+import com.arthenica.mobileffmpeg.FFmpeg
 import com.google.common.collect.ImmutableList
+import io.legado.app.constant.AppLog
 import io.legado.app.help.audio.ExoAudioDecoder
 import io.legado.app.help.audio.Sonic
 import io.legado.app.help.audiobook.PostAudioParams
@@ -1147,9 +1149,73 @@ object AudioDecodeUtil {
         }
     }
 
+    /**
+     * FFmpeg 解码文件为 PCM（mobile-ffmpeg-min，解码器全为原生自带）。
+     *
+     * @param targetRate 目标采样率，null 表示保留源采样率
+     * @param targetChannels 目标声道数，null 表示保留源声道
+     * @return (PCM, 采样率, 声道数)；失败返回 null（静默，由调用方走兜底链）
+     *
+     * 说明：本层同时用 swresample 完成重采样，质量优于 [resamplePcm] 的线性插值；
+     * 对非标封装、残缺流、ID3 残留等的容忍度也远高于平台 MediaExtractor。
+     */
+    fun decodeFileViaFfmpeg(
+        file: File,
+        targetRate: Int? = null,
+        targetChannels: Int? = null,
+    ): Triple<ByteArray, Int, Int>? {
+        var tempOut: File? = null
+        return try {
+            tempOut = File.createTempFile("ff_dec_out", ".wav")
+            // 直接转码为标准 WAV（pcm_s16le），解码 + 重采样一步到位
+            val cmd = StringBuilder("-y -i ").append(file.absolutePath)
+                .append(" -vn -acodec pcm_s16le")
+            targetRate?.let { cmd.append(" -ar ").append(it) }
+            targetChannels?.let { cmd.append(" -ac ").append(it) }
+            cmd.append(' ').append(tempOut.absolutePath)
+            val rc = FFmpeg.execute(cmd.toString())
+            if (rc != 0) return null
+            val wav = tempOut.readBytes()
+            if (wav.size <= 44) return null
+            extractWavPcm(wav)
+        } catch (e: Throwable) {
+            // 必须接 Throwable：32 位设备（APK 只含 arm64-v8a 的 .so）上加载
+            // mobile-ffmpeg 会抛 UnsatisfiedLinkError / NoClassDefFoundError，
+            // 它们是 Error 不是 Exception，catch(Exception) 接不住会炸掉解码链。
+            AppLog.put("$TAG FFmpeg 解码不可用/失败: ${e.localizedMessage}")
+            null
+        } finally {
+            tempOut?.delete()
+        }
+    }
+
+    /**
+     * ★ 解码第一优先：FFmpeg 解码任意格式音频到标准 PCM。
+     * 失败（返回 null）时由调用方静默落入 Exo / MediaCodec 兜底链，合成不中断。
+     */
+    private fun decodeViaFfmpeg(audioData: ByteArray): Triple<ByteArray, Int, Int>? {
+        var tempIn: File? = null
+        return try {
+            tempIn = File.createTempFile("ff_dec_in", detectAudioExtension(audioData))
+            tempIn.writeBytes(audioData)
+            decodeFileViaFfmpeg(tempIn, TARGET_SAMPLE_RATE, TARGET_CHANNELS)
+                ?.let { validateDecodedPcm(audioData, it) }
+        } finally {
+            tempIn?.delete()
+        }
+    }
+
     /** 使用 MediaExtractor + MediaCodec 解码任意格式音频 */
     private fun decodeViaMediaCodec(audioData: ByteArray): Triple<ByteArray, Int, Int>? {
-        // ★ 第一优先：ExoPlayer（media3 自带 extractor：纯 Java、打包在 APK 内）解码。
+        // ★ 第零优先：FFmpeg（mobile-ffmpeg-min）解码——解码器最全、最精准，
+        // 顺带用 swresample 高质量重采样到目标参数。失败才走下面各兜底层。
+        try {
+            decodeViaFfmpeg(audioData)?.let { return it }
+        } catch (_: Throwable) {
+            // FFmpeg 不可用（如非 arm64 设备加载 .so 失败抛 Error）：静默进入兜底
+        }
+
+        // ★ 第一优先（FFmpeg 之后）：ExoPlayer（media3 自带 extractor：纯 Java、打包在 APK 内）解码。
         // 平台 MediaExtractor 的 MP3 解析由 OEM 维护、随 Android 版本/ROM 变化，
         // 对 ID3 标签尤其挑剔，是「时好时坏」的根源；media3 跨设备行为一致，对
         // ID3/裸帧/VBR 容忍度高——移植自 TTS_Server_Android，它的合成转码从不

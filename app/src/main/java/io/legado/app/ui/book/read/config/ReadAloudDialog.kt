@@ -80,6 +80,9 @@ import androidx.appcompat.app.AlertDialog
 class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     companion object {
+        /** 弹幕发射统一延后时长（毫秒）：AI 弹幕按段落起点触发，延后 1 秒让弹幕与朗读情节对齐 */
+        const val DANMAKU_LAUNCH_DELAY_MS = 1000L
+
         /**
          * 手势序列超时（毫秒）。
          * 超过此间隔没有事件即视为新序列，用于 ACTION_UP 丢失后的状态自愈。
@@ -1064,14 +1067,26 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         // 本书专属旁白：点击弹出旁白音色选择（默认 = 不指定，按默认逻辑挑）
         tvTtsNarration.setOnClickListener { showNarrationPicker() }
         upNarrationText()
+        // 加减按钮：若当前值不在 0.05 步进刻度上（如拖动条产生的 1.02），
+        // 第一次点击先吸附到最近的刻度（加→向上取整，减→向下取整），之后再按步进走
         ivTtsSpeechReduce.setOnClickListener {
-            val v = (AppConfig.ttsSpeechRateFine - 5).coerceAtLeast(0)
+            val cur = AppConfig.ttsSpeechRateFine
+            val v = if (cur % 5 == 0) {
+                (cur - 5).coerceAtLeast(0)
+            } else {
+                cur / 5 * 5
+            }
             seekTtsSpeechRate.progress = v
             AppConfig.ttsSpeechRateFine = v
             upTtsSpeechRate()
         }
         ivTtsSpeechAdd.setOnClickListener {
-            val v = (AppConfig.ttsSpeechRateFine + 5).coerceAtMost(450)
+            val cur = AppConfig.ttsSpeechRateFine
+            val v = if (cur % 5 == 0) {
+                (cur + 5).coerceAtMost(450)
+            } else {
+                (cur + 4) / 5 * 5
+            }
             seekTtsSpeechRate.progress = v
             AppConfig.ttsSpeechRateFine = v
             upTtsSpeechRate()
@@ -1879,9 +1894,19 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         }
         observeEvent<VnParagraph>(EventBus.VN_PARAGRAPH) { p ->
             if (!AppConfig.danmakuEnabled || currentDanmaku.isEmpty()) return@observeEvent
-            // 锚点 <= 当前段落即发射（追发错过的），firedAnchors 保证每条只发一次
+            // 锚点 <= 当前段落即发射（追发错过的），firedAnchors 保证每条只发一次。
+            // 发射统一延后 1 秒：AI 弹幕按段落起点触发，情节常在段落中后段才读到，
+            // 立即发射会「剧透」——延后让弹幕出现时朗读刚好讲到这里。
             currentDanmaku.filter { it.para <= p.index && firedAnchors.add(it.para) }
-                .forEach { binding.danmakuView.show(it.text) }
+                .forEach { item ->
+                    val keyAtSchedule = danmakuKey
+                    binding.danmakuView.postDelayed({
+                        // 延迟期间切章 / 关闭弹幕开关：丢弃，避免旧弹幕在新章开头冒出来
+                        if (danmakuKey == keyAtSchedule && AppConfig.danmakuEnabled) {
+                            binding.danmakuView.show(item.text)
+                        }
+                    }, DANMAKU_LAUNCH_DELAY_MS)
+                }
         }
         observeEvent<String>(EventBus.AI_IMAGE_CHANGED) { imagePath ->
             if (imagePath.isNotBlank() && File(imagePath).exists()) {

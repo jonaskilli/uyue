@@ -23,6 +23,8 @@ import io.legado.app.constant.AppPattern
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.glide.ImageLoader
 import io.legado.app.help.glide.OkHttpModelLoader
+import io.legado.app.help.book.isVideo
+import io.legado.app.help.video.VideoDownloader
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.model.BookCover
 import io.legado.app.utils.textHeight
@@ -282,7 +284,14 @@ open class CoverImageView @JvmOverloads constructor(
         lifecycle: Lifecycle? = null,
         onLoadFinish: (() -> Unit)? = null
     ) {
-       load(book.getDisplayCover(), book.name, book.author, loadOnlyWifi, book.origin, fragment, lifecycle, onLoadFinish)
+        // 视频书：若该视频已下载（下载目录里有落地封面），优先用本地封面，
+        // 线上 URL 有防盗链/时效问题；没有本地封面则沿用原逻辑
+        val path = if (book.isVideo) {
+            VideoDownloader.bookshelfLocalCover(book) ?: book.getDisplayCover()
+        } else {
+            book.getDisplayCover()
+        }
+        load(path, book.name, book.author, loadOnlyWifi, book.origin, fragment, lifecycle, onLoadFinish)
     }
 
     fun load(

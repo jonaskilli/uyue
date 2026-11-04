@@ -159,36 +159,6 @@
             tools:ignore="TouchTargetSizeCheck" />
     </LinearLayout>
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:layout_marginTop="4dp">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="每章弹幕条数"
-            android:textColor="@color/primaryText"
-            android:textSize="14sp" />
-
-        <Space
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-
-        <EditText
-            android:id="@+id/et_danmaku_count"
-            android:layout_width="60dp"
-            android:layout_height="wrap_content"
-            android:inputType="number"
-            android:gravity="end"
-            android:text="6"
-            android:textColor="@color/primaryText"
-            android:textSize="14sp" />
-    </LinearLayout>
-
     <!-- ===== 音效设置 ===== -->
     <View
         android:layout_width="match_parent"

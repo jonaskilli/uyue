@@ -93,6 +93,9 @@ abstract class BaseReadAloudService : BaseService(),
     AudioManager.OnAudioFocusChangeListener {
 
     companion object {
+        /** 每章弹幕条数（固定值，不再提供设置）：配合按字数占比分摊，12 在中长章节里密度适中 */
+        const val DANMAKU_COUNT_PER_CHAPTER = 12
+
         /** 音效文件（JSON）存放目录，音效规则管理界面也往这里写入 */
         const val SOUND_EFFECT_DIR = "/storage/emulated/0/Download/chajian/bendiyinxiao2"
 
@@ -2310,6 +2313,9 @@ abstract class BaseReadAloudService : BaseService(),
     private var danmakuContentHash = ""
     private var danmakuChapterTotalChars = 0
 
+    /** 弹幕条数按区间字数占比分摊时的小数余额（累积到后续区间，保证全章总条数≈设置值） */
+    private var danmakuCountRemainder = 0.0
+
     /**
      * 每段朗读开始时调用（prepareSubtitles），驱动弹幕区间的提前调度：
      * - 首段：从当前位置开区间并入队，再预排下一个区间；
@@ -2329,6 +2335,7 @@ abstract class BaseReadAloudService : BaseService(),
             danmakuChapterTitle = title
             danmakuContentHash = contentList.joinToString("\n").hashCode().toString()
             danmakuChapterTotalChars = contentList.sumOf { it.length + 1 }
+            danmakuCountRemainder = 0.0
             danmakuStarted = false
             danmakuScheduledMaxPara = -1
             danmakuCurrentStartPara = -1
@@ -2411,10 +2418,17 @@ abstract class BaseReadAloudService : BaseService(),
                     }
                 }
                 if (paras.isEmpty()) continue
+                // 每区间条数 = 总条数 × 区间实际字数占比，小数余额累积到后续区间。
+                // 条数固定为 DANMAKU_COUNT_PER_CHAPTER（原输入框已移除：旧取整逻辑
+                // 让设置在中长章节里密度毫无差别，没有存在的意义）。
                 val count = if (danmakuChapterTotalChars > 0) {
-                    (AppConfig.danmakuCount.toDouble() *
-                        AppConfig.aiEffectCharInterval / danmakuChapterTotalChars)
-                        .coerceAtLeast(1.0).toInt()
+                    val rangeChars = paras.sumOf { it.second.length + 1 }
+                    val exact = DANMAKU_COUNT_PER_CHAPTER.toDouble() *
+                        rangeChars / danmakuChapterTotalChars
+                    val acc = danmakuCountRemainder + exact
+                    val n = kotlin.math.floor(acc + 1e-9).toInt().coerceAtLeast(0)
+                    danmakuCountRemainder = acc - n
+                    n
                 } else 1
                 val items = DanmakuGenerator.generateRange(
                     bookName, title, danmakuContentHash, paras, count
@@ -2437,6 +2451,7 @@ abstract class BaseReadAloudService : BaseService(),
         danmakuCurrentStartPara = -1
         danmakuCurrentEndPara = -1
         danmakuChapterKey = ""
+        danmakuCountRemainder = 0.0
     }
 
     /**
