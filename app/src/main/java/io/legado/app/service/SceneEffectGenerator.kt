@@ -29,6 +29,8 @@ object SceneEffectGenerator {
     /** 站点 lightning 预设为 8 秒：场景渐暗 → 四道分叉闪电依次照亮 → 渐亮 */
     private const val LIGHTNING_DURATION_MS = 8000L
     private const val WIND_DURATION_MS = 6000L
+    /** 规则表版本：新增特效后旧缓存里「已检查无特效」的段落要重新分析 */
+    private const val CACHE_VERSION = 2
 
     private val INDOOR_WORDS = listOf(
         "屋内", "室内", "房里", "房内", "屋里", "殿内", "车厢", "舱内",
@@ -49,6 +51,59 @@ object SceneEffectGenerator {
     private val PETALS_WORDS = listOf("花瓣", "落花", "樱花", "花瓣雨", "花雨", "桃花落")
     private val FIREFLIES_WORDS = listOf("萤火虫", "流萤", "萤光")
     private val EMBERS_WORDS = listOf("火星", "余烬", "篝火", "火星四溅", "灰烬")
+    private val COMIC_WORDS = listOf(
+        "砰", "轰隆", "哐当", "哗啦", "咔嚓", "嘭", "咚", "噼啪", "嗖", "唰"
+    )
+
+    /**
+     * 新增实体类特效的关键词规则，按「具体 → 泛化」排序，第一个命中生效。
+     * 站点环境/人物表现中的屏幕实体（fog/smoke/bubbles/rays/dust/butterflies/
+     * birds/漫画符号）与 tsParticles(MIT) 预设里适合小说的效果类型。
+     */
+    private val EXTRA_RULES: List<Triple<SceneEffectKind, List<String>, Int>> = listOf(
+        Triple(SceneEffectKind.FIREWORKS, listOf("烟花", "焰火", "礼花", "爆竹", "烟花绽放"), 3),
+        Triple(SceneEffectKind.METEORS, listOf("流星", "陨星", "划过天际", "星雨", "流星雨"), 2),
+        Triple(SceneEffectKind.BIRDS_CROW, listOf("乌鸦", "寒鸦", "鸦群", "老鸹", "乌鹊"), 2),
+        Triple(SceneEffectKind.BIRDS_GULL, listOf("海鸥", "白鸥", "鸥鸟", "海鸟", "沙鸥"), 2),
+        Triple(SceneEffectKind.BIRD_FLOCK, listOf("鸟群", "群鸟", "雁阵", "大雁", "飞鸟", "惊鸟", "雀群", "归鸟"), 2),
+        Triple(SceneEffectKind.BUTTERFLIES, listOf("蝴蝶", "彩蝶", "粉蝶", "蝶舞", "蝶翼", "花蝶"), 2),
+        Triple(SceneEffectKind.BUBBLES, listOf("气泡", "水泡", "冒泡", "泡沫", "气泡上浮", "吐泡泡"), 2),
+        Triple(SceneEffectKind.FOUNTAIN, listOf("喷泉", "水花", "水柱", "浪花", "溅起", "水雾", "飞溅"), 2),
+        Triple(SceneEffectKind.FIRE, listOf("火焰", "烈火", "火光", "燃烧", "火苗", "火舌", "着火", "熊熊"), 3),
+        Triple(SceneEffectKind.FOG, listOf("薄雾", "雾气", "白雾", "迷雾", "雾霭", "晨雾", "浓雾", "云雾", "起雾"), 2),
+        Triple(SceneEffectKind.SMOKE, listOf("炊烟", "青烟", "烟雾", "烟气", "烟尘", "轻烟", "浓烟", "香烟"), 2),
+        Triple(SceneEffectKind.RAYS, listOf("光束", "晨光", "斜射", "透过窗", "光线", "霞光", "夕照", "光柱", "阳光洒"), 2),
+        Triple(SceneEffectKind.DUST, listOf("尘土", "扬尘", "黄沙", "沙尘", "飞沙", "灰土", "尘烟", "浮尘"), 2),
+        Triple(SceneEffectKind.STARS, listOf("星空", "星辰", "繁星", "星河", "银河", "夜空", "星子", "满天星", "星光"), 2),
+        Triple(SceneEffectKind.CONFETTI, listOf("彩纸", "彩带", "纸屑", "庆祝", "欢呼", "喜庆", "彩旗"), 2),
+        Triple(SceneEffectKind.DANDELION, listOf("蒲公英", "柳絮", "飞絮", "杨花", "芦花", "绒球"), 2),
+        Triple(SceneEffectKind.FEATHERS, listOf("羽毛", "白羽", "羽落", "翎毛", "鹤羽", "羽绒"), 2),
+        Triple(SceneEffectKind.BOKEH, listOf("光斑", "光点", "微光", "朦胧", "斑驳", "光影", "粼粼"), 2),
+        Triple(SceneEffectKind.SPARKLES, listOf("闪光", "闪耀", "亮晶晶", "晶莹", "闪烁", "熠熠", "亮光"), 2),
+        Triple(SceneEffectKind.LIGHTBULB, listOf("灵光一闪", "恍然", "顿悟", "茅塞顿开", "灵机一动", "忽然想到"), 2),
+        Triple(SceneEffectKind.HEART, listOf("心动", "怦然", "脸红", "心跳加速", "脸颊发烫", "心头一跳"), 2),
+        Triple(SceneEffectKind.SWEAT, listOf("冷汗", "冒汗", "汗珠", "汗流", "额角汗", "捏了把汗", "冷汗直流"), 2),
+        Triple(SceneEffectKind.ANGER, listOf("青筋", "怒火", "恼怒", "气得", "暴跳", "咬牙切齿", "怒气"), 2),
+        Triple(SceneEffectKind.ZZZ, listOf("睡意", "打盹", "呼噜", "入眠", "困倦", "打哈欠", "昏昏欲睡"), 2),
+        Triple(SceneEffectKind.QUESTION, listOf("满头问号", "疑惑不解", "一头雾水", "纳闷", "不明所以", "百思不得"), 2),
+        Triple(SceneEffectKind.COMIC, COMIC_WORDS, 2)
+    )
+
+    /** 无命中时的低频环境兜底，让朗读过程中时不时能看到轻量特效 */
+    private val AMBIENT_FALLBACK_RATE = 0.14
+    private fun frac(v: Double): Double = v - kotlin.math.floor(v)
+    private fun pseudo(i: Int, seed: Int): Double =
+        frac(kotlin.math.sin(i * 127.1 + seed * 311.7) * 43758.5453)
+
+    private fun ambientFallback(para: Int): Pair<SceneEffectKind, Int>? {
+        if (pseudo(para, 77) >= AMBIENT_FALLBACK_RATE) return null
+        val kinds = listOf(
+            SceneEffectKind.BOKEH, SceneEffectKind.FOG,
+            SceneEffectKind.DUST, SceneEffectKind.SPARKLES
+        )
+        val idx = (pseudo(para, 91) * kinds.size).toInt().coerceIn(0, kinds.size - 1)
+        return kinds[idx] to 2
+    }
 
     fun getCacheFile(bookName: String, chapterTitle: String): File =
         File(
@@ -103,7 +158,7 @@ object SceneEffectGenerator {
         val wind = WIND_WORDS.any { t.contains(it) }
         val hasLightning = LIGHTNING_WORDS.any { t.contains(it) }
 
-        val hit: Pair<SceneEffectKind, Int> = when {
+        val hit: Pair<SceneEffectKind, Int>? = when {
             SNOW_WORDS.any { t.contains(it) } ->
                 SceneEffectKind.SNOW to snowLevel(t)
             RAIN_WORDS.any { t.contains(it) } ->
@@ -112,10 +167,19 @@ object SceneEffectGenerator {
             PETALS_WORDS.any { t.contains(it) } -> SceneEffectKind.PETALS to 2
             FIREFLIES_WORDS.any { t.contains(it) } -> SceneEffectKind.FIREFLIES to 2
             EMBERS_WORDS.any { t.contains(it) } -> SceneEffectKind.EMBERS to 2
-            hasLightning -> SceneEffectKind.LIGHTNING to 3
-            wind -> SceneEffectKind.WIND to if (t.contains("狂风")) 4 else 2
-            else -> return null
+            else -> {
+                val rule = EXTRA_RULES.firstOrNull { (_, words, _) ->
+                    words.any { t.contains(it) }
+                }
+                when {
+                    rule != null -> rule.first to rule.third
+                    hasLightning -> SceneEffectKind.LIGHTNING to 3
+                    wind -> SceneEffectKind.WIND to if (t.contains("狂风")) 4 else 2
+                    else -> ambientFallback(para)
+                }
+            }
         }
+        if (hit == null) return null
 
         val kind = hit.first
         // 室内不播室外天气/植物类，避免「屋里下雪」的违和感
@@ -124,8 +188,15 @@ object SceneEffectGenerator {
         val duration = when (kind) {
             SceneEffectKind.LIGHTNING -> LIGHTNING_DURATION_MS
             SceneEffectKind.WIND -> WIND_DURATION_MS
+            SceneEffectKind.SPARKLES, SceneEffectKind.QUESTION, SceneEffectKind.SWEAT,
+            SceneEffectKind.HEART, SceneEffectKind.ANGER, SceneEffectKind.ZZZ,
+            SceneEffectKind.LIGHTBULB, SceneEffectKind.COMIC -> 4000L
+            SceneEffectKind.FIREWORKS, SceneEffectKind.METEORS,
+            SceneEffectKind.CONFETTI -> 6000L
             else -> DEFAULT_DURATION_MS
         }
+        val comicText = if (kind == SceneEffectKind.COMIC)
+            COMIC_WORDS.firstOrNull { t.contains(it) } else null
         return SceneEffectCue(
             para = para,
             kind = kind,
@@ -135,7 +206,8 @@ object SceneEffectGenerator {
             wind = wind,
             // 雨雪段落里若同时写了雷电，叠加闪电轨道
             lightning = hasLightning && (kind == SceneEffectKind.RAIN || kind == SceneEffectKind.SNOW),
-            source = "local"
+            source = "local",
+            text = comicText
         )
     }
 
@@ -186,7 +258,7 @@ object SceneEffectGenerator {
         return """你是小说演出标注器。下面是《$bookName》章节「$chapterTitle」的部分段落，每段前有【段落N】编号。
 
 ## 任务
-只标注**真实发生**的场景环境，供朗读时播放对应的画面特效（飘雪、下雨、落叶、花瓣、闪电、萤火虫、火星、风）。
+只标注**真实发生**的场景环境，供朗读时播放对应的画面特效（雨雪、飘落物、雾烟气泡光束、蝴蝶与鸟群、漫画符号、星空流星烟花等）。
 
 ## 规则
 1. 只标正文明确写出的天气/景物，不推测；「心在下雪」「泪如雨下」「气氛冰冷」等比喻一律不标。
@@ -195,13 +267,16 @@ object SceneEffectGenerator {
 4. para 必须照抄【段落N】里的 N，是该段的真实编号，不是序号。
 5. level 只能 1~4：1=微弱，2=正常，3=明显，4=暴雨/暴雪/狂风。
 6. 雨雪段落若同时出现雷电，把 lightning 填 true；有风把 wind 填 true。
-7. durationMs 用 8000；闪电单独出现时用 1600。
+7. durationMs 用 8000；闪电、漫画符号用 4000；烟花/流星/彩屑用 6000。
 
 ## 输出
 只输出 JSON 数组，不要解释、不要 markdown 代码块：
 [{"para":12,"kind":"SNOW","level":2,"indoors":false,"wind":true,"lightning":false,"durationMs":8000}]
 
-kind 白名单：RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND
+kind 白名单：RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND,
+FOG, SMOKE, BUBBLES, RAYS, DUST, BUTTERFLIES, BIRDS_GULL, BIRDS_CROW, BIRD_FLOCK,
+SPARKLES, QUESTION, SWEAT, HEART, ANGER, ZZZ, LIGHTBULB, COMIC,
+STARS, METEORS, FIREWORKS, FIRE, CONFETTI, FOUNTAIN, BOKEH, FEATHERS, DANDELION
 
 ## 段落正文
 $sb"""
@@ -253,6 +328,7 @@ $sb"""
             if (!file.exists()) return result
             val json = JSONObject(file.readText())
             if (json.optString("contentHash") != contentHash) return result
+            if (json.optInt("version", 1) != CACHE_VERSION) return result
             val records = json.optJSONObject("records") ?: return result
             records.keys().forEach { key ->
                 val para = key.toIntOrNull() ?: return@forEach
@@ -273,6 +349,7 @@ $sb"""
     ) {
         runCatching {
             val json = JSONObject().apply {
+                put("version", CACHE_VERSION)
                 put("contentHash", contentHash)
                 put("records", JSONObject().apply {
                     records.forEach { (para, cues) ->
@@ -294,6 +371,7 @@ $sb"""
         put("wind", c.wind)
         put("lightning", c.lightning)
         put("source", c.source)
+        c.text?.let { put("text", it) }
     }
 
     private fun cueFromJson(para: Int, o: JSONObject): SceneEffectCue? {
@@ -306,7 +384,8 @@ $sb"""
             indoors = o.optBoolean("indoors", false),
             wind = o.optBoolean("wind", false),
             lightning = o.optBoolean("lightning", false),
-            source = o.optString("source", "local")
+            source = o.optString("source", "local"),
+            text = o.optString("text", "").takeIf { it.isNotEmpty() }
         )
     }
 }
