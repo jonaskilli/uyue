@@ -133,6 +133,7 @@ object AiChapterFixService {
     /**
      * 获取书籍当前生效的模板：绑定的模板优先，其次默认模板，
      * 都不存在时返回内置默认模板（不落库）。
+     * 这是给运行时（自动处理）用的只读版本，可能在主线程调用，不写数据库。
      */
     fun getEffectiveTemplate(bookName: String, bookUrl: String): AiChapterFixTemplate {
         val boundId = getBoundTemplateId(bookName, bookUrl)
@@ -140,6 +141,48 @@ object AiChapterFixService {
             appDb.aiChapterFixTemplateDao.getById(boundId)?.let { return it }
         }
         return appDb.aiChapterFixTemplateDao.getDefault() ?: builtinDefaultTemplate()
+    }
+
+    /**
+     * 与 [getEffectiveTemplate] 相同，但保证返回的是已落库的模板（id > 0）。
+     * 绑定 id 失效时顺手解绑；默认模板不存在时补建，
+     * 避免「显示内置默认模板、保存却写不进去」以及异步初始化竞态。
+     * 需在 IO 线程调用。
+     */
+    fun getOrCreateEffectiveTemplate(
+        bookName: String,
+        bookUrl: String
+    ): AiChapterFixTemplate {
+        val boundId = getBoundTemplateId(bookName, bookUrl)
+        if (boundId > 0) {
+            appDb.aiChapterFixTemplateDao.getById(boundId)?.let { return it }
+            setBoundTemplateId(bookName, bookUrl, null)
+        }
+        return getOrCreateDefaultTemplate()
+    }
+
+    /** 取得（必要时补建）默认模板；需在 IO 线程调用 */
+    fun getOrCreateDefaultTemplate(): AiChapterFixTemplate {
+        val dao = appDb.aiChapterFixTemplateDao
+        dao.getDefault()?.let { return it }
+        // id=1 可能被备份恢复成普通模板：直接复用并标记为默认，避免 REPLACE 覆盖用户配置
+        val existing = dao.getById(DEFAULT_TEMPLATE_ID)
+        val template = if (existing != null) {
+            existing.copy(
+                isDefault = true,
+                name = existing.name.ifBlank { "默认模板" },
+                lastUpdateTime = System.currentTimeMillis()
+            )
+        } else {
+            builtinDefaultTemplate().copy(
+                id = DEFAULT_TEMPLATE_ID,
+                isDefault = true,
+                lastUpdateTime = System.currentTimeMillis()
+            )
+        }
+        // REPLACE 与 App 启动时的默认模板初始化并发也只会留下同一条 id=1 记录
+        dao.insert(template)
+        return dao.getDefault() ?: template
     }
 
     /** 内置默认模板（兜底）：字段取自旧版全局配置，保证老用户升级后配置不丢 */
@@ -158,30 +201,29 @@ object AiChapterFixService {
 
     // ---------- 自动处理开关（按书生效） ----------
 
+    private fun autoFixKey(bookName: String, bookUrl: String): String? = when {
+        bookName.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookName
+        bookUrl.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookUrl
+        else -> null
+    }
+
     /**
-     * 当前书是否开启自动处理：优先读按书设置；
-     * 该书从未单独设置过时，回退到旧版全局开关（兼容升级前行为）。
+     * 当前书是否开启自动处理：只按书读取，未单独设置过一律关闭。
+     * 旧版全局开关（包含此前误写入的全局值）直接丢弃并清理，
+     * 绝不把它继承给当前书或之后新打开的书。
      */
     fun isAutoFixEnabled(bookName: String, bookUrl: String): Boolean {
-        val key = when {
-            bookName.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookName
-            bookUrl.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookUrl
-            else -> return AppConfig.aiChapterFixAuto
-        }
+        val key = autoFixKey(bookName, bookUrl) ?: return false
         val prefs = appCtx.defaultSharedPreferences
-        if (prefs.contains(key)) {
-            return prefs.getBoolean(key, false)
+        if (prefs.contains(PreferKey.aiChapterFixAuto)) {
+            prefs.edit().remove(PreferKey.aiChapterFixAuto).apply()
         }
-        return AppConfig.aiChapterFixAuto
+        return appCtx.getPrefBoolean(key, false)
     }
 
     /** 设置当前书的自动处理开关（按书存储，切换书籍后互不影响） */
     fun setAutoFixEnabled(bookName: String, bookUrl: String, enabled: Boolean) {
-        val key = when {
-            bookName.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookName
-            bookUrl.isNotBlank() -> PreferKey.aiChapterFixAutoBookPrefix + bookUrl
-            else -> return
-        }
+        val key = autoFixKey(bookName, bookUrl) ?: return
         appCtx.putPrefBoolean(key, enabled)
     }
 
