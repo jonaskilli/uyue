@@ -1,0 +1,77 @@
+{
+  "source": "https://www.tftgamer.com/assets/index-BLGBg1UO.js -> Zde() / hue() / pue(); https://www.tftgamer.com/assets/MusicCatalogPicker-tesK0yHr.js -> q() 中的天气粒子重建",
+  "description": "天气语义 → 粒子参数。这是「根据情节下雨/下雪」最关键的一张表。",
+  "weatherToType": {
+    "rain": "r",
+    "snow": "s"
+  },
+  "intensityToLevel": {
+    "light": 1,
+    "moderate": 2,
+    "heavy": 3,
+    "violent": 4
+  },
+  "levelToIntensity": {
+    "1": "light",
+    "2": "moderate",
+    "3": "heavy",
+    "4": "violent"
+  },
+  "particleCountByLevel": {
+    "rain": [90, 180, 340, 600],
+    "snow": [60, 110, 230, 400]
+  },
+  "fallSpeedByLevel": [0.6, 1.0, 1.4, 1.9],
+  "windFromBoolean": {
+    "description": "w.w 为 1/true 时 wind=1，否则 0；渲染层用 wind 控制横向漂移和雨丝倾角。",
+    "true": 1,
+    "false": 0
+  },
+  "presetLookup": {
+    "description": "天气渲染时先取对应预设的 particles track 作为模板，再覆盖 count / fallSpeed / wind / duration。",
+    "rain": "rain",
+    "snow": "snow",
+    "lightning": "lightning"
+  },
+  "baseParticlesTrack": {
+    "rain": {
+      "kind": "particles",
+      "variant": "rain",
+      "count": 180,
+      "at": 0,
+      "duration": 7
+    },
+    "snow": {
+      "kind": "particles",
+      "variant": "snow",
+      "count": 110,
+      "at": 0,
+      "duration": 7
+    }
+  },
+  "weatherDuration": "Infinity（持续到区间结束，区间切换时立即停止并恢复）",
+  "rules": {
+    "indoor": "indoors === 1 时不生成降水粒子；室内场景只保留语义效果（如 a08 夜色、a09 回忆）。",
+    "lightning": "l === 1 且非 reduced-motion 时，额外叠加 lightning 预设的 overlay track；天气已有闪电时不重复选 a07。",
+    "overlap": "天气区间不能重叠；类型冲突的重叠部分留空，保留非冲突部分（Iw 校验）。",
+    "rebuild": "仅当 [t, lv, l, w, indoors] 变化时重建粒子池；相同则复用，避免每帧 new。",
+    "windDoNotDuplicate": "有雨雪时不再单独标 wind cue，风通过 w.w 表达。",
+    "metaphor": "提示词要求模型不要把比喻当真实天气（如『心在下雪』不标 snow）。"
+  },
+  "levelPresets": {
+    "description": "74 个预设里与天气强度对应的独立预设，可在特效实验室里手动选用；自动标注走上面的粒子参数覆盖。",
+    "rain": ["drizzle", "rain", "downpour", "storm"],
+    "snow": ["flurry", "snow", "blizzard"]
+  },
+  "particlePresetParams": {
+    "drizzle": { "count": 100, "wind": 0.3, "size": 1, "opacity": 0.5 },
+    "rain": { "count": 180 },
+    "downpour": { "count": 600, "wind": 1.7, "size": 1.8, "opacity": 0.95 },
+    "flurry": { "count": 70, "wind": 0.3, "size": 1.2, "opacity": 0.7 },
+    "snow": { "count": 110 },
+    "blizzard": { "count": 400, "wind": 2.5, "size": 2, "opacity": 0.95 },
+    "petals": { "kind": "ambient", "variant": "petals", "count": 100, "size": 1, "opacity": 0.9 },
+    "leaves": { "kind": "ambient", "variant": "leaves", "count": 100, "size": 1, "opacity": 0.9 },
+    "wind": { "kind": "ambient", "variant": "wind", "count": 20, "size": 1, "opacity": 0.5 }
+  }
+}

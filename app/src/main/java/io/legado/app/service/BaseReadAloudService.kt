@@ -51,6 +51,8 @@ import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.AiImagePersistentCache
 import io.legado.app.model.DanmakuReady
 import io.legado.app.model.DanmakuStore
+import io.legado.app.model.SceneEffectReady
+import io.legado.app.model.SceneEffectStore
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.receiver.MediaButtonReceiver
@@ -2323,7 +2325,8 @@ abstract class BaseReadAloudService : BaseService(),
      * - 跳段/回退：从当前位置重开区间（重复段落命中记录缓存，不重复问 AI）。
      */
     protected fun scheduleDanmaku() {
-        if (!AppConfig.danmakuEnabled) return
+        // 弹幕与场景特效共用同一套区间调度：任一开启都要排区间
+        if (!AppConfig.danmakuEnabled && !AppConfig.sceneEffectEnabled) return
         val book = ReadBook.book ?: return
         val title = textChapter?.title ?: ReadBook.curTextChapter?.title ?: return
         val chapterKey = "${book.bookUrl}/${ReadBook.durChapterIndex}"
@@ -2344,6 +2347,9 @@ abstract class BaseReadAloudService : BaseService(),
             // 切章后旧锚点全部作废（同章 seek 重入时 key 不变，保留已生成结果）
             if (DanmakuStore.key != null && DanmakuStore.key != nameKey) {
                 DanmakuStore.clear()
+            }
+            if (SceneEffectStore.key != null && SceneEffectStore.key != nameKey) {
+                SceneEffectStore.clear()
             }
         }
         when {
@@ -2418,24 +2424,41 @@ abstract class BaseReadAloudService : BaseService(),
                     }
                 }
                 if (paras.isEmpty()) continue
-                // 每区间条数 = 总条数 × 区间实际字数占比，小数余额累积到后续区间。
-                // 条数固定为 DANMAKU_COUNT_PER_CHAPTER（原输入框已移除：旧取整逻辑
-                // 让设置在中长章节里密度毫无差别，没有存在的意义）。
-                val count = if (danmakuChapterTotalChars > 0) {
-                    val rangeChars = paras.sumOf { it.second.length + 1 }
-                    val exact = DANMAKU_COUNT_PER_CHAPTER.toDouble() *
-                        rangeChars / danmakuChapterTotalChars
-                    val acc = danmakuCountRemainder + exact
-                    val n = kotlin.math.floor(acc + 1e-9).toInt().coerceAtLeast(0)
-                    danmakuCountRemainder = acc - n
-                    n
-                } else 1
-                val items = DanmakuGenerator.generateRange(
-                    bookName, title, danmakuContentHash, paras, count
-                )
-                if (items.isNotEmpty()) {
-                    val all = DanmakuStore.merge(danmakuNameKey, items)
-                    postEvent(EventBus.DANMAKU_READY, DanmakuReady(danmakuNameKey, all))
+                if (AppConfig.danmakuEnabled) {
+                    // 每区间条数 = 总条数 × 区间实际字数占比，小数余额累积到后续区间。
+                    // 条数固定为 DANMAKU_COUNT_PER_CHAPTER（原输入框已移除：旧取整逻辑
+                    // 让设置在中长章节里密度毫无差别，没有存在的意义）。
+                    val count = if (danmakuChapterTotalChars > 0) {
+                        val rangeChars = paras.sumOf { it.second.length + 1 }
+                        val exact = DANMAKU_COUNT_PER_CHAPTER.toDouble() *
+                            rangeChars / danmakuChapterTotalChars
+                        val acc = danmakuCountRemainder + exact
+                        val n = kotlin.math.floor(acc + 1e-9).toInt().coerceAtLeast(0)
+                        danmakuCountRemainder = acc - n
+                        n
+                    } else 1
+                    val items = DanmakuGenerator.generateRange(
+                        bookName, title, danmakuContentHash, paras, count
+                    )
+                    if (items.isNotEmpty()) {
+                        val all = DanmakuStore.merge(danmakuNameKey, items)
+                        postEvent(EventBus.DANMAKU_READY, DanmakuReady(danmakuNameKey, all))
+                    }
+                }
+                // 场景特效与弹幕共用区间队列/段落锚点，但独立生成、独立缓存、独立广播。
+                // 本地关键词规则为主路径；弹幕开启时复用其 AI Provider 做可选增强。
+                if (AppConfig.sceneEffectEnabled) {
+                    val cues = SceneEffectGenerator.generateRange(
+                        bookName, title, danmakuContentHash, paras,
+                        aiEnhanced = AppConfig.danmakuEnabled
+                    )
+                    if (cues.isNotEmpty()) {
+                        val allCues = SceneEffectStore.merge(danmakuNameKey, cues)
+                        postEvent(
+                            EventBus.SCENE_EFFECT_READY,
+                            SceneEffectReady(danmakuNameKey, allCues)
+                        )
+                    }
                 }
             }
         }
@@ -2452,6 +2475,8 @@ abstract class BaseReadAloudService : BaseService(),
         danmakuCurrentEndPara = -1
         danmakuChapterKey = ""
         danmakuCountRemainder = 0.0
+        // 场景特效共用区间队列，切章时同步丢弃本章内存结果（缓存文件保留）
+        SceneEffectStore.clear()
     }
 
     /**

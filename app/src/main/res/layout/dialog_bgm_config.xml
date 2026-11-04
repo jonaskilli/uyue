@@ -159,6 +159,28 @@
             tools:ignore="TouchTargetSizeCheck" />
     </LinearLayout>
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:layout_marginTop="4dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="场景特效（雪/雨/落叶/闪电，按剧情播放）"
+            android:textColor="@color/primaryText"
+            android:textSize="14sp" />
+
+        <io.legado.app.lib.theme.view.ThemeSwitch
+            android:id="@+id/switch_scene_effect_enable"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            tools:ignore="TouchTargetSizeCheck" />
+    </LinearLayout>
+
     <!-- ===== 音效设置 ===== -->
     <View
         android:layout_width="match_parent"

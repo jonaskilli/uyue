@@ -45,6 +45,13 @@
 
     </LinearLayout>
 
+    <!-- 场景特效层：绘制在背景之上、台词与弹幕之下；触摸穿透给下层 -->
+    <io.legado.app.ui.book.read.config.SceneEffectView
+        android:id="@+id/scene_effect_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
     <!-- AI 弹幕浮层：绘制在图片与字幕之上；不设 clickable，触摸穿透给下层 -->
     <io.legado.app.ui.book.read.config.DanmakuView
         android:id="@+id/danmaku_view"

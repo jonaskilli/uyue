@@ -1,0 +1,226 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "场景特效渲染轨道 Track",
+  "description": "一个效果 = 一组 tracks。所有 track 共享 at/duration 基础字段（gr = {at:0..30, duration:0..30}），按 kind 分支。整理自站点主包 oue=SB(\"kind\", [...]) 定义。",
+  "oneOf": [
+    { "$ref": "#/definitions/particles" },
+    { "$ref": "#/definitions/ambient" },
+    { "$ref": "#/definitions/camera" },
+    { "$ref": "#/definitions/shake" },
+    { "$ref": "#/definitions/blur" },
+    { "$ref": "#/definitions/flash" },
+    { "$ref": "#/definitions/overlay" },
+    { "$ref": "#/definitions/tone" },
+    { "$ref": "#/definitions/actor" },
+    { "$ref": "#/definitions/text" },
+    { "$ref": "#/definitions/birds" },
+    { "$ref": "#/definitions/brightness" },
+    { "$ref": "#/definitions/cutin" },
+    { "$ref": "#/definitions/scrutiny" },
+    { "$ref": "#/definitions/eyelids" },
+    { "$ref": "#/definitions/opening" },
+    { "$ref": "#/definitions/distortion" }
+  ],
+  "definitions": {
+    "base": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "at": { "type": "number", "minimum": 0, "maximum": 30, "default": 0 },
+        "duration": { "type": "number", "exclusiveMinimum": 0, "maximum": 30, "default": 7 }
+      }
+    },
+    "particles": {
+      "description": "雨/雪粒子。天气区间渲染时由 weather-mapper 覆盖 count/fallSpeed/wind，duration 设为 Infinity 表示持续到区间结束。",
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind", "variant"],
+      "properties": {
+        "kind": { "const": "particles" },
+        "variant": { "type": "string", "enum": ["rain", "snow"] },
+        "count": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 180 },
+        "size": { "type": "number", "minimum": 0.1, "default": 1 },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.8 },
+        "wind": { "type": "number", "default": 0, "description": "横向风力，负值向左" },
+        "fallSpeed": { "type": "number", "minimum": 0, "default": 1 },
+        "duration": { "description": "天气区间内为 Infinity 语义；JSON 中用 null 或极大值表示" }
+      }
+    },
+    "ambient": {
+      "description": "环境粒子：花瓣、落叶、萤火虫、火星、气泡、雾、烟、风线、光束、尘埃、蝴蝶。",
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind", "variant"],
+      "properties": {
+        "kind": { "const": "ambient" },
+        "variant": {
+          "type": "string",
+          "enum": ["fog", "smoke", "wind", "rays", "bubbles", "fireflies", "embers", "dust", "petals", "leaves", "butterflies"]
+        },
+        "count": { "type": "integer", "minimum": 1, "default": 100 },
+        "size": { "type": "number", "default": 1 },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.9 },
+        "wind": { "type": "number", "default": 0 }
+      }
+    },
+    "camera": {
+      "description": "镜头运镜：缩放、平移、旋转。站点里 74 个预设大量使用此轨道实现推/拉/摇/移。",
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "camera" },
+        "scale": { "type": "number", "default": 1 },
+        "panX": { "type": "number", "default": 0 },
+        "panY": { "type": "number", "default": 0 },
+        "angle": { "type": "number", "default": 0, "description": "旋转角度（度）" }
+      }
+    },
+    "shake": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "shake" },
+        "strength": { "type": "number", "default": 1 },
+        "frequency": { "type": "number", "default": 12 }
+      }
+    },
+    "blur": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "blur" },
+        "strength": { "type": "number", "default": 3 }
+      }
+    },
+    "flash": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "flash" },
+        "color": { "type": "string", "default": "#FFFFFF" },
+        "strength": { "type": "number", "default": 1 }
+      }
+    },
+    "overlay": {
+      "description": "叠加层：闪电、暗角、心跳、色调染色、遮幅等。",
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind", "variant"],
+      "properties": {
+        "kind": { "const": "overlay" },
+        "variant": { "type": "string", "enum": ["lightning", "vignette", "heartbeat", "tint", "fade", "letterbox", "iris", "wipe", "speedlines"] },
+        "strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.75 },
+        "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
+      }
+    },
+    "tone": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind", "variant"],
+      "properties": {
+        "kind": { "const": "tone" },
+        "variant": { "type": "string", "enum": ["cold", "warm", "sepia", "night", "negative", "grayscale"] },
+        "strength": { "type": "number", "default": 0.6 }
+      }
+    },
+    "actor": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "actor" },
+        "cId": { "type": "string" },
+        "motion": { "type": "string", "enum": ["enter", "exit", "sway", "jump", "float"] }
+      }
+    },
+    "text": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind", "text"],
+      "properties": {
+        "kind": { "const": "text" },
+        "text": { "type": "string" },
+        "anchor": { "type": "string", "enum": ["head", "center", "top"] },
+        "motion": { "type": "string", "enum": ["float", "pop", "static"] },
+        "size": { "type": "number", "default": 1 },
+        "offsetX": { "type": "number", "default": 0 },
+        "offsetY": { "type": "number", "default": 0 }
+      }
+    },
+    "birds": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "birds" },
+        "variant": { "type": "string", "enum": ["crow", "swallow", "generic"] },
+        "count": { "type": "integer", "default": 8 },
+        "size": { "type": "number", "default": 0.45 }
+      }
+    },
+    "brightness": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "brightness" },
+        "from": { "type": "number", "default": 0.6 },
+        "to": { "type": "number", "default": 1 }
+      }
+    },
+    "cutin": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "cutin" },
+        "cropRatio": { "type": "number", "minimum": 0.15, "maximum": 0.75, "default": 0.36 },
+        "panelHeight": { "type": "number", "minimum": 0.2, "maximum": 0.8, "default": 0.5 },
+        "panelWidth": { "type": "number", "minimum": 0.3, "maximum": 0.75, "default": 0.61 },
+        "angle": { "type": "number", "minimum": -25, "maximum": 25, "default": -7 }
+      }
+    },
+    "scrutiny": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "scrutiny" },
+        "panelWidth": { "type": "number", "minimum": 0.3, "maximum": 1 },
+        "panelHeight": { "type": "number", "minimum": 0.08, "maximum": 0.6 },
+        "panelTop": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "eyelids": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "eyelids" },
+        "pattern": { "type": "string", "enum": ["close", "open", "blink"] }
+      }
+    },
+    "opening": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "opening" },
+        "id": { "type": "string", "enum": ["cutin", "cinema", "pan", "struggle", "startled", "mist", "focus"] }
+      }
+    },
+    "distortion": {
+      "allOf": [{ "$ref": "#/definitions/base" }],
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "distortion" },
+        "strength": { "type": "number", "default": 0.5 }
+      }
+    }
+  }
+}

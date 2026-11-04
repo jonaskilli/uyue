@@ -184,6 +184,9 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
 
         // AI 弹幕：总开关（条数固定，不再提供设置）
         switchDanmakuEnable.isChecked = AppConfig.danmakuEnabled
+
+        // 场景特效：总开关（本地关键词规则为主，AI 为可选增强）
+        switchSceneEffectEnable.isChecked = AppConfig.sceneEffectEnabled
     }
 
     private fun initEvent() = binding.run {
@@ -277,6 +280,14 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         // AI 弹幕总开关：朗读运行中打开时，立即为当前章生成一次弹幕
         switchDanmakuEnable.setOnCheckedChangeListener { _, isChecked ->
             AppConfig.danmakuEnabled = isChecked
+            if (isChecked && BaseReadAloudService.isRun) {
+                BaseReadAloudService.instance?.triggerDanmakuGenerationManual()
+            }
+        }
+
+        // 场景特效总开关：与弹幕共用区间调度，打开时立即为当前章排一次区间
+        switchSceneEffectEnable.setOnCheckedChangeListener { _, isChecked ->
+            AppConfig.sceneEffectEnabled = isChecked
             if (isChecked && BaseReadAloudService.isRun) {
                 BaseReadAloudService.instance?.triggerDanmakuGenerationManual()
             }

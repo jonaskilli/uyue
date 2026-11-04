@@ -1,0 +1,114 @@
+{
+  "source": "https://www.tftgamer.com/assets/index-BLGBg1UO.js -> const fF / MA / wj / dJ",
+  "description": "语义 cue 到稳定效果 ID 的映射。LLM 输出 cue，决策层查此表转成效果 ID；效果 ID 再查 presets/semantic-effects.json 与 presets/effects.json 得到 tracks。",
+  "cueToEffectIds": {
+    "important_arrival": ["e01"],
+    "realization": ["e01"],
+    "scrutiny": ["e22"],
+    "weak_waking": ["e02"],
+    "startled_waking": ["e06"],
+    "heavy_impact": ["e03", "e11"],
+    "brightening": ["e04"],
+    "darkening": ["e05"],
+    "landscape": ["e07"],
+    "searching": ["e08"],
+    "clearing_mist": ["e09"],
+    "rushing": ["e10"],
+    "regaining_focus": ["e14"],
+    "looking_up": ["e15"],
+    "dizziness": ["e16"],
+    "closing_eyes": ["e17"],
+    "weapon_clash": ["e18"],
+    "dream": ["e19"],
+    "slashing": ["e20"],
+    "glass_cracks": ["e24"],
+    "glass_shatter": ["e25"],
+    "freezing": ["e26"],
+    "blazing_fire": ["e27"],
+    "color_tint": ["a18"],
+    "cosmic_warp": ["e28"],
+    "screen_gunshot": ["e29"],
+    "claw_slash": ["e30"],
+    "paper_dissolve": ["e31"],
+    "shooting_stars": ["e32"],
+    "sparkling_delight": ["s08"],
+    "bright_idea": ["s09"],
+    "smoke_wisps": ["a19"],
+    "space_rift": ["e33"],
+    "heat": ["a01"],
+    "falling_petals": ["a02"],
+    "falling_leaves": ["a03"],
+    "fireflies": ["a04"],
+    "embers": ["a05"],
+    "underwater": ["a06"],
+    "lightning": ["a07"],
+    "night": ["a08"],
+    "warm_memory": ["a09"],
+    "distant_memory": ["a10"],
+    "tension": ["e13"],
+    "oppression": ["a14"],
+    "solemnity": ["e07"],
+    "seaside": ["a15"],
+    "open_sea": ["a16"],
+    "wind": ["a17"]
+  },
+  "emotionToEffectId": {
+    "shock": "s01",
+    "confusion": "s02",
+    "speechless": "s03",
+    "sleep": "s04",
+    "anger": "s05",
+    "embarrassment": "s06",
+    "affection": "s07"
+  },
+  "cuePriority": {
+    "startled_waking": 100,
+    "weak_waking": 95,
+    "closing_eyes": 95,
+    "realization": 90,
+    "important_arrival": 85,
+    "scrutiny": 80,
+    "weapon_clash": 75,
+    "heavy_impact": 70,
+    "shock": 65,
+    "dream": 60,
+    "dizziness": 55,
+    "fear": 50,
+    "affection": 40
+  },
+  "intensitySpecialRules": {
+    "shock": {
+      "extreme": ["e11", "a11"],
+      "strong": ["e11"],
+      "mild": []
+    },
+    "fear": {
+      "not_mild": ["e12"]
+    },
+    "affection": {
+      "not_mild": ["e13"]
+    }
+  },
+  "lightheartedToneRule": {
+    "description": "当 action.tone === 'lighthearted' 且当前动作尚未出现 camera / impact group 时，才补充 emotionToEffectId 的符号效果。",
+    "onlyWhenNoGroups": ["camera", "impact"]
+  },
+  "llmAllowedEffectFilter": {
+    "description": "站点 dJ = FB.filter(...)：不是所有效果都开放给大模型自动选择。",
+    "excludeTargetRequired": true,
+    "excludeRendererPortrait": true,
+    "excludeIds": ["e11", "e31", "a15", "a16", "a17"],
+    "excludeTrackKinds": ["tone", "text", "distortion", "cutin", "scrutiny"],
+    "requireNonEmptyTracks": true
+  },
+  "groupDeduplication": {
+    "description": "同一动作内，按 cuePriority 降序依次选效果；若某效果的 groups 与已选效果有交集，则跳过。天气 lightning 会预先占用 lightning group。",
+    "example": "已有 a07（lightning）时，a02（particles）仍可选；但另一个 particles group 效果会被跳过。"
+  },
+  "idNormalization": {
+    "description": "pue()：把 e1 / a2 / s8 补零成 e01 / a02 / s08；过滤 a12 / a13 / e23；无 target 的效果删除 cId。",
+    "regex": "^([eas])([1-9])$ -> $1 0$2",
+    "removedIds": ["a12", "a13", "e23"],
+    "e21Alias": "e21 -> e01"
+  }
+}

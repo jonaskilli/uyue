@@ -56,4 +56,6 @@ object EventBus {
     const val AI_IMAGE_REQUEST = "aiImageRequest"
     // AI 弹幕：区间生成完毕（增量全量下发），value = DanmakuReady
     const val DANMAKU_READY = "danmakuReady"
+    // 场景特效：区间生成完毕（增量全量下发），value = SceneEffectReady
+    const val SCENE_EFFECT_READY = "sceneEffectReady"
 }
