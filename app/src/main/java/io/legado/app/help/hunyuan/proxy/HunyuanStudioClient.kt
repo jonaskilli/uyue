@@ -57,6 +57,11 @@ object HunyuanStudioClient {
     /** effort：深度思考。 */
     const val EFFORT_THINK = "high"
 
+    /** 混元图像3.0（网页端生图）的 chatModelId（2026-11 抓包实测）。 */
+    const val IMAGE_CHAT_MODEL_ID = "hunyuan-image-v3.0-v1.0.5"
+    /** 生图走的是网页端「AI 生图」入口，agentId 与文本对话不同。 */
+    private const val IMAGE_AGENT_ID = "h5ImagePlus"
+
     /**
      * 下拉模型名 → 上游 (chatModelId, effort)。
      * 未在白名单内的模型名按「混元3 + 快速」处理，与千问的策略一致。
@@ -215,6 +220,103 @@ object HunyuanStudioClient {
                     throw RuntimeException("混元错误${if (code.isNotBlank()) " [$code]" else ""}: $msg")
                 }
             }
+        }
+    }
+
+    /**
+     * 生图（混元图像3.0，走与文本同一个 /chat/{convId} SSE 通道）。
+     *
+     * 协议（逆向自 aistudio.tencent.com 网页端「AI 生图」抓包）：
+     *  - agentId 固定 h5ImagePlus，chatModelId = [IMAGE_CHAT_MODEL_ID]
+     *  - 比例用 options.imageIntention.userIntention.scale 表示（如 720x1280 = 9:16）
+     *  - 响应 SSE：type=think（思考）/ progress（进度）/ image（imageUrlHigh 高清）/
+     *    meta（会话信息）/ [DONE]；event: speech_type 后的裸文本负载直接跳过
+     *
+     * 返回图片 URL 列表（高清优先），正常一次一张。会话用完即删，避免账号里堆积生图历史。
+     */
+    fun generateImage(prompt: String, scale: String, cookie: String): List<String> {
+        val convId = newConversation(cookie)
+        try {
+            val body = JSONObject().apply {
+                put("model", MODEL_FIELD)
+                put("prompt", prompt)
+                put("plugin", "Adaptive")
+                put("displayPrompt", prompt)
+                put("displayPromptType", 1)
+                put("options", JSONObject().put(
+                    "imageIntention",
+                    JSONObject()
+                        .put("needIntentionModel", true)
+                        .put("backendUpdateFlag", 2)
+                        .put("userIntention", JSONObject().put("scale", scale))
+                ))
+                put("targetLang", JSONObject.NULL)
+                put("targetLangLabel", JSONObject.NULL)
+                put("sourceLang", JSONObject.NULL)
+                put("sourceLangLabel", JSONObject.NULL)
+                put("translateModelList", org.json.JSONArray())
+                put("podcast", JSONObject().put("voices", org.json.JSONArray()))
+                put("displayImageIntentionLabels", org.json.JSONArray().put(
+                    JSONObject()
+                        .put("type", "scale")
+                        .put("disPlayValue", scale)
+                        .put("startIndex", 0)
+                        .put("endIndex", scale.length)
+                ))
+                put("multimedia", org.json.JSONArray())
+                put("agentId", IMAGE_AGENT_ID)
+                put("supportHint", 1)
+                put("version", "v2")
+                put("chatModelId", IMAGE_CHAT_MODEL_ID)
+            }.toString()
+
+            client.newCall(
+                request(
+                    path = "/api/new-portal/chat/$convId",
+                    body = body,
+                    cookie = cookie,
+                    contentType = CHAT_CONTENT_TYPE,
+                    extra = mapOf("X-AgentID" to "$AGENT_ID/$convId")
+                )
+            ).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val err = resp.body?.string().orEmpty()
+                    throw RuntimeException("混元生图 HTTP ${resp.code}: ${err.take(200)}")
+                }
+                val src = resp.body?.source() ?: throw RuntimeException("混元生图响应为空")
+                val urls = mutableListOf<String>()
+                while (true) {
+                    val line = src.readUtf8Line() ?: break
+                    val trimmed = line.trim()
+                    if (!trimmed.startsWith("data:")) continue
+                    val payload = trimmed.substring(5).trim()
+                    if (payload.isEmpty() || payload == "[DONE]") continue
+                    val obj = try {
+                        JSONObject(payload)
+                    } catch (_: Exception) {
+                        continue
+                    }
+                    when {
+                        obj.optString("type") == "image" -> {
+                            val url = obj.optString("imageUrlHigh", "")
+                                .ifBlank { obj.optString("imageUrlLow", "") }
+                            if (url.isNotBlank()) urls.add(url)
+                        }
+                        obj.optString("type") == "error" || obj.has("error") -> {
+                            val err = obj.optJSONObject("error")
+                            val code = err?.optString("code") ?: obj.optString("code", "")
+                            val msg = err?.optString("message")
+                                ?: obj.optString("msg", obj.optString("message", "上游错误"))
+                            throw RuntimeException(
+                                "混元生图错误${if (code.isNotBlank()) " [$code]" else ""}: $msg"
+                            )
+                        }
+                    }
+                }
+                return urls
+            }
+        } finally {
+            deleteConversation(convId, cookie)
         }
     }
 

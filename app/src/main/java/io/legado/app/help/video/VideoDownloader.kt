@@ -910,6 +910,13 @@ object VideoDownloader {
     }.getOrNull()
 
     /**
+     * 书架封面用：该视频若进过下载（有下载目录且里面已落地 cover.jpg），
+     * 返回本地封面路径，否则返回 null——调用方沿用线上 URL 的原逻辑。
+     * cover.jpg 只在入队下载/边看边存/恢复记录时写入，存在即代表与下载器有过交集。
+     */
+    fun bookshelfLocalCover(book: Book): String? = localCoverOf(dirNameOf(book))
+
+    /**
      * 把封面保存到视频的下载目录（幂等：已存过有效图片直接跳过，不产生流量）。
      * 入队下载、边看边存、恢复下载记录时各调一次，尽早把封面落成本地文件。
      * 下载结果必须通过图片魔数校验才落地，防止把防盗链页面存成封面。

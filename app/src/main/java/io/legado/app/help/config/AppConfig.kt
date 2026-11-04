@@ -1429,11 +1429,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.danmakuEnabled, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.danmakuEnabled, value)
 
-    /** 每章生成的弹幕条数 */
-    var danmakuCount: Int
-        get() = appCtx.getPrefInt(PreferKey.danmakuCount, 6).coerceIn(1, 20)
-        set(value) = appCtx.putPrefInt(PreferKey.danmakuCount, value.coerceIn(1, 20))
-
     /** 屏幕上方同时可用的弹幕轨道数（错开用） */
     var danmakuTrackCount: Int
         get() = appCtx.getPrefInt(PreferKey.danmakuTrackCount, 3).coerceIn(1, 6)

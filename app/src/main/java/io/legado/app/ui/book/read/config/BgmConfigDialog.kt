@@ -182,9 +182,8 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         // AI 音效总开关
         switchAiEffectEnable.isChecked = AppConfig.aiEffectEnabled
 
-        // AI 弹幕：总开关 + 每章条数
+        // AI 弹幕：总开关（条数固定，不再提供设置）
         switchDanmakuEnable.isChecked = AppConfig.danmakuEnabled
-        etDanmakuCount.setText(AppConfig.danmakuCount.toString())
     }
 
     private fun initEvent() = binding.run {
@@ -282,16 +281,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
                 BaseReadAloudService.instance?.triggerDanmakuGenerationManual()
             }
         }
-
-        // 每章弹幕条数
-        etDanmakuCount.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                val value = s?.toString()?.toIntOrNull() ?: 6
-                AppConfig.danmakuCount = value.coerceIn(1, 20)
-            }
-        })
 
         // 单首最少持续时长：铺够该时长后才允许切下一首，避免音乐过碎
         etBgmMinSegment.addTextChangedListener(object : TextWatcher {

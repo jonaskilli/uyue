@@ -475,6 +475,11 @@ object AudioConcatUtil {
     }
 
     private fun decodeCompressedToPcm(file: File): PcmData? {
+        // ★ 优先 FFmpeg 解码（mobile-ffmpeg-min）：解码器全为原生自带、对非标封装
+        // 容忍度高，swresample 重采样质量也优于线性插值。失败再走 MediaExtractor。
+        AudioDecodeUtil.decodeFileViaFfmpeg(file)?.let { (pcm, rate, channels) ->
+            return PcmData(rate, channels, pcm)
+        }
         val extractor = MediaExtractor()
         extractor.setDataSource(file.absolutePath)
         var trackIndex = -1

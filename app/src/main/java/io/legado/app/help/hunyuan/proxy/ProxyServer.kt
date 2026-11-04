@@ -325,6 +325,12 @@ object ProxyServer {
      */
     private val STUDIO_GLOBAL_IMAGE_MODELS = listOf("gpt-image")
 
+    /**
+     * 识别为混元生图模型（aistudio 网页版混元图像3.0）。
+     * 与混元文本模型走同一套 Cookie 轮换（hunyuan_cookies），通道是 HunyuanStudioClient。
+     */
+    private val HUNYUAN_IMAGE_MODELS = listOf("hunyuan-image", "混元生图")
+
     /** 识别为 LongCat（美团龙猫）模型的名称（前缀匹配，大小写不敏感）。 */
     private val LONGCAT_MODELS = listOf("longcat")
 
@@ -435,6 +441,7 @@ object ProxyServer {
                         {"id":"hunyuan3-think","object":"model","owned_by":"hunyuan"},
                         {"id":"hunyuan4","object":"model","owned_by":"hunyuan"},
                         {"id":"hunyuan4-think","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan-image","object":"model","owned_by":"hunyuan"},
                         {"id":"longcat","object":"model","owned_by":"longcat"},
                         {"id":"longcat-search","object":"model","owned_by":"longcat"},
                         {"id":"bailian","object":"model","owned_by":"bailian"},
@@ -460,6 +467,7 @@ object ProxyServer {
                             "hunyuan3-think" to "hunyuan",
                             "hunyuan4" to "hunyuan",
                             "hunyuan4-think" to "hunyuan",
+                            "hunyuan-image" to "hunyuan",
                             "longcat" to "longcat",
                             "longcat-search" to "longcat",
                             "bailian" to "bailian",
@@ -822,8 +830,16 @@ object ProxyServer {
 
     /** 是否「混元」（aistudio 网页版）模型：hunyuan3 / hunyuan3-think / hunyuan4 / hunyuan4-think。 */
     private fun isHunyuanModel(m: String): Boolean {
+        // 生图模型（hunyuan-image）名字里同样含 hunyuan，先排除，避免被聊天通道误吞
+        if (isHunyuanImageModel(m)) return false
         val lower = m.lowercase()
         return HUNYUAN_MODELS.any { lower.startsWith(it) || lower.contains(it) }
+    }
+
+    /** 是否混元生图模型（hunyuan-image / 混元生图）。 */
+    private fun isHunyuanImageModel(m: String): Boolean {
+        val lower = m.lowercase()
+        return HUNYUAN_IMAGE_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否 LongCat（美团龙猫）模型。 */
@@ -907,6 +923,19 @@ object ProxyServer {
             "1920x768" -> "5:2"
             else -> null
         }
+    }
+
+    /**
+     * 豆包 ratio（9:16 等）映射到混元生图的 scale（如 720x1280）。
+     * 网页端生图只认常用比例，2:5 / 5:2 用最近的竖屏/横屏近似。
+     */
+    private fun ratioToHunyuanScale(ratio: String): String = when (ratio) {
+        "1:1" -> "1024x1024"
+        "3:4" -> "768x1024"
+        "4:3" -> "1024x768"
+        "16:9" -> "1280x720"
+        "5:2" -> "1280x720"   // 近似长横屏
+        else -> "720x1280"    // 9:16 / 2:5 及兜底
     }
 
     /** 解析生图比例：原始 ratio（如 9:16）直接返回，否则按 OpenAI size 映射，兜底 9:16。 */
@@ -1621,6 +1650,46 @@ object ProxyServer {
                     call.respond(
                         HttpStatusCode.BadGateway,
                         mapOf("error" to "StudioGlobal 生图未返回图片（匿名会话额度有限，可稍后重试）")
+                    )
+                    return
+                }
+                // 仅返回第一张
+                call.respond(
+                    ImageGenResponse(
+                        created = (System.currentTimeMillis() / 1000).toInt(),
+                        data = listOf(ImageDataItem(url = urls.first()))
+                    )
+                )
+                return
+            }
+
+            // 混元生图（aistudio 网页版混元图像3.0）：与混元文本共用 Cookie 轮换通道
+            if (isHunyuanImageModel(model)) {
+                val cookie = nextHunyuanCookie()
+                LogStore.i("Hunyuan", "调用生图，prompt=${prompt.take(60)} ratio=$ratio cookie空白=${cookie.isBlank()}")
+                if (cookie.isBlank()) {
+                    call.respond(
+                        HttpStatusCode.BadGateway,
+                        mapOf("error" to "混元未配置 Cookie：请在「浏览器」页登录 aistudio.tencent.com 后点「提取Cookie」")
+                    )
+                    return
+                }
+                val (urls, errMsg) = withContext(Dispatchers.IO) {
+                    try {
+                        HunyuanStudioClient.generateImage(prompt, ratioToHunyuanScale(ratio), cookie) to null
+                    } catch (e: Exception) {
+                        LogStore.e("Hunyuan", "生图异常: ${e.stackTraceToString()}")
+                        emptyList<String>() to (e.localizedMessage ?: e.toString())
+                    }
+                }
+                if (errMsg != null) {
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+                    return
+                }
+                if (urls.isEmpty()) {
+                    call.respond(
+                        HttpStatusCode.BadGateway,
+                        mapOf("error" to "混元生图未返回图片（可能 Cookie 失效或触发限流）")
                     )
                     return
                 }
@@ -2428,6 +2497,15 @@ object ProxyServer {
                 upstream("StudioGlobal") {
                     StudioGlobalClient.generateImage(prompt, model)
                 }
+            } else if (isHunyuanImageModel(model)) {
+                // 混元生图（aistudio 网页版）：与混元文本同一套 Cookie
+                upstream("Hunyuan") {
+                    val cookie = nextHunyuanCookie()
+                    if (cookie.isBlank()) {
+                        error("混元未配置 Cookie：请在「浏览器」页登录 aistudio.tencent.com 后点「提取Cookie」")
+                    }
+                    HunyuanStudioClient.generateImage(prompt, ratioToHunyuanScale(ratio), cookie)
+                }
             } else {
                 upstream("Doubao") {
                     val cookies = DoubaoClient.parseCookie(nextDoubaoCookie())
@@ -2463,6 +2541,7 @@ object ProxyServer {
             "hunyuan3-think" to "hunyuan",
             "hunyuan4" to "hunyuan",
             "hunyuan4-think" to "hunyuan",
+            "hunyuan-image" to "hunyuan",
             "longcat" to "longcat",
             "longcat-search" to "longcat",
             "bailian" to "bailian",
