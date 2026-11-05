@@ -128,6 +128,21 @@ class DanmakuView @JvmOverloads constructor(
         postDelayed(runnable, delayMs)
     }
 
+    /** 生命周期安全的延迟发射：Runnable 内不再访问 Fragment binding */
+    fun postDanmakuDelayed(delayMs: Long, action: (DanmakuView) -> Unit) {
+        val runnable = object : Runnable {
+            override fun run() {
+                pendingRunnables.remove(this)
+                if (!AppConfig.danmakuEnabled || !isAttachedToWindow ||
+                    !isShown || windowVisibility != VISIBLE
+                ) return
+                action(this@DanmakuView)
+            }
+        }
+        pendingRunnables.add(runnable)
+        postDelayed(runnable, delayMs)
+    }
+
     private fun launchNow(text: String) {
         if (text.isBlank() || width <= 0) return
         val trackCount = AppConfig.danmakuTrackCount
@@ -246,6 +261,11 @@ class DanmakuView @JvmOverloads constructor(
         } else if (active.isNotEmpty()) {
             startFrameLoop()
         }
+    }
+
+    override fun onDetachedFromWindow() {
+        clearDanmaku()
+        super.onDetachedFromWindow()
     }
 
     private fun measureWidth(text: String, scale: Float): Float {

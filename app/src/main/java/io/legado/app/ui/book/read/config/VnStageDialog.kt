@@ -136,6 +136,9 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
      */
     private var useAiImageBackground = false
 
+    /** 直接持有特效 View，避免 onDestroyView 后通过 binding 触发 viewLifecycleOwner 异常 */
+    private var sceneEffectViewRef: SceneEffectView? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /** 屏幕超时设置（毫秒），跟随阅读页"屏幕超时"设置；< 0 表示常亮 */
@@ -189,13 +192,28 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         // 背景来源：AI 生图开关开启 → 与大图/小图界面同源（AiImageGenerator + AI_IMAGE_CHANGED）；
         // 关闭 → 场景背景管理器（原逻辑，不动）
         useAiImageBackground = AppConfig.readAloudAiImage
+        sceneEffectViewRef = binding.sceneEffectView
+        VnBackgroundManager.onIdleEffect = { cue ->
+            val target = sceneEffectViewRef
+            if (AppConfig.sceneEffectEnabled && isAdded && this@VnStageDialog.view != null &&
+                target?.isAttachedToWindow == true
+            ) {
+                target.setIdleEffect(cue)
+            }
+        }
         if (useAiImageBackground) {
             showAiGeneratedBackground()
         } else {
             // 背景管理器（object 单例）：绑定显示目标；渲染交给本界面的两层背景加载，
             // 以统一支持「背景呈现方式」（裁切 / 上下补模糊 / 贴顶补模糊）。
-            VnBackgroundManager.onSceneFile = { loadBackgroundImage(file = it) }
-            VnBackgroundManager.onBuiltin = { loadBackgroundImage(resId = R.drawable.vn_default_background) }
+            VnBackgroundManager.onSceneFile = {
+                if (isAdded && this@VnStageDialog.view != null) loadBackgroundImage(file = it)
+            }
+            VnBackgroundManager.onBuiltin = {
+                if (isAdded && this@VnStageDialog.view != null) {
+                    loadBackgroundImage(resId = R.drawable.vn_default_background)
+                }
+            }
             VnBackgroundManager.attach(binding.ivVnBackground)
         }
 
@@ -232,6 +250,9 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
     }
 
     override fun observeLiveBus() {
+        observeEvent<Boolean>(EventBus.READ_ALOUD_CONFIG_CHANGED) {
+            syncSceneEffectVisibility()
+        }
         // 旁白切句 + 对话触发时机：由 VN_SUBTITLE_POS 片段（带段内区间）驱动。
         // 注意：不能用 READ_ALOUD_SUBTITLE 累计长度——同步任务会周期性重发
         // 同一片段，累计长度膨胀 3~5 倍，导致段落刚开始对话就"读到了"。
@@ -250,6 +271,17 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
             if (imagePath.isBlank()) return@observeEvent
             val f = File(imagePath)
             if (f.exists()) loadBackgroundImage(file = f)
+        }
+        // 音效联动画面：消费音效播放收口的事件，不新增 AI 调用、不新建词表配置
+        observeEvent<io.legado.app.model.SoundEffectFired>(EventBus.SOUND_EFFECT_FIRED) { fired ->
+            if (!AppConfig.sceneEffectEnabled) return@observeEvent
+            val cue = io.legado.app.model.SoundEffectSceneMapper.map(fired)
+                ?: return@observeEvent
+            if (cue.burst) {
+                binding.sceneEffectView.burst(cue)
+            } else {
+                binding.sceneEffectView.show(cue)
+            }
         }
         observeEvent<SceneEffectReady>(EventBus.SCENE_EFFECT_READY) { ready ->
             if (ready.key != sceneEffectKey) {
@@ -270,11 +302,9 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
                 .forEach { cue ->
                     val keyAtSchedule = sceneEffectKey
                     // 与弹幕一致延后 1 秒：读到描写时才出现，不提前剧透
-                    binding.sceneEffectView.postDelayed({
-                        if (sceneEffectKey == keyAtSchedule && AppConfig.sceneEffectEnabled) {
-                            binding.sceneEffectView.show(cue)
-                        }
-                    }, 1000L)
+                    binding.sceneEffectView.postEffectDelayed(1000L) { target ->
+                        if (sceneEffectKey == keyAtSchedule) target.show(cue)
+                    }
                 }
         }
         observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
@@ -305,13 +335,26 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
 
     /** 场景特效层初始化：按开关显示；弹窗重建时从 Store 恢复本章结果 */
     private fun initSceneEffect() {
-        binding.sceneEffectView.visibility =
-            if (AppConfig.sceneEffectEnabled) View.VISIBLE else View.GONE
+        syncSceneEffectVisibility()
         if (!AppConfig.sceneEffectEnabled) return
         val book = ReadBook.book ?: return
         val title = ReadBook.curTextChapter?.title ?: return
         sceneEffectKey = SceneEffectStore.key
         currentSceneEffects = SceneEffectStore.get("${book.name}|$title")
+    }
+
+    /** 总开关变化时启停常驻层；VN 预设场景模式下再按当前场景覆盖默认值 */
+    private fun syncSceneEffectVisibility() {
+        val target = sceneEffectViewRef ?: return
+        val enabled = AppConfig.sceneEffectEnabled
+        target.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (!enabled) {
+            target.clearSceneEffects()
+            target.setIdleEffect(null)
+            return
+        }
+        target.setIdleEffect(VnBackgroundManager.defaultIdleCue())
+        if (!useAiImageBackground) VnBackgroundManager.refreshIdleEffect()
     }
 
     // ------------------------------------------------------------------
@@ -1080,11 +1123,25 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         }
     }
 
+    override fun onDestroyView() {
+        stopTypewriter()
+        portraitPollJob?.cancel()
+        portraitPollJob = null
+        sceneEffectViewRef?.cancelPendingEffects()
+        sceneEffectViewRef?.setIdleEffect(null)
+        sceneEffectViewRef = null
+        VnBackgroundManager.release()
+        screenOffHandler.removeCallbacks(screenOffRunnable)
+        super.onDestroyView()
+    }
+
     override fun onDismiss(dialog: android.content.DialogInterface) {
         super.onDismiss(dialog)
         stopTypewriter()
         portraitPollJob?.cancel()
         portraitPollJob = null
+        sceneEffectViewRef?.cancelPendingEffects()
+        sceneEffectViewRef?.setIdleEffect(null)
         VnBackgroundManager.release()
         // 清理屏幕超时计时器，避免泄漏；退出后由朗读界面/阅读界面自行管理屏幕状态
         screenOffHandler.removeCallbacks(screenOffRunnable)

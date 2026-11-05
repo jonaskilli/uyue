@@ -4,6 +4,8 @@ import android.widget.ImageView
 import io.legado.app.constant.AppLog
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.CharacterProfileManager
+import io.legado.app.model.SceneEffectCue
+import io.legado.app.model.SceneEffectKind
 import io.legado.app.model.ReadBook
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,6 +82,104 @@ object VnBackgroundManager {
     /** 默认场景（无 AI 接口/分析失败时兜底；从类别清单里取一个通用起点） */
     private const val DEFAULT_SCENE = "现代客厅公寓"
 
+    /** 每个 VN 预设场景一个低干扰常驻循环特效；不用雾烟、光束、星芒、萤火等遮挡/闪烁类 */
+    private val IDLE_EFFECT_BY_SCENE: Map<String, SceneEffectKind> = mapOf(
+        "古代宫殿大殿" to SceneEffectKind.BOKEH,
+        "古代皇家园林" to SceneEffectKind.BUTTERFLIES,
+        "古代庭院深深" to SceneEffectKind.PETALS,
+        "古代客栈大堂" to SceneEffectKind.BOKEH,
+        "古代市集街道" to SceneEffectKind.DUST,
+        "古代书房雅室" to SceneEffectKind.DUST,
+        "古代闺房卧室" to SceneEffectKind.DUST,
+        "古代厨房灶房" to SceneEffectKind.BOKEH,
+        "古代府衙公堂" to SceneEffectKind.DUST,
+        "古代军营帐内" to SceneEffectKind.DUST,
+        "古代城楼城墙" to SceneEffectKind.BIRD_FLOCK,
+        "古代酒楼茶馆" to SceneEffectKind.BOKEH,
+        "古代书院学堂" to SceneEffectKind.DUST,
+        "古代寺庙禅房" to SceneEffectKind.BOKEH,
+        "古代地牢牢房" to SceneEffectKind.DUST,
+        "古代马车车内" to SceneEffectKind.DUST,
+        "古代小桥流水" to SceneEffectKind.BUBBLES,
+        "古代田园村庄" to SceneEffectKind.DANDELION,
+        "古代青山密林" to SceneEffectKind.LEAVES,
+        "古代悬崖峭壁" to SceneEffectKind.WIND,
+        "古代瀑布深潭" to SceneEffectKind.BUBBLES,
+        "古代山洞洞府" to SceneEffectKind.DUST,
+        "古代雪原荒野" to SceneEffectKind.SNOW,
+        "古代沙漠戈壁" to SceneEffectKind.WIND,
+        "古代海边疆岸" to SceneEffectKind.BIRDS_GULL,
+        "修仙宗门广场" to SceneEffectKind.BOKEH,
+        "修仙洞府内室" to SceneEffectKind.DUST,
+        "修仙藏经阁楼" to SceneEffectKind.DUST,
+        "修仙炼丹房室" to SceneEffectKind.WIND,
+        "修仙秘境深处" to SceneEffectKind.DUST,
+        "修仙祭坛法阵" to SceneEffectKind.FOUNTAIN,
+        "修仙山顶云海" to SceneEffectKind.DUST,
+        "玄幻异空间内" to SceneEffectKind.FOUNTAIN,
+        "玄幻魔域深处" to SceneEffectKind.WIND,
+        "武侠竹林小径" to SceneEffectKind.LEAVES,
+        "武侠客栈大堂" to SceneEffectKind.BOKEH,
+        "武侠比武擂台" to SceneEffectKind.DUST,
+        "武侠悬崖绝顶" to SceneEffectKind.WIND,
+        "武侠丐帮破庙" to SceneEffectKind.BIRDS_CROW,
+        "现代客厅公寓" to SceneEffectKind.BOKEH,
+        "现代厨房餐厅" to SceneEffectKind.BOKEH,
+        "现代卧室套房" to SceneEffectKind.DUST,
+        "现代书房办公室" to SceneEffectKind.DUST,
+        "现代公司会议室" to SceneEffectKind.DUST,
+        "现代教室校园" to SceneEffectKind.DUST,
+        "现代操场校园" to SceneEffectKind.WIND,
+        "现代图书馆内" to SceneEffectKind.DUST,
+        "现代医院病房" to SceneEffectKind.DUST,
+        "现代地铁车厢" to SceneEffectKind.DUST,
+        "现代街道夜景" to SceneEffectKind.BOKEH,
+        "现代天台楼顶" to SceneEffectKind.BOKEH,
+        "现代商场内部" to SceneEffectKind.BOKEH,
+        "现代咖啡馆内" to SceneEffectKind.BOKEH,
+        "现代餐厅饭馆" to SceneEffectKind.BOKEH,
+        "现代工厂车间" to SceneEffectKind.BOKEH,
+        "现代实验室研究" to SceneEffectKind.BUBBLES,
+        "现代电梯轿厢" to SceneEffectKind.DUST,
+        "现代地下车库" to SceneEffectKind.DUST,
+        "现代公园长椅" to SceneEffectKind.LEAVES,
+        "校园教室课堂" to SceneEffectKind.DUST,
+        "校园操场黄昏" to SceneEffectKind.WIND,
+        "校园图书馆内" to SceneEffectKind.DUST,
+        "校园天台黄昏" to SceneEffectKind.BOKEH,
+        "校园林荫小道" to SceneEffectKind.LEAVES,
+        "科幻飞船舱内" to SceneEffectKind.FOUNTAIN,
+        "科幻太空站内" to SceneEffectKind.BOKEH,
+        "科幻星球地表" to SceneEffectKind.WIND,
+        "科幻未来都市" to SceneEffectKind.BOKEH,
+        "科幻实验室基地" to SceneEffectKind.FOUNTAIN,
+        "科幻废墟世界" to SceneEffectKind.DUST,
+        "科幻虚拟空间" to SceneEffectKind.FOUNTAIN,
+        "悬疑废弃医院" to SceneEffectKind.DUST,
+        "悬疑旧宅古屋" to SceneEffectKind.DUST,
+        "悬疑地下室暗室" to SceneEffectKind.DUST,
+        "悬疑浓雾街道" to SceneEffectKind.DUST,
+        "悬疑深夜小巷" to SceneEffectKind.DUST,
+        "悬疑灵堂殡仪" to SceneEffectKind.BIRDS_CROW,
+        "悬疑深山迷路" to SceneEffectKind.DUST,
+        "西幻城堡大厅" to SceneEffectKind.BOKEH,
+        "西幻酒馆旅店" to SceneEffectKind.BOKEH,
+        "西幻村庄农田" to SceneEffectKind.DANDELION,
+        "西幻魔法塔内" to SceneEffectKind.FOUNTAIN,
+        "西幻森林深处" to SceneEffectKind.BUTTERFLIES,
+        "西幻地下城内" to SceneEffectKind.DUST,
+        "西幻龙巢深处" to SceneEffectKind.WIND,
+        "西幻王座宫殿" to SceneEffectKind.BOKEH,
+        "自然山林小径" to SceneEffectKind.LEAVES,
+        "自然河边溪畔" to SceneEffectKind.BUBBLES,
+        "自然雪地冰原" to SceneEffectKind.SNOW,
+        "自然雨夜街巷" to SceneEffectKind.RAIN,
+        "自然山谷深处" to SceneEffectKind.DUST,
+        "自然海边沙滩" to SceneEffectKind.BIRDS_GULL,
+        "自然草原旷野" to SceneEffectKind.WIND,
+        "自然星空夜空" to SceneEffectKind.BOKEH
+    )
+
     /** 区间目标字数（照 AI 音效：先按字数确定覆盖哪几段，边界永远落在段落结尾） */
     private const val RANGE_CHARS = 300
 
@@ -98,6 +198,20 @@ object VnBackgroundManager {
 
     /** 内置通用背景回调（同样交给舞台界面渲染，以统一呈现方式） */
     var onBuiltin: (() -> Unit)? = null
+
+    /** 当前 VN 预设场景对应的常驻循环特效；主线程回调给 SceneEffectView */
+    var onIdleEffect: ((SceneEffectCue) -> Unit)? = null
+
+    @Volatile
+    private var currentIdleScene: String = ""
+
+    /** 代次号：界面销毁/重新绑定后让所有排队中的主线程回调失效 */
+    @Volatile
+    private var idleGeneration: Int = 0
+
+    /** 背景图回调代次：只随 attach/release 变化，不因场景切换误伤背景刷新 */
+    @Volatile
+    private var viewGeneration: Int = 0
 
     /** 当前 ImageView 引用（界面销毁即释放） */
     @Volatile
@@ -135,6 +249,8 @@ object VnBackgroundManager {
      * 立即显示内置通用背景兜底（避免进入界面/生成中一片黑）。
      */
     fun attach(view: ImageView) {
+        idleGeneration++
+        viewGeneration++
         targetView = view
         // 先上内置通用背景，绝不让用户看到黑屏
         showBuiltinBackground()
@@ -142,6 +258,7 @@ object VnBackgroundManager {
         if (currentScene.isNotBlank()) {
             showScene(currentScene)
         }
+        emitIdle(if (currentScene.isNotBlank()) currentScene else DEFAULT_SCENE)
     }
 
     /**
@@ -161,12 +278,57 @@ object VnBackgroundManager {
         targetView = null
         onSceneFile = null
         onBuiltin = null
+        onIdleEffect = null
+        currentIdleScene = ""
+        idleGeneration++
+        viewGeneration++
     }
 
     /** 呈现方式切换后，按当前场景/内置背景重绘（回调交给舞台界面做两层渲染） */
     fun reshow() {
         if (currentScene.isNotBlank()) showScene(currentScene)
         else onBuiltin?.invoke()
+        emitIdle(if (currentScene.isNotBlank()) currentScene else DEFAULT_SCENE)
+    }
+
+    /** 非 VN 界面/开关刚打开时用的默认常驻层 */
+    fun defaultIdleCue(): SceneEffectCue = idleCueFor(DEFAULT_SCENE)
+
+    /** 配置变化后强制重发一次当前场景特效，避免 idle 因开关切换丢失 */
+    fun refreshIdleEffect() {
+        currentIdleScene = ""
+        emitIdle(if (currentScene.isNotBlank()) currentScene else DEFAULT_SCENE)
+    }
+
+    private fun emitIdle(scene: String) {
+        if (scene.isBlank() || scene == currentIdleScene) return
+        currentIdleScene = scene
+        val generation = ++idleGeneration
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (generation != idleGeneration || scene != currentIdleScene) return@post
+            val callback = onIdleEffect ?: return@post
+            callback.invoke(idleCueFor(scene))
+        }
+    }
+
+    private fun idleCueFor(scene: String): SceneEffectCue {
+        val kind = IDLE_EFFECT_BY_SCENE[scene] ?: SceneEffectKind.BOKEH
+        val wind = when (kind) {
+            SceneEffectKind.WIND, SceneEffectKind.RAIN, SceneEffectKind.SNOW,
+            SceneEffectKind.LEAVES, SceneEffectKind.PETALS, SceneEffectKind.DANDELION,
+            SceneEffectKind.BIRD_FLOCK, SceneEffectKind.BIRDS_GULL,
+            SceneEffectKind.BIRDS_CROW -> true
+            else -> false
+        }
+        return SceneEffectCue(
+            para = -1,
+            kind = kind,
+            level = 1,
+            durationMs = Long.MAX_VALUE,
+            wind = wind,
+            source = "vn-scene-idle",
+            sizeScale = 1.6f
+        )
     }
 
     // ------------------------------------------------------------------
@@ -349,6 +511,8 @@ object VnBackgroundManager {
         if (lastSwitchIndex in 0 until index && index - lastSwitchIndex < MIN_STAY_PARAGRAPHS) {
             return
         }
+        // 场景一确定就换常驻特效，不等背景图生成完
+        emitIdle(scene)
         // 图未就绪：不切显示（保持当前图），等生成完成回调补切
         val f = sceneFile(scene)
         if (!f.isFile || f.length() == 0L) {
@@ -454,20 +618,24 @@ object VnBackgroundManager {
 
     /** 主线程显示该类别背景；渲染交给舞台界面的 [onSceneFile] 回调（两层 + 呈现方式） */
     private fun showScene(scene: String) {
+        emitIdle(scene)
         val f = sceneFile(scene)
         if (!f.isFile || f.length() == 0L) return
         if (targetView == null) return
+        val generation = viewGeneration
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (targetView == null) return@post
+            if (generation != viewGeneration || targetView == null) return@post
             onSceneFile?.invoke(f)
         }
     }
 
     /** 显示打包进 APK 的内置通用背景（渲染交给舞台界面的 [onBuiltin] 回调） */
     private fun showBuiltinBackground() {
+        emitIdle(DEFAULT_SCENE)
         if (targetView == null) return
+        val generation = viewGeneration
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (targetView == null) return@post
+            if (generation != viewGeneration || targetView == null) return@post
             onBuiltin?.invoke()
         }
     }

@@ -78,6 +78,9 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
     private var sceneEffectKey: String? = null
     private val firedSceneAnchors = mutableSetOf<Int>()
 
+    /** 直接持有特效 View，避免 onDestroyView 后通过 binding 触发 viewLifecycleOwner 异常 */
+    private var sceneEffectViewRef: SceneEffectView? = null
+
     /** 当前显示的图片文件，进入时从最新生图取，后续随 AI_IMAGE_CHANGED 更新 */
     private var currentImageFile: File? = null
 
@@ -184,8 +187,8 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
 
     /** 场景特效层初始化：按开关显示；弹窗重建时从 Store 恢复本章结果 */
     private fun initSceneEffect() {
-        binding.sceneEffectView.visibility =
-            if (AppConfig.sceneEffectEnabled) View.VISIBLE else View.GONE
+        sceneEffectViewRef = binding.sceneEffectView
+        syncSceneEffectVisibility()
         if (!AppConfig.sceneEffectEnabled) return
         val book = ReadBook.book ?: return
         val title = ReadBook.curTextChapter?.title ?: return
@@ -193,7 +196,23 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
         currentSceneEffects = SceneEffectStore.get("${book.name}|$title")
     }
 
+    /** 非 VN 预设场景界面使用默认常驻层；触发型特效出现时自动让位 */
+    private fun syncSceneEffectVisibility() {
+        val target = sceneEffectViewRef ?: return
+        val enabled = AppConfig.sceneEffectEnabled
+        target.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (enabled) {
+            target.setIdleEffect(VnBackgroundManager.defaultIdleCue())
+        } else {
+            target.clearSceneEffects()
+            target.setIdleEffect(null)
+        }
+    }
+
     override fun observeLiveBus() {
+        observeEvent<Boolean>(EventBus.READ_ALOUD_CONFIG_CHANGED) {
+            syncSceneEffectVisibility()
+        }
         // 播放状态变化不影响本界面显示，仅用于保持状态同步
         observeEvent<Int>(EventBus.ALOUD_STATE) { }
         // 字幕更新：同步显示到全屏界面下方的字幕区
@@ -217,6 +236,17 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 aiHistoryIndex = AiImageGenerator.getGalleryIndexOfCurrent(aiHistoryImages)
             }
         }
+        // 音效联动画面：消费音效播放收口的事件，不新增 AI 调用、不新建词表配置
+        observeEvent<io.legado.app.model.SoundEffectFired>(EventBus.SOUND_EFFECT_FIRED) { fired ->
+            if (!AppConfig.sceneEffectEnabled) return@observeEvent
+            val cue = io.legado.app.model.SoundEffectSceneMapper.map(fired)
+                ?: return@observeEvent
+            if (cue.burst) {
+                binding.sceneEffectView.burst(cue)
+            } else {
+                binding.sceneEffectView.show(cue)
+            }
+        }
         observeEvent<SceneEffectReady>(EventBus.SCENE_EFFECT_READY) { ready ->
             if (ready.key != sceneEffectKey) {
                 sceneEffectKey = ready.key
@@ -236,11 +266,9 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
                 .forEach { cue ->
                     val keyAtSchedule = sceneEffectKey
                     // 与弹幕一致延后 1 秒：读到描写时才出现，不提前剧透
-                    binding.sceneEffectView.postDelayed({
-                        if (sceneEffectKey == keyAtSchedule && AppConfig.sceneEffectEnabled) {
-                            binding.sceneEffectView.show(cue)
-                        }
-                    }, 1000L)
+                    binding.sceneEffectView.postEffectDelayed(1000L) { target ->
+                        if (sceneEffectKey == keyAtSchedule) target.show(cue)
+                    }
                 }
         }
         observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
@@ -751,6 +779,14 @@ class FullscreenAiImageDialog : BaseDialogFragment(R.layout.dialog_fullscreen_im
             .fitCenter()
             .placeholder(placeholder)
             .into(iv)
+    }
+
+    override fun onDestroyView() {
+        sceneEffectViewRef?.cancelPendingEffects()
+        sceneEffectViewRef?.setIdleEffect(null)
+        sceneEffectViewRef = null
+        screenOffHandler.removeCallbacks(screenOffRunnable)
+        super.onDestroyView()
     }
 
     override fun onDismiss(dialog: DialogInterface) {

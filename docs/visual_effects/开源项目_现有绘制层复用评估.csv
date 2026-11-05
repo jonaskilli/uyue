@@ -1,0 +1,130 @@
+序号,项目,分类,地址,复用档位,接入方式,许可证
+1,pixelfx,现成特效库,https://github.com/patch-gg/pixelfx,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,MIT（字体除外）
+2,Effekseer,现成特效库,https://github.com/effekseer/Effekseer,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+3,Effekseer EffectMaterials,现成特效库,https://github.com/effekseer/EffectMaterials,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,CC0
+4,Effekseer 官方示例特效,现成特效库,https://effekseer.github.io/zh-cn/,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,多数CC-0需逐个确认
+5,kmpmedia OGSlash,现成特效库,https://github.com/SolidKeyAB/kmpmedia/blob/main/docs/SLASH.md,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+6,Sprite Fusion VFX,现成特效库,https://spritefusion.com/,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,MIT
+7,Free-Game-Dev-Assets,现成特效库,https://github.com/TMHSDigital/Free-Game-Dev-Assets,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,各资源不同
+8,Leonids,Android原生,https://github.com/plattysoft/Leonids,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,Apache-2.0
+9,androidx-particles,Android原生,https://github.com/fkorax/androidx-particles,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,Apache-2.0
+10,Particles-Android,Android原生,https://github.com/AbdullahSako/Particles-Android,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+11,Konfetti,Android原生,https://github.com/DanielMartinus/Konfetti,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+12,ExplosionField 原版,Android原生,https://github.com/tyrantgit/ExplosionField,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+13,ExplosionField 新版,Android原生,https://github.com/ahmmedrejowan/explosionfield,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+14,ParticleSmasher,Android原生,https://github.com/tombcato/ParticleSmasher,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+15,Particle Kotlin版,Android原生,https://github.com/ultimateHandsomeBoy666/Particle,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+16,FireWorks,Android原生,https://github.com/hotstu/FireWorks,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,Apache-2.0
+17,SparkScreen,Android原生,https://github.com/a396901990/SparkScreen,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+18,ViewExplosion,Android原生,https://github.com/karlsoft/ViewExplosion,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+19,Popview-Android,Android原生,https://github.com/krishnarb3/Popview-Android,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+20,Grav,Android原生,https://github.com/glomadrian/Grav,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+21,XView,Android原生,https://github.com/af913337456/XView,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+22,explosion示例,Android原生,https://github.com/ReadyShowShow/explosion,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+23,JetpackComposeConfetti,Android原生,https://github.com/Meteh4/JetpackComposeConfetti,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+24,ConfettiKit,Android原生,https://github.com/vinceglb/ConfettiKit,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+25,Particle-Emitter,Android原生,https://github.com/AndriaNjoku/Particle-Emitter,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+26,AndroidAnimation,Android原生,https://github.com/TheRangerStar/AndroidAnimation,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+27,particles-android,Android原生,https://github.com/henriquehorbovyi/particles,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+28,Aether,Android原生,https://github.com/Manabu-GT/Aether,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+29,cosmic_flow,Android原生,https://github.com/PedroGM80/cosmic_flow,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+30,shimmer-android,Android原生,https://github.com/facebook/shimmer-android,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+31,AndroidViewAnimations,Android原生,https://github.com/daimajia/AndroidViewAnimations,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,MIT
+32,APNG4Android,Android原生,https://github.com/penfeizhou/APNG4Android,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,Apache-2.0
+33,Fresco,Android原生,https://github.com/facebook/fresco,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+34,Coil,Android原生,https://github.com/coil-kt/coil,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+35,PopcornView,Android原生,见AndroidLibs特效Effect清单,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+36,SnowingView与FallingView与android-snowfall,Android原生,https://github.com/ColorfulCat/AndroidLibs/blob/master/特效Effect/README.md,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+37,AlphaPlayer,播放引擎,https://github.com/bytedance/AlphaPlayer,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,Apache-2.0
+38,Tencent vap 旧版开源,播放引擎,https://github.com/Tencent/vap,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT开源版保持有效
+39,Lottie Android,播放引擎,https://github.com/airbnb/lottie-android,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,Apache-2.0
+40,lottie-web,播放引擎,https://github.com/airbnb/lottie-web,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+41,libpag,播放引擎,https://github.com/Tencent/libpag,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,Apache-2.0
+42,dotlottie-web,播放引擎,https://github.com/LottieFiles/dotlottie-web,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+43,SVGA,播放引擎,仓库SVGAPlayer-Android已归档,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+44,Rive,播放引擎,https://rive.app/,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,运行时部分开源商用条款需核
+45,rlottie,播放引擎,https://github.com/Samsung/rlottie,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+46,LottieFiles免费火焰动画,素材站,https://lottiefiles.com/free-animations/fire-animation,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,逐文件确认
+47,IconScout与Lordicon,素材站,https://iconscout.com/,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,逐文件确认
+48,tsParticles,Web特效,https://github.com/tsparticles/tsparticles,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+49,canvas-confetti,Web特效,https://github.com/catdad/canvas-confetti,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+50,fireworks-js,Web特效,https://github.com/crashmax-dev/fireworks-js,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+51,PixiJS,Web特效,https://github.com/pixijs/pixi.js,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+52,Phaser,Web特效,https://github.com/photonstorm/phaser,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+53,three.quarks,Web特效,https://github.com/Alchemist0823/three.quarks,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+54,three.js,Web特效,https://github.com/mrdoob/three.js,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+55,particles.js,Web特效,https://github.com/VincentGarreau/particles.js,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+56,Proton,Web特效,https://github.com/drawcall/Proton,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+57,party.js,Web特效,https://github.com/yiliansource/party-js,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+58,9am fire-flame,Web特效,https://github.com/9am/fire-flame,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,MIT
+59,doom-fire-algorithm,Web特效,https://github.com/filipedeschamps/doom-fire-algorithm,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,MIT
+60,烟花模拟器 yanhua,Web特效,https://github.com/itboy365/yanhua,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+61,anime.js,Web特效,https://github.com/juliangarnier/anime.js,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+62,mo.js,Web特效,https://github.com/mojs/mojs,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+63,Kaplay,Web特效,https://github.com/kaplayjs/kaplay,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+64,ParticleEffectsButtons,Web特效,https://github.com/codrops/ParticleEffectsButtons,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+65,lucky-canvas,Web特效,https://github.com/buuing/lucky-canvas,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+66,kmpmedia OGSlash,Compose跨端,https://github.com/SolidKeyAB/kmpmedia,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+67,Particles-compose,Compose跨端,https://github.com/AbdullahSako/Particles-Android,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+68,ConfettiKit,Compose跨端,https://github.com/vinceglb/ConfettiKit,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+69,Aether,Compose跨端,https://github.com/Manabu-GT/Aether,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+70,AndroidAnimation,Compose跨端,https://github.com/TheRangerStar/AndroidAnimation,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+71,newton或newton_particles,Flutter,https://github.com/tguerin/newton,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+72,particle_fx,Flutter,https://pub.dev/packages/particle_fx,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+73,flutter_fireworks,Flutter,https://github.com/justinschier/flutter_fireworks,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+74,Flame,Flutter,https://github.com/flame-engine/flame,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+75,easy_conffeti_flutter,Flutter,https://github.com/Flucadetena/easy_conffeti_flutter,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+76,workfire,Flutter,https://github.com/vlvcDev/workfire,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+77,particle_fl,Flutter,https://github.com/mvorotyn/particle_fl,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+78,Vortex,iOS,https://github.com/twostraws/Vortex,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+79,Burst,iOS,https://github.com/piemonte/Burst,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+80,Twinkle,iOS,https://github.com/piemonte/Twinkle,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+81,Plume,iOS,https://github.com/samlupton/SLAnimations,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+82,SwiftConfettiView,iOS,https://github.com/ugurethemaydin/SwiftConfettiView,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+83,SAConfettiView,iOS,https://github.com/nsimunko/SAConfettiView,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+84,FireEmitter,iOS,https://github.com/DuncanMC/FireEmitter,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+85,react-native-confetti-cannon,ReactNative,https://github.com/VincentCATILLON/react-native-confetti-cannon,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+86,react-native-fast-confetti,ReactNative,https://github.com/AlirezaHadjar/react-native-fast-confetti,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+87,react-native-fiesta,ReactNative,https://github.com/mateoguzmana/react-native-fiesta,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+88,react-native-skia,ReactNative,https://github.com/Shopify/react-native-skia,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+89,ShaderView,Shader,https://github.com/appspell/ShaderView,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,MIT
+90,android-gpuimage,Shader,https://github.com/wasabeef/android-gpuimage,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+91,Burning-Flame2.0,Shader,https://github.com/ThunderSoft-XA/Burning-Flame2.0,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+92,InstantGLSL,Shader,https://github.com/glumes/InstantGLSL,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+93,shaderbox,Shader,https://github.com/rmnkhr/shaderbox,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+94,ShaderToyAndroid,Shader,https://github.com/tanpuer/ShaderToyAndroid,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+95,Shadertoy,Shader,https://www.shadertoy.com/,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,默认CC BY-NC-SA 3.0
+96,The Book of Shaders,Shader,https://github.com/patriciogonzalezvivo/thebookofshaders,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,待核
+97,shaderbrew与pixy.js,Shader,https://web3dev1337.github.io/shaderbrew/,B-加渲染后端仍挂同一浮层,在现有浮层之上新增播放或渲染后端（Lottie/PAG/动图/透明视频/WebView/GLSL），复用 show 与 clear 生命周期,部分MIT部分Shadertoy许可
+98,cocos2d-x,游戏引擎,https://github.com/cocos2d/cocos2d-x,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+99,libGDX与Particle Editor,游戏引擎,https://github.com/libgdx/libgdx,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,Apache-2.0
+100,SPARK Particle Engine,游戏引擎,https://github.com/Synxis/SPARK,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+101,Godot,游戏引擎,https://github.com/godotengine/godot,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+102,SwordSlash-Effect-Godot,游戏引擎,https://github.com/metanoia83/SwordSlash-Effect-Godot-3.2,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+103,ParticleEffectForUGUI,游戏引擎,https://github.com/mob-sakai/ParticleEffectForUGUI,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+104,Unity-Slash-Effect,游戏引擎,https://github.com/ArtMelnykov/Unity-Slash-Effect,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+105,gdx-effekseer,游戏引擎,https://github.com/SrJohnathan/gdx-effekseer,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+106,cge-effekseer,游戏引擎,https://github.com/Kagamma/cge-effekseer,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+107,Effekseer运行时子仓库,游戏引擎,https://github.com/effekseer,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,MIT
+108,FelgoSDK ParticleEditor,游戏引擎,https://github.com/FelgoSDK/ParticleEditor,C-需换UI栈或引擎,当前 Android View 栈不直接复用，仅参考粒子算法、参数与素材,待核
+109,Kenney Particle Pack,素材包,https://kenney.nl/assets/particle-pack,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,CC0
+110,OpenGameArt Free VFX asset pack,素材包,https://opengameart.org/content/free-vfx-asset-pack,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,CC0
+111,Pixel Art VFX Pack vol.01,素材包,https://nuhemugames.itch.io/pixel-art-vfx-pack-vol01-24-effects-256-frames,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,以页面许可为准
+112,itch.io Open Source VFX合集,素材包,https://itch.io/c/4909438/open-source-vfx,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,逐个确认
+113,GameAssets资源导航,素材包,https://github.com/JackLuguibin/GameAssets,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,待核
+114,Godot Lab免费素材库,素材包,https://godotlab.org/en/assets,A-直接沿用现有绘制层,直接并入 SceneEffectView.onDraw 或 SceneEffectExtraRenderer.draw；序列帧与贴图放 assets/fx 后用 Canvas.drawBitmap 播帧,逐个确认
+115,本项目scene-effects,语义触发,/workspace/scene-effects/,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,项目自有
+116,WebGAL,语义触发,https://github.com/OpenWebGAL/WebGAL,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,待核
+117,WebGAL特效文档,语义触发,https://docs.openwebgal.com/webgal-script/special-effect.html,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,不适用
+118,RenPy,语义触发,https://github.com/renpy/renpy,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,待核
+119,Monogatari,语义触发,https://monogatari.io/,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,待核
+120,GinkgoEngine,语义触发,https://github.com/1366sll/GinkgoEngine,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,待核
+121,nilvn engine,语义触发,https://npm.io/package/@nilvn/engine,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,待核
+122,AndroidLibs特效Effect,合集索引,https://github.com/ColorfulCat/AndroidLibs/blob/master/特效Effect/README.md,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,待核
+123,GitHub topic particle-effects,合集索引,https://github.com/topics/particle-effects,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,逐个确认
+124,GitHub topic fireworks,合集索引,https://github.com/topics/fireworks,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,逐个确认
+125,GitHub topic particles与visual-effects与confetti,合集索引,https://github.com/topics/particles,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,逐个确认
+126,10 Best Particle Systems 2026,合集索引,https://www.jqueryscript.net/blog/best-particle-systems.html,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,不适用
+127,LibHunt particles,合集索引,https://libhunt.com/topic/particles,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,不适用
+128,git-stars particles,合集索引,https://git-stars.org/en/repositories/topic/particles,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,不适用
+129,GitHub topic particle,合集索引,https://github.com/topics/particle,N-非绘制参考,语义触发架构参考或资源索引，不参与绘制,逐个确认

@@ -56,8 +56,9 @@ inline fun <reified EVENT> Fragment.observeEvent(
     val o = Observer<EVENT> {
         observer(it)
     }
+    val owner = if (view != null) viewLifecycleOwner else this
     tags.forEach {
-        eventObservable<EVENT>(it).observe(this, o)
+        eventObservable<EVENT>(it).observe(owner, o)
     }
 }
 
@@ -68,8 +69,9 @@ inline fun <reified EVENT> Fragment.observeEventSticky(
     val o = Observer<EVENT> {
         observer(it)
     }
+    val owner = if (view != null) viewLifecycleOwner else this
     tags.forEach {
-        eventObservable<EVENT>(it).observeSticky(this, o)
+        eventObservable<EVENT>(it).observeSticky(owner, o)
     }
 }
 

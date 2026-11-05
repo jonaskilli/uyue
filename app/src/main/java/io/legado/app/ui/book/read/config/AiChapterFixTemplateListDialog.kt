@@ -13,7 +13,7 @@ import io.legado.app.base.BaseDialogFragment
 import io.legado.app.data.appDb
 import io.legado.app.data.dao.AiChapterFixTemplateDao
 import io.legado.app.data.entities.AiChapterFixTemplate
-import io.legado.app.databinding.DialogAiImageTemplateListBinding
+import io.legado.app.databinding.DialogAiChapterFixTemplateListBinding
 import io.legado.app.service.AiChapterFixService
 import io.legado.app.utils.setLayout
 import io.legado.app.utils.toastOnUi
@@ -31,9 +31,9 @@ import kotlinx.coroutines.withContext
  * 绑定变化只刷新主弹窗的提示，不会把正在编辑的模板强行切走。
  */
 class AiChapterFixTemplateListDialog :
-    BaseDialogFragment(R.layout.dialog_ai_image_template_list) {
+    BaseDialogFragment(R.layout.dialog_ai_chapter_fix_template_list) {
 
-    private val binding by viewBinding(DialogAiImageTemplateListBinding::bind)
+    private val binding by viewBinding(DialogAiChapterFixTemplateListBinding::bind)
 
     private var currentEditId: Long = 0
     private var bookName: String = ""

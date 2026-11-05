@@ -12,6 +12,7 @@ import android.widget.SeekBar
 import androidx.appcompat.app.AlertDialog
 import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
+import io.legado.app.constant.EventBus
 import io.legado.app.databinding.DialogBgmConfigBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.bottomBackground
@@ -26,6 +27,7 @@ import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.widget.seekbar.SeekBarChangeListener
 import io.legado.app.utils.ColorUtils
+import io.legado.app.utils.postEvent
 import io.legado.app.utils.setLayout
 import io.legado.app.utils.startForegroundServiceCompat
 import io.legado.app.utils.toastOnUi
@@ -291,6 +293,7 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             if (isChecked && BaseReadAloudService.isRun) {
                 BaseReadAloudService.instance?.triggerDanmakuGenerationManual()
             }
+            postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)
         }
 
         // 单首最少持续时长：铺够该时长后才允许切下一首，避免音乐过碎

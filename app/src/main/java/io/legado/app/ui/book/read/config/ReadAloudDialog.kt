@@ -120,6 +120,9 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
     private var currentSceneEffects: List<SceneEffectCue> = emptyList()
     private var sceneEffectKey: String? = null
     private val firedSceneAnchors = mutableSetOf<Int>()
+
+    /** 直接持有特效 View，避免 onDestroyView 后通过 binding 触发 viewLifecycleOwner 异常 */
+    private var sceneEffectViewRef: SceneEffectView? = null
     private var imageTimer: Timer? = null
     private var currentImageIndex = 0
     private var bookImageFiles: List<File> = emptyList()
@@ -460,10 +463,17 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         }
     }
 
+    override fun onDestroyView() {
+        sceneEffectViewRef?.cancelPendingEffects()
+        sceneEffectViewRef?.setIdleEffect(null)
+        sceneEffectViewRef = null
+        super.onDestroyView()
+    }
+
     override fun onDismiss(dialog: DialogInterface) {
         super.onDismiss(dialog)
-        (activity as ReadBookActivity).bottomDialog--
-        binding.ivBookCover.setMarqueeEnabled(false)
+        (activity as? ReadBookActivity)?.let { it.bottomDialog-- }
+        if (view != null) binding.ivBookCover.setMarqueeEnabled(false)
         BgmManager.onBgmStarted = oldBgmStartedCallback
         oldBgmStartedCallback = null
         stopImageTimer()
@@ -1875,13 +1885,26 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     /** 场景特效层初始化：按开关显示；弹窗重建时从 Store 恢复本章结果 */
     private fun initSceneEffect() {
-        binding.sceneEffectView.visibility =
-            if (AppConfig.sceneEffectEnabled) View.VISIBLE else View.GONE
+        sceneEffectViewRef = binding.sceneEffectView
+        syncSceneEffectVisibility()
         if (!AppConfig.sceneEffectEnabled) return
         val book = ReadBook.book ?: return
         val title = ReadBook.curTextChapter?.title ?: return
         sceneEffectKey = SceneEffectStore.key
         currentSceneEffects = SceneEffectStore.get("${book.name}|$title")
+    }
+
+    /** 朗读弹窗使用默认常驻层；半屏 GONE 时由 View 自己停帧，回全屏自动续播 */
+    private fun syncSceneEffectVisibility() {
+        val target = sceneEffectViewRef ?: return
+        val enabled = AppConfig.sceneEffectEnabled
+        target.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (enabled) {
+            target.setIdleEffect(VnBackgroundManager.defaultIdleCue())
+        } else {
+            target.clearSceneEffects()
+            target.setIdleEffect(null)
+        }
     }
 
     override fun observeLiveBus() {
@@ -1898,6 +1921,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         }
         observeEvent<Boolean>(EventBus.READ_ALOUD_CONFIG_CHANGED) {
             upTopSection()
+            syncSceneEffectVisibility()
         }
         observeEvent<String>(EventBus.READ_ALOUD_CHAPTER_CHANGED) {
             // 章节变化时更新章节名
@@ -1909,6 +1933,17 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             currentSceneEffects = emptyList()
             firedSceneAnchors.clear()
             binding.sceneEffectView.clearSceneEffects()
+        }
+        // 音效联动画面：消费音效播放收口的事件，不新增 AI 调用、不新建词表配置
+        observeEvent<io.legado.app.model.SoundEffectFired>(EventBus.SOUND_EFFECT_FIRED) { fired ->
+            if (!AppConfig.sceneEffectEnabled) return@observeEvent
+            val cue = io.legado.app.model.SoundEffectSceneMapper.map(fired)
+                ?: return@observeEvent
+            if (cue.burst) {
+                binding.sceneEffectView.burst(cue)
+            } else {
+                binding.sceneEffectView.show(cue)
+            }
         }
         observeEvent<SceneEffectReady>(EventBus.SCENE_EFFECT_READY) { ready ->
             if (ready.key != sceneEffectKey) {
@@ -1929,11 +1964,9 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 .forEach { cue ->
                     val keyAtSchedule = sceneEffectKey
                     // 与弹幕一致延后 1 秒：读到描写时才出现，不提前剧透
-                    binding.sceneEffectView.postDelayed({
-                        if (sceneEffectKey == keyAtSchedule && AppConfig.sceneEffectEnabled) {
-                            binding.sceneEffectView.show(cue)
-                        }
-                    }, 1000L)
+                    binding.sceneEffectView.postEffectDelayed(1000L) { target ->
+                        if (sceneEffectKey == keyAtSchedule) target.show(cue)
+                    }
                 }
         }
         observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
@@ -1954,12 +1987,10 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
             currentDanmaku.filter { it.para <= p.index && firedAnchors.add(it.para) }
                 .forEach { item ->
                     val keyAtSchedule = danmakuKey
-                    binding.danmakuView.postDelayed({
+                    binding.danmakuView.postDanmakuDelayed(DANMAKU_LAUNCH_DELAY_MS) { target ->
                         // 延迟期间切章 / 关闭弹幕开关：丢弃，避免旧弹幕在新章开头冒出来
-                        if (danmakuKey == keyAtSchedule && AppConfig.danmakuEnabled) {
-                            binding.danmakuView.show(item.text)
-                        }
-                    }, DANMAKU_LAUNCH_DELAY_MS)
+                        if (danmakuKey == keyAtSchedule) target.show(item.text)
+                    }
                 }
         }
         observeEvent<String>(EventBus.AI_IMAGE_CHANGED) { imagePath ->

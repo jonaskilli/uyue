@@ -8,7 +8,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import io.legado.app.R
 import io.legado.app.data.entities.AiChapterFixTemplate
-import io.legado.app.databinding.ItemAiImageTemplateBinding
+import io.legado.app.databinding.ItemAiChapterFixTemplateBinding
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.utils.getCompatColor
 
@@ -32,7 +32,7 @@ class AiChapterFixTemplateListAdapter(
 ) {
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val binding = ItemAiImageTemplateBinding.inflate(
+        val binding = ItemAiChapterFixTemplateBinding.inflate(
             LayoutInflater.from(parent.context), parent, false
         )
         return ViewHolder(binding)
@@ -46,7 +46,7 @@ class AiChapterFixTemplateListAdapter(
         submitList(newData)
     }
 
-    inner class ViewHolder(private val binding: ItemAiImageTemplateBinding) :
+    inner class ViewHolder(private val binding: ItemAiChapterFixTemplateBinding) :
         RecyclerView.ViewHolder(binding.root) {
 
         fun bind(template: AiChapterFixTemplate) {
