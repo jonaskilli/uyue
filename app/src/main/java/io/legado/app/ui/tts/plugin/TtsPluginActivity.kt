@@ -53,6 +53,9 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
     private val adapter by lazy { TtsPluginAdapter() }
     private val logAdapter by lazy { PluginLogAdapter(this) }
     private var currentTab = TAB_CONFIGS
+    /** 本次导入/导出的数据目标：由菜单项显式指定，不再看当前 Tab */
+    private var pendingImportTarget = TARGET_CONFIGS
+    private var pendingExportTarget = TARGET_CONFIGS
     /** 上次装载日志时的指纹（AppLog 条数 + PluginLog 版本 + 开关状态），用于跳过无变化的轮询 */
     private var logSignature = -1
     /** 日志 Tab 可见时的自动刷新轮询：AppLog / PluginLog 都在内存里，没有监听器，只能轮询 */
@@ -479,8 +482,8 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         binding.layoutEmpty.visibility = if (empty) View.VISIBLE else View.GONE
         binding.recyclerView.visibility = if (empty) View.GONE else View.VISIBLE
         binding.tvEmptyHint.text = when (currentTab) {
-            TAB_CONFIGS -> "点击右下角按钮新增配置"
-            TAB_PLUGINS -> "点击右下角按钮或右上角导入插件"
+            TAB_CONFIGS -> "点击右上角「新增」或「导入(配置列表)」"
+            TAB_PLUGINS -> "点击右上角「新增」或「导入(插件)」"
             else -> ""
         }
     }
@@ -675,12 +678,25 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 withContext(Dispatchers.IO) { JReadVoiceEngine.ensureBuiltInVoicePresets(this@TtsPluginActivity) }
                 toastOnUi("内置配置已初始化"); loadData()
             }
-            R.id.menu_import -> importLauncher.launch("*/*")
-            R.id.menu_export -> {
-                // 清掉可能残留的单插件目标，确保这次走整体导出
+            // 4 个入口各自锁定目标，与当前 Tab 无关：在日志页点「导入(配置列表)」
+            // 也是导入配置，不会静默无效；导出文件名也直接标出是哪一类数据。
+            R.id.menu_import_configs -> {
+                pendingImportTarget = TARGET_CONFIGS
+                importLauncher.launch("*/*")
+            }
+            R.id.menu_import_plugins -> {
+                pendingImportTarget = TARGET_PLUGINS
+                importLauncher.launch("*/*")
+            }
+            R.id.menu_export_configs -> {
                 pendingExportPlugin = null
-                val suffix = if (currentTab == TAB_CONFIGS) "configs" else "plugins"
-                exportLauncher.launch("tts_${suffix}_${System.currentTimeMillis()}.json")
+                pendingExportTarget = TARGET_CONFIGS
+                exportLauncher.launch("tts_configs_${System.currentTimeMillis()}.json")
+            }
+            R.id.menu_export_plugins -> {
+                pendingExportPlugin = null
+                pendingExportTarget = TARGET_PLUGINS
+                exportLauncher.launch("tts_plugins_${System.currentTimeMillis()}.json")
             }
             R.id.menu_disable_all -> lifecycleScope.launch {
                 alert("确认", "确定要禁用所有配置吗？") {
@@ -1714,19 +1730,20 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         PluginEditDialogs.buildSliderRow(this, label, initialProgress, allowFollow)
 
     private fun doImport(uri: android.net.Uri) {
+        // 目标在点击菜单时就定下来了，文件选择回来后不再受当前 Tab 影响
+        val target = pendingImportTarget
+        val label = if (target == TARGET_CONFIGS) "配置列表" else "插件"
         lifecycleScope.launch {
             try {
                 val count = withContext(Dispatchers.IO) {
                     val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
                         ?: run { toastOnUi("无法读取文件"); return@withContext 0 }
-                    when (currentTab) {
-                        TAB_CONFIGS -> {
-                            val text = bytes.toString(Charsets.UTF_8)
-                            // 使用稳定 id + 一次性写盘（避免逐条 saveConfig 的 N 次全量写盘导致导入卡顿）
-                            JReadVoiceEngine.importConfigsFromJson(this@TtsPluginActivity, text, useStableId = true)
-                        }
-                        TAB_PLUGINS -> JReadVoiceEngine.importPluginsFromPackageBytes(this@TtsPluginActivity, bytes)
-                        else -> 0
+                    if (target == TARGET_CONFIGS) {
+                        val text = bytes.toString(Charsets.UTF_8)
+                        // 使用稳定 id + 一次性写盘（避免逐条 saveConfig 的 N 次全量写盘导致导入卡顿）
+                        JReadVoiceEngine.importConfigsFromJson(this@TtsPluginActivity, text, useStableId = true)
+                    } else {
+                        JReadVoiceEngine.importPluginsFromPackageBytes(this@TtsPluginActivity, bytes)
                     }
                 }
                 if (count > 0) {
@@ -1736,10 +1753,10 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                     pluginsMap = buildPluginsIndex(allPlugins)
                     adapter.setPluginsMap(pluginsMap)
                 }
-                toastOnUi("导入了 $count 条")
+                toastOnUi("已导入 $count 条$label")
                 refreshListLight()
             } catch (e: Exception) {
-                toastOnUi("导入失败: ${e.message}")
+                toastOnUi("导入${label}失败: ${e.message}")
             }
         }
     }
@@ -1760,19 +1777,18 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         // 取一次就清掉：用户可能在选文件框里取消，残留会让下一次整体导出误导成单插件
         val single = pendingExportPlugin
         pendingExportPlugin = null
+        // 整体导出的目标在点击菜单时已定，与当前 Tab 无关
+        val target = pendingExportTarget
+        val label = if (target == TARGET_CONFIGS) "配置列表" else "插件"
         lifecycleScope.launch {
             val json = withContext(Dispatchers.IO) {
                 if (single != null) {
                     // 单插件导出与整包同格式（plugins 数组里只有这一个），可直接再导入
                     JReadVoiceEngine.exportPluginJson(this@TtsPluginActivity, single.id)
+                } else if (target == TARGET_CONFIGS) {
+                    JReadVoiceEngine.exportConfigsJson(this@TtsPluginActivity)
                 } else {
-                    when (currentTab) {
-                        TAB_CONFIGS -> JReadVoiceEngine.exportConfigsJson(this@TtsPluginActivity)
-                        TAB_PLUGINS -> JReadVoiceEngine.exportPluginsJson(
-                            this@TtsPluginActivity, includeUserVars = false
-                        )
-                        else -> "[]"
-                    }
+                    JReadVoiceEngine.exportPluginsJson(this@TtsPluginActivity, includeUserVars = false)
                 }
             }
             if (json == null) {
@@ -1780,7 +1796,7 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
                 return@launch
             }
             contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
-            toastOnUi(if (single != null) "已导出插件：${single.name}" else "导出完成")
+            toastOnUi(if (single != null) "已导出插件：${single.name}" else "已导出$label")
         }
     }
 
@@ -1794,6 +1810,9 @@ class TtsPluginActivity : BaseActivity<ActivityTtsPluginBinding>() {
         private const val TAB_CONFIGS = 0
         private const val TAB_LOGS = 1
         private const val TAB_PLUGINS = 2
+        /** 导入/导出的数据目标：由菜单项决定，不随 Tab 变化 */
+        private const val TARGET_CONFIGS = 0
+        private const val TARGET_PLUGINS = 1
         /** 日志页自动刷新间隔：内存日志没有监听器，靠轮询把新日志刷出来 */
         private const val LOG_POLL_INTERVAL_MS = 500L
         /** 空分组名在列表中的展示名，落盘匹配时沿用同一口径 */

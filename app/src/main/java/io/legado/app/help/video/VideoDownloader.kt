@@ -89,6 +89,10 @@ object VideoDownloader {
         val dirName: String = "",
         /** 合并 MP4 进度（0-100）；-1 = 未在合并。界面在播放按钮左侧的圆圈上显示 */
         val mergeProgress: Int = -1,
+        /** 直播录制任务：没有固定总量，进度不能用百分比，改用 [recordedMs] 显示 */
+        val isLive: Boolean = false,
+        /** 已录制的媒体时长（毫秒），仅 [isLive] 任务有意义 */
+        val recordedMs: Long = 0L,
     )
 
     /** 暂停用异常：从下载循环安全退出，已写入部分保留供续传 */
@@ -130,6 +134,17 @@ object VideoDownloader {
     private var workerBusy = false
     /** 暂停中的下载 key（watchKey） */
     private val pausedKeys: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /**
+     * 正在录制的直播任务。直播没有"下完"这个概念，必须跑独立协程长期拉流，
+     * 不能占着 [manualQueue] 的串行 worker（否则录制期间别的选集一个都下不了）。
+     */
+    private val liveRecordingKeys: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** 用户点了「完成并合成」：录制循环见到就退出并把已录部分合成 MP4 */
+    private val liveFinishKeys: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** 直播录制现场文件：暂停/重启后据此接着录 */
+    private const val LIVE_META_FILE = "live.json"
+    /** 连续拉清单失败多少次才判定直播中断 */
+    private const val LIVE_MAX_FETCH_FAIL = 10
     /** 撞上"该集正忙"的重排次数（key = watchKey）：只用来给重排设上限，避免空转 */
     private val busyRetries = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** 重排上限：边看边存若长期占着这一集，超过就按失败处理，不再无限重排 */
@@ -256,8 +271,12 @@ object VideoDownloader {
             //   于是它再也不会被继续下载——表现就是"列表显示已下载，播放却还在边播边下"；
             //   缺了的分片要按暂停处理，续传时只补缺口。
             // - 只有 .part = 中断，可续传
+            // 直播录制现场没有"分片总数"：绝不能拿 hlsSegProgress 的行数判完成，
+            // 恢复成暂停，点继续时由录制循环从 live.json 的 lastSeq 接着录。
+            val live = readLiveMeta(File(dir, title))
             val hls = hlsSegProgress(File(dir, title))
             val state = when {
+                live != null -> DlStatus.PAUSED to 0
                 File(dir, "$title.mp4").exists() ->
                     DlStatus.COMPLETED to 100
                 hls != null && hls.second >= hls.first ->
@@ -267,10 +286,18 @@ object VideoDownloader {
                     DlStatus.PAUSED to (hls.second * 100 / hls.first).coerceIn(0, 99)
                 File(dir, "$title.mp4.part").exists() ->
                     DlStatus.PAUSED to savedProgress
+                // 直播录像已归档成带序号的成品（如 标题001.mp4），没有可续录的现场。
+                // 不认这条的话重启后会显示「失败」，让用户以为录像丢了。
+                hasLiveArchive(dir, title) ->
+                    DlStatus.COMPLETED to 100
                 else -> DlStatus.FAILED to savedProgress
             }
             synchronized(statesMap) {
-                statesMap[key] = TaskState(key, task, title, state.second, state.first, dir.name)
+                statesMap[key] = TaskState(
+                    key, task, title, state.second, state.first, dir.name,
+                    isLive = live != null,
+                    recordedMs = live?.durationMs ?: 0L,
+                )
             }
             // 恢复历史下载记录时，本地还没有封面的补存一份（幂等），
             // 老视频重启后下载记录里的封面也因此能稳定刷出来
@@ -490,8 +517,69 @@ object VideoDownloader {
         return keys.size
     }
 
+    // ---------- 直播录制：暂停时由用户决定「真暂停」还是「下载完成」 ----------
+
+    /** 该条目是否正在录制直播（界面据此在暂停前弹选择框） */
+    fun isLiveRecording(key: String): Boolean = key in liveRecordingKeys
+
+    /** 指定目录里有没有待收尾的直播录制（录制中与「仅暂停」后都算） */
+    fun hasLiveRecording(dirName: String?): Boolean = synchronized(statesMap) {
+        statesMap.values.any {
+            (dirName == null || it.dirName == dirName) && isUnfinishedLive(it)
+        }
+    }
+
+    private fun isUnfinishedLive(s: TaskState): Boolean =
+        s.isLive && s.status != DlStatus.COMPLETED && s.status != DlStatus.MERGING
+
+    /**
+     * 「下载完成」：停止拉流，把已录制的分片合成一个完整 MP4。
+     *
+     * 正在录制时只置标记，让录制循环自己在下一个检查点收尾（不会硬杀正在写的分片）；
+     * 已经处于暂停状态、没有循环在跑时，直接按磁盘现状合成。
+     */
+    fun finishLiveRecording(key: String) {
+        if (key in liveRecordingKeys) {
+            liveFinishKeys.add(key)
+            updateState(key) { it.copy(status = DlStatus.MERGING, mergeProgress = 0) }
+            return
+        }
+        val state = synchronized(statesMap) { statesMap[key] } ?: return
+        val task = state.task
+        // 已经在合成 / 已经合成完了：重复点不该再合并一次
+        if (state.status == DlStatus.MERGING || state.status == DlStatus.COMPLETED) return
+        pausedKeys.remove(key)
+        liveFinishKeys.remove(key)
+        scope.launch {
+            runCatching { finalizeLiveRecording(task, key) }
+                .onFailure { AppLog.put("直播录制合成失败：${titleOf(task)}", it) }
+        }
+    }
+
+    /**
+     * 批量收尾：范围内正在录制的直播按「下载完成」合成，其余条目照常暂停。
+     *
+     * @return 被收尾的直播条数
+     */
+    fun finishLiveRecordings(dirName: String?): Int {
+        val keys = synchronized(statesMap) {
+            statesMap.values
+                .filter { (dirName == null || it.dirName == dirName) && isUnfinishedLive(it) }
+                .map { it.key }
+        }
+        keys.forEach { finishLiveRecording(it) }
+        // 合成中的条目状态已是 MERGING，pauseAll 会自动跳过它们
+        pauseAll(dirName)
+        return keys.size
+    }
+
     /** 删除已缓存（分片文件夹 + mp4 成品 + .part/.idx 临时文件），条目保留，再次下载时从头开始 */
     fun deleteCache(state: TaskState) {
+        // 正在录制时删目录会和拉流写盘打架：先让用户停掉录制
+        if (state.key in liveRecordingKeys) {
+            appCtx.toastOnUi("请先停止直播录制，再删除缓存")
+            return
+        }
         val dir = dirOf(state.task)
         // 界面状态先落，瞬时完成
         updateState(state.key) { it.copy(progress = 0) }
@@ -783,6 +871,9 @@ object VideoDownloader {
      */
     fun watchStart(task: Task, knownUrl: String? = null) {
         if (!isWatchSaveEnabled()) return
+        // 直播由「录制」接管：边看边存那套"按清单分片数补齐再合并"会把滑动窗口
+        // 里这几片当成一整集下完，和录制协程抢同一个目录，必须让开。
+        if (isLiveTask(task)) return
         // 边看边存同样是"这个视频有下载目录"的信号，封面一并落地
         saveCoverAsync(task)
         if (File(dirOf(task), "${titleOf(task)}.mp4").exists()) {
@@ -810,6 +901,7 @@ object VideoDownloader {
      */
     fun watchFinalize(task: Task, knownUrl: String? = null) {
         if (!isWatchSaveEnabled()) return
+        if (isLiveTask(task)) return
         if (File(dirOf(task), "${titleOf(task)}.mp4").exists()) {
             notifyCompleted(task)
             return
@@ -852,6 +944,9 @@ object VideoDownloader {
         if (mp4.exists() && mp4.length() > 0) return mp4
         // 分片缓存文件夹：有分片即视为已缓存
         val epFolder = epFolderOf(dir, t)
+        // 录制中的直播目录清单是逐轮追加的，分片序号与清单行号不一定对齐，
+        // 不能按 local.m3u8 播；等用户点「下载完成」合成 mp4 之后再看。
+        if (File(epFolder, LIVE_META_FILE).exists()) return null
         if (epFolder.isDirectory &&
             epFolder.listFiles().orEmpty().any { isSegFileName(it.name) }
         ) {
@@ -950,8 +1045,505 @@ object VideoDownloader {
     private fun watchKey(task: Task): String =
         "${dirOf(task).absolutePath}/${titleOf(task)}"
 
+    // ================================================================== 直播录制
+    //
+    // 点播清单是"一整集的分片表"，下载器数完分片就该结束；直播清单是**滑动窗口**，
+    // 每次拉只有最近几片，而且没有 #EXT-X-ENDLIST。旧逻辑把它当点播：拉一次、下完
+    // 窗口里那几片、判定 100% 并合并，于是"只下载了一小段就认为完成"。
+    //
+    // 这里改成录制式：点下载即从当前窗口开始，按 HLS 的绝对媒体序号持续把新分片
+    // 追加落盘，直到用户点暂停并选择「下载完成」；暂停本身只是挂起，可继续录。
+    // 停止时把累积的清单补上 #EXT-X-ENDLIST，整段合成一个 MP4。
+
+    /** 录制现场（分片目录里的 live.json）：暂停/重启后据此接着录 */
+    private data class LiveMeta(
+        val mediaUrl: String,
+        val baseSeq: Long,
+        val lastSeq: Long,
+        val durationMs: Long,
+        val keyUri: String?,
+        val iv: String?,
+        val initUri: String?,
+    )
+
+    /** 探测结果：章节地址（点播复用）、媒体清单地址（录制用）、是否直播 */
+    private data class LiveProbe(
+        val chapterUrl: String,
+        val mediaUrl: String,
+        val isLive: Boolean,
+    )
+
+    private data class LiveSegment(val url: String, val tags: List<String>)
+
+    private data class LivePlaylist(
+        val endList: Boolean,
+        val mediaSequence: Long,
+        val targetSeconds: Int,
+        val pollMs: Long,
+        val keyUri: String?,
+        val iv: String?,
+        val initUri: String?,
+        val segments: List<LiveSegment>,
+    )
+
+    private fun readLiveMeta(epFolder: File): LiveMeta? {
+        val f = File(epFolder, LIVE_META_FILE)
+        if (!f.exists()) return null
+        return runCatching {
+            val o = org.json.JSONObject(f.readText())
+            LiveMeta(
+                mediaUrl = o.optString("mediaUrl"),
+                baseSeq = o.optLong("baseSeq"),
+                lastSeq = o.optLong("lastSeq", -1L),
+                durationMs = o.optLong("durationMs"),
+                keyUri = o.optString("keyUri").takeIf { it.isNotEmpty() },
+                iv = o.optString("iv").takeIf { it.isNotEmpty() },
+                initUri = o.optString("initUri").takeIf { it.isNotEmpty() },
+            ).takeIf { it.mediaUrl.isNotEmpty() }
+        }.getOrNull()
+    }
+
+    private fun writeLiveMeta(epFolder: File, m: LiveMeta) {
+        runCatching {
+            org.json.JSONObject().apply {
+                put("mediaUrl", m.mediaUrl)
+                put("baseSeq", m.baseSeq)
+                put("lastSeq", m.lastSeq)
+                put("durationMs", m.durationMs)
+                put("keyUri", m.keyUri ?: "")
+                put("iv", m.iv ?: "")
+                put("initUri", m.initUri ?: "")
+            }.let { File(epFolder, LIVE_META_FILE).writeText(it.toString()) }
+        }.onFailure { AppLog.put("保存直播录制现场失败", it) }
+    }
+
+    /** 这一集是否由录制链路接管（避免边看边存去写同一份分片目录） */
+    private fun isLiveTask(task: Task): Boolean {
+        if (watchKey(task) in liveRecordingKeys) return true
+        val dir = dirOf(task)
+        val title = titleOf(task)
+        if (File(epFolderOf(dir, title), LIVE_META_FILE).exists()) return true
+        // 已经归档过（标题001.mp4 等）说明这是直播：合成后 epFolder 会被清掉，
+        // 若这里返回 false，边看边存就会按点播把它下成 <标题>.mp4 —— 那正是
+        // 「重新打开直播被本地缓存挡住」的老问题。再次保存应走录制链路生成 002。
+        return hasLiveArchive(dir, title)
+    }
+
+    /**
+     * 探测是否直播 HLS，返回可直接拉取的媒体清单地址。
+     *
+     * 只有「m3u8 媒体清单 + 没有 #EXT-X-ENDLIST」才算直播；主清单先取最高码率的子清单。
+     * 任何一步失败都返回 null，交回原点播下载链路，不额外制造失败。
+     */
+    private suspend fun probeLivePlaylist(task: Task): LiveProbe? {
+        if (File(dirOf(task), "${titleOf(task)}.mp4").exists()) return null
+        // 已有录制现场：即使这次清单带了 ENDLIST（直播刚结束），也要回到录制循环，
+        // 由它把最后一段收尾合成；不能在这儿退回点播下载去猜分片数。
+        val savedMeta = readLiveMeta(epFolderOf(dirOf(task), titleOf(task)))
+        val resumeLive = savedMeta != null
+        val url = runCatching {
+            VideoSourcePlayer.resolveChapterUrl(task.book, task.source, task.chapter)
+        }.getOrNull()?.takeIf { it.startsWith("http", true) }
+            // 续录时现场解析失败（书源接口抖动）也能用上次记下的清单地址接着录
+            ?: savedMeta?.mediaUrl?.takeIf { it.isNotEmpty() }
+            ?: return null
+        // 解析结果带回给 downloadCore 复用，点播不必再跑一遍书源正文规则
+        if (!(url.contains(".m3u8", true) || url.contains("/m3u8/", true))) {
+            return LiveProbe(url, url, false)
+        }
+        val headers = getHeaders(task.source)
+        var mediaUrl = url
+        var text = runCatching { fetchText(mediaUrl, headers) }.getOrNull()
+            ?: return LiveProbe(url, url, false)
+        if (text.contains("#EXT-X-STREAM-INF")) {
+            val lines = text.lines()
+            var best: String? = null
+            var bestBw = -1L
+            for (i in lines.indices) {
+                val l = lines[i].trim()
+                if (!l.startsWith("#EXT-X-STREAM-INF")) continue
+                val bw = Regex("BANDWIDTH=(\\d+)").find(l)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                val next = lines.getOrNull(i + 1)?.trim()
+                if (!next.isNullOrBlank() && !next.startsWith("#") && bw >= bestBw) {
+                    bestBw = bw
+                    best = next
+                }
+            }
+            val variant = best ?: return LiveProbe(url, url, false)
+            mediaUrl = NetworkUtils.getAbsoluteURL(mediaUrl, variant)
+            text = runCatching { fetchText(mediaUrl, headers) }.getOrNull()
+                ?: return LiveProbe(url, url, false)
+        }
+        if (resumeLive) return LiveProbe(url, mediaUrl, true)
+        val isLive = !text.contains("#EXT-X-ENDLIST") &&
+            !text.contains("#EXT-X-PLAYLIST-TYPE:VOD", true) &&
+            text.lines().any { it.isNotBlank() && !it.trim().startsWith("#") }
+        return LiveProbe(url, mediaUrl, isLive)
+    }
+
+    /** 启动独立录制协程；返回 false 表示这一集已经在录了 */
+    private fun startLiveRecording(task: Task, key: String, mediaUrl: String): Boolean {
+        if (!liveRecordingKeys.add(key)) return false
+        liveFinishKeys.remove(key)
+        pausedKeys.remove(key)
+        updateState(key) { it.copy(status = DlStatus.RUNNING, isLive = true, progress = 0) }
+        scope.launch {
+            val epFolder = epFolderOf(dirOf(task), titleOf(task))
+            var owned = false
+            try {
+                // 边看边存那一轮收集可能还在写这个目录，稍等它收工再接管
+                var waited = 0
+                while (waited < 20 && !owned) {
+                    synchronized(activePaths) { owned = activePaths.add(epFolder.path) }
+                    if (!owned) {
+                        delay(200L)
+                        waited++
+                    }
+                }
+                recordLiveHls(task, key, mediaUrl)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.put("直播录制中断：${titleOf(task)}", e)
+                appCtx.toastOnUi("直播录制中断：${e.localizedMessage}")
+                updateState(key) { it.copy(status = DlStatus.FAILED) }
+            } finally {
+                if (owned) synchronized(activePaths) { activePaths.remove(epFolder.path) }
+                liveRecordingKeys.remove(key)
+                // 极端竞态：循环刚退出时用户才点「完成」，这里补一次收尾
+                if (liveFinishKeys.remove(key)) {
+                    scope.launch {
+                        runCatching { finalizeLiveRecording(task, key) }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    /** 持续拉直播清单，把新分片按绝对媒体序号追加落盘 */
+    private suspend fun recordLiveHls(task: Task, key: String, mediaUrl: String) {
+        val dir = dirOf(task)
+        val title = titleOf(task)
+        val epFolder = epFolderOf(dir, title)
+        epFolder.mkdirs()
+        ensureNoMedia(epFolder)
+        val headers = getHeaders(task.source)
+        val saved = readLiveMeta(epFolder)
+        var meta = if (saved == null) {
+            // 首次录制：清掉边看边存可能留下的点播式清单/分片，从零开始录
+            epFolder.listFiles()?.forEach { if (it.name != NO_MEDIA) it.deleteRecursively() }
+            LiveMeta(mediaUrl, 0L, -1L, 0L, null, null, null)
+        } else {
+            // 地址常带时效 token：续录用本次新解析的地址，序号与已录时长沿用现场
+            saved.copy(mediaUrl = mediaUrl)
+        }
+        writeLiveMeta(epFolder, meta)
+        val playlistFile = File(epFolder, "playlist.m3u8")
+        val keyCache = HashMap<String, ByteArray>()
+        var fetchFails = 0
+        var paused = false
+        var finished = false
+        try {
+            while (true) {
+                checkPaused(key)
+                if (key in liveFinishKeys) {
+                    finished = true
+                    break
+                }
+                val text: String? = try {
+                    val t = fetchText(meta.mediaUrl, headers)
+                    fetchFails = 0
+                    t
+                } catch (e: Exception) {
+                    fetchFails++
+                    if (fetchFails >= LIVE_MAX_FETCH_FAIL) {
+                        throw IllegalStateException("直播清单连续拉取失败", e)
+                    }
+                    waitForNextPoll(key, 1000L)
+                    null
+                }
+                if (text == null) continue
+                val pl = parseLivePlaylist(text, meta.mediaUrl)
+                if (pl == null) {
+                    waitForNextPoll(key, 1000L)
+                    continue
+                }
+                // 换了密钥：已录分片是旧密钥加密的，混着继续录会花屏，到此收尾。
+                // 只比路径不比 query——key 地址常带一次性 token，不能当成换了密钥。
+                val oldKey = meta.keyUri
+                val newKey = pl.keyUri
+                if (meta.lastSeq >= 0 && oldKey != null && newKey != null &&
+                    newKey.substringBefore('?') != oldKey.substringBefore('?')
+                ) {
+                    finished = true
+                    break
+                }
+                if (meta.lastSeq < 0) {
+                    meta = meta.copy(
+                        baseSeq = pl.mediaSequence,
+                        keyUri = pl.keyUri,
+                        iv = pl.iv,
+                        initUri = pl.initUri,
+                    )
+                    val liveKeyUrl = pl.keyUri
+                    if (liveKeyUrl != null) {
+                        runCatching {
+                            File(epFolder, "key.bin").writeBytes(
+                                fetchBytes(liveKeyUrl, headers, write = false)
+                            )
+                        }
+                    }
+                    val liveInitUrl = pl.initUri
+                    if (liveInitUrl != null) {
+                        runCatching {
+                            File(epFolder, "init.bin").writeBytes(
+                                fetchBytes(liveInitUrl, headers, write = false)
+                            )
+                        }
+                    }
+                    writePlaylistHeader(playlistFile, meta, pl.targetSeconds)
+                    writeMetaJson(epFolder, meta)
+                }
+                var appended = false
+                for ((rel, seg) in pl.segments.withIndex()) {
+                    checkPaused(key)
+                    if (key in liveFinishKeys) {
+                        finished = true
+                        break
+                    }
+                    val absSeq = pl.mediaSequence + rel
+                    // 同一个绝对序号只录一次：滑动窗口里重复出现的旧片直接跳过
+                    if (absSeq <= meta.lastSeq) continue
+                    val localIndex = (absSeq - meta.baseSeq).toInt()
+                    if (localIndex < 0) continue
+                    val dst = segFile(epFolder, localIndex)
+                    if (findSegFile(epFolder, localIndex) == null) {
+                        val ok = runCatching {
+                            fetchSegmentWithRetry(
+                                Triple(seg.url, pl.iv, pl.keyUri),
+                                meta.mediaUrl, headers, absSeq, keyCache, dst, key
+                            )
+                        }.onFailure { e ->
+                            if (e is PausedException) throw e
+                            AppLog.putDebug("直播分片 #$absSeq 丢失：${e.localizedMessage}")
+                            File(epFolder, "${dst.name}.part").delete()
+                            dst.delete()
+                        }.isSuccess
+                        // 单片失败只留空洞，不复用这个序号：aesCipher 的 IV 依赖真实媒体序号
+                        if (!ok) continue
+                    }
+                    // 清单按录制顺序累积；全局标签（KEY/MAP/SEQUENCE）已在头部写过
+                    val tags = seg.tags.filter {
+                        it.startsWith("#EXTINF") ||
+                            it.startsWith("#EXT-X-DISCONTINUITY") ||
+                            it.startsWith("#EXT-X-BYTERANGE") ||
+                            it.startsWith("#EXT-X-PROGRAM-DATE-TIME")
+                    }
+                    if (tags.isNotEmpty()) playlistFile.appendText(tags.joinToString("\n", postfix = "\n"))
+                    playlistFile.appendText(seg.url + "\n")
+                    meta = meta.copy(
+                        lastSeq = absSeq,
+                        durationMs = meta.durationMs + extInfMs(seg.tags),
+                    )
+                    appended = true
+                }
+                writeLiveMeta(epFolder, meta)
+                if (finished) break
+                updateState(key) {
+                    it.copy(status = DlStatus.RUNNING, isLive = true, recordedMs = meta.durationMs)
+                }
+                // 直播自然结束（清单出现 ENDLIST）：同样把这一整段合成成品
+                if (pl.endList) {
+                    finished = true
+                    break
+                }
+                waitForNextPoll(key, if (appended) 300L else pl.pollMs)
+            }
+        } catch (e: PausedException) {
+            paused = true
+        }
+        if (paused) {
+            writeLiveMeta(epFolder, meta)
+            updateState(key) {
+                it.copy(status = DlStatus.PAUSED, isLive = true, recordedMs = meta.durationMs)
+            }
+            appCtx.toastOnUi("直播录制已暂停，可继续录制或选择「完成并合成」")
+            return
+        }
+        if (finished) finalizeLiveRecording(task, key)
+    }
+
+    /** 等待下一轮拉清单，期间随时响应暂停/完成（不能超过 200ms 才生效） */
+    private suspend fun waitForNextPoll(key: String, ms: Long) {
+        var left = ms.coerceAtLeast(0L)
+        while (left > 0) {
+            checkPaused(key)
+            if (key in liveFinishKeys) return
+            val step = 200L.coerceAtMost(left)
+            delay(step)
+            left -= step
+        }
+    }
+
+    /** 解析直播媒体清单：分片地址绝对化，保留每片前面的 EXTINF / DISCONTINUITY 等标签 */
+    private fun parseLivePlaylist(text: String, baseUrl: String): LivePlaylist? {
+        var endList = false
+        var mediaSequence = 0L
+        var targetSeconds = 6
+        var keyUri: String? = null
+        var iv: String? = null
+        var initUri: String? = null
+        val segments = ArrayList<LiveSegment>()
+        var pending = ArrayList<String>()
+        for (raw in text.lines()) {
+            val l = raw.trim()
+            when {
+                l.isEmpty() -> Unit
+                l.startsWith("#EXT-X-ENDLIST") -> endList = true
+                l.startsWith("#EXT-X-MEDIA-SEQUENCE") ->
+                    mediaSequence = l.substringAfter(':').trim().toLongOrNull() ?: 0L
+                l.startsWith("#EXT-X-TARGETDURATION") ->
+                    targetSeconds = (l.substringAfter(':').trim().toIntOrNull() ?: 6).coerceAtLeast(1)
+                l.startsWith("#EXT-X-KEY") -> {
+                    val method = parseAttribute(l, "METHOD")
+                    if (method.equals("NONE", true)) {
+                        keyUri = null
+                        iv = null
+                    } else {
+                        keyUri = parseAttribute(l, "URI")?.let { NetworkUtils.getAbsoluteURL(baseUrl, it) }
+                        iv = parseAttribute(l, "IV")
+                    }
+                }
+                l.startsWith("#EXT-X-MAP") ->
+                    initUri = parseAttribute(l, "URI")?.let { NetworkUtils.getAbsoluteURL(baseUrl, it) }
+                l.startsWith("#EXTM3U") || l.startsWith("#EXT-X-VERSION") ||
+                    l.startsWith("#EXT-X-PLAYLIST-TYPE") ||
+                    l.startsWith("#EXT-X-INDEPENDENT-SEGMENTS") ||
+                    l.startsWith("#EXT-X-ALLOW-CACHE") -> Unit
+                l.startsWith("#") -> pending.add(l)
+                else -> {
+                    segments.add(LiveSegment(NetworkUtils.getAbsoluteURL(baseUrl, l), pending))
+                    pending = ArrayList()
+                }
+            }
+        }
+        if (segments.isEmpty()) return null
+        val pollMs = (targetSeconds * 1000L / 2).coerceIn(500L, 3000L)
+        return LivePlaylist(endList, mediaSequence, targetSeconds, pollMs, keyUri, iv, initUri, segments)
+    }
+
+    /** 写录制清单的头部（只在首轮写一次，之后的分片行都 append） */
+    private fun writePlaylistHeader(out: File, meta: LiveMeta, targetSeconds: Int) {
+        val sb = StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n")
+            .append("#EXT-X-TARGETDURATION:").append(targetSeconds).append('\n')
+            .append("#EXT-X-MEDIA-SEQUENCE:").append(meta.baseSeq).append('\n')
+        if (meta.keyUri != null) {
+            sb.append("#EXT-X-KEY:METHOD=AES-128,URI=\"").append(meta.keyUri).append('"')
+            meta.iv?.let { sb.append(",IV=").append(it) }
+            sb.append('\n')
+        }
+        if (meta.initUri != null) {
+            sb.append("#EXT-X-MAP:URI=\"").append(meta.initUri).append("\"\n")
+        }
+        out.writeText(sb.toString())
+    }
+
+    /** 合并器按 meta.seq + 文件名序号还原 AES IV，seq 必须是首片的绝对媒体序号 */
+    private fun writeMetaJson(epFolder: File, meta: LiveMeta) {
+        org.json.JSONObject().apply {
+            put("seq", meta.baseSeq)
+            if (meta.iv != null) put("iv", meta.iv) else put("iv", org.json.JSONObject.NULL)
+            put("encrypted", meta.keyUri != null)
+        }.let { File(epFolder, "meta.json").writeText(it.toString()) }
+    }
+
+    private fun extInfMs(tags: List<String>): Long {
+        val line = tags.firstOrNull { it.startsWith("#EXTINF") } ?: return 0L
+        val seconds = line.substringAfter(':').substringBefore(',').trim().toDoubleOrNull()
+            ?: return 0L
+        return (seconds * 1000).toLong()
+    }
+
+    /** 正在收尾合成的直播，防止两条路径并发进来各消耗一个归档序号 */
+    private val liveFinalizingKeys: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** 「下载完成」：把累积清单收成 VOD，再把已录分片整体合成一个 MP4 */
+    private suspend fun finalizeLiveRecording(task: Task, key: String) {
+        // 录制循环里的 finished 分支、按钮回调、循环 finally 的补刀可能同时到达，
+        // 重复合成会白吃掉 001/002 这样的序号，还会把同一批分片合成两份。
+        if (!liveFinalizingKeys.add(key)) return
+        try {
+            finalizeLiveRecordingOnce(task, key)
+        } finally {
+            liveFinalizingKeys.remove(key)
+        }
+    }
+
+    private suspend fun finalizeLiveRecordingOnce(task: Task, key: String) {
+        val dir = dirOf(task)
+        val title = titleOf(task)
+        val epFolder = epFolderOf(dir, title)
+        if (epFolder.listFiles().orEmpty().none { isSegFileName(it.name) }) {
+            updateState(key) {
+                it.copy(status = DlStatus.FAILED, isLive = false, mergeProgress = -1)
+            }
+            appCtx.toastOnUi("没有录到分片，无法合成：$title")
+            return
+        }
+        val pl = File(epFolder, "playlist.m3u8")
+        if (pl.exists() && !pl.readText().contains("#EXT-X-ENDLIST")) {
+            pl.appendText("\n#EXT-X-ENDLIST\n")
+        }
+        liveFinishKeys.remove(key)
+        updateState(key) {
+            it.copy(status = DlStatus.MERGING, isLive = false, mergeProgress = 0)
+        }
+        val mp4 = mergeMutex.withLock {
+            // 序号必须和合成一起串行：两次「完成并合成」并发时会拿到同一个号、互相覆盖。
+            // 成品刻意不叫 <标题>.mp4 —— 那一整套「已有缓存」判定只认原名，
+            // 用带序号的名字，用户重新打开直播时不会被这份录像挡住，能继续看直播；
+            // 下次再录再合成则自动顺延到 002、003…
+            val archiveName = nextLiveArchiveFile(dir, title).name
+            runCatching {
+                mergeSegFolder(dir, title, key, deleteSegments = true, outputName = archiveName)
+            }.getOrNull()
+        }
+        if (mp4 != null) {
+            // 合成成功时整个分片目录（含 live.json）已被清掉，这里兜底再删一次
+            File(epFolder, LIVE_META_FILE).delete()
+            updateState(key) {
+                it.copy(
+                    status = DlStatus.COMPLETED, progress = 100,
+                    mergeProgress = -1, isLive = false
+                )
+            }
+            // 不调 notifyCompleted：这次产物是带序号的归档，不是「这一集已缓存」，
+            // 不该让播放会话把当前这一集切成本地文件（用户还要继续看直播）。
+            appCtx.toastOnUi("直播录制完成：${mp4.name}", Toast.LENGTH_LONG)
+        } else {
+            updateState(key) {
+                it.copy(status = DlStatus.FAILED, mergeProgress = -1, isLive = true)
+            }
+            appCtx.toastOnUi("合成失败：$title", Toast.LENGTH_LONG)
+        }
+    }
+
     private suspend fun download(task: Task) {
         val key = watchKey(task)
+        // 直播：交给独立协程长期录制，立刻腾出串行 worker 给其它选集
+        val probe = probeLivePlaylist(task)
+        val live = probe?.takeIf { it.isLive }
+        if (live != null) {
+            if (startLiveRecording(task, key, live.mediaUrl)) {
+                appCtx.toastOnUi(
+                    "开始录制直播：${task.chapter.title}\n点暂停可选择「仅暂停」或「完成并合成」",
+                    Toast.LENGTH_LONG
+                )
+            }
+            return
+        }
         val title = titleOf(task)
         // 重排导致的二次进入不算"新开始"，不重复弹「开始下载」
         val isRetry = busyRetries.containsKey(key)
@@ -960,6 +1552,7 @@ object VideoDownloader {
         runCatching {
             downloadCore(
                 task, dirOf(task), title, knownUrl = null, key = key, collectOnly = false,
+                resolvedUrl = probe?.chapterUrl,
             ) { p ->
                 updateState(key) { it.copy(progress = p) }
             }
@@ -1021,6 +1614,8 @@ object VideoDownloader {
         knownUrl: String?,
         key: String,
         collectOnly: Boolean = false,
+        /** 探测阶段已解析好的章节地址，避免再跑一次书源正文规则 */
+        resolvedUrl: String? = null,
         onProgress: (Int) -> Unit = {},
     ): File? {
         val mp4 = File(dir, "$title.mp4")
@@ -1031,6 +1626,7 @@ object VideoDownloader {
 
         // 1. 直链：优先用已知的（播放中已在播的地址），否则现场解析
         val url = knownUrl?.takeIf { it.startsWith("http") }
+            ?: resolvedUrl?.takeIf { it.startsWith("http") }
             ?: VideoSourcePlayer.resolveChapterUrl(task.book, task.source, task.chapter)
         if (url.isNullOrBlank()) {
             throw IllegalStateException("未获取到直链（网页播放器型源无法下载）")
@@ -1702,6 +2298,44 @@ object VideoDownloader {
     /** 某一集的分片缓存目录：Download/保存视频/<dir>/<标题>/ */
     private fun epFolderOf(dir: File, title: String): File = File(dir, title)
 
+    /** 直播归档文件名匹配：<标题>001.mp4 / <标题>002.mp4 … */
+    private fun liveArchivePattern(title: String) =
+        Regex("^${Regex.escape(title)}(\\d{3,})\\.mp4$")
+
+    /**
+     * 分配本次直播录制的归档文件名：在原名后追加三位递增序号（标题001.mp4、002…）。
+     *
+     * 刻意**不叫** `<标题>.mp4`：findLocalFile / enqueue / probeLivePlaylist / watchStart
+     * 这一整套「已完成、有缓存」的判定都只认那个名字。用带序号的名字，重新打开同一个
+     * 直播时就不会把上次录的内容当成本地缓存播出来，用户可以继续看直播；再次保存时
+     * 扫一遍已有序号自动顺延，也不会覆盖之前的录像。
+     *
+     * 归档文件不带下载记录，会自然出现在「其他缓存」列表里，可单独播放/删除。
+     */
+    private fun nextLiveArchiveFile(dir: File, title: String): File {
+        val pattern = liveArchivePattern(title)
+        var max = 0
+        dir.listFiles()?.forEach { f ->
+            if (!f.isFile) return@forEach
+            val n = pattern.matchEntire(f.name)?.groupValues?.get(1)?.toIntOrNull()
+                ?: return@forEach
+            if (n > max) max = n
+        }
+        var seq = max + 1
+        var out: File
+        do {
+            out = File(dir, title + seq.toString().padStart(3, '0') + ".mp4")
+            seq++
+        } while (out.exists())
+        return out
+    }
+
+    /** 该标题是否已经有直播归档文件（用于恢复下载记录时不误判成失败） */
+    private fun hasLiveArchive(dir: File, title: String): Boolean {
+        val pattern = liveArchivePattern(title)
+        return dir.listFiles().orEmpty().any { it.isFile && pattern.matches(it.name) }
+    }
+
     /**
      * 分片后缀。
      *
@@ -1852,10 +2486,12 @@ object VideoDownloader {
         title: String,
         key: String? = null,
         deleteSegments: Boolean = false,
+        /** 直播录制归档用：指定带序号的成品名；null = 常规 <标题>.mp4 */
+        outputName: String? = null,
     ): File? {
         val epFolder = epFolderOf(dir, title)
         if (!epFolder.isDirectory) return null
-        val mp4 = File(dir, "$title.mp4")
+        val mp4 = File(dir, outputName ?: "$title.mp4")
         val segs = epFolder.listFiles().orEmpty()
             .filter { isSegFileName(it.name) }
             .sortedBy { segIndexFromName(it.name) ?: 0 }
@@ -1876,7 +2512,8 @@ object VideoDownloader {
         report(0)
 
         // 第一步：解密 + 按序拼接原始流（进度 0~50，按已写字节占比）
-        val raw = File(dir, "$title.ts.part")
+        // 临时名跟随成品名：直播归档是 标题001/002…，别让多次合成共用一个 .ts.part
+        val raw = File(dir, mp4.name.removeSuffix(".mp4") + ".ts.part")
         val totalBytes = segs.sumOf { it.length() }.coerceAtLeast(1L)
         var written = 0L
         FileOutputStream(raw).use { out ->
