@@ -30,7 +30,7 @@ object SceneEffectGenerator {
     private const val LIGHTNING_DURATION_MS = 8000L
     private const val WIND_DURATION_MS = 6000L
     /** 规则表版本：新增特效后旧缓存里「已检查无特效」的段落要重新分析 */
-    private const val CACHE_VERSION = 2
+    private const val CACHE_VERSION = 4
 
     private val INDOOR_WORDS = listOf(
         "屋内", "室内", "房里", "房内", "屋里", "殿内", "车厢", "舱内",
@@ -61,6 +61,11 @@ object SceneEffectGenerator {
      * birds/漫画符号）与 tsParticles(MIT) 预设里适合小说的效果类型。
      */
     private val EXTRA_RULES: List<Triple<SceneEffectKind, List<String>, Int>> = listOf(
+        // 瞬时爆发类：音效关闭时也能由正文兜底触发，画 1.2 秒就收，不拖到整段结束
+        Triple(SceneEffectKind.EXPLOSION, listOf("爆炸", "爆裂", "炸开", "炸毁", "爆破", "轰隆", "轰然", "轰炸", "炸", "砰", "嘭"), 4),
+        Triple(SceneEffectKind.SLASH, listOf("拔刀", "出鞘", "剑气", "刀光", "剑鸣", "挥刀", "挥剑", "一刀斩", "斩下", "斩击", "劈下", "劈开", "砍下", "刀锋", "剑锋", "比武", "过招", "唰"), 3),
+        Triple(SceneEffectKind.IMPACT, listOf("暴击", "重击", "重创", "击中", "命中", "撞击", "打斗", "格挡", "拳脚", "一拳", "一掌", "咚", "哐"), 3),
+        Triple(SceneEffectKind.SHOCKWAVE, listOf("冲击波", "气浪", "震波", "震荡", "余波", "威压", "地动山摇"), 3),
         Triple(SceneEffectKind.FIREWORKS, listOf("烟花", "焰火", "礼花", "爆竹", "烟花绽放"), 3),
         Triple(SceneEffectKind.METEORS, listOf("流星", "陨星", "划过天际", "星雨", "流星雨"), 2),
         Triple(SceneEffectKind.BIRDS_CROW, listOf("乌鸦", "寒鸦", "鸦群", "老鸹", "乌鹊"), 2),
@@ -89,8 +94,8 @@ object SceneEffectGenerator {
         Triple(SceneEffectKind.COMIC, COMIC_WORDS, 2)
     )
 
-    /** 无命中时的低频环境兜底，让朗读过程中时不时能看到轻量特效 */
-    private val AMBIENT_FALLBACK_RATE = 0.14
+    /** 无命中时交给按 VN 场景常驻的 idle 层，不再随机插入短特效打断它 */
+    private const val AMBIENT_FALLBACK_RATE = 0.0
     private fun frac(v: Double): Double = v - kotlin.math.floor(v)
     private fun pseudo(i: Int, seed: Int): Double =
         frac(kotlin.math.sin(i * 127.1 + seed * 311.7) * 43758.5453)
@@ -191,6 +196,8 @@ object SceneEffectGenerator {
             SceneEffectKind.SPARKLES, SceneEffectKind.QUESTION, SceneEffectKind.SWEAT,
             SceneEffectKind.HEART, SceneEffectKind.ANGER, SceneEffectKind.ZZZ,
             SceneEffectKind.LIGHTBULB, SceneEffectKind.COMIC -> 4000L
+            SceneEffectKind.EXPLOSION, SceneEffectKind.SLASH,
+            SceneEffectKind.IMPACT, SceneEffectKind.SHOCKWAVE -> 1200L
             SceneEffectKind.FIREWORKS, SceneEffectKind.METEORS,
             SceneEffectKind.CONFETTI -> 6000L
             else -> DEFAULT_DURATION_MS
@@ -268,6 +275,7 @@ object SceneEffectGenerator {
 5. level 只能 1~4：1=微弱，2=正常，3=明显，4=暴雨/暴雪/狂风。
 6. 雨雪段落若同时出现雷电，把 lightning 填 true；有风把 wind 填 true。
 7. durationMs 用 8000；闪电、漫画符号用 4000；烟花/流星/彩屑用 6000。
+8. EXPLOSION/SLASH/IMPACT/SHOCKWAVE 只在明确写出爆炸、挥刀斩击、重击命中、冲击波时标，durationMs 用 1200；没有这些动作一律不标。
 
 ## 输出
 只输出 JSON 数组，不要解释、不要 markdown 代码块：
@@ -276,7 +284,8 @@ object SceneEffectGenerator {
 kind 白名单：RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND,
 FOG, SMOKE, BUBBLES, RAYS, DUST, BUTTERFLIES, BIRDS_GULL, BIRDS_CROW, BIRD_FLOCK,
 SPARKLES, QUESTION, SWEAT, HEART, ANGER, ZZZ, LIGHTBULB, COMIC,
-STARS, METEORS, FIREWORKS, FIRE, CONFETTI, FOUNTAIN, BOKEH, FEATHERS, DANDELION
+STARS, METEORS, FIREWORKS, FIRE, CONFETTI, FOUNTAIN, BOKEH, FEATHERS, DANDELION,
+EXPLOSION, SLASH, IMPACT, SHOCKWAVE
 
 ## 段落正文
 $sb"""

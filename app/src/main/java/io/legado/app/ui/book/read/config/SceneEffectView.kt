@@ -13,6 +13,7 @@ import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.View
 import androidx.core.graphics.PathParser
+import io.legado.app.help.config.AppConfig
 import io.legado.app.model.SceneEffectCue
 import io.legado.app.model.SceneEffectKind
 import kotlin.math.PI
@@ -280,22 +281,42 @@ class SceneEffectView @JvmOverloads constructor(
     private var lastFrameTime = 0L
     private val drawAreaRatio = 0.78f
 
+    /** 常驻兜底层：没有段落特效/音效爆发特效时一直循环，场景切换时换 kind */
+    private var idleCue: SceneEffectCue? = null
+    private var idleStartMs = 0L
+
+    /** 延迟触发的段落特效；View 销毁时统一取消，避免回调打到已销毁的 Fragment */
+    private val pendingEffectRunnables = mutableListOf<Runnable>()
+
     private val unit: Float
         get() = resources.displayMetrics.density * SIZE_BOOST *
             (minOf(width, height) / 900f).coerceIn(0.85f, 2.0f)
 
+    private fun hasVisibleWork(): Boolean =
+        currentCue != null || bursts.isNotEmpty() || idleCue != null
+
+    private fun canAnimate(): Boolean =
+        AppConfig.sceneEffectEnabled && isShown && windowVisibility == VISIBLE
+
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
-            if (currentCue == null) return
+            if (!canAnimate() || !hasVisibleWork()) {
+                stopFrameLoop()
+                return
+            }
             invalidate()
             Choreographer.getInstance().postFrameCallback(this)
         }
     }
 
     private fun startFrameLoop() {
-        if (currentCue == null) return
+        if (!canAnimate() || !hasVisibleWork()) return
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         Choreographer.getInstance().postFrameCallback(frameCallback)
+    }
+
+    private fun scheduleFrameLoop() {
+        post { startFrameLoop() }
     }
 
     private fun stopFrameLoop() {
@@ -317,11 +338,100 @@ class SceneEffectView @JvmOverloads constructor(
         startFrameLoop()
     }
 
-    fun clearSceneEffects() {
-        currentCue = null
+    /**
+     * 设置/切换常驻兜底特效：不占用 currentCue，也不受 8 秒/20 秒上限影响。
+     * 场景不变时保持同一条时间轴，避免每次刷新都从头跳帧。
+     */
+    fun setIdleEffect(cue: SceneEffectCue?) {
+        if (cue == null || !AppConfig.sceneEffectEnabled) {
+            idleCue = null
+            invalidate()
+            if (!hasVisibleWork()) stopFrameLoop()
+            return
+        }
+        val normalized = cue.copy(
+            para = -1,
+            durationMs = Long.MAX_VALUE,
+            burst = false,
+            lightning = false,
+            source = "vn-scene-idle"
+        )
+        if (idleCue?.kind != normalized.kind) {
+            idleStartMs = SystemClock.uptimeMillis()
+        }
+        idleCue = normalized
         lastFrameTime = 0L
-        stopFrameLoop()
         invalidate()
+        scheduleFrameLoop()
+    }
+
+    fun clearIdleEffect() = setIdleEffect(null)
+
+    /**
+     * 瞬时爆发层：音效命中同一句时调用，与持续型 currentCue 并存、互不打断。
+     * 同一个音效名 900ms 内去重，同屏最多 2 个，避免连续脚步声刷屏。
+     */
+    private data class Burst(val cue: SceneEffectCue, val startMs: Long)
+    private val bursts = mutableListOf<Burst>()
+
+    fun burst(cue: SceneEffectCue) {
+        if (!cue.burst) return
+        val now = SystemClock.uptimeMillis()
+        bursts.removeAll {
+            now - it.startMs < 900L &&
+                it.cue.kind == cue.kind &&
+                it.cue.sourceEffectName == cue.sourceEffectName
+        }
+        if (bursts.size >= 2) bursts.removeAt(0)
+        bursts.add(Burst(cue, now))
+        invalidate()
+        startFrameLoop()
+    }
+
+    /** 优先播 assets/fx 里的开源序列帧素材，没有素材就回退到 Canvas 算法绘制 */
+    private fun drawBursts(c: Canvas, now: Long, w: Double, h: Double, k: Double) {
+        if (bursts.isEmpty()) return
+        val iterator = bursts.iterator()
+        while (iterator.hasNext()) {
+            val b = iterator.next()
+            val t = ((now - b.startMs) / 1000.0).coerceAtLeast(0.0)
+            val dur = b.cue.durationMs / 1000.0
+            if (t >= dur) {
+                iterator.remove()
+                continue
+            }
+            if (!FxSpriteSheet.draw(c, context, b.cue, t, w, h, k, bitmapPaint)) {
+                extraRenderer.draw(c, b.cue, t, dur, w, h, k)
+            }
+            bitmapPaint.alpha = 255
+        }
+    }
+
+    fun clearSceneEffects() {
+        cancelPendingEffects()
+        currentCue = null
+        bursts.clear()
+        lastFrameTime = 0L
+        invalidate()
+        if (hasVisibleWork()) scheduleFrameLoop() else stopFrameLoop()
+    }
+
+    /** 延迟触发：Runnable 内不再访问 Fragment binding，View 失效时直接跳过 */
+    fun postEffectDelayed(delayMs: Long, action: (SceneEffectView) -> Unit) {
+        val runnable = object : Runnable {
+            override fun run() {
+                pendingEffectRunnables.remove(this)
+                if (!canAnimate() || !isAttachedToWindow) return
+                action(this@SceneEffectView)
+            }
+        }
+        pendingEffectRunnables.add(runnable)
+        postDelayed(runnable, delayMs)
+    }
+
+    fun cancelPendingEffects() {
+        pendingEffectRunnables.toList().forEach { removeCallbacks(it) }
+        pendingEffectRunnables.clear()
     }
 
     /** Sprite 等价绘制：居中 → 旋转 → 缩放 → 定位 */
@@ -339,40 +449,72 @@ class SceneEffectView @JvmOverloads constructor(
         c.restore()
     }
 
+    /** 段落型/常驻型共用绘制；looping=true 时不做到期淡出，时间轴一直前进 */
+    private fun drawAmbientCue(
+        c: Canvas,
+        cue: SceneEffectCue,
+        startedAt: Long,
+        now: Long,
+        w: Double,
+        h: Double,
+        k: Double,
+        looping: Boolean
+    ): Boolean {
+        val t = ((now - startedAt) / 1000.0).coerceAtLeast(0.0)
+        val dur = if (looping) Double.POSITIVE_INFINITY else cue.durationMs / 1000.0
+        if (!looping && t >= dur) return false
+        val sk = k * cue.sizeScale.toDouble()
+        when (cue.kind) {
+            SceneEffectKind.RAIN -> drawRain(c, cue, t, dur, w, h, sk)
+            SceneEffectKind.SNOW -> drawSnow(c, cue, t, dur, w, h, sk)
+            SceneEffectKind.PETALS, SceneEffectKind.LEAVES ->
+                drawFalling(c, cue, t, dur, w, h, sk)
+            SceneEffectKind.LIGHTNING -> drawLightning(c, t, dur, w, h, sk, 0.75)
+            SceneEffectKind.FIREFLIES -> drawFireflies(c, cue, t, dur, w, h, sk)
+            SceneEffectKind.EMBERS -> drawEmbers(c, cue, t, dur, w, h, sk)
+            SceneEffectKind.WIND -> drawWind(c, cue, t, dur, w, h, sk)
+            else -> extraRenderer.draw(c, cue, t, dur, w, h, sk)
+        }
+        if (!looping && cue.lightning && cue.kind != SceneEffectKind.LIGHTNING) {
+            drawLightning(c, t, dur, w, h, sk, 0.5)
+        }
+        return true
+    }
+
     override fun onDraw(canvas: Canvas) {
-        val cue = currentCue ?: return
-        val now = SystemClock.uptimeMillis()
-        val t = ((now - startMs) / 1000.0).coerceAtLeast(0.0)
-        val dur = cue.durationMs / 1000.0
-        if (t >= dur) {
-            clearSceneEffects()
+        if (!canAnimate()) {
+            stopFrameLoop()
             return
         }
-        lastFrameTime = now
+        val now = SystemClock.uptimeMillis()
         val w = width.toDouble()
         val h = (height * drawAreaRatio).toDouble()
         if (w <= 0 || h <= 0) return
         val k = unit.toDouble() / 3.0
+        lastFrameTime = now
 
-        when (cue.kind) {
-            SceneEffectKind.RAIN -> drawRain(canvas, cue, t, dur, w, h, k)
-            SceneEffectKind.SNOW -> drawSnow(canvas, cue, t, dur, w, h, k)
-            SceneEffectKind.PETALS, SceneEffectKind.LEAVES ->
-                drawFalling(canvas, cue, t, dur, w, h, k)
-            SceneEffectKind.LIGHTNING -> drawLightning(canvas, t, dur, w, h, k, 0.75)
-            SceneEffectKind.FIREFLIES -> drawFireflies(canvas, cue, t, dur, w, h, k)
-            SceneEffectKind.EMBERS -> drawEmbers(canvas, cue, t, dur, w, h, k)
-            SceneEffectKind.WIND -> drawWind(canvas, cue, t, dur, w, h, k)
-            else -> extraRenderer.draw(canvas, cue, t, dur, w, h, k)
+        // 触发型段落特效：有则覆盖常驻层
+        val cue = currentCue
+        if (cue != null && !drawAmbientCue(canvas, cue, startMs, now, w, h, k, false)) {
+            currentCue = null
         }
-        if (cue.lightning && cue.kind != SceneEffectKind.LIGHTNING) {
-            drawLightning(canvas, t, dur, w, h, k, 0.5)
+
+        // 瞬时爆发层（音效同句触发）
+        drawBursts(canvas, now, w, h, k)
+
+        // 没有任何触发型特效时，按当前 VN 预设场景无限循环
+        if (currentCue == null && bursts.isEmpty()) {
+            idleCue?.let {
+                drawAmbientCue(canvas, it, idleStartMs, now, w, h, k, true)
+            }
         }
+
         bitmapPaint.alpha = 255
         shapePaint.alpha = 255
         linePaint.alpha = 255
         glowPaint.alpha = 255
         bgPaint.alpha = 255
+        if (!hasVisibleWork()) stopFrameLoop()
     }
 
     /** 站点 s_().draw 的淡入淡出 m */
@@ -403,10 +545,6 @@ class SceneEffectView @JvmOverloads constructor(
     ) {
         val m = fade(t, dur)
         val wind = windOf(cue); val fall = fallOf(cue)
-        // 全屏冷色雨幕
-        bgPaint.color = Color.parseColor("#233D53")
-        bgPaint.alpha = (0.23 * m * 255).toInt()
-        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bgPaint)
 
         val tex = rainTexture
         val spanX = w + 160 * k
@@ -435,9 +573,6 @@ class SceneEffectView @JvmOverloads constructor(
     ) {
         val m = fade(t, dur)
         val wind = windOf(cue); val fall = fallOf(cue)
-        bgPaint.color = Color.parseColor("#CBD9E4")
-        bgPaint.alpha = (0.09 * m * 255).toInt()
-        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bgPaint)
 
         val spanX = w + 160 * k
         val spanY = h + 160 * k
@@ -722,8 +857,30 @@ class SceneEffectView @JvmOverloads constructor(
         if (visibility != VISIBLE) {
             stopFrameLoop()
             lastFrameTime = 0L
-        } else if (currentCue != null) {
-            startFrameLoop()
+        } else {
+            scheduleFrameLoop()
         }
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (visibility != VISIBLE) {
+            stopFrameLoop()
+            lastFrameTime = 0L
+        } else {
+            scheduleFrameLoop()
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        scheduleFrameLoop()
+    }
+
+    override fun onDetachedFromWindow() {
+        clearSceneEffects()
+        setIdleEffect(null)
+        stopFrameLoop()
+        super.onDetachedFromWindow()
     }
 }

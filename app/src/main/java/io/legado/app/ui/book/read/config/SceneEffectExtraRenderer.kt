@@ -92,6 +92,11 @@ class SceneEffectExtraRenderer {
             SceneEffectKind.METEORS -> drawMeteors(c, t, w, h, k, f)
             SceneEffectKind.FIREWORKS -> drawFireworks(c, t, w, h, k, f)
             SceneEffectKind.FIRE -> drawFire(c, t, w, h, k, f)
+            // 瞬时爆发类：音效命中同一句时由 SceneEffectView.burst() 绘制
+            SceneEffectKind.EXPLOSION -> drawExplosion(c, t, dur, w, h, k, f)
+            SceneEffectKind.SLASH -> drawSlash(c, t, dur, w, h, k, f)
+            SceneEffectKind.IMPACT -> drawImpact(c, t, dur, w, h, k, f)
+            SceneEffectKind.SHOCKWAVE -> drawShockwave(c, t, dur, w, h, k, f)
             SceneEffectKind.CONFETTI -> drawConfetti(c, t, w, h, k, f)
             SceneEffectKind.FOUNTAIN -> drawFountain(c, t, w, h, k, f)
             SceneEffectKind.BOKEH -> drawBokeh(c, t, w, h, k, f)
@@ -105,25 +110,199 @@ class SceneEffectExtraRenderer {
         }
     }
 
-    // ===== 站点 Cn()：fog / smoke（5 层椭圆，alpha .025 逐层叠加） =====
-    private fun drawFogSmoke(
-        c: Canvas, smoke: Boolean, t: Double, w: Double, h: Double,
-        k: Double, f: Double, wind: Double
+    // ===== 瞬时爆发类：音效命中同一句时的短促演出 =====
+    // 参考 pixelfx（MIT）的 explosions/melee/impacts 分镜与 OGSlash 的三层缎带描边，
+    // 全部用确定性伪随机 + Canvas 实现，不引入素材、不引入引擎。
+
+    /** 爆炸：全屏短闪 + 热核 + 三层冲击环 + 放射碎片 + 上浮烟团 */
+    private fun drawExplosion(
+        c: Canvas, t: Double, dur: Double, w: Double, h: Double, k: Double, f: Double
     ) {
-        val color = if (smoke) Color.parseColor("#65717B") else Color.parseColor("#E6EDF0")
-        fill.color = color
-        for (i in 0 until 26) {
-            val b = ambientBase(i, t, w, h, k, wind, false)
-            val g = b[4] * 2.4
-            val y = if (smoke) h - wrap(t * 40 + i * 63, h + 140) else b[1]
-            for (q in 5 downTo 1) {
-                fill.alpha = (f * 0.025 * 255).toInt()
-                val rx = 65 * g * q / 5
-                val ry = 24 * g * q / 5
-                c.drawOval((b[0] - rx).toFloat(), (y - ry).toFloat(),
-                    (b[0] + rx).toFloat(), (y + ry).toFloat(), fill)
+        val p = (t / dur).coerceIn(0.0, 1.0)
+        val cx = (w * 0.5).toFloat()
+        val cy = (h * 0.45).toFloat()
+        val unit = (minOf(w, h) * 0.26 * k).toFloat()
+        val alpha = (1.0 - p) * f
+
+        fill.color = Color.argb((alpha * 70).toInt(), 255, 232, 186)
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), fill)
+
+        val core = unit * (0.45f + p.toFloat() * 1.1f)
+        glow.color = Color.argb((alpha * 220).toInt(), 255, 176, 72)
+        c.drawCircle(cx, cy, core, glow)
+        glow.color = Color.argb((alpha * 255).toInt(), 255, 246, 214)
+        c.drawCircle(cx, cy, core * 0.42f, glow)
+
+        for (ring in 0 until 3) {
+            val rp = ((p - ring * 0.11) / (1.0 - ring * 0.11)).coerceIn(0.0, 1.0)
+            if (rp <= 0.0) continue
+            line.strokeWidth = (7f - ring * 2f) * k.toFloat() * (1f - rp.toFloat()) + 1f
+            line.color = Color.argb((alpha * (1.0 - rp) * 210).toInt(), 255, 170 - ring * 28, 70)
+            c.drawCircle(cx, cy, unit * (0.3f + rp.toFloat() * 2.6f), line)
+        }
+
+        for (i in 0 until 40) {
+            val a = qt(i.toDouble(), 7.0) * PI * 2.0
+            val d = unit * (0.35f + p.toFloat() * (0.8f + dt(i + 31.0).toFloat()) * 2.0f)
+            val x = cx + (cos(a) * d).toFloat()
+            val y = cy + (sin(a) * d).toFloat() + (p * p * unit * 0.7).toFloat()
+            val r = (1.5f + dt(i + 5.0).toFloat() * 4f) * k.toFloat() * (1f - p.toFloat()) + 1f
+            fill.color = Color.argb((alpha * 255).toInt(), 255, (140 + dt(i.toDouble()) * 100).toInt(), 60)
+            c.drawCircle(x, y, r, fill)
+        }
+
+        for (i in 0 until 7) {
+            val sx = cx + (qt(i.toDouble(), 3.0) - 0.5).toFloat() * unit
+            val sy = cy - p.toFloat() * unit * (0.4f + dt(i + 9.0).toFloat())
+            fill.color = Color.argb((p * f * 42).toInt(), 96, 92, 90)
+            c.drawCircle(sx, sy, unit * (0.25f + p.toFloat() * 0.5f), fill)
+        }
+    }
+
+    /** 斩击：三层发光缎带 + 速度线 + 命中星芒（比武/斩杀） */
+    private fun drawSlash(
+        c: Canvas, t: Double, dur: Double, w: Double, h: Double, k: Double, f: Double
+    ) {
+        val p = (t / dur).coerceIn(0.0, 1.0)
+        val cx = w * 0.5
+        val cy = h * 0.45
+        val span = (minOf(w, h) * 0.44 * k).toFloat()
+        val grow = minOf(1.0, p / 0.28).toFloat()
+        val alpha = minOf(1.0, p / 0.06, (1.0 - p) / 0.42).coerceAtLeast(0.0) * f
+
+        val path = Path()
+        path.moveTo((cx - span).toFloat(), (cy + span * 0.55).toFloat())
+        path.quadTo(
+            (cx - span * 0.1).toFloat(),
+            (cy - span * 0.62).toFloat(),
+            (cx + span * grow).toFloat(),
+            (cy - span * 0.55 * grow).toFloat()
+        )
+        line.strokeWidth = 26f * k.toFloat()
+        line.color = Color.argb((alpha * 60).toInt(), 150, 215, 255)
+        c.drawPath(path, line)
+        line.strokeWidth = 11f * k.toFloat()
+        line.color = Color.argb((alpha * 150).toInt(), 195, 240, 255)
+        c.drawPath(path, line)
+        line.strokeWidth = 3.5f * k.toFloat()
+        line.color = Color.argb((alpha * 255).toInt(), 255, 255, 255)
+        c.drawPath(path, line)
+
+        for (i in 0 until 18) {
+            val yy = (cy + (qt(i.toDouble(), 11.0) - 0.5) * span * 2.2).toFloat()
+            val len = span * (0.2f + dt(i + 3.0).toFloat() * 0.5f) * grow
+            val sx = (cx - span * 1.25 + qt(i.toDouble(), 5.0).toFloat() * span).toFloat()
+            line.strokeWidth = 1.5f * k.toFloat()
+            line.color = Color.argb((alpha * 110).toInt(), 255, 255, 255)
+            c.drawLine(sx, yy, sx + len, yy - len * 0.35f, line)
+        }
+
+        if (p > 0.22) {
+            val hx = (cx + span * 0.55).toFloat()
+            val hy = (cy - span * 0.3).toFloat()
+            val r = span * (0.12f + (p - 0.22).toFloat() * 0.5f)
+            for (i in 0 until 8) {
+                val a = i * PI / 4.0
+                line.strokeWidth = 3f * k.toFloat()
+                line.color = Color.argb((alpha * 220).toInt(), 255, 246, 214)
+                c.drawLine(
+                    hx, hy,
+                    hx + (cos(a) * r).toFloat(), hy + (sin(a) * r).toFloat(), line
+                )
             }
         }
+    }
+
+    /** 命中：集中线 + 爆点 + 漫画「!」符号（暴击/重击） */
+    private fun drawImpact(
+        c: Canvas, t: Double, dur: Double, w: Double, h: Double, k: Double, f: Double
+    ) {
+        val p = (t / dur).coerceIn(0.0, 1.0)
+        val cx = (w * 0.5).toFloat()
+        val cy = (h * 0.45).toFloat()
+        val span = (minOf(w, h) * 0.5 * k).toFloat()
+        val alpha = minOf(1.0, p / 0.05, (1.0 - p) / 0.35).coerceAtLeast(0.0) * f
+
+        for (i in 0 until 26) {
+            val a = i * PI * 2.0 / 26.0
+            val inner = span * (0.12f + p.toFloat() * 0.12f)
+            val outer = span * (0.6f - p.toFloat() * 0.18f)
+            line.strokeWidth = (1.5f + dt(i + 2.0).toFloat() * 3f) * k.toFloat()
+            line.color = Color.argb((alpha * 180).toInt(), 255, 240, 210)
+            c.drawLine(
+                cx + (cos(a) * outer).toFloat(), cy + (sin(a) * outer).toFloat(),
+                cx + (cos(a) * inner).toFloat(), cy + (sin(a) * inner).toFloat(), line
+            )
+        }
+        glow.color = Color.argb((alpha * 230).toInt(), 255, 244, 208)
+        c.drawCircle(cx, cy, span * (0.1f + p.toFloat() * 0.12f), glow)
+        // typo 默认就是 Paint.Align.CENTER，不要改动共享 Paint 的对齐方式
+        typo.textSize = span * 0.24f
+        typo.color = Color.argb((alpha * 255).toInt(), 255, 236, 180)
+        c.drawText("!", cx, cy + typo.textSize * 0.35f, typo)
+    }
+
+    /** 冲击波：四圈扩散环 + 轻微全屏泛白（大招/气浪） */
+    private fun drawShockwave(
+        c: Canvas, t: Double, dur: Double, w: Double, h: Double, k: Double, f: Double
+    ) {
+        val p = (t / dur).coerceIn(0.0, 1.0)
+        val cx = (w * 0.5).toFloat()
+        val cy = (h * 0.45).toFloat()
+        val span = (minOf(w, h) * 0.5 * k).toFloat()
+        val alpha = (1.0 - p) * f
+
+        fill.color = Color.argb((alpha * 45).toInt(), 235, 245, 255)
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), fill)
+        for (ring in 0 until 4) {
+            val rp = ((p - ring * 0.09) / (1.0 - ring * 0.09)).coerceIn(0.0, 1.0)
+            if (rp <= 0.0) continue
+            line.strokeWidth = (10f - ring * 1.5f) * k.toFloat() * (1f - rp.toFloat()) + 1f
+            line.color = Color.argb((alpha * (1.0 - rp) * 200).toInt(), 210, 235, 255)
+            c.drawCircle(cx, cy, span * (0.15f + rp.toFloat() * 1.5f), line)
+        }
+    }
+
+    // ===== 雾/烟：离散柔光粒子，不再用整片椭圆雾罩造成屏幕忽明忽暗 =====
+    private fun drawFogSmoke(
+        c: Canvas, smoke: Boolean, t: Double, w: Double, h: Double,
+        k: Double, fadeValue: Double, wind: Double
+    ) {
+        if (fadeValue <= 0.0) return
+        val count = if (smoke) 84 else 66
+        val color = if (smoke) Color.parseColor("#6F7880") else Color.parseColor("#C9D4DA")
+        val coreColor = if (smoke) Color.parseColor("#AEB7BD") else Color.parseColor("#F2F6F8")
+        val drift = (8 + wind * 18) * k
+        for (i in 0 until count) {
+            val speed = 12 + qt(i.toDouble(), 1.0) * 20
+            val period = 2.8 + qt(i.toDouble(), 2.0) * 3.4
+            val phase = wrap(t / period + qt(i.toDouble(), 3.0), 1.0)
+            val life = sin(phase * PI).pow(1.4)
+            val sway = sin(t * 0.7 + i) * 12 * k
+            val x = wrap(
+                qt(i.toDouble(), 4.0) * w + t * drift + sway,
+                w + 40 * k
+            ) - 20 * k
+            val y = if (smoke) {
+                h + 20 * k - wrap(
+                    t * speed * k + qt(i.toDouble(), 5.0) * (h + 100 * k),
+                    h + 100 * k
+                )
+            } else {
+                wrap(
+                    qt(i.toDouble(), 5.0) * h + sin(t * 0.35 + i) * 22 * k,
+                    h + 40 * k
+                ) - 20 * k
+            }
+            val r = (1.4 + qt(i.toDouble(), 6.0) * 2.6) * k
+            fill.color = color
+            fill.alpha = (life * (if (smoke) 0.20 else 0.13) * 255).toInt()
+            c.drawCircle(x.toFloat(), y.toFloat(), (r * 1.8).toFloat(), fill)
+            fill.color = coreColor
+            fill.alpha = (life * (if (smoke) 0.28 else 0.18) * 255).toInt()
+            c.drawCircle(x.toFloat(), y.toFloat(), r.toFloat(), fill)
+        }
+        fill.alpha = 255
     }
 
     // ===== 站点 Cn()：bubbles（描边圆 + 高光点） =====
@@ -289,11 +468,11 @@ class SceneEffectExtraRenderer {
             val x = w + 120 * k - phase * (w + 320 * k)
             val baseY = h * (0.08 + qt(i.toDouble(), 2.0) * 0.5)
             val y = baseY - sin(phase * PI) * 70 * k
-            val far = if (count > 8) 0.45 else 1.0
-            val span = (14 + qt(i.toDouble(), 3.0) * 10) * k * far * (1.1 - phase * 0.45)
+            val far = if (count > 8) 0.8 else 1.0
+            val span = (14 + qt(i.toDouble(), 3.0) * 10) * k * 2.0 * far * (1.1 - phase * 0.45)
             val flap = sin(t * 7.0 + i) * 0.55
-            line.strokeWidth = (2.2 * k * far).toFloat()
-            line.alpha = (f * (if (crow) 0.85 else 0.7) * 255).toInt()
+            line.strokeWidth = (3.2 * k * far).toFloat()
+            line.alpha = (f * (if (crow) 0.95 else 0.88) * 255).toInt()
             val path = Path().apply {
                 moveTo((x - span).toFloat(), (y - span * flap).toFloat())
                 quadTo((x - span * 0.5).toFloat(), (y - span * 0.15).toFloat(),

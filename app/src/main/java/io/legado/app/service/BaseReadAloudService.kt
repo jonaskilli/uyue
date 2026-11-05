@@ -1003,6 +1003,19 @@ abstract class BaseReadAloudService : BaseService(),
      * AI 音效跳过 JSON 解码流程，直接取本地文件或下载远端 mp3。
      */
     protected fun loadAndPlayEffect(effect: SoundEffect) {
+        // 画面联动：规则音效 / AI 音效 / 补播三条路径都收敛到这里。
+        // 在下载音频之前同步发事件，保证画面与音效落在同一句；
+        // 不改 ttsrv-replaces*.json、ai_effect_index_kw.json 与两条 AI 音效提示词。
+        if (AppConfig.sceneEffectEnabled) {
+            postEvent(EventBus.SOUND_EFFECT_FIRED, io.legado.app.model.SoundEffectFired(
+                para = nowSpeak,
+                ratio = effect.offsetRatio ?: 0f,
+                name = effect.name,
+                fileName = effect.fileName,
+                isAiEffect = effect.isAiEffect,
+                charOffset = effect.charOffset
+            ))
+        }
         lifecycleScope.launch(Dispatchers.IO) {
             val audioFile = if (effect.isAiEffect) {
                 AiEffectDownloader.obtain(effect.fileName)

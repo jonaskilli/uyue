@@ -58,4 +58,7 @@ object EventBus {
     const val DANMAKU_READY = "danmakuReady"
     // 场景特效：区间生成完毕（增量全量下发），value = SceneEffectReady
     const val SCENE_EFFECT_READY = "sceneEffectReady"
+    // 音效真正触发（规则音效 / AI 音效同一收口），value = SoundEffectFired
+    // 场景特效浮层订阅它，在音效响起的同一句绘制瞬时动画
+    const val SOUND_EFFECT_FIRED = "soundEffectFired"
 }
