@@ -1125,6 +1125,8 @@ internal fun DownloadDialog(
     var batchDeleteConfirm by remember {
         mutableStateOf<Pair<String, (() -> Unit)>?>(null)
     }
+    // 批量停止时若范围内有直播录制：先问「全部仅暂停」还是「直播完成并合成」
+    var liveStopScope by remember { mutableStateOf<LiveStopScope?>(null) }
 
     // 「其他缓存」：无下载记录的孤儿缓存。两种来源：
     // - 记录丢失（tasks.json 损坏/被清），分片与密钥都还在；
@@ -1410,6 +1412,38 @@ internal fun DownloadDialog(
                 }
             )
         }
+        // 直播录制没有"下完"的时刻，停止必须由用户决定是挂起还是收尾成视频
+        liveStopScope?.let { scope ->
+            AlertDialog(
+                onDismissRequest = { liveStopScope = null },
+                title = { Text("停止直播录制") },
+                text = {
+                    Text(
+                        "范围里有正在录制的直播。\n" +
+                            "「全部仅暂停」保留已录内容，之后可继续录；\n" +
+                            "「直播完成并合成」把已录内容合成一个 MP4 并结束录制，其它任务照常暂停。"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        liveStopScope = null
+                        val n = VideoDownloader.finishLiveRecordings(scope.dirName)
+                        context.toastOnUi("已将 $n 个直播录制收尾合成")
+                    }) {
+                        Text("直播完成并合成", color = MaterialTheme.colorScheme.primary)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        liveStopScope = null
+                        val n = VideoDownloader.pauseAll(scope.dirName)
+                        context.toastOnUi("已暂停 $n 个任务")
+                    }) {
+                        Text("全部仅暂停")
+                    }
+                }
+            )
+        }
         val orphanVideos = playingOrphanVideos
         if (orphanVideos != null) {
             // 全屏播「其他缓存」：与正片同一个时光播放器（本地清单 / 进度 / 手势全都在），
@@ -1496,10 +1530,14 @@ internal fun DownloadDialog(
                                 text = { Text("全部停止") },
                                 onClick = {
                                     menuOpen = false
-                                    val n = VideoDownloader.pauseAll(currentDir)
-                                    context.toastOnUi(
-                                        if (n > 0) "已暂停 $n 个任务" else "没有进行中的任务"
-                                    )
+                                    if (VideoDownloader.hasLiveRecording(currentDir)) {
+                                        liveStopScope = LiveStopScope(currentDir)
+                                    } else {
+                                        val n = VideoDownloader.pauseAll(currentDir)
+                                        context.toastOnUi(
+                                            if (n > 0) "已暂停 $n 个任务" else "没有进行中的任务"
+                                        )
+                                    }
                                 }
                             )
                             if (!selectorOpen && tab == 1) {
@@ -1777,11 +1815,18 @@ internal fun DownloadDialog(
                                                             fontSize = 11.sp,
                                                             modifier = Modifier.clickable {
                                                                 if (anyRunning) {
-                                                                    val n = VideoDownloader
-                                                                        .pauseAll(g.dirName)
-                                                                    context.toastOnUi(
-                                                                        "已暂停 $n 个任务"
-                                                                    )
+                                                                    if (VideoDownloader
+                                                                            .hasLiveRecording(g.dirName)
+                                                                    ) {
+                                                                        liveStopScope =
+                                                                            LiveStopScope(g.dirName)
+                                                                    } else {
+                                                                        val n = VideoDownloader
+                                                                            .pauseAll(g.dirName)
+                                                                        context.toastOnUi(
+                                                                            "已暂停 $n 个任务"
+                                                                        )
+                                                                    }
                                                                 } else {
                                                                     onContinueGroup(g)
                                                                 }
@@ -2287,6 +2332,18 @@ private fun PlaybackErrorChoiceDialog(
     }
 }
 
+/** 批量停止直播录制的作用范围 */
+private data class LiveStopScope(val dirName: String?)
+
+/** 已录制时长：mm:ss / h:mm:ss（直播没有总量，只能报时长） */
+private fun formatRecorded(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0)
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+}
+
 /** 体积格式化：B / KB / MB / GB */
 private fun formatSize(bytes: Long): String {
     if (bytes <= 0) return "0B"
@@ -2336,9 +2393,40 @@ private fun DownloadStateItem(
     contentColor: Color,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    // 直播录制条目的「暂停」要先问清楚：真暂停（可续录）还是收尾合成完整视频
+    var liveStopAsk by remember { mutableStateOf(false) }
     val running = st.status == VideoDownloader.DlStatus.QUEUED ||
         st.status == VideoDownloader.DlStatus.RUNNING
     val completed = st.status == VideoDownloader.DlStatus.COMPLETED
+    if (liveStopAsk) {
+        AlertDialog(
+            onDismissRequest = { liveStopAsk = false },
+            title = { Text("停止直播录制？") },
+            text = {
+                Text(
+                    "已录制 ${formatRecorded(st.recordedMs)}。直播没有固定结束点：\n" +
+                        "「仅暂停」保留现场，之后可接着录；\n" +
+                        "「完成并合成」结束录制，把已录内容合成一个完整的 MP4 视频。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    liveStopAsk = false
+                    VideoDownloader.finishLiveRecording(st.key)
+                }) {
+                    Text("完成并合成", color = MaterialTheme.colorScheme.primary)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    liveStopAsk = false
+                    VideoDownloader.pause(st.key)
+                }) {
+                    Text("仅暂停")
+                }
+            }
+        )
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         // 勾选后配合上方的"删除选中"做批量删除
         Checkbox(checked = checked, onCheckedChange = onCheckedChange)
@@ -2380,8 +2468,12 @@ private fun DownloadStateItem(
         Text(
             when (st.status) {
                 VideoDownloader.DlStatus.QUEUED -> "等待中"
-                VideoDownloader.DlStatus.RUNNING -> "${st.progress.coerceAtLeast(0)}%"
-                VideoDownloader.DlStatus.PAUSED -> "已暂停 ${st.progress}%"
+                VideoDownloader.DlStatus.RUNNING ->
+                    if (st.isLive) "录制中 ${formatRecorded(st.recordedMs)}"
+                    else "${st.progress.coerceAtLeast(0)}%"
+                VideoDownloader.DlStatus.PAUSED ->
+                    if (st.isLive) "已暂停·录 ${formatRecorded(st.recordedMs)}"
+                    else "已暂停 ${st.progress}%"
                 VideoDownloader.DlStatus.COMPLETED -> "完成"
                 VideoDownloader.DlStatus.FAILED -> "失败"
                 VideoDownloader.DlStatus.COLLECTING ->
@@ -2403,7 +2495,15 @@ private fun DownloadStateItem(
             when {
                 merging -> Unit
                 completed -> onPlay(st)
-                running -> VideoDownloader.pause(st.key)
+                running -> {
+                    if (st.status == VideoDownloader.DlStatus.RUNNING &&
+                        VideoDownloader.isLiveRecording(st.key)
+                    ) {
+                        liveStopAsk = true
+                    } else {
+                        VideoDownloader.pause(st.key)
+                    }
+                }
                 else -> VideoDownloader.resume(st.key)
             }
         }) {
@@ -2425,6 +2525,16 @@ private fun DownloadStateItem(
                 )
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                // 「仅暂停」之后也能随时把已录内容收尾成一个完整 MP4
+                if (st.isLive && !completed && !merging) {
+                    DropdownMenuItem(
+                        text = { Text("完成并合成（结束录制）") },
+                        onClick = {
+                            menuOpen = false
+                            VideoDownloader.finishLiveRecording(st.key)
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("删除已缓存") },
                     onClick = {
