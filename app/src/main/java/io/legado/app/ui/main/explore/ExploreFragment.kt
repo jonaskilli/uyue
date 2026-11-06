@@ -1,5 +1,7 @@
 package io.legado.app.ui.main.explore
 
+import androidx.compose.ui.platform.ViewCompositionStrategy
+
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
@@ -18,20 +20,25 @@ import io.legado.app.constant.AppLog
 import io.legado.app.data.AppDatabase
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.BookSourcePart
+import io.legado.app.data.entities.SearchBook
 import io.legado.app.databinding.FragmentExploreBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.lib.theme.primaryTextColor
 import io.legado.app.ui.book.explore.ExploreShowActivity
+import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.search.SearchScope
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.main.MainFragmentInterface
+import io.legado.app.ui.main.explore.compose.ExplorePane
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.flowWithLifecycleAndDatabaseChange
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.startActivity
+import io.legado.app.utils.getPrefString
+import io.legado.app.utils.putPrefString
 import io.legado.app.utils.transaction
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.CoroutineScope
@@ -60,6 +67,8 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
     override val position: Int? get() = arguments?.getInt("position")
 
     override val viewModel by viewModels<ExploreViewModel>()
+    /** 左侧 75% 内容区专用，与旧版 ExploreShowActivity 的 ViewModel 互不干扰 */
+    private val paneViewModel by viewModels<ExplorePaneViewModel>()
     private val binding by viewBinding(FragmentExploreBinding::bind)
     private val adapter by lazy { ExploreAdapter(requireContext(), this) }
     private val linearLayoutManager by lazy { LinearLayoutManager(context) }
@@ -74,6 +83,18 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
         setSupportToolbar(binding.titleBar.toolbar)
         initSearchView()
+        binding.composeExplorePane.apply {
+            setViewCompositionStrategy(
+                ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed
+            )
+            setContent {
+                ExplorePane(
+                    viewModel = paneViewModel,
+                    onBookClick = { book -> openBookInfo(book) },
+                    onBookLongClick = { book -> openBookInfo(book) }
+                )
+            }
+        }
         initRecyclerView()
         initGroupData()
         upExploreData()
@@ -117,7 +138,19 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
             override fun onItemRangeInserted(positionStart: Int, itemCount: Int) {
                 super.onItemRangeInserted(positionStart, itemCount)
                 if (positionStart == 0) {
-                    binding.rvFind.scrollToPosition(0)
+                    // 恢复上次选中的书源时，右侧直接滚到它，别每次刷新都弹回顶部
+                    val selected = adapter.selectedSourceUrl
+                    val index = adapter.getItems().indexOfFirst {
+                        it.bookSourceUrl == selected
+                    }
+                    if (index >= 0) {
+                        binding.rvFind.post {
+                            (binding.rvFind.layoutManager as LinearLayoutManager)
+                                .scrollToPositionWithOffset(index, 0)
+                        }
+                    } else {
+                        binding.rvFind.scrollToPosition(0)
+                    }
                 }
             }
         })
@@ -167,6 +200,16 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
             }.conflate().flowOn(IO).collect {
                 binding.tvEmptyMsg.isGone = it.isNotEmpty() || searchView.query.isNotEmpty()
                 adapter.setItems(it, diffItemCallBack)
+                // 首次进入：恢复上次选的书源，没有就默认第一个
+                if (adapter.selectedSourceUrl == null) {
+                    val saved = getPrefString("explorePaneSourceUrl")
+                    val target = it.firstOrNull { s -> s.bookSourceUrl == saved }
+                        ?: it.firstOrNull()
+                    if (target != null) {
+                        adapter.selectedSourceUrl = target.bookSourceUrl
+                        paneViewModel.selectSource(target.bookSourceUrl)
+                    }
+                }
                 delay(500)
             }
         }
@@ -187,6 +230,21 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
         if (item.groupId == R.id.menu_group_text) {
             searchView.setQuery("group:${item.title}", true)
         }
+    }
+
+    /** 左侧点书：与旧发现内容页一致，进书籍详情页（加书架/换源/开始阅读都在这里） */
+    private fun openBookInfo(book: SearchBook) {
+        startActivity<BookInfoActivity> {
+            putExtra("name", book.name)
+            putExtra("author", book.author)
+            putExtra("bookUrl", book.bookUrl)
+        }
+    }
+
+    /** 右侧点书源名 → 左侧整块换源，不再展开分类、也不跳 ExploreShowActivity */
+    override fun onSelectSource(sourceUrl: String) {
+        putPrefString("explorePaneSourceUrl", sourceUrl)
+        paneViewModel.selectSource(sourceUrl)
     }
 
     override fun scrollTo(pos: Int) {

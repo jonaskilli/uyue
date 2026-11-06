@@ -1,5 +1,7 @@
 package io.legado.app.ui.main.explore
 
+import android.graphics.Color
+
 import android.annotation.SuppressLint
 import android.content.Context
 import android.text.Editable
@@ -67,6 +69,9 @@ class ExploreAdapter(context: Context, val callBack: CallBack) :
     companion object {
         val exploreInfoMapList = LruCache<String, InfoMap>(99)
     }
+
+    /** 当前在左侧展示的书源，用于右侧行高亮 */
+    var selectedSourceUrl: String? = null
     private val recycler = arrayListOf<TextView>()
     private val textRecycler = arrayListOf<AutoCompleteTextView>()
     private val selectRecycler = arrayListOf<LinearLayout>()
@@ -88,40 +93,22 @@ class ExploreAdapter(context: Context, val callBack: CallBack) :
         payloads: MutableList<Any>
     ) {
         binding.run {
-            if (holder.layoutPosition == itemCount - 1) {
-                root.setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
-            } else {
-                root.setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 0)
-            }
-            if (payloads.isEmpty()) {
-                tvName.text = item.bookSourceName
-            }
-            if (exIndex == holder.layoutPosition) {
-                ivStatus.setImageResource(R.drawable.ic_arrow_down)
-                rotateLoading.loadingColor = context.accentColor
-                rotateLoading.visible()
-                Coroutine.async(callBack.scope) {
-                    sourceKinds[item.bookSourceUrl]?.also {
-                        return@async it
-                    }
-                    item.exploreKinds().also {
-                        sourceKinds[item.bookSourceUrl] = it
-                    }
-                }.onSuccess { kindList ->
-                    upKindList(this@run, item, kindList, exIndex)
-                }.onFinally {
-                    rotateLoading.gone()
-                    if (scrollTo >= 0) {
-                        callBack.scrollTo(scrollTo)
-                        scrollTo = -1
-                    }
-                }
-            } else kotlin.runCatching {
-                ivStatus.setImageResource(R.drawable.ic_arrow_right)
-                rotateLoading.gone()
-                recyclerFlexbox(flexbox)
-                flexbox.gone()
-            }
+            // 右侧只有 25% 宽：边距/字号压到最小，展开分类改由左侧内容区承担
+            root.setPadding(3.dpToPx(), 4.dpToPx(), 3.dpToPx(), 4.dpToPx())
+            tvName.text = item.bookSourceName
+            tvName.textSize = 13f
+            tvName.maxLines = 1
+            // ClipTextView 按像素裁剪：不用省略号，也不按字素簇整段丢弃，
+            // 最后一个字哪怕只显示一半也要显示出来
+            tvName.ellipsize = null
+            val selected = item.bookSourceUrl == selectedSourceUrl
+            llTitle.setBackgroundColor(
+                if (selected) Color.argb(70, 128, 128, 128) else Color.TRANSPARENT
+            )
+            ivStatus.gone()
+            rotateLoading.gone()
+            recyclerFlexbox(flexbox)
+            flexbox.gone()
         }
     }
 
@@ -578,15 +565,16 @@ class ExploreAdapter(context: Context, val callBack: CallBack) :
     override fun registerListener(holder: ItemViewHolder, binding: ItemFindBookBinding) {
         binding.apply {
             llTitle.setOnClickListener {
-                val position = holder.layoutPosition
-                val oldEx = exIndex
-                exIndex = if (exIndex == position) -1 else position
-                notifyItemChanged(oldEx, false)
-                if (exIndex != -1) {
-                    scrollTo = position
-                    callBack.scrollTo(position)
-                    notifyItemChanged(position, false)
+                val item = getItemByLayoutPosition(holder.layoutPosition)
+                    ?: return@setOnClickListener
+                val previous = selectedSourceUrl
+                selectedSourceUrl = item.bookSourceUrl
+                notifyItemChanged(holder.layoutPosition, false)
+                if (previous != null) {
+                    getItems().indexOfFirst { it.bookSourceUrl == previous }
+                        .takeIf { it >= 0 }?.let { notifyItemChanged(it, false) }
                 }
+                callBack.onSelectSource(item.bookSourceUrl)
             }
             llTitle.onLongClick {
                 showMenu(binding, holder.layoutPosition)
@@ -656,6 +644,8 @@ class ExploreAdapter(context: Context, val callBack: CallBack) :
 
     interface CallBack {
         val scope: CoroutineScope
+        /** 点书源名：让左侧内容区整体切换到这个源；视频页也实现了本接口，给默认空实现 */
+        fun onSelectSource(sourceUrl: String) = Unit
         fun scrollTo(pos: Int)
         fun openExplore(sourceUrl: String, title: String, exploreUrl: String?)
         fun editSource(sourceUrl: String)

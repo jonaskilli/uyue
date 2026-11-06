@@ -1,5 +1,8 @@
 package io.legado.app.ui.main.video
 
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.constraintlayout.widget.ConstraintLayout
+
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -51,9 +54,13 @@ import io.legado.app.ui.book.video.SourceVideoPlayerSession
 import io.legado.app.ui.book.video.VideoDownloadActivity
 import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.main.explore.ExploreAdapter
+import io.legado.app.ui.main.explore.ExplorePaneViewModel
+import io.legado.app.ui.main.explore.compose.ExplorePane
 import io.legado.app.ui.main.explore.ExploreDiffItemCallBack
 import io.legado.app.ui.main.video.VideoHistoryActivity
 import io.legado.app.utils.applyTint
+import io.legado.app.utils.getPrefString
+import io.legado.app.utils.putPrefString
 import io.legado.app.utils.iconItemOnLongClick
 import io.legado.app.utils.flowWithLifecycleAndDatabaseChange
 import io.legado.app.utils.setEdgeEffectColor
@@ -91,6 +98,8 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
     override val position: Int? get() = arguments?.getInt("position")
 
     override val viewModel by viewModels<VideoViewModel>()
+    /** 左侧 75% 内容区，与发现页复用同一套 ViewModel / Compose 页面 */
+    private val paneViewModel by viewModels<ExplorePaneViewModel>()
     private val binding by viewBinding(FragmentVideoBinding::bind)
     private val adapter by lazy { ExploreAdapter(requireContext(), this) }
     /** 搜索结果列表：搜视频名时用，与书源列表共用同一个 RecyclerView */
@@ -115,6 +124,21 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
         setSupportToolbar(binding.titleBar.toolbar)
         initSearchView()
+        // 仅用于区分两页各自的网格/列表偏好键
+        paneViewModel.videoPage = true
+        binding.composeVideoPane.apply {
+            setViewCompositionStrategy(
+                ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed
+            )
+            setContent {
+                ExplorePane(
+                    viewModel = paneViewModel,
+                    // 与搜索结果列表完全同一套代码路径，不再自写播放/入库/feed 逻辑
+                    onBookClick = { book -> showBookInfo(book) },
+                    onBookLongClick = { book -> openBookInfo(book) }
+                )
+            }
+        }
         initRecyclerView()
         upVideoData()
         initSearchObserve()
@@ -156,6 +180,7 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
 
     private fun enterSearchMode() {
         searchMode = true
+        updatePaneForSearch(true)
         // 停掉书源列表的刷新，免得它把列表和空态提示又改回去
         videoFlowJob?.cancel()
         binding.rvFind.adapter = searchAdapter
@@ -185,6 +210,7 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         allResults = emptyList()
         selectedSourceUrl = null
         binding.rvFind.adapter = adapter
+        updatePaneForSearch(false)
         upVideoData()
     }
 
@@ -298,7 +324,19 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
             override fun onItemRangeInserted(positionStart: Int, itemCount: Int) {
                 super.onItemRangeInserted(positionStart, itemCount)
                 if (positionStart == 0) {
-                    binding.rvFind.scrollToPosition(0)
+                    // 恢复上次选中的书源时，右侧直接滚到它，别每次刷新都弹回顶部
+                    val selected = adapter.selectedSourceUrl
+                    val index = adapter.getItems().indexOfFirst {
+                        it.bookSourceUrl == selected
+                    }
+                    if (index >= 0) {
+                        binding.rvFind.post {
+                            (binding.rvFind.layoutManager as LinearLayoutManager)
+                                .scrollToPositionWithOffset(index, 0)
+                        }
+                    } else {
+                        binding.rvFind.scrollToPosition(0)
+                    }
                 }
             }
         })
@@ -320,6 +358,16 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
             }.conflate().flowOn(IO).collect {
                 binding.tvEmptyMsg.isGone = it.isNotEmpty() || searchView.query.isNotEmpty()
                 adapter.setItems(it, diffItemCallBack)
+                // 首次进入：恢复上次选中的视频源，没有就默认第一个
+                if (adapter.selectedSourceUrl == null) {
+                    val saved = getPrefString("videoPaneSourceUrl")
+                    val target = it.firstOrNull { s -> s.bookSourceUrl == saved }
+                        ?: it.firstOrNull()
+                    if (target != null) {
+                        adapter.selectedSourceUrl = target.bookSourceUrl
+                        paneViewModel.selectSource(target.bookSourceUrl)
+                    }
+                }
                 delay(500)
             }
         }
@@ -348,6 +396,31 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
             InfiniteSwipeFilterDialog { startInfiniteSwipe() }
                 .show(childFragmentManager, "infinite_swipe_filter")
         }
+    }
+
+    /** 右侧点视频源名 → 左侧整块换源（与发现页同一交互） */
+    override fun onSelectSource(sourceUrl: String) {
+        putPrefString("videoPaneSourceUrl", sourceUrl)
+        paneViewModel.selectSource(sourceUrl)
+    }
+
+    /**
+     * 搜索视频名时，rv_find 装的是搜索结果，25% 宽放不下：
+     * 临时隐藏左侧内容区并把列表拉回全宽，退出搜索再恢复 75/25。
+     */
+    private fun updatePaneForSearch(searching: Boolean) {
+        binding.composeVideoPane.isGone = searching
+        binding.paneDivider.isGone = searching
+        val lp = binding.rvFind.layoutParams as ConstraintLayout.LayoutParams
+        if (searching) {
+            lp.leftToRight = ConstraintLayout.LayoutParams.UNSET
+            lp.leftToLeft = ConstraintLayout.LayoutParams.PARENT_ID
+        } else {
+            lp.leftToLeft = ConstraintLayout.LayoutParams.UNSET
+            lp.leftToRight = R.id.guideline_video_pane
+        }
+        lp.rightToRight = ConstraintLayout.LayoutParams.PARENT_ID
+        binding.rvFind.layoutParams = lp
     }
 
     override fun scrollTo(pos: Int) {
