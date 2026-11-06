@@ -268,6 +268,14 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
 
     override fun toTop(source: BookSourcePart) {
         viewModel.topSource(source)
+        // 置顶后把「记住的源」同步成被置顶的源：重启时原有的自动定位逻辑
+        // 会滚到这个源，而它此时正是列表第 0 位，置顶结果不会被滚走。
+        // 当前会话的高亮与左侧内容区保持不变。
+        putPrefString("explorePaneSourceUrl", source.bookSourceUrl)
+        // 置顶只改 customOrder，列表刷新后当前滚动位置可能把新顶到第一位的源留在屏幕外
+        binding.rvFind.post {
+            binding.rvFind.scrollToPosition(0)
+        }
     }
 
     override fun deleteSource(source: BookSourcePart) {
