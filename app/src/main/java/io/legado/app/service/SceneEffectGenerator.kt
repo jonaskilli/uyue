@@ -4,6 +4,7 @@ import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.model.SceneEffectCue
 import io.legado.app.model.SceneEffectKind
+import io.legado.app.model.SceneEffectSettings
 import io.legado.app.ui.book.toc.AiCacheFileUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,7 +31,7 @@ object SceneEffectGenerator {
     private const val LIGHTNING_DURATION_MS = 8000L
     private const val WIND_DURATION_MS = 6000L
     /** 规则表版本：新增特效后旧缓存里「已检查无特效」的段落要重新分析 */
-    private const val CACHE_VERSION = 4
+    private const val CACHE_VERSION = 6
 
     private val INDOOR_WORDS = listOf(
         "屋内", "室内", "房里", "房内", "屋里", "殿内", "车厢", "舱内",
@@ -91,6 +92,21 @@ object SceneEffectGenerator {
         Triple(SceneEffectKind.ANGER, listOf("青筋", "怒火", "恼怒", "气得", "暴跳", "咬牙切齿", "怒气"), 2),
         Triple(SceneEffectKind.ZZZ, listOf("睡意", "打盹", "呼噜", "入眠", "困倦", "打哈欠", "昏昏欲睡"), 2),
         Triple(SceneEffectKind.QUESTION, listOf("满头问号", "疑惑不解", "一头雾水", "纳闷", "不明所以", "百思不得"), 2),
+        // 本轮从新收集的开源特效中新增的 14 类（全部有对应序列帧素材）
+        Triple(SceneEffectKind.MAGIC_CIRCLE, listOf("魔法阵", "法阵亮起", "符文亮", "阵法", "召唤阵"), 3),
+        Triple(SceneEffectKind.ARCANE, listOf("法阵", "咒语", "符文", "灵力爆发", "奥术", "结界"), 3),
+        Triple(SceneEffectKind.HOLY, listOf("圣光", "神光", "净化", "祝福", "神圣", "佛光"), 2),
+        Triple(SceneEffectKind.SHADOW, listOf("黑雾", "暗影", "阴影", "魔气", "黑气", "幽影"), 2),
+        Triple(SceneEffectKind.FROST, listOf("冰霜", "结冰", "冻结", "寒冰", "霜花", "冰封"), 3),
+        Triple(SceneEffectKind.PORTAL, listOf("传送门", "空间裂缝", "裂隙", "门户洞开"), 3),
+        Triple(SceneEffectKind.PROJECTILE, listOf("箭矢", "万箭", "飞箭", "弩箭", "飞镖", "弹丸"), 3),
+        Triple(SceneEffectKind.SPARK_JET, listOf("火花四溅", "火星喷射", "迸出火花", "火花飞溅"), 3),
+        Triple(SceneEffectKind.RIPPLE, listOf("涟漪", "水波荡漾", "波纹扩散", "水面泛起"), 2),
+        Triple(SceneEffectKind.WAVE, listOf("波浪", "浪潮", "波涛", "水波起伏"), 2),
+        Triple(SceneEffectKind.SHIMMER, listOf("流光", "寒光一闪", "光华流转", "闪过一道光"), 2),
+        Triple(SceneEffectKind.RED_PACKET, listOf("红包雨", "撒钱", "金币雨", "漫天金币", "天降宝物"), 2),
+        Triple(SceneEffectKind.KOI, listOf("锦鲤", "游鱼", "红鲤", "鱼群游过"), 2),
+        Triple(SceneEffectKind.DOOM_FIRE, listOf("烈焰滔天", "火海", "焚天", "岩浆", "熊熊烈焰"), 3),
         Triple(SceneEffectKind.COMIC, COMIC_WORDS, 2)
     )
 
@@ -118,6 +134,18 @@ object SceneEffectGenerator {
             ).apply { mkdirs() },
             AiCacheFileUtil.sanitizeChapterFileName(chapterTitle) + ".json"
         )
+
+    /** 复位用：删除全部已落盘的段落特效缓存，让关键词重新分析 */
+    fun clearAllCache(): Int {
+        val root = File("/storage/emulated/0/Download/chajian/scene_effect")
+        var count = 0
+        runCatching {
+            root.walkTopDown()
+                .filter { it.isFile && it.extension == "json" }
+                .forEach { if (it.delete()) count++ }
+        }
+        return count
+    }
 
     /**
      * 生成一个区间的场景特效。
@@ -187,6 +215,8 @@ object SceneEffectGenerator {
         if (hit == null) return null
 
         val kind = hit.first
+        // 管理界面里被关闭的效果：本地规则直接不产出，也不写进段落缓存
+        if (!SceneEffectSettings.isEnabled(kind)) return null
         // 室内不播室外天气/植物类，避免「屋里下雪」的违和感
         if (indoor && SceneEffectKind.isOutdoorOnly(kind)) return null
 
@@ -200,7 +230,7 @@ object SceneEffectGenerator {
             SceneEffectKind.IMPACT, SceneEffectKind.SHOCKWAVE -> 1200L
             SceneEffectKind.FIREWORKS, SceneEffectKind.METEORS,
             SceneEffectKind.CONFETTI -> 6000L
-            else -> DEFAULT_DURATION_MS
+            else -> if (SceneEffectKind.isBurst(kind)) 1200L else DEFAULT_DURATION_MS
         }
         val comicText = if (kind == SceneEffectKind.COMIC)
             COMIC_WORDS.firstOrNull { t.contains(it) } else null
@@ -275,7 +305,7 @@ object SceneEffectGenerator {
 5. level 只能 1~4：1=微弱，2=正常，3=明显，4=暴雨/暴雪/狂风。
 6. 雨雪段落若同时出现雷电，把 lightning 填 true；有风把 wind 填 true。
 7. durationMs 用 8000；闪电、漫画符号用 4000；烟花/流星/彩屑用 6000。
-8. EXPLOSION/SLASH/IMPACT/SHOCKWAVE 只在明确写出爆炸、挥刀斩击、重击命中、冲击波时标，durationMs 用 1200；没有这些动作一律不标。
+8. EXPLOSION/SLASH/IMPACT/SHOCKWAVE 及 ARCANE/FROST/PORTAL 等瞬时类，只在正文明确写出对应动作或法术时标，durationMs 用 1200；没有这些描写一律不标。
 
 ## 输出
 只输出 JSON 数组，不要解释、不要 markdown 代码块：
@@ -285,7 +315,9 @@ kind 白名单：RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND,
 FOG, SMOKE, BUBBLES, RAYS, DUST, BUTTERFLIES, BIRDS_GULL, BIRDS_CROW, BIRD_FLOCK,
 SPARKLES, QUESTION, SWEAT, HEART, ANGER, ZZZ, LIGHTBULB, COMIC,
 STARS, METEORS, FIREWORKS, FIRE, CONFETTI, FOUNTAIN, BOKEH, FEATHERS, DANDELION,
-EXPLOSION, SLASH, IMPACT, SHOCKWAVE
+EXPLOSION, SLASH, IMPACT, SHOCKWAVE,
+ARCANE, HOLY, SHADOW, FROST, PORTAL, PROJECTILE, MAGIC_CIRCLE,
+RIPPLE, WAVE, SHIMMER, SPARK_JET, RED_PACKET, KOI, DOOM_FIRE
 
 ## 段落正文
 $sb"""
@@ -306,6 +338,7 @@ $sb"""
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val para = o.optInt("para", -1)
                 val kind = SceneEffectKind.from(o.optString("kind")) ?: return@mapNotNull null
+                if (!SceneEffectSettings.isEnabled(kind)) return@mapNotNull null
                 if (para !in validParas) return@mapNotNull null
                 val cue = SceneEffectCue(
                     para = para,

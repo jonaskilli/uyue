@@ -14,8 +14,10 @@ import android.view.Choreographer
 import android.view.View
 import androidx.core.graphics.PathParser
 import io.legado.app.help.config.AppConfig
+import io.legado.app.model.FxCatalog
 import io.legado.app.model.SceneEffectCue
 import io.legado.app.model.SceneEffectKind
+import io.legado.app.model.SceneEffectSettings
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -281,9 +283,14 @@ class SceneEffectView @JvmOverloads constructor(
     private var lastFrameTime = 0L
     private val drawAreaRatio = 0.78f
 
-    /** 常驻兜底层：没有段落特效/音效爆发特效时一直循环，场景切换时换 kind */
-    private var idleCue: SceneEffectCue? = null
-    private var idleStartMs = 0L
+    /** 管理界面预览模式：绕过总开关与单条禁用，只用于试播 */
+    var previewMode: Boolean = false
+
+    /** 单独预览某个具体序列帧素材：只画素材，不叠大类的算法层 */
+    var fxOnlyPreview: Boolean = false
+
+    /** 单独预览原版矢量/算法效果：只画算法层，不叠序列帧素材 */
+    var algoOnlyPreview: Boolean = false
 
     /** 延迟触发的段落特效；View 销毁时统一取消，避免回调打到已销毁的 Fragment */
     private val pendingEffectRunnables = mutableListOf<Runnable>()
@@ -293,10 +300,18 @@ class SceneEffectView @JvmOverloads constructor(
             (minOf(width, height) / 900f).coerceIn(0.85f, 2.0f)
 
     private fun hasVisibleWork(): Boolean =
-        currentCue != null || bursts.isNotEmpty() || idleCue != null
+        currentCue != null || bursts.isNotEmpty()
 
     private fun canAnimate(): Boolean =
-        AppConfig.sceneEffectEnabled && isShown && windowVisibility == VISIBLE
+        (previewMode || AppConfig.sceneEffectEnabled) && isShown && windowVisibility == VISIBLE
+
+    /** 正常使用时被禁用的效果不绘制；预览界面仍可试播 */
+    private fun blocked(cue: SceneEffectCue): Boolean =
+        !previewMode && !SceneEffectSettings.isEnabled(cue.kind)
+
+    /** 原版矢量/算法层是否允许绘制；预览模式下随时可测 */
+    private fun algoEnabled(cue: SceneEffectCue): Boolean =
+        previewMode || SceneEffectSettings.isAlgoEnabled(cue.kind)
 
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
@@ -324,6 +339,7 @@ class SceneEffectView @JvmOverloads constructor(
     }
 
     fun show(cue: SceneEffectCue) {
+        if (blocked(cue)) return
         val old = currentCue
         if (old != null && old.kind == cue.kind) {
             currentCue = old.copy(
@@ -339,31 +355,11 @@ class SceneEffectView @JvmOverloads constructor(
     }
 
     /**
-     * 设置/切换常驻兜底特效：不占用 currentCue，也不受 8 秒/20 秒上限影响。
-     * 场景不变时保持同一条时间轴，避免每次刷新都从头跳帧。
+     * 常驻兜底特效已整个移除。保留空接口只为兼容朗读弹窗 / VN 舞台 / 大图界面
+     * 仍会调用的 setIdleEffect / clearIdleEffect：调用后不绘制任何内容、不启动帧循环。
      */
-    fun setIdleEffect(cue: SceneEffectCue?) {
-        if (cue == null || !AppConfig.sceneEffectEnabled) {
-            idleCue = null
-            invalidate()
-            if (!hasVisibleWork()) stopFrameLoop()
-            return
-        }
-        val normalized = cue.copy(
-            para = -1,
-            durationMs = Long.MAX_VALUE,
-            burst = false,
-            lightning = false,
-            source = "vn-scene-idle"
-        )
-        if (idleCue?.kind != normalized.kind) {
-            idleStartMs = SystemClock.uptimeMillis()
-        }
-        idleCue = normalized
-        lastFrameTime = 0L
-        invalidate()
-        scheduleFrameLoop()
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun setIdleEffect(cue: SceneEffectCue?) = Unit
 
     fun clearIdleEffect() = setIdleEffect(null)
 
@@ -375,7 +371,7 @@ class SceneEffectView @JvmOverloads constructor(
     private val bursts = mutableListOf<Burst>()
 
     fun burst(cue: SceneEffectCue) {
-        if (!cue.burst) return
+        if (!cue.burst || blocked(cue)) return
         val now = SystemClock.uptimeMillis()
         bursts.removeAll {
             now - it.startMs < 900L &&
@@ -400,9 +396,27 @@ class SceneEffectView @JvmOverloads constructor(
                 iterator.remove()
                 continue
             }
-            if (!FxSpriteSheet.draw(c, context, b.cue, t, w, h, k, bitmapPaint)) {
-                extraRenderer.draw(c, b.cue, t, dur, w, h, k)
+            val target = if (b.cue.fxId.isNullOrEmpty() &&
+                SceneEffectKind.prefersSprite(b.cue.kind)
+            ) {
+                b.cue.copy(
+                    fxId = FxCatalog.pick(
+                        b.cue.kind,
+                        b.cue.sourceEffectName ?: b.cue.text,
+                        b.cue.para * 31 + b.cue.kind.ordinal
+                    )
+                )
+            } else b.cue
+            // 算法层（全屏闪光 / 粒子 / 震屏），受「原版绘制」开关控制
+            if (algoEnabled(b.cue)) {
+                if (SceneEffectKind.isExtra(b.cue.kind)) {
+                    extraRenderer.draw(c, b.cue, t, dur, w, h, k)
+                } else {
+                    drawAmbientCue(c, b.cue, b.startMs, now, w, h, k, false)
+                }
             }
+            // 再叠开源序列帧主体，两层合成
+            FxSpriteSheet.draw(c, context, target, t, w, h, k, bitmapPaint)
             bitmapPaint.alpha = 255
         }
     }
@@ -464,19 +478,41 @@ class SceneEffectView @JvmOverloads constructor(
         val dur = if (looping) Double.POSITIVE_INFINITY else cue.durationMs / 1000.0
         if (!looping && t >= dur) return false
         val sk = k * cue.sizeScale.toDouble()
-        when (cue.kind) {
-            SceneEffectKind.RAIN -> drawRain(c, cue, t, dur, w, h, sk)
-            SceneEffectKind.SNOW -> drawSnow(c, cue, t, dur, w, h, sk)
-            SceneEffectKind.PETALS, SceneEffectKind.LEAVES ->
-                drawFalling(c, cue, t, dur, w, h, sk)
-            SceneEffectKind.LIGHTNING -> drawLightning(c, t, dur, w, h, sk, 0.75)
-            SceneEffectKind.FIREFLIES -> drawFireflies(c, cue, t, dur, w, h, sk)
-            SceneEffectKind.EMBERS -> drawEmbers(c, cue, t, dur, w, h, sk)
-            SceneEffectKind.WIND -> drawWind(c, cue, t, dur, w, h, sk)
-            else -> extraRenderer.draw(c, cue, t, dur, w, h, sk)
+        // 管理界面点具体特效：只播那一个效果，避免被大类的算法层盖住
+        if (fxOnlyPreview && cue.fxId != null) {
+            FxSpriteSheet.draw(c, context, cue, t, w, h, sk, bitmapPaint)
+            bitmapPaint.alpha = 255
+            return true
         }
-        if (!looping && cue.lightning && cue.kind != SceneEffectKind.LIGHTNING) {
-            drawLightning(c, t, dur, w, h, sk, 0.5)
+        // 原版矢量/算法层：由管理页「原版绘制」开关控制，预览时始终可测
+        if (algoEnabled(cue)) {
+            when (cue.kind) {
+                SceneEffectKind.RAIN -> drawRain(c, cue, t, dur, w, h, sk)
+                SceneEffectKind.SNOW -> drawSnow(c, cue, t, dur, w, h, sk)
+                SceneEffectKind.PETALS, SceneEffectKind.LEAVES ->
+                    drawFalling(c, cue, t, dur, w, h, sk)
+                SceneEffectKind.LIGHTNING -> drawLightning(c, t, dur, w, h, sk, 0.75)
+                SceneEffectKind.FIREFLIES -> drawFireflies(c, cue, t, dur, w, h, sk)
+                SceneEffectKind.EMBERS -> drawEmbers(c, cue, t, dur, w, h, sk)
+                SceneEffectKind.WIND -> drawWind(c, cue, t, dur, w, h, sk)
+                else -> extraRenderer.draw(c, cue, t, dur, w, h, sk)
+            }
+            if (!looping && cue.lightning && cue.kind != SceneEffectKind.LIGHTNING) {
+                drawLightning(c, t, dur, w, h, sk, 0.5)
+            }
+        }
+        // 具象类叠加序列帧主体；单独预览算法版时不叠素材
+        if (!algoOnlyPreview && SceneEffectKind.prefersSprite(cue.kind)) {
+            val fxId = cue.fxId ?: FxCatalog.pick(
+                cue.kind,
+                cue.text ?: cue.sourceEffectName,
+                cue.para * 31 + cue.kind.ordinal
+            )
+            if (fxId != null) {
+                val spriteCue = if (cue.fxId == fxId) cue else cue.copy(fxId = fxId)
+                FxSpriteSheet.draw(c, context, spriteCue, t, w, h, sk, bitmapPaint)
+                bitmapPaint.alpha = 255
+            }
         }
         return true
     }
@@ -502,12 +538,7 @@ class SceneEffectView @JvmOverloads constructor(
         // 瞬时爆发层（音效同句触发）
         drawBursts(canvas, now, w, h, k)
 
-        // 没有任何触发型特效时，按当前 VN 预设场景无限循环
-        if (currentCue == null && bursts.isEmpty()) {
-            idleCue?.let {
-                drawAmbientCue(canvas, it, idleStartMs, now, w, h, k, true)
-            }
-        }
+        // 常驻兜底特效已移除：没有触发型特效时画面保持静止
 
         bitmapPaint.alpha = 255
         shapePaint.alpha = 255
@@ -558,10 +589,11 @@ class SceneEffectView @JvmOverloads constructor(
             val mm = sin(t * 0.65 + i * 0.13) * 14 * wgt * wind * k
             val px = wrap(y0 * spanX + t * s + mm + 1e5, spanX) - 80 * k
             val py = wrap(((i * 137) % 991) / 991.0 * spanY + t * cc, spanY) - 80 * k
-            val bw = (if (big) 2.8 else 1.1) * wgt * k
+            // 雨丝加粗约 2.3 倍：原来不到 1px，竖屏上必须仔细看才发现下雨
+            val bw = (if (big) 6.2 else 2.6) * wgt * k
             val bh = (if (big) 80 else 34) * wgt * k
             val deg = -atan2(s, cc) * 180 / PI
-            val a = m * (if (big) 0.19 else 0.45) * 0.9 * 1.5
+            val a = m * (if (big) 0.26 else 0.58) * 0.9 * 1.5
             sprite(c, tex, px, py, bw / 32.0, bh / 128.0, deg, a)
         }
     }
@@ -617,7 +649,8 @@ class SceneEffectView @JvmOverloads constructor(
             val phase = qt(i.toDouble(), 3.0) * PI * 2
             val g = 0.65 + qt(i.toDouble(), 4.0) * 0.7
             val ph = t * g + phase
-            val base = size * p * (if (isLeaf) 0.34 else 0.25)
+            // 叶片 / 花瓣放大约 1.6 倍，原来飘落时太小
+            val base = size * p * (if (isLeaf) 0.54 else 0.40)
             var bx = qt(i.toDouble(), 5.0) * spanX + t * 26 * wind * p * k
             var by = qt(i.toDouble(), 6.0) * spanY
             var sx: Double; var sy: Double; var deg: Double; var tinted = false
@@ -625,7 +658,8 @@ class SceneEffectView @JvmOverloads constructor(
                 bx += sin(ph) * 32 * p * k + sin(ph * 0.43) * 18 * wind * k
                 by += t * 33 * p * k + sin(ph * 1.7) * 9 * k
                 val fl = cos(ph * 1.6)
-                val s = 0.18 + 0.82 * abs(fl)
+                // 翻转时别缩成一条细线，放大后仍保持可辨的叶片轮廓
+                val s = 0.28 + 0.72 * abs(fl)
                 deg = (phase + t * 0.8 * g + sin(ph) * 0.65) * 180 / PI
                 sx = base * s
                 sy = base * (0.85 + 0.15 * sin(ph + 0.8))

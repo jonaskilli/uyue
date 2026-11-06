@@ -25,6 +25,7 @@ import io.legado.app.service.BgmManager
 import io.legado.app.service.BookScriptAnalysisService
 import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.ui.file.HandleFileContract
+import io.legado.app.ui.sceneeffect.SceneEffectManageActivity
 import io.legado.app.ui.widget.seekbar.SeekBarChangeListener
 import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.postEvent
@@ -294,6 +295,13 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
                 BaseReadAloudService.instance?.triggerDanmakuGenerationManual()
             }
             postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)
+        }
+
+        // 屏幕特效管理：逐条试播与启用/禁用
+        tvManageSceneEffect.setOnClickListener {
+            startActivity(
+                Intent(requireContext(), SceneEffectManageActivity::class.java)
+            )
         }
 
         // 单首最少持续时长：铺够该时长后才允许切下一首，避免音乐过碎

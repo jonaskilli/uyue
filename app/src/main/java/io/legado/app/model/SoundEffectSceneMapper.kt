@@ -170,6 +170,63 @@ object SoundEffectSceneMapper {
             SceneEffectKind.ZZZ,
             listOf("睡意", "打盹", "呼噜", "入眠", "困倦", "打哈欠"), 2
         ),
+        // ===== 本轮新增：法术 / 冰霜 / 传送 / 飞矢 / 涟漪 / 扫光 / 落物 / 锦鲤 =====
+        Triple(
+            SceneEffectKind.MAGIC_CIRCLE,
+            listOf("魔法阵", "法阵", "阵法", "召唤阵", "符文亮"), 3
+        ),
+        Triple(
+            SceneEffectKind.ARCANE,
+            listOf("咒语", "符文", "奥术", "灵力爆发", "结界", "法术波动"), 3
+        ),
+        Triple(
+            SceneEffectKind.HOLY,
+            listOf("圣光", "神光", "净化", "祝福", "神圣", "佛光"), 2
+        ),
+        Triple(
+            SceneEffectKind.SHADOW,
+            listOf("黑雾", "暗影", "阴影", "魔气", "黑气"), 2
+        ),
+        Triple(
+            SceneEffectKind.FROST,
+            listOf("冰霜", "结冰", "冻结", "寒冰", "冰封", "霜冻"), 3
+        ),
+        Triple(
+            SceneEffectKind.PORTAL,
+            listOf("传送门", "空间裂缝", "裂隙", "空间门"), 3
+        ),
+        Triple(
+            SceneEffectKind.PROJECTILE,
+            listOf("箭矢", "万箭", "飞箭", "弩箭", "飞镖", "弹丸", "乱箭"), 3
+        ),
+        Triple(
+            SceneEffectKind.SPARK_JET,
+            listOf("火花四溅", "火星喷射", "迸出火花", "火花飞溅"), 3
+        ),
+        Triple(
+            SceneEffectKind.RIPPLE,
+            listOf("涟漪", "水波荡漾", "波纹扩散"), 2
+        ),
+        Triple(
+            SceneEffectKind.WAVE,
+            listOf("波浪", "浪潮", "波涛", "水波起伏"), 2
+        ),
+        Triple(
+            SceneEffectKind.SHIMMER,
+            listOf("流光", "寒光一闪", "光华流转"), 2
+        ),
+        Triple(
+            SceneEffectKind.RED_PACKET,
+            listOf("红包雨", "金币雨", "撒钱", "天降宝物"), 2
+        ),
+        Triple(
+            SceneEffectKind.KOI,
+            listOf("锦鲤", "游鱼", "红鲤", "鱼群游过"), 2
+        ),
+        Triple(
+            SceneEffectKind.DOOM_FIRE,
+            listOf("烈焰滔天", "火海", "焚天", "岩浆", "熊熊烈焰"), 3
+        ),
         Triple(
             SceneEffectKind.COMIC,
             listOf("哐当", "哗啦", "咔嚓", "噼啪", "嗖", "咚", "轰", "砰"), 2
@@ -220,6 +277,7 @@ object SoundEffectSceneMapper {
         // 1. 精确音效名优先：一个效果绑定多个真实音效名，任一命中即触发
         val exact = exactBindings[name] ?: exactBindings[fileName]
         if (exact != null) {
+            if (!SceneEffectSettings.isEnabled(exact)) return null
             val level = RULES.firstOrNull { it.first == exact }?.third ?: 3
             return buildCue(fired, name, exact, level)
         }
@@ -230,6 +288,7 @@ object SoundEffectSceneMapper {
         val hit = RULES.firstOrNull { (_, words, _) ->
             words.any { it.length >= 2 && haystack.contains(it) }
         } ?: return null
+        if (!SceneEffectSettings.isEnabled(hit.first)) return null
         return buildCue(fired, name, hit.first, hit.third)
     }
 
@@ -255,8 +314,14 @@ object SoundEffectSceneMapper {
             burst = !ambient,
             ratio = fired.ratio,
             sourceEffectName = name.ifEmpty { fired.fileName },
-            // 与 assets/fx/<id>.png 约定：放入开源导出的序列帧即自动替换算法绘制
-            fxId = kind.name.lowercase()
+            // 具象类从 244 个开源序列帧里按 kind + 音效名选片；氛围类保留全屏粒子算法
+            fxId = if (SceneEffectKind.prefersSprite(kind)) {
+                FxCatalog.pick(
+                    kind,
+                    name.ifEmpty { fired.fileName },
+                    fired.para * 31 + name.hashCode()
+                )
+            } else null
         )
     }
 }

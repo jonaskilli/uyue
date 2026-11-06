@@ -181,6 +181,16 @@
             tools:ignore="TouchTargetSizeCheck" />
     </LinearLayout>
 
+    <TextView
+        android:id="@+id/tv_manage_scene_effect"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:attr/selectableItemBackground"
+        android:padding="10dp"
+        android:text="管理屏幕特效（52 种 · 试播 / 单独开关）"
+        android:textColor="@color/primaryText"
+        android:textSize="14sp" />
+
     <!-- ===== 音效设置 ===== -->
     <View
         android:layout_width="match_parent"

@@ -114,9 +114,9 @@ object VnBackgroundManager {
         "修仙藏经阁楼" to SceneEffectKind.DUST,
         "修仙炼丹房室" to SceneEffectKind.WIND,
         "修仙秘境深处" to SceneEffectKind.DUST,
-        "修仙祭坛法阵" to SceneEffectKind.FOUNTAIN,
+        "修仙祭坛法阵" to SceneEffectKind.DUST,
         "修仙山顶云海" to SceneEffectKind.DUST,
-        "玄幻异空间内" to SceneEffectKind.FOUNTAIN,
+        "玄幻异空间内" to SceneEffectKind.DUST,
         "玄幻魔域深处" to SceneEffectKind.WIND,
         "武侠竹林小径" to SceneEffectKind.LEAVES,
         "武侠客栈大堂" to SceneEffectKind.BOKEH,
@@ -148,13 +148,13 @@ object VnBackgroundManager {
         "校园图书馆内" to SceneEffectKind.DUST,
         "校园天台黄昏" to SceneEffectKind.BOKEH,
         "校园林荫小道" to SceneEffectKind.LEAVES,
-        "科幻飞船舱内" to SceneEffectKind.FOUNTAIN,
+        "科幻飞船舱内" to SceneEffectKind.DUST,
         "科幻太空站内" to SceneEffectKind.BOKEH,
         "科幻星球地表" to SceneEffectKind.WIND,
         "科幻未来都市" to SceneEffectKind.BOKEH,
-        "科幻实验室基地" to SceneEffectKind.FOUNTAIN,
+        "科幻实验室基地" to SceneEffectKind.DUST,
         "科幻废墟世界" to SceneEffectKind.DUST,
-        "科幻虚拟空间" to SceneEffectKind.FOUNTAIN,
+        "科幻虚拟空间" to SceneEffectKind.DUST,
         "悬疑废弃医院" to SceneEffectKind.DUST,
         "悬疑旧宅古屋" to SceneEffectKind.DUST,
         "悬疑地下室暗室" to SceneEffectKind.DUST,
@@ -165,7 +165,7 @@ object VnBackgroundManager {
         "西幻城堡大厅" to SceneEffectKind.BOKEH,
         "西幻酒馆旅店" to SceneEffectKind.BOKEH,
         "西幻村庄农田" to SceneEffectKind.DANDELION,
-        "西幻魔法塔内" to SceneEffectKind.FOUNTAIN,
+        "西幻魔法塔内" to SceneEffectKind.DUST,
         "西幻森林深处" to SceneEffectKind.BUTTERFLIES,
         "西幻地下城内" to SceneEffectKind.DUST,
         "西幻龙巢深处" to SceneEffectKind.WIND,
@@ -300,16 +300,9 @@ object VnBackgroundManager {
         emitIdle(if (currentScene.isNotBlank()) currentScene else DEFAULT_SCENE)
     }
 
-    private fun emitIdle(scene: String) {
-        if (scene.isBlank() || scene == currentIdleScene) return
-        currentIdleScene = scene
-        val generation = ++idleGeneration
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (generation != idleGeneration || scene != currentIdleScene) return@post
-            val callback = onIdleEffect ?: return@post
-            callback.invoke(idleCueFor(scene))
-        }
-    }
+    /** 常驻兜底特效已整个移除：不再按场景下发任何 idle cue */
+    @Suppress("UNUSED_PARAMETER")
+    private fun emitIdle(scene: String) = Unit
 
     private fun idleCueFor(scene: String): SceneEffectCue {
         val kind = IDLE_EFFECT_BY_SCENE[scene] ?: SceneEffectKind.BOKEH

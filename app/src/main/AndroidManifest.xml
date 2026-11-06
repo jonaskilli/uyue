@@ -293,6 +293,12 @@
             android:label="音效规则管理"
             android:launchMode="singleTop"
             android:screenOrientation="behind" />
+        <!-- 屏幕特效管理界面：逐条试播 / 启用禁用 -->
+        <activity
+            android:name=".ui.sceneeffect.SceneEffectManageActivity"
+            android:label="屏幕特效管理"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind" />
         <!-- AI 生成书源界面 -->
         <activity
             android:name=".ui.book.source.AiBookSourceActivity"
