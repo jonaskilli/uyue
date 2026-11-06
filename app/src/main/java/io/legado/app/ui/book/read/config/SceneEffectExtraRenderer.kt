@@ -27,6 +27,9 @@ import kotlin.math.sin
  */
 class SceneEffectExtraRenderer {
 
+    /** 高质量重绘层：命中时直接绘制并返回，下面的旧实现只作为兜底 */
+    private val qualityRenderer = SceneEffectQualityRenderer()
+
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -78,6 +81,7 @@ class SceneEffectExtraRenderer {
     ) {
         val f = fade(t, dur)
         val wind = if (cue.wind) 1.0 else 0.0
+        if (qualityRenderer.draw(c, cue, t, dur, w, h, k)) return
         when (cue.kind) {
             SceneEffectKind.FOG -> drawFogSmoke(c, false, t, w, h, k, f, wind)
             SceneEffectKind.SMOKE -> drawFogSmoke(c, true, t, w, h, k, f, wind)
@@ -102,8 +106,10 @@ class SceneEffectExtraRenderer {
             SceneEffectKind.BOKEH -> drawBokeh(c, t, w, h, k, f)
             SceneEffectKind.FEATHERS -> drawFallingShapes(c, true, t, w, h, k, f, wind)
             SceneEffectKind.DANDELION -> drawFallingShapes(c, false, t, w, h, k, f, wind)
+            // 睡意 ZZZ 不走符号绘制：右上角那组静态「Z z z」与矢量层动态上浮的 Z
+            // 会同时出现、互相打架，只保留矢量层的动态 Z
             SceneEffectKind.SPARKLES, SceneEffectKind.QUESTION, SceneEffectKind.SWEAT,
-            SceneEffectKind.HEART, SceneEffectKind.ANGER, SceneEffectKind.ZZZ,
+            SceneEffectKind.HEART, SceneEffectKind.ANGER,
             SceneEffectKind.LIGHTBULB, SceneEffectKind.COMIC ->
                 drawSymbol(c, cue, t, dur, w, h, k, f)
             else -> Unit
@@ -633,7 +639,8 @@ class SceneEffectExtraRenderer {
                 w
             )
             val y = wrap(qt(i.toDouble(), 6.0) * h + t * 20 * p * k, h)
-            val size = (10 + qt(i.toDouble(), 8.0) * 12) * k
+            // 羽毛 / 蒲公英放大约 1.7 倍，两种共用同一个 scale
+            val size = (17 + qt(i.toDouble(), 8.0) * 20) * k
             c.save()
             c.translate(x.toFloat(), y.toFloat())
             c.rotate((phase + sin(ph) * 0.6).toFloat() * 180f / PI.toFloat())
@@ -765,10 +772,9 @@ class SceneEffectExtraRenderer {
                     )
                 }
             }
-            SceneEffectKind.QUESTION, SceneEffectKind.ZZZ, SceneEffectKind.COMIC -> {
+            SceneEffectKind.QUESTION, SceneEffectKind.COMIC -> {
                 val text = when (cue.kind) {
                     SceneEffectKind.QUESTION -> "?"
-                    SceneEffectKind.ZZZ -> "Z z z"
                     else -> cue.text ?: "砰！"
                 }
                 val size = if (cue.kind == SceneEffectKind.COMIC) 34f else 42f

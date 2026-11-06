@@ -13,7 +13,7 @@ package io.legado.app.model
  * - 瞬时爆发类 EXPLOSION/SLASH/IMPACT/SHOCKWAVE，由音效触发事件同句联动绘制。
  */
 
-/** 场景特效类型 */
+/** 场景特效类型（共 52 种） */
 enum class SceneEffectKind {
     // 原有 8 种：按 tftgamer 原版 s_()/Xg()/Cn() 实现
     RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FIREFLIES, EMBERS, WIND,
@@ -25,7 +25,10 @@ enum class SceneEffectKind {
     STARS, METEORS, FIREWORKS, FIRE, CONFETTI, FOUNTAIN, BOKEH,
     FEATHERS, DANDELION,
     // 瞬时爆发类：音效命中同一句时触发（算法参考 pixelfx / OGSlash 的爆炸、斩击、打击）
-    EXPLOSION, SLASH, IMPACT, SHOCKWAVE;
+    EXPLOSION, SLASH, IMPACT, SHOCKWAVE,
+    // 本轮从 /workspace/tmp/fx-src 新收集的开源特效中新增（均有对应序列帧素材）
+    ARCANE, HOLY, SHADOW, FROST, PORTAL, PROJECTILE, MAGIC_CIRCLE,
+    RIPPLE, WAVE, SHIMMER, SPARK_JET, RED_PACKET, KOI, DOOM_FIRE;
 
     companion object {
         fun from(name: String?): SceneEffectKind? =
@@ -40,13 +43,30 @@ enum class SceneEffectKind {
         fun isOutdoorOnly(kind: SceneEffectKind): Boolean = when (kind) {
             RAIN, SNOW, PETALS, LEAVES, LIGHTNING, FOG, DUST,
             BIRDS_GULL, BIRDS_CROW, BIRD_FLOCK, BUTTERFLIES,
-            STARS, METEORS, FIREWORKS, FEATHERS, DANDELION -> true
+            STARS, METEORS, FIREWORKS, FEATHERS, DANDELION,
+            RIPPLE, WAVE, KOI -> true
             else -> false
         }
 
         /** 瞬时爆发型：短时长、跟音效同句、不进段落缓存 */
         fun isBurst(kind: SceneEffectKind): Boolean = when (kind) {
-            EXPLOSION, SLASH, IMPACT, SHOCKWAVE -> true
+            EXPLOSION, SLASH, IMPACT, SHOCKWAVE,
+            ARCANE, HOLY, SHADOW, FROST, PORTAL, PROJECTILE, MAGIC_CIRCLE,
+            SPARK_JET, DOOM_FIRE -> true
+            else -> false
+        }
+
+        /**
+         * 有开源序列帧素材时优先播素材（中央具象演出，比算法圆点精致得多）；
+         * 雨雪/雾/星/光斑等全屏氛围类保留粒子算法，避免中央贴一张小图破坏画面。
+         */
+        fun prefersSprite(kind: SceneEffectKind): Boolean = when (kind) {
+            EXPLOSION, SLASH, IMPACT, SHOCKWAVE,
+            FIRE, DOOM_FIRE, FIREWORKS, FROST, ARCANE, HOLY, SHADOW,
+            PORTAL, PROJECTILE, MAGIC_CIRCLE, SPARK_JET,
+            SPARKLES, CONFETTI, METEORS, COMIC, HEART, QUESTION,
+            SWEAT, ANGER, ZZZ, LIGHTBULB, RED_PACKET, KOI,
+            RIPPLE, WAVE, SHIMMER -> true
             else -> false
         }
     }
