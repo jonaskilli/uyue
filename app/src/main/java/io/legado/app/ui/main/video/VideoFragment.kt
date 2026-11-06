@@ -133,9 +133,11 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
             setContent {
                 ExplorePane(
                     viewModel = paneViewModel,
-                    // 与搜索结果列表完全同一套代码路径，不再自写播放/入库/feed 逻辑
-                    onBookClick = { book -> showBookInfo(book) },
-                    onBookLongClick = { book -> openBookInfo(book) }
+                    // 左侧分类列表走旧版 ExploreShowActivity 的「点封面即播」链路：
+                    // 全屏播放 + 当前分类作为切换列表。showBookInfo 是搜索结果专用的
+                    // 首页模式(homeMode = true)，两者不能混用。
+                    onBookClick = { book -> playPaneVideo(book) },
+                    onBookLongClick = { book -> openPaneBookInfo(book) }
                 )
             }
         }
@@ -405,6 +407,69 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
     }
 
     /**
+     * 左侧分类列表点视频：复刻旧版 ExploreShowActivity.playVideo 的链路。
+     * 不传 homeMode（默认 false）→ 全屏播放页；搜索结果入口 showBookInfo
+     * 是首页模式(homeMode = true，播放器在上、选集在下)，两者不能混用。
+     */
+    private fun playPaneVideo(searchBook: SearchBook) {
+        lifecycleScope.launch(IO) {
+            runCatching {
+                // 当前分类列表整体交给播放器竖滑切换，滑到末尾自动加载下一页
+                VideoFeedStore.put(
+                    provider = {
+                        paneViewModel.books.value?.map { it.bookUrl } ?: emptyList()
+                    },
+                    currentBookUrl = searchBook.bookUrl,
+                    loadMore = { paneViewModel.loadMore() }
+                )
+                val now = System.currentTimeMillis()
+                val exist = appDb.bookDao.getBook(searchBook.bookUrl)
+                val book = if (exist != null) {
+                    exist.ensureVideoType()
+                    // 刷新「最近看过」时间，保证继续阅读排序正确
+                    exist.durChapterTime = now
+                    appDb.bookDao.update(exist)
+                    exist
+                } else {
+                    searchBook.toBook().apply {
+                        // notShelf：看过的视频不自动上书架，播放器里点图标才加入
+                        addType(BookType.video)
+                        addType(BookType.notShelf)
+                        durChapterTime = now
+                        if (order == 0) {
+                            order = appDb.bookDao.minOrder - 1
+                        }
+                    }.also { appDb.bookDao.insert(it) }
+                }
+                withContext(Dispatchers.Main) {
+                    startActivity(
+                        SourceVideoPlayerActivity.createIntent(
+                            requireContext(),
+                            book.bookUrl,
+                            book.durChapterIndex
+                        )
+                    )
+                }
+            }.onFailure {
+                AppLog.put("打开视频失败\n${it.localizedMessage}", it)
+                toastOnUi(it.localizedMessage ?: "打开失败")
+            }
+        }
+    }
+
+    /**
+     * 左侧分类列表长按：进详情页，好在里面加书架、换源、改信息等。
+     * 链接用条目自身的，不能按搜索结果的选中源换算。
+     */
+    private fun openPaneBookInfo(book: SearchBook) {
+        startActivity<BookInfoActivity> {
+            putExtra("name", book.name)
+            putExtra("author", book.author)
+            putExtra("bookUrl", book.bookUrl)
+        }
+    }
+
+    /**
      * 搜索视频名时，rv_find 装的是搜索结果，25% 宽放不下：
      * 临时隐藏左侧内容区并把列表拉回全宽，退出搜索再恢复 75/25。
      */
@@ -444,6 +509,14 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
 
     override fun toTop(source: BookSourcePart) {
         viewModel.topSource(source)
+        // 置顶后把「记住的源」同步成被置顶的源：重启时原有的自动定位逻辑
+        // 会滚到这个源，而它此时正是列表第 0 位，置顶结果不会被滚走。
+        // 当前会话的高亮与左侧内容区保持不变。
+        putPrefString("videoPaneSourceUrl", source.bookSourceUrl)
+        // 置顶只改 customOrder，列表刷新后当前滚动位置可能把新顶到第一位的源留在屏幕外
+        binding.rvFind.post {
+            binding.rvFind.scrollToPosition(0)
+        }
     }
 
     override fun deleteSource(source: BookSourcePart) {

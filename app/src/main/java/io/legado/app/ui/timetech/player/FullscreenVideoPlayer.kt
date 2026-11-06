@@ -310,6 +310,9 @@ fun FullscreenVideoPlayer(
     // 播放阶段出错（ExoPlayer 报错：无法播放/播放出错/网址问题等）回调。
     // 上层据此在可切换列表的场景自动跳到下一个视频。
     onPlaybackError: ((PlaybackException) -> Unit)? = null,
+    // 是否对本地 file:// 视频抽首帧做铺底。「其他缓存」这种无记录、无封面的场景关掉：
+    // MediaMetadataRetriever 对非标准 MP4 可能在 native 层崩溃，Java 的 try/catch 拦不住。
+    showLocalThumbnail: Boolean = true,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -601,6 +604,7 @@ fun FullscreenVideoPlayer(
                 activePlayer = activePlayer,
                 onPlaybackError = onPlaybackError,
                 compactMode = compactMode,
+                showLocalThumbnail = showLocalThumbnail,
                 // 首/末集：该方向没有集可切，竖滑改为切列表里的上一个/下一个视频
                 noPrevEpisode = page == 0 || videos.size <= 1,
                 noNextEpisode = page == videos.lastIndex || videos.size <= 1,
@@ -733,6 +737,8 @@ private fun VideoPage(
     onPlaybackError: ((PlaybackException) -> Unit)? = null,
     // 首页压缩模式：控制条只保留进度条与播放三键，不显示顶部功能栏
     compactMode: Boolean = false,
+    // 是否对本地 file:// 视频抽首帧做铺底（见 FullscreenVideoPlayer 同名参数）
+    showLocalThumbnail: Boolean = true,
     // 播放顺序上前一集/后一集是否存在。为 false 时该方向的竖滑改为切换列表视频
     noPrevEpisode: Boolean = false,
     noNextEpisode: Boolean = false,
@@ -776,6 +782,7 @@ private fun VideoPage(
         activePlayer = activePlayer,
         onPlaybackError = onPlaybackError,
         compactMode = compactMode,
+        showLocalThumbnail = showLocalThumbnail,
         noPrevEpisode = noPrevEpisode,
         noNextEpisode = noNextEpisode,
     )
@@ -1009,6 +1016,8 @@ internal fun VideoPlayerPage(
     onPlaybackError: ((PlaybackException) -> Unit)? = null,
     // 首页压缩模式：控制条只保留进度条与播放三键，不显示顶部功能栏
     compactMode: Boolean = false,
+    // 是否对本地 file:// 视频抽首帧做铺底（见 FullscreenVideoPlayer 同名参数）
+    showLocalThumbnail: Boolean = true,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1438,7 +1447,9 @@ internal fun VideoPlayerPage(
         // 视频首帧缩略图：垫在 PlayerView 之下。
         // 非当前页没有 PlayerView，用它做占位；当前页则覆盖 SurfaceView 就绪前的黑帧。
         // 在线视频没有本地文件可读，MediaMetadataRetriever 只会白等一场，直接跳过。
-        if (video.uri.scheme == "file" || video.uri.scheme == "content") {
+        if (showLocalThumbnail &&
+            (video.uri.scheme == "file" || video.uri.scheme == "content")
+        ) {
             ThumbnailLayer(video)
         }
 

@@ -124,6 +124,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.media3.common.Player
+import io.legado.app.constant.AppLog
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.NotificationId
 import kotlin.math.abs
@@ -1137,11 +1138,12 @@ internal fun DownloadDialog(
     // 合并/删除孤儿后手动触发一次重扫（这些操作不改下载记录，dlStates 不会变）
     var orphanTick by remember { mutableIntStateOf(0) }
     // 非空时正在全屏播放某个孤儿缓存
-    // 「其他缓存」的播放会话：整份列表都交给时光播放器（上下滑可切换全集），
-    // 与正常下载的视频一致。未解析的集 uri 为空，滑到时由 onResolveEpisode 现场解析。
+    // 「其他缓存」的播放会话：整份列表一次解析好，交给时光播放器（上下滑可切换全集）。
     var playingOrphanVideos by remember { mutableStateOf<List<LocalVideo>?>(null) }
     var playingOrphanCaches by remember { mutableStateOf<List<VideoDownloader.OrphanCache>?>(null) }
     var playingOrphanStart by remember { mutableStateOf(0) }
+    // 稳定的播放器实例引用：默认参数每次重组都会新建一个 state，预缓冲会一直等不到实例
+    val orphanActivePlayer = remember { mutableStateOf<Player?>(null) }
     val orphanScope = rememberCoroutineScope()
 
     // —— 其他缓存手动排序 ——
@@ -1335,46 +1337,29 @@ internal fun DownloadDialog(
         }
     }
 
-    // 播放无记录的缓存：把整份「其他缓存」列表都交给时光播放器（与正常下载的视频一致，
-    // 上下滑切换全集）；点击的这一集先解析出本地文件直接起播，其余集滑到时再现场解析
+    // 播放无记录的缓存：整份列表一次性解析成可播的本地文件，再交给播放器。
+    // 本地文件解析只是纯 IO，不该套用在线剧集那套 Uri.EMPTY 懒解析：
+    // 懒解析每次回填都会换掉 videos 实例，触发 Pager / 预缓冲反复重组，
+    // 是「其他缓存」一进播放就出错的主要来源。解析不到的条目直接不进播放列表。
     val onPlayOrphan: (VideoDownloader.OrphanCache) -> Unit = { o ->
         orphanScope.launch {
             val snapshot = orphans.toList()
-            val startIdx = snapshot.indexOfFirst { it.title == o.title }.coerceAtLeast(0)
-            val f = withContext(Dispatchers.IO) {
-                VideoDownloader.findOrphanFile(o.dirName, o.title)
+            val resolved = withContext(Dispatchers.IO) {
+                snapshot.mapNotNull { c ->
+                    val f = VideoDownloader.findOrphanFile(c.dirName, c.title)
+                        ?: return@mapNotNull null
+                    if (f.length() <= 0L) return@mapNotNull null
+                    c to LocalVideo(Uri.fromFile(f), c.title, f.absolutePath, f.length(), 0L)
+                }
             }
-            if (f == null || f.length() <= 0L) {
+            val startIdx = resolved.indexOfFirst { it.first.title == o.title }
+            if (startIdx < 0) {
                 context.toastOnUi("缓存文件不存在或已损坏")
                 return@launch
             }
-            playingOrphanCaches = snapshot
+            playingOrphanCaches = resolved.map { it.first }
             playingOrphanStart = startIdx
-            playingOrphanVideos = snapshot.map { c ->
-                if (c.title == o.title) {
-                    LocalVideo(Uri.fromFile(f), c.title, f.absolutePath, f.length(), 0L)
-                } else {
-                    LocalVideo(Uri.EMPTY, c.title, "", 0L, 0L)
-                }
-            }
-        }
-    }
-
-    /** 播放器滑到未解析的集（或预取下一集）时现场解析本地文件；回填列表后自动起播 */
-    fun resolveOrphanAt(index: Int) {
-        val caches = playingOrphanCaches ?: return
-        val videos = playingOrphanVideos ?: return
-        val c = caches.getOrNull(index) ?: return
-        if (videos.getOrNull(index)?.uri != Uri.EMPTY) return
-        orphanScope.launch {
-            val f = withContext(Dispatchers.IO) {
-                VideoDownloader.findOrphanFile(c.dirName, c.title)
-            }
-            if (f == null || f.length() <= 0L) return@launch
-            if (playingOrphanCaches !== caches) return@launch // 播放会话已换，丢弃结果
-            playingOrphanVideos = (playingOrphanVideos ?: videos).toMutableList().also {
-                it[index] = LocalVideo(Uri.fromFile(f), c.title, f.absolutePath, f.length(), 0L)
-            }
+            playingOrphanVideos = resolved.map { it.second }
         }
     }
 
@@ -1446,9 +1431,11 @@ internal fun DownloadDialog(
         }
         val orphanVideos = playingOrphanVideos
         if (orphanVideos != null) {
-            // 全屏播「其他缓存」：与正片同一个时光播放器（本地清单 / 进度 / 手势全都在），
-            // 上下滑可在全集之间切换；未解析的集滑到时由 onResolveEpisode 现场补齐后自动起播。
-            // 顺序/页码状态以进入播放时的列表快照为 key：解析回填不会重置分页位置
+            // 全屏播「其他缓存」：整份列表已一次性解析好，不再有 Uri.EMPTY 懒解析。
+            // bookUrl 用目录名做唯一键，避免与正片/其它孤儿会话共用 SharedPlayer 的
+            // "#index" 交接键而误复用 ExoPlayer 实例。
+            val orphanBookUrl = "orphan:" +
+                (playingOrphanCaches?.firstOrNull()?.dirName ?: currentDir)
             val orphanOrder = remember(playingOrphanCaches) {
                 mutableStateOf(orphanVideos.indices.toList())
             }
@@ -1459,13 +1446,20 @@ internal fun DownloadDialog(
                 videos = orphanVideos,
                 initialIndex = playingOrphanStart,
                 seriesTitle = currentName,
+                bookUrl = orphanBookUrl,
+                activePlayer = orphanActivePlayer,
+                onPlaybackError = { err ->
+                    AppLog.put("其他缓存播放失败", err)
+                    context.toastOnUi(err.localizedMessage ?: "播放失败")
+                },
+                showLocalThumbnail = false,
                 onExit = {
                     playingOrphanVideos = null
                     playingOrphanCaches = null
+                    orphanActivePlayer.value = null
                 },
                 playOrderState = orphanOrder,
                 currentPageState = orphanPage,
-                onResolveEpisode = { index, _ -> resolveOrphanAt(index) },
             )
         } else {
         Column(modifier = Modifier.padding(16.dp)) {
