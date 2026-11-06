@@ -17,6 +17,7 @@ object SceneEffectSettings {
     private const val KEY_DISABLED = "disabled_kinds"
     private const val KEY_ALGO_DISABLED = "disabled_algo_kinds"
     private const val KEY_RESET_MIGRATION = "reset_migration_v1"
+    private const val KEY_AMBIENT = "ambient_kind"
 
     /** 算法版默认全部启用：素材删掉的大类也要能靠原版矢量绘制正常触发 */
     private val DEFAULT_ALGO_DISABLED = emptySet<String>()
@@ -92,6 +93,31 @@ object SceneEffectSettings {
     /** 全部 52 个大类都显示：素材删掉的只剩原版算法效果，仍可开关与测试 */
     val entries: List<Entry> = allEntries
 
+    /**
+     * 可作为常驻的全屏氛围 / 粒子类：花瓣、蒲公英、落叶、气泡、鸟群、浮尘、
+     * 雨雪雾烟、光束、星空等。排除瞬时爆发、漫画符号、定点喷泉与过亮的闪电。
+     */
+    private val AMBIENT_KINDS = setOf(
+        "RAIN", "SNOW", "PETALS", "LEAVES", "FIREFLIES", "EMBERS", "WIND",
+        "FOG", "SMOKE", "BUBBLES", "RAYS", "DUST", "BUTTERFLIES",
+        "BIRDS_GULL", "BIRDS_CROW", "BIRD_FLOCK", "STARS", "METEORS",
+        "FIRE", "CONFETTI", "BOKEH", "FEATHERS", "DANDELION",
+        "SPARKLES", "WAVE"
+    )
+
+    /** 选择框候选项，顺序沿用管理页列表；默认「无」不在这个列表里 */
+    val ambientChoices: List<Entry> =
+        entries.filter { it.kind.name in AMBIENT_KINDS && it.kind.name !in REMOVED_KINDS }
+
+    /** 当前常驻特效；null = 未选择。被整类移除/禁用时自动视为未选择 */
+    fun ambientKind(): SceneEffectKind? =
+        prefs.getString(KEY_AMBIENT, null)?.let { SceneEffectKind.from(it) }
+            ?.takeIf { it.name in AMBIENT_KINDS && isEnabled(it) }
+
+    fun setAmbientKind(kind: SceneEffectKind?) {
+        prefs.edit().putString(KEY_AMBIENT, kind?.name).apply()
+    }
+
     val groups: List<String> = entries.map { it.group }.distinct()
 
     private val prefs by lazy {
@@ -133,6 +159,7 @@ object SceneEffectSettings {
             .putStringSet(KEY_DISABLED, emptySet())
             .putStringSet(KEY_DISABLED_FX, emptySet())
             .putStringSet(KEY_ALGO_DISABLED, emptySet())
+            .putString(KEY_AMBIENT, null)
             .putBoolean(KEY_RESET_MIGRATION, true)
             .apply()
     }
