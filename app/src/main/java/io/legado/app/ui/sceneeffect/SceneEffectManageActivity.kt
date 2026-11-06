@@ -9,6 +9,11 @@ import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.Gravity
+import android.widget.BaseAdapter
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -88,6 +93,7 @@ class SceneEffectManageActivity : AppCompatActivity() {
             Toast.makeText(this, "已禁用全部特效", Toast.LENGTH_SHORT).show()
         }
         binding.btnReset.setOnClickListener { resetEverything() }
+        setupAmbientPicker()
         binding.etSearch.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -97,6 +103,105 @@ class SceneEffectManageActivity : AppCompatActivity() {
         })
 
         applyFilter("")
+    }
+
+    /** 顶部显示当前选中的常驻特效；点一下展开带播放按钮的列表面板 */
+    private fun setupAmbientPicker() {
+        updateAmbientLabel()
+        binding.tvAmbient.setOnClickListener { binding.ambientPanel.visibility = View.VISIBLE }
+        binding.btnAmbientClose.setOnClickListener { binding.ambientPanel.visibility = View.GONE }
+
+        val rows: List<SceneEffectSettings.Entry?> =
+            listOf(null) + SceneEffectSettings.ambientChoices
+        binding.lvAmbient.adapter = AmbientChoiceAdapter(rows) { entry -> playKind(entry) }
+        binding.lvAmbient.setOnItemClickListener { _, _, position, _ ->
+            // position 0 是「无」，其余与 ambientChoices 对齐
+            val entry = SceneEffectSettings.ambientChoices.getOrNull(position - 1)
+            SceneEffectSettings.setAmbientKind(entry?.kind)
+            updateAmbientLabel()
+            binding.ambientPanel.visibility = View.GONE
+            Toast.makeText(
+                this,
+                if (entry == null) "常驻特效已关闭"
+                else "常驻特效：${entry.name}（与其它特效同时播放）",
+                Toast.LENGTH_SHORT
+            ).show()
+            postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)
+        }
+    }
+
+    private fun updateAmbientLabel() {
+        val current = SceneEffectSettings.ambientKind()
+        val name = SceneEffectSettings.ambientChoices
+            .firstOrNull { it.kind == current }?.name
+        binding.tvAmbient.text = (name ?: "无（不启用常驻）") + "  ▾"
+    }
+
+    /**
+     * 列表项：左边名字、右边独立播放按钮。播放只试看、不改变选中项，
+     * 也不会关闭面板（预览浮层不拦截触摸），可以连着点几项对比。
+     */
+    private inner class AmbientChoiceAdapter(
+        private val rows: List<SceneEffectSettings.Entry?>,
+        private val onPlay: (SceneEffectSettings.Entry) -> Unit
+    ) : BaseAdapter() {
+
+        private val textColor = binding.tvAmbient.currentTextColor
+
+        override fun getCount(): Int = rows.size
+        override fun getItem(position: Int): SceneEffectSettings.Entry? = rows[position]
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val row = convertView ?: buildRow()
+            val label = row.findViewById<TextView>(android.R.id.text1)
+            val play = row.findViewById<Button>(android.R.id.button1)
+            val entry = rows[position]
+            label.text = entry?.name ?: "无（不启用常驻）"
+            play.visibility = if (entry == null) View.GONE else View.VISIBLE
+            play.setOnClickListener { entry?.let(onPlay) }
+            return row
+        }
+
+        private fun buildRow(): View {
+            val density = resources.displayMetrics.density
+            val pad = (10 * density).toInt()
+            return LinearLayout(this@SceneEffectManageActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(pad, pad, pad, pad)
+                addView(TextView(context).apply {
+                    id = android.R.id.text1
+                    setTextColor(textColor)
+                    textSize = 15f
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                    )
+                })
+                addView(Button(context).apply {
+                    id = android.R.id.button1
+                    text = "播放"
+                    isAllCaps = false
+                    // 否则 ListView 整行会被按钮抢走焦点，点名字无法选中
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                })
+            }
+        }
+    }
+
+    /** 面板展开时，返回键先关面板而不是退出页面 */
+    @Suppress("MissingSuperCall")
+    override fun onBackPressed() {
+        if (binding.ambientPanel.visibility == View.VISIBLE) {
+            binding.ambientPanel.visibility = View.GONE
+        } else {
+            super.onBackPressed()
+        }
     }
 
     private fun currentKey(): String = binding.etSearch.text?.toString().orEmpty()
@@ -197,6 +302,8 @@ class SceneEffectManageActivity : AppCompatActivity() {
      */
     private fun resetEverything() {
         SceneEffectSettings.resetAll()
+        updateAmbientLabel()
+        binding.ambientPanel.visibility = View.GONE
         val cleared = SceneEffectGenerator.clearAllCache()
         applyFilter(currentKey())
         postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)

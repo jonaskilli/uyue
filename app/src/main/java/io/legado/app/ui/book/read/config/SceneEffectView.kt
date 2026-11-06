@@ -283,6 +283,10 @@ class SceneEffectView @JvmOverloads constructor(
     private var lastFrameTime = 0L
     private val drawAreaRatio = 0.78f
 
+    /** 用户手动选中的唯一常驻氛围层：一直画，其它特效开始/结束都不打断它 */
+    private var ambientKind: SceneEffectKind? = null
+    private var ambientStartMs = 0L
+
     /** 管理界面预览模式：绕过总开关与单条禁用，只用于试播 */
     var previewMode: Boolean = false
 
@@ -299,8 +303,19 @@ class SceneEffectView @JvmOverloads constructor(
         get() = resources.displayMetrics.density * SIZE_BOOST *
             (minOf(width, height) / 900f).coerceIn(0.85f, 2.0f)
 
+    /** 与管理页选择框同步：变化时重置时间轴并唤起帧循环 */
+    private fun syncAmbient() {
+        val next = if (previewMode) null else SceneEffectSettings.ambientKind()
+        if (next != ambientKind) {
+            ambientKind = next
+            ambientStartMs = SystemClock.uptimeMillis()
+            invalidate()
+            scheduleFrameLoop()
+        }
+    }
+
     private fun hasVisibleWork(): Boolean =
-        currentCue != null || bursts.isNotEmpty()
+        currentCue != null || bursts.isNotEmpty() || ambientKind != null
 
     private fun canAnimate(): Boolean =
         (previewMode || AppConfig.sceneEffectEnabled) && isShown && windowVisibility == VISIBLE
@@ -311,7 +326,8 @@ class SceneEffectView @JvmOverloads constructor(
 
     /** 原版矢量/算法层是否允许绘制；预览模式下随时可测 */
     private fun algoEnabled(cue: SceneEffectCue): Boolean =
-        previewMode || SceneEffectSettings.isAlgoEnabled(cue.kind)
+        previewMode || cue.source == "ambient" ||
+            SceneEffectSettings.isAlgoEnabled(cue.kind)
 
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
@@ -502,7 +518,10 @@ class SceneEffectView @JvmOverloads constructor(
             }
         }
         // 具象类叠加序列帧主体；单独预览算法版时不叠素材
-        if (!algoOnlyPreview && SceneEffectKind.prefersSprite(cue.kind)) {
+        // 常驻层只画全屏算法氛围，不叠中央具象素材
+        if (!algoOnlyPreview && cue.source != "ambient" &&
+            SceneEffectKind.prefersSprite(cue.kind)
+        ) {
             val fxId = cue.fxId ?: FxCatalog.pick(
                 cue.kind,
                 cue.text ?: cue.sourceEffectName,
@@ -528,8 +547,22 @@ class SceneEffectView @JvmOverloads constructor(
         if (w <= 0 || h <= 0) return
         val k = unit.toDouble() / 3.0
         lastFrameTime = now
+        syncAmbient()
 
-        // 触发型段落特效：有则覆盖常驻层
+        // 常驻氛围层：最底层无条件绘制，其它特效触发时不停止、也不重置它的时间轴
+        ambientKind?.let { kind ->
+            val ambient = SceneEffectCue(
+                para = -1,
+                kind = kind,
+                level = 2,
+                durationMs = Long.MAX_VALUE,
+                wind = true,
+                source = "ambient"
+            )
+            drawAmbientCue(canvas, ambient, ambientStartMs, now, w, h, k, true)
+        }
+
+        // 触发型段落特效：与常驻层叠加，而不是替换它
         val cue = currentCue
         if (cue != null && !drawAmbientCue(canvas, cue, startMs, now, w, h, k, false)) {
             currentCue = null
@@ -538,7 +571,6 @@ class SceneEffectView @JvmOverloads constructor(
         // 瞬时爆发层（音效同句触发）
         drawBursts(canvas, now, w, h, k)
 
-        // 常驻兜底特效已移除：没有触发型特效时画面保持静止
 
         bitmapPaint.alpha = 255
         shapePaint.alpha = 255
@@ -892,6 +924,16 @@ class SceneEffectView @JvmOverloads constructor(
             stopFrameLoop()
             lastFrameTime = 0L
         } else {
+            syncAmbient()
+            scheduleFrameLoop()
+        }
+    }
+
+    /** 从管理页返回时窗口可见性可能不变，用焦点变化兜底唤起常驻层 */
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (hasWindowFocus) {
+            syncAmbient()
             scheduleFrameLoop()
         }
     }
@@ -908,6 +950,7 @@ class SceneEffectView @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        syncAmbient()
         scheduleFrameLoop()
     }
 

@@ -63,6 +63,39 @@
             android:textSize="12sp"
             tools:text="类 52/52 · 特效 244/244" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="6dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="常驻特效"
+                android:textColor="@color/primaryText"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/tv_ambient"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackground"
+                android:gravity="center_vertical"
+                android:minHeight="40dp"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:text="无（不启用常驻）  ▾"
+                android:textColor="@color/primaryText"
+                android:textSize="14sp" />
+        </LinearLayout>
+
         <EditText
             android:id="@+id/et_search"
             android:layout_width="match_parent"
@@ -113,6 +146,49 @@
             android:layout_height="0dp"
             android:layout_weight="1"
             android:clipToPadding="false" />
+    </LinearLayout>
+
+    <!-- 常驻特效选择面板：铺在列表上方，每项右侧有独立播放按钮。
+         预览浮层在它之上且不拦截触摸，所以能连续点着试看 -->
+    <LinearLayout
+        android:id="@+id/ambient_panel"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="?android:attr/colorBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:orientation="vertical"
+        android:padding="8dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="选择常驻特效（点右侧「播放」试看）"
+                android:textColor="@color/primaryText"
+                android:textSize="15sp" />
+
+            <Button
+                android:id="@+id/btn_ambient_close"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="关闭"
+                android:textAllCaps="false" />
+        </LinearLayout>
+
+        <ListView
+            android:id="@+id/lv_ambient"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
     </LinearLayout>
 
     <!-- 预览浮层：点播放时铺满屏幕直接演这个特效，不拦截触摸 -->

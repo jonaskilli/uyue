@@ -225,7 +225,8 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         initSceneEffect()
 
         // 手势（与大图界面一致）：单击左/右 1/3 上一段/下一段，
-        // 中 1/3 暂停/继续朗读；从上向下滑动退出本界面
+        // 中 1/3 暂停/继续朗读；从上向下滑动退出本界面，
+        // 但顶部 10% 起手不触发，方便下拉状态栏
         setupGestures()
 
         // 点立绘 → 打开该角色的角色档案（可补全信息/编辑提示词/重新生成立绘）。
@@ -992,7 +993,7 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
      * 手势：
      * - 单击左 1/3：朗读上一段；单击右 1/3：朗读下一段
      * - 单击中 1/3：暂停/继续朗读
-     * - 从上向下滑动：退出本界面
+     * - 从上向下滑动：退出本界面（顶部 10% 起手无效，留给下拉状态栏）
      */
     @android.annotation.SuppressLint("ClickableViewAccessibility")
     private fun setupGestures() {
@@ -1031,8 +1032,14 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
                     val startY = e1?.y ?: downY
                     val dx = e2.x - (e1?.x ?: 0f)
                     val dy = e2.y - startY
-                    // 从上向下滑动（纵向位移为主且超过阈值）：退出本界面
-                    if (dy > 60 && Math.abs(dy) > Math.abs(dx)) {
+                    // 从上向下滑动（纵向位移为主且超过阈值）：退出本界面。
+                    // 排除顶部 10% 起手：这块留给下拉状态栏，避免误退出。
+                    // 与朗读界面（decorView 高度 10%）和大图界面（rootView 高度 10%）一致，
+                    // 本界面 window 为 MATCH_PARENT 且 decorView 无 padding，root 即整屏坐标。
+                    if (startY > root.height * 0.1f
+                        && dy > 60
+                        && Math.abs(dy) > Math.abs(dx)
+                    ) {
                         dismissAllowingStateLoss()
                         moved = true
                     }
