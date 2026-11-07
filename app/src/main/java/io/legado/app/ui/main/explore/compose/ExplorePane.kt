@@ -1,5 +1,7 @@
 package io.legado.app.ui.main.explore.compose
 
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -36,8 +38,11 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -57,8 +62,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -69,6 +76,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import androidx.lifecycle.LiveData
@@ -78,6 +86,7 @@ import io.legado.app.data.entities.SearchBook
 import io.legado.app.data.entities.rule.ExploreKind
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.ThemeStore
+import io.legado.app.ui.login.SourceLoginJsExtensions
 import io.legado.app.ui.main.explore.ExplorePaneViewModel
 import io.legado.app.ui.widget.image.CoverImageView
 import io.legado.app.utils.getCompatColor
@@ -228,6 +237,24 @@ fun ExplorePane(
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
     val paneScope = rememberCoroutineScope()
+    // 分类 JS 的 java 对象：与改版前 ExploreAdapter 一致，让按钮/下拉的 action
+    // 里 java.refreshExplore() / upUiData() 仍能重绘分类、回写筛选值
+    val activity = LocalContext.current as? AppCompatActivity
+    val kindJs = remember(name) {
+        SourceLoginJsExtensions(
+            activity,
+            viewModel.getSource(),
+            object : SourceLoginJsExtensions.Callback {
+                override fun upUiData(data: Map<String, String?>?) {
+                    data?.forEach { (k, v) -> if (v != null) viewModel.putKindValue(k, v) }
+                }
+
+                override fun reUiView() {
+                    viewModel.refreshKinds()
+                }
+            }
+        )
+    }
 
     // 换源 / 换分类 / 刷新都从顶部开始看。gridState、listState 是长期 remember 的，
     // 不重置的话新分类数据更短，原滚动位置会被钳到列表末尾，看起来像"一下滑到底"。
@@ -375,10 +402,13 @@ fun ExplorePane(
                 // 关掉平台默认宽度限制，否则弹窗本身就被留白压窄
                 properties = DialogProperties(usePlatformDefaultWidth = false)
             ) {
+                // 高度按屏幕比例给：分类多的书源一次能看到更多项（仍可上下滑动）；
+                // 分类少时仍是 wrapContent，不会撑出一个很高的空弹窗
+                val screenH = LocalConfiguration.current.screenHeightDp.dp
                 Surface(
                     shape = RoundedCornerShape(6.dp),
                     color = MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.fillMaxWidth(0.96f).heightIn(max = 460.dp)
+                    modifier = Modifier.fillMaxWidth(0.96f).heightIn(max = screenH * 0.88f)
                 ) {
                     Column(Modifier.padding(8.dp)) {
                         Text(
@@ -389,10 +419,10 @@ fun ExplorePane(
                         androidx.compose.foundation.layout.FlowRow(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 380.dp)
+                                .heightIn(max = screenH * 0.76f)
                                 .verticalScroll(rememberScrollState())
                         ) {
-                            kinds.forEachIndexed { index, kind ->
+                            kinds.forEach { kind ->
                                 val style = kind.style()
                                 val percent = style.layout_flexBasisPercent
                                 val widthMod = when {
@@ -402,52 +432,29 @@ fun ExplorePane(
                                         Modifier.fillMaxWidth(percent.coerceIn(0.25f, 0.9f))
                                     else -> Modifier.wrapContentWidth()
                                 }
-                                val loadable = kind.type == ExploreKind.Type.url &&
-                                    !kind.url.isNullOrBlank()
-                                val active = loadable && kind.url == selectedUrl
-                                // 非 url 类是书源的筛选/输入项，沿用原 Flexbox 的样式但不可点
-                                val label = when (kind.type) {
-                                    ExploreKind.Type.select -> "${kind.title} ▾"
-                                    ExploreKind.Type.text -> "${kind.title} ✎"
-                                    else -> kind.title
-                                }
-                                Text(
-                                    text = label,
-                                    fontSize = PaneD.expandText,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    color = if (loadable) Color.Unspecified
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = widthMod
-                                        .clipToBounds()
-                                        .padding(3.dp)
-                                        .background(
-                                            if (active) MaterialTheme.colorScheme.primaryContainer
-                                            else MaterialTheme.colorScheme.surfaceVariant,
-                                            // 对齐 item_fillet_text 的圆角胶囊
-                                            RoundedCornerShape(16.dp)
-                                        )
-                                        .border(
-                                            PaneD.hairline,
-                                            MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                                            RoundedCornerShape(16.dp)
-                                        )
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                        .then(
-                                            if (loadable) Modifier.clickable {
-                                                showAllKinds = false
-                                                selectedUrl = kind.url
-                                                viewModel.loadKind(kind)
-                                                val rowIndex = urlKinds.indexOfFirst {
-                                                    it.url == kind.url
-                                                }
-                                                if (rowIndex >= 0) {
-                                                    paneScope.launch {
-                                                        tagRowState.animateScrollToItem(rowIndex)
-                                                    }
-                                                }
-                                            } else Modifier
-                                        )
+                                // 与改版前 Flexbox 一样按 kind.type 分别渲染：
+                                // url 胶囊 / 下拉选择 / 输入框 / 切换 / 动作按钮全部可交互
+                                ExploreKindItem(
+                                    kind = kind,
+                                    modifier = widthMod,
+                                    active = kind.type == ExploreKind.Type.url &&
+                                        !kind.url.isNullOrBlank() && kind.url == selectedUrl,
+                                    viewModel = viewModel,
+                                    jsExt = kindJs,
+                                    onValueChanged = { viewModel.reloadForKindChange() },
+                                    onLoadUrl = { picked ->
+                                        showAllKinds = false
+                                        selectedUrl = picked.url
+                                        viewModel.loadKind(picked)
+                                        val rowIndex = urlKinds.indexOfFirst {
+                                            it.url == picked.url
+                                        }
+                                        if (rowIndex >= 0) {
+                                            paneScope.launch {
+                                                tagRowState.animateScrollToItem(rowIndex)
+                                            }
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -502,6 +509,211 @@ fun ExplorePane(
             }
         }
 
+    }
+}
+
+/** 展开分类里的圆角胶囊：对齐旧版 item_fillet_text，颜色跟随主题 */
+@Composable
+private fun KindChip(
+    label: String,
+    active: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    Text(
+        text = label,
+        fontSize = PaneD.expandText,
+        maxLines = 1,
+        softWrap = false,
+        color = MaterialTheme.colorScheme.onSurface,
+        modifier = modifier
+            .clipToBounds()
+            .padding(3.dp)
+            .background(
+                if (active) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant,
+                RoundedCornerShape(16.dp)
+            )
+            .border(
+                PaneD.hairline,
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                RoundedCornerShape(16.dp)
+            )
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .clickable(onClick = onClick)
+    )
+}
+
+/** viewName：'字面量' 或书源 JS 求出的动态标题（旧版 evalUiJs） */
+@Composable
+private fun rememberKindLabel(
+    kind: ExploreKind,
+    viewModel: ExplorePaneViewModel
+): State<String> = produceState(initialValue = kind.title, key1 = kind) {
+    val n = viewModel.evalViewName(kind)
+    value = when {
+        n == null -> kind.title
+        n.isEmpty() -> "null"
+        else -> n
+    }
+}
+
+/** 展开面板按 kind.type 分派：url / select / text / toggle / button 全部可交互 */
+@Composable
+private fun ExploreKindItem(
+    kind: ExploreKind,
+    modifier: Modifier,
+    active: Boolean,
+    viewModel: ExplorePaneViewModel,
+    jsExt: SourceLoginJsExtensions,
+    onValueChanged: () -> Unit,
+    onLoadUrl: (ExploreKind) -> Unit
+) {
+    val label by rememberKindLabel(kind, viewModel)
+    val context = LocalContext.current
+    when (kind.type) {
+        ExploreKind.Type.select -> KindSelectItem(
+            kind, label, modifier, viewModel, jsExt, onValueChanged
+        )
+        ExploreKind.Type.text -> KindTextItem(kind, label, modifier, viewModel, jsExt)
+        ExploreKind.Type.toggle -> KindToggleItem(
+            kind, label, modifier, viewModel, jsExt, onValueChanged
+        )
+        ExploreKind.Type.button -> {
+            var lastClick by remember(kind) { mutableStateOf(0L) }
+            KindChip(label = label, active = false, modifier = modifier) {
+                val now = System.currentTimeMillis()
+                if (now - lastClick >= 200) {
+                    lastClick = now
+                    viewModel.evalKindAction(kind, jsExt)
+                    onValueChanged()
+                }
+            }
+        }
+        else -> KindChip(label = label, active = active, modifier = modifier) {
+            if (kind.title.startsWith("ERROR:")) {
+                Toast.makeText(context, kind.url.orEmpty(), Toast.LENGTH_LONG).show()
+            } else {
+                onLoadUrl(kind)
+            }
+        }
+    }
+}
+
+/** select：下拉列表，选项来自 kind.chars，选中值写回 infoMap 并触发 action */
+@Composable
+private fun KindSelectItem(
+    kind: ExploreKind,
+    label: String,
+    modifier: Modifier,
+    viewModel: ExplorePaneViewModel,
+    jsExt: SourceLoginJsExtensions,
+    onValueChanged: () -> Unit
+) {
+    val options = remember(kind) {
+        kind.chars?.filterNotNull().orEmpty().ifEmpty { listOf("chars", "is null") }
+    }
+    var selected by remember(kind) {
+        mutableStateOf(
+            viewModel.kindValue(kind.title) ?: kind.default ?: options.firstOrNull().orEmpty()
+        )
+    }
+    // 旧版初始化就把默认值写进 infoMap，后续 URL 规则才取得到
+    LaunchedEffect(kind) { viewModel.putKindValue(kind.title, selected) }
+    var expanded by remember(kind) { mutableStateOf(false) }
+    Box(modifier) {
+        KindChip(
+            label = "$label: $selected ▾",
+            active = false,
+            modifier = Modifier.wrapContentWidth()
+        ) { expanded = true }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option, fontSize = PaneD.expandText, maxLines = 1) },
+                    onClick = {
+                        expanded = false
+                        selected = option
+                        viewModel.putKindValue(kind.title, option)
+                        viewModel.evalKindAction(kind, jsExt)
+                        onValueChanged()
+                    }
+                )
+            }
+        }
+    }
+}
+
+/** text：输入即写 infoMap，action 带 500ms 防抖（对齐旧版 TextWatcher） */
+@Composable
+private fun KindTextItem(
+    kind: ExploreKind,
+    label: String,
+    modifier: Modifier,
+    viewModel: ExplorePaneViewModel,
+    jsExt: SourceLoginJsExtensions
+) {
+    var value by remember(kind) {
+        mutableStateOf(viewModel.kindValue(kind.title).orEmpty())
+    }
+    var lastActionValue by remember(kind) { mutableStateOf(value) }
+    OutlinedTextField(
+        value = value,
+        onValueChange = {
+            value = it
+            viewModel.putKindValue(kind.title, it)
+        },
+        singleLine = true,
+        placeholder = { Text(label, fontSize = PaneD.expandText, maxLines = 1) },
+        textStyle = TextStyle(
+            fontSize = PaneD.expandText,
+            color = MaterialTheme.colorScheme.onSurface
+        ),
+        modifier = modifier.padding(3.dp).widthIn(min = 120.dp)
+    )
+    LaunchedEffect(value) {
+        if (value == lastActionValue) return@LaunchedEffect
+        delay(500)
+        lastActionValue = value
+        viewModel.evalKindAction(kind, jsExt)
+    }
+}
+
+/** toggle：点击在 kind.chars 间循环，写 infoMap 并触发 action */
+@Composable
+private fun KindToggleItem(
+    kind: ExploreKind,
+    label: String,
+    modifier: Modifier,
+    viewModel: ExplorePaneViewModel,
+    jsExt: SourceLoginJsExtensions,
+    onValueChanged: () -> Unit
+) {
+    val chars = remember(kind) {
+        kind.chars?.filterNotNull().orEmpty().ifEmpty { listOf("chars", "is null") }
+    }
+    val valueFirst = kind.style().layout_justifySelf != "right"
+    var value by remember(kind) {
+        mutableStateOf(
+            viewModel.kindValue(kind.title) ?: kind.default ?: chars.firstOrNull().orEmpty()
+        )
+    }
+    LaunchedEffect(kind) { viewModel.putKindValue(kind.title, value) }
+    var lastClick by remember(kind) { mutableStateOf(0L) }
+    KindChip(
+        label = if (valueFirst) "$value$label" else "$label$value",
+        active = false,
+        modifier = modifier
+    ) {
+        val now = System.currentTimeMillis()
+        if (now - lastClick >= 200) {
+            lastClick = now
+            val next = chars.getOrNull((chars.indexOf(value) + 1) % chars.size) ?: ""
+            value = next
+            viewModel.putKindValue(kind.title, next)
+            viewModel.evalKindAction(kind, jsExt)
+            onValueChanged()
+        }
     }
 }
 
