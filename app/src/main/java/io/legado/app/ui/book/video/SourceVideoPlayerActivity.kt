@@ -336,6 +336,12 @@ class SourceVideoPlayerActivity : BaseComposeActivity(imageBg = false) {
         LaunchedEffect(state.fallbackIndex) {
             val index = state.fallbackIndex ?: return@LaunchedEffect
             if (infiniteSwipe) return@LaunchedEffect
+            if (SourceVideoPlayerSession.isOfflineSession()) {
+                // 离线开播：本地缓存已经在播，后台刷新/详情获取失败都不能把
+                // 内置浏览器（"获取出错"）拉到前台。清掉标志，否则还会一直转圈。
+                SourceVideoPlayerSession.skipFallback()
+                return@LaunchedEffect
+            }
             SourceVideoPlayerSession.playWithSourcePlayer(index)
         }
         // 无限刷模式：解析/播放失败、或需要书源自带播放器时，不弹错误、不退出，

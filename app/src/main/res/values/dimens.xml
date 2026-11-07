@@ -36,4 +36,8 @@
     <dimen name="fastscroll_scrollbar_padding_end">8dp</dimen>
 
     <dimen name="fixed_height_bottom_padding">8dp</dimen>
+
+    <!-- 发现/视频页全宽头部高度：顶条 32dp + 间距 8dp + 分类条 32dp，
+         须与 ExplorePane.PaneD 的 btnH / headerGap / chipH 之和一致 -->
+    <dimen name="pane_header_height">72dp</dimen>
 </resources>

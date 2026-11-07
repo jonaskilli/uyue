@@ -6,6 +6,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,11 +34,16 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.State
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,10 +57,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -65,11 +73,14 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
+import io.legado.app.R
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.data.entities.rule.ExploreKind
 import io.legado.app.help.config.AppConfig
+import io.legado.app.lib.theme.ThemeStore
 import io.legado.app.ui.main.explore.ExplorePaneViewModel
 import io.legado.app.ui.widget.image.CoverImageView
+import io.legado.app.utils.getCompatColor
 
 /**
  * 字号在初版基础上共放大五号（+2 后用户仍嫌小，再 +3），容器与封面同步放大。
@@ -84,22 +95,82 @@ private object PaneD {
     val gap = 2.dp
     val chipH = 32.dp
     val btnH = 32.dp
-    /** 内容区顶部留白：分类条与第一行封面之间不该贴在一起 */
-    val contentTop = 10.dp
+    /** 顶条与分类条之间的间距：原来两块贴得太近 */
+    val headerGap = 8.dp
+    /** 内容区顶部留白：加大后第一行封面不会被上方的分类条压住 */
+    val contentTop = 14.dp
+    /** 分类按钮最小宽度：按两个汉字计，字数再少也不缩成一条 */
+    val chipMinW = 48.dp
+    /** 分类按钮之间的间距 */
+    val chipGap = 8.dp
+    /** 顶条按钮之间的间距 */
+    val btnGap = 10.dp
+    /** 顶条小按钮最小宽度，方便点击 */
+    val btnMinW = 44.dp
     /** 封面放大：列表 34x46 -> 52x72，网格高度 78 -> 120 */
     val listCoverW = 72.dp
     val listCoverH = 100.dp
     /** 展开面板分类项比正文小一号，配合加宽后能多显示几个字 */
     val expandText = 13.sp
-    /** 网格：封面下方独立的文字区，两行标题也能完整显示 */
-    val gridNameBandH = 72.dp
-    val gridFadeH = 28.dp
-    /** 网格行与行之间的上下间距（用户要的是这个，卡片高，给足才看得出来） */
-    val gridVGap = 14.dp
+    /** 网格：文字区收紧，标题贴着封面底部，两行也能完整显示 */
+    val gridNameBandH = 40.dp
+    /** 网格行与行之间的上下间距：保留分隔但不再把名字推得太远 */
+    val gridVGap = 12.dp
+    /** 每张卡片上下各留一段，与行间距叠加成上下间隔 */
+    val gridItemPadV = 2.dp
     /** 两列之间的左右间距：保持接近原状，不跟着一起加大 */
     val gridHGap = 2.dp
     val corner = 2.dp
     val hairline = 0.5.dp
+}
+
+/**
+ * 发现页与视频页共用：颜色取自项目自身的日/夜间资源（values / values-night），
+ * 与 App 其它界面保持一致。Compose 的 MaterialTheme 默认永远停在亮色配色，
+ * 且不会给 Text 提供主题文字色，所以这里显式构造 ColorScheme 并注入
+ * LocalContentColor；isSystemInDarkTheme() 会在日夜间切换时触发重组。
+ */
+@Composable
+private fun paneColorScheme(): ColorScheme {
+    val context = LocalContext.current
+    val night = isSystemInDarkTheme()
+    fun color(resId: Int) = Color(context.getCompatColor(resId))
+    val surface = color(R.color.background)
+    val surfaceVariant = color(R.color.background_card)
+    val onSurface = color(R.color.primaryText)
+    val onSurfaceVariant = color(R.color.secondaryText)
+    val outline = color(R.color.divider)
+    val primary = Color(ThemeStore.primaryColor(context))
+    val primaryContainer = primary
+        .copy(alpha = if (night) 0.38f else 0.20f)
+        .compositeOver(surface)
+    val base = if (night) darkColorScheme() else lightColorScheme()
+    return base.copy(
+        primary = primary,
+        primaryContainer = primaryContainer,
+        onPrimaryContainer = onSurface,
+        surface = surface,
+        onSurface = onSurface,
+        surfaceVariant = surfaceVariant,
+        onSurfaceVariant = onSurfaceVariant,
+        background = surface,
+        onBackground = onSurface,
+        outline = outline
+    )
+}
+
+/**
+ * 发现页 / 视频页的 Compose 主题入口：两个页面的 setContent 都从这里进入，
+ * 保证日夜间切换时整块界面（背景、文字、卡片、边框）都跟着项目主题走。
+ */
+@Composable
+fun ExplorePaneTheme(content: @Composable () -> Unit) {
+    val scheme = paneColorScheme()
+    MaterialTheme(colorScheme = scheme) {
+        CompositionLocalProvider(LocalContentColor provides scheme.onSurface) {
+            content()
+        }
+    }
 }
 
 /**
@@ -149,6 +220,7 @@ fun ExplorePane(
     val loading by liveState(viewModel.loading, false)
     val message by liveState(viewModel.message, null)
     val page by liveState(viewModel.page, 1)
+    val contentEpoch by liveState(viewModel.contentEpoch, 0)
     var selectedUrl by remember { mutableStateOf<String?>(null) }
     var grid by remember { mutableStateOf(viewModel.gridMode) }
     var showAllKinds by remember { mutableStateOf(false) }
@@ -156,6 +228,13 @@ fun ExplorePane(
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
     val paneScope = rememberCoroutineScope()
+
+    // 换源 / 换分类 / 刷新都从顶部开始看。gridState、listState 是长期 remember 的，
+    // 不重置的话新分类数据更短，原滚动位置会被钳到列表末尾，看起来像"一下滑到底"。
+    // 只滚当前模式的 state，避免动到未附加的列表；切网格/列表时也归位。
+    LaunchedEffect(contentEpoch, grid) {
+        if (grid) gridState.scrollToItem(0) else listState.scrollToItem(0)
+    }
 
     // 滚到末尾自动加载下一页，取代原来的「更多」按钮；
     // 防重复与「到底」判断做在 ViewModel，避免重组时连发好几页
@@ -199,16 +278,19 @@ fun ExplorePane(
                 maxLines = 1,
                 // 不换行排成一行，超出的部分按像素裁到 weight 给的边界
                 softWrap = false,
-                modifier = Modifier.weight(1f, fill = false).clipToBounds()
+                // 独占按钮组之外的全部剩余宽度。原先这里又放了一个 weight(1f) 的
+                // Spacer，剩余空间被两者平分：名字只拿到一半就被裁掉，另一半变成
+                // 名字与「网格/列表」之间的空白。
+                modifier = Modifier.weight(1f).clipToBounds()
             )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(PaneD.btnGap))
             TinyButton(if (grid) "列表" else "网格") {
                 grid = !grid
                 viewModel.gridMode = grid
             }
-            Spacer(Modifier.width(PaneD.gap))
+            Spacer(Modifier.width(PaneD.btnGap))
             TinyButton("刷新") { viewModel.refresh() }
-            Spacer(Modifier.width(PaneD.gap))
+            Spacer(Modifier.width(PaneD.btnGap))
             // 展开分类：放在按钮组最右，宽度至少 56dp，避免小按钮难点
             Text(
                 text = "展开 ▾",
@@ -223,15 +305,18 @@ fun ExplorePane(
                     )
                     .border(
                         PaneD.hairline,
-                        Color.Gray.copy(alpha = 0.3f),
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
                         RoundedCornerShape(PaneD.corner)
                     )
                     .padding(horizontal = 6.dp, vertical = 3.dp)
                     .clickable { showAllKinds = true }
             )
-            Spacer(Modifier.width(PaneD.gap))
+            Spacer(Modifier.width(PaneD.btnGap))
             Text("P$page", fontSize = PaneD.textTiny)
         }
+
+        // 顶条与分类条之间留出间距，别贴在一起
+        Spacer(Modifier.height(PaneD.headerGap))
 
         // 分类条：只放可加载的 url 类分类，整行都留给横向滚动
         if (urlKinds.isNotEmpty()) {
@@ -253,8 +338,10 @@ fun ExplorePane(
                         text = kind.title,
                         fontSize = PaneD.text,
                         maxLines = 1,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier
-                            .padding(end = PaneD.gap)
+                            .padding(end = PaneD.chipGap)
+                            .widthIn(min = PaneD.chipMinW)
                             .background(
                                 if (active) MaterialTheme.colorScheme.primaryContainer
                                 else MaterialTheme.colorScheme.surfaceVariant,
@@ -262,10 +349,10 @@ fun ExplorePane(
                             )
                             .border(
                                 PaneD.hairline,
-                                Color.Gray.copy(alpha = 0.3f),
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
                                 RoundedCornerShape(PaneD.corner)
                             )
-                            .padding(horizontal = 3.dp, vertical = 1.dp)
+                            .padding(horizontal = 6.dp, vertical = 3.dp)
                             .clickable {
                                 selectedUrl = kind.url
                                 viewModel.loadKind(kind)
@@ -274,6 +361,10 @@ fun ExplorePane(
                 }
                 }
             }
+        } else {
+            // 没有分类时也占住同样的高度：右侧书源列表的顶部偏移是固定值，
+            // 头部高度必须恒定，否则会对不齐
+            Spacer(Modifier.fillMaxWidth().height(PaneD.chipH))
         }
 
         // 展开：按书源原本的 Flexbox 排布（圆角胶囊 + flexBasisPercent 宽度 +
@@ -338,7 +429,7 @@ fun ExplorePane(
                                         )
                                         .border(
                                             PaneD.hairline,
-                                            Color.Gray.copy(alpha = 0.3f),
+                                            MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
                                             RoundedCornerShape(16.dp)
                                         )
                                         .padding(horizontal = 8.dp, vertical = 4.dp)
@@ -365,44 +456,47 @@ fun ExplorePane(
             }
         }
 
-        // 内容区：占满剩余空间
-        Box(Modifier.fillMaxWidth().weight(1f)) {
-            when {
-                // 换源 / 换分类 / 刷新期间旧列表已清空，显示加载态而不是上一个分类的内容
-                loading && books.isEmpty() -> LoadingPane()
-                !message.isNullOrBlank() -> CenteredText(
-                    "${message!!}\n点此重试",
-                    onClick = { viewModel.refresh() }
-                )
-                books.isEmpty() ->
-                    CenteredText(if (name.isEmpty()) "点右侧书源查看内容" else "暂无内容")
-
-                grid -> LazyVerticalGrid(
-                    state = gridState,
-                    columns = GridCells.Fixed(2),
-                    verticalArrangement = Arrangement.spacedBy(PaneD.gridVGap),
-                    horizontalArrangement = Arrangement.spacedBy(PaneD.gridHGap),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = PaneD.pad, top = PaneD.contentTop,
-                        end = PaneD.pad, bottom = PaneD.pad
+        // 内容区：顶部全宽区域已让给顶条 + 分类条，这里只占左侧 70%，
+        // 右侧 30% 空出来给 XML 里的书源列表（rv_find 在 ComposeView 上层）
+        Row(Modifier.fillMaxWidth().weight(1f)) {
+            Box(Modifier.fillMaxWidth(0.7f).fillMaxHeight()) {
+                when {
+                    // 换源 / 换分类 / 刷新期间旧列表已清空，显示加载态而不是上一个分类的内容
+                    loading && books.isEmpty() -> LoadingPane()
+                    !message.isNullOrBlank() -> CenteredText(
+                        "${message!!}\n点此重试",
+                        onClick = { viewModel.refresh() }
                     )
-                ) {
-                    items(count = books.size) { index ->
-                        GridCard(books[index], onBookClick, onBookLongClick)
+                    books.isEmpty() ->
+                        CenteredText(if (name.isEmpty()) "点右侧书源查看内容" else "暂无内容")
+
+                    grid -> LazyVerticalGrid(
+                        state = gridState,
+                        columns = GridCells.Fixed(2),
+                        verticalArrangement = Arrangement.spacedBy(PaneD.gridVGap),
+                        horizontalArrangement = Arrangement.spacedBy(PaneD.gridHGap),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = PaneD.pad, top = PaneD.contentTop,
+                            end = PaneD.pad, bottom = PaneD.pad
+                        )
+                    ) {
+                        items(count = books.size) { index ->
+                            GridCard(books[index], onBookClick, onBookLongClick)
+                        }
                     }
-                }
 
-                else -> LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = PaneD.pad, top = PaneD.contentTop,
-                        end = PaneD.pad, bottom = PaneD.pad
-                    )
-                ) {
-                    items(count = books.size) { index ->
-                        ListCard(books[index], onBookClick, onBookLongClick)
+                    else -> LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = PaneD.pad, top = PaneD.contentTop,
+                            end = PaneD.pad, bottom = PaneD.pad
+                        )
+                    ) {
+                        items(count = books.size) { index ->
+                            ListCard(books[index], onBookClick, onBookLongClick)
+                        }
                     }
                 }
             }
@@ -413,24 +507,31 @@ fun ExplorePane(
 
 @Composable
 private fun TinyButton(text: String, onClick: () -> Unit) {
-    Text(
-        text = text,
-        fontSize = PaneD.textTiny,
-        maxLines = 1,
-        modifier = Modifier
+    // 用 Box 包一层，让文字在固定高度的按钮里真正上下居中；
+    // 原先直接把 Text 放在 background 上，只有 1dp 纵向 padding，字会贴着上沿
+    Box(
+        Modifier
             .height(PaneD.btnH - PaneD.pad)
+            .widthIn(min = PaneD.btnMinW)
             .background(
                 MaterialTheme.colorScheme.surfaceVariant,
                 RoundedCornerShape(PaneD.corner)
             )
             .border(
                 PaneD.hairline,
-                Color.Gray.copy(alpha = 0.3f),
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
                 RoundedCornerShape(PaneD.corner)
             )
-            .padding(horizontal = 3.dp, vertical = 1.dp)
-            .clickable(onClick = onClick)
-    )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            fontSize = PaneD.textTiny,
+            maxLines = 1,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
 }
 
 @Composable
@@ -470,8 +571,9 @@ private fun Cover(book: SearchBook, modifier: Modifier) {
 }
 
 /**
- * 按书架 item_bookshelf_grid2 的结构：封面铺满，书名叠在封面底部渐变条上（白字两行）。
- * 渐变用 Compose 原生 Brush 复刻书架的 bg_gradient_cover，尺寸仍走紧凑表。
+ * 网格卡片：封面按列宽等比缩放，标题放在封面下方的独立文字区。
+ * 文字区底色与文字色都取自日夜间主题，不再用固定的半透明黑 + 白字；
+ * 卡片上下 padding 与 gridVGap 叠加，形成清晰的上下间隔。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -481,44 +583,36 @@ private fun GridCard(
     onLongClick: (SearchBook) -> Unit
 ) {
     Column(
-        Modifier.padding(PaneD.pad).combinedClickable(
-            onClick = { onClick(book) },
-            onLongClick = { onLongClick(book) }
-        )
+        Modifier.padding(horizontal = PaneD.pad, vertical = PaneD.gridItemPadV)
+            .combinedClickable(
+                onClick = { onClick(book) },
+                onLongClick = { onLongClick(book) }
+            )
     ) {
-        // 左栏变窄后按列宽等比缩放，避免固定高度把封面拉成瘦高
-        Box(Modifier.fillMaxWidth().aspectRatio(1.2f)) {
+        // 与 CoverImageView.onMeasure() 的 4:3 严格对齐：
+        // 之前容器是 1.2:1 的矮胖框，控件却按 4:3 测量，CENTER_CROP 会把
+        // 图片上下裁掉，第一排连顶部圆角都看不到
+        Box(Modifier.fillMaxWidth().aspectRatio(0.75f)) {
             Cover(
                 book,
                 Modifier.fillMaxSize()
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             )
-            // 封面底部留一点渐变，视觉上延续到下面的文字条
-            Box(
-                Modifier.fillMaxWidth().height(PaneD.gridFadeH)
-                    .align(Alignment.BottomCenter)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))
-                        )
-                    )
-            )
         }
-        // 文字在封面下方的独立区域：固定高度 + 垂直居中，
-        // 两行标题也不会被默认 Clip 裁掉第二行的底部
+        // 文字区收紧 + 顶部对齐：标题紧贴封面底部，到下一排封面也更近
         Box(
             Modifier.fillMaxWidth().height(PaneD.gridNameBandH)
                 .clipToBounds()
-                .background(Color.Black.copy(alpha = 0.78f)),
-            contentAlignment = Alignment.CenterStart
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.TopStart
         ) {
             Text(
                 text = book.name,
-                color = Color.White,
+                color = MaterialTheme.colorScheme.onSurface,
                 fontSize = PaneD.text,
-                lineHeight = 19.sp,
+                lineHeight = 18.sp,
                 maxLines = 2,
-                modifier = Modifier.padding(horizontal = 3.dp, vertical = 3.dp)
+                modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp)
             )
         }
     }

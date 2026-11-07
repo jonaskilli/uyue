@@ -156,8 +156,34 @@ object VideoSourcePlayer {
                     AppLog.put("详情页出错: ${it.localizedMessage}", it)
                 }
         }
-        var list =
-            if (forceRefresh) emptyList() else appDb.bookChapterDao.getChapterList(book.bookUrl)
+        // ===== 后台刷新：只追加新集，绝不覆盖/删除本地缓存目录 =====
+        // 原来的 forceRefresh 会 delByBook + 全量 insert。站点延迟、关站或返回
+        // 半份列表时，缓存目录就被毁掉、集号错位，已缓存的视频下次就播不了。
+        // 刷新失败/结果变短一律沿用旧目录；成功也只把多出来的集追加到尾部，
+        // 这样旧集序号恒定，正在播的与已缓存的都不会串位。
+        if (forceRefresh) {
+            val cached = appDb.bookChapterDao.getChapterList(book.bookUrl)
+            val fresh = try {
+                WebBook.getChapterListAwait(source, book).getOrThrow()
+            } catch (e: Exception) {
+                AppLog.put("后台刷新目录失败，沿用本地目录\n${e.localizedMessage}", e)
+                return cached
+            }
+            if (fresh.size <= cached.size) return cached
+            book.ensureVideoType()
+            if (wasNotShelf) book.addType(BookType.notShelf)
+            if (appDb.bookDao.getBook(book.bookUrl) == null) {
+                appDb.bookDao.insert(book)
+            } else {
+                appDb.bookDao.update(book)
+            }
+            val added = fresh.subList(cached.size, fresh.size).mapIndexed { offset, ch ->
+                ch.copy(bookUrl = book.bookUrl, index = cached.size + offset)
+            }
+            appDb.bookChapterDao.insert(*added.toTypedArray())
+            return appDb.bookChapterDao.getChapterList(book.bookUrl)
+        }
+        var list = appDb.bookChapterDao.getChapterList(book.bookUrl)
         if (list.isEmpty()) {
             val oldBook = book.copy()
             val newList = WebBook.getChapterListAwait(source, book).getOrThrow()
