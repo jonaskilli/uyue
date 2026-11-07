@@ -9,9 +9,15 @@ import io.legado.app.utils.putPrefBoolean
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.data.entities.rule.ExploreKind
+import io.legado.app.constant.AppLog
 import io.legado.app.help.coroutine.Coroutine
+import io.legado.app.help.source.clearExploreKindsCache
 import io.legado.app.help.source.exploreKinds
+import io.legado.app.ui.login.SourceLoginJsExtensions
+import io.legado.app.utils.InfoMap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Collections
 import io.legado.app.model.webBook.WebBook
 
@@ -125,6 +131,86 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
         val url = currentUrl ?: return
         cancelInflight()
         loadBooks(url, page.value ?: 1)
+    }
+
+    // ===== 展开分类的筛选控件（select / text / toggle / button）=====
+    // 与改版前 ExploreAdapter.upKindList 共用同一份 InfoMap：
+    // WebBook.exploreBookAwait 会把它塞进 AnalyzeUrl，URL 规则里的占位自动替换。
+
+    /** 按当前书源取（或新建）分类输入值表 */
+    private fun infoMap(): InfoMap? {
+        val url = sourceUrl ?: return null
+        return ExploreAdapter.exploreInfoMapList[url]
+            ?: InfoMap(url).also { ExploreAdapter.exploreInfoMapList.put(url, it) }
+    }
+
+    fun kindValue(title: String): String? = infoMap()?.get(title)
+
+    /** 写回筛选值并落盘，重启后仍在 */
+    fun putKindValue(title: String, value: String) {
+        infoMap()?.let { map ->
+            if (map[title] != value) {
+                map[title] = value
+                map.save()
+                map.saveNow()
+            }
+        }
+    }
+
+    /** 筛选条件变了：从当前 url 分类的第 1 页重新加载 */
+    fun reloadForKindChange() {
+        val url = currentUrl ?: return
+        cancelInflight()
+        page.postValue(1)
+        loadBooks(url, 1)
+    }
+
+    /** 当前书源，供 JS 扩展对象使用 */
+    fun getSource(): BookSource? = source
+
+    /** viewName：支持 '字面量' 与书源 JS 动态标题，与旧版 evalUiJs 一致 */
+    suspend fun evalViewName(kind: ExploreKind): String? = withContext(Dispatchers.IO) {
+        val name = kind.viewName ?: return@withContext null
+        if (name.length in 3..19 && name.first() == '\'' && name.last() == '\'') {
+            return@withContext name.substring(1, name.length - 1)
+        }
+        val src = source ?: return@withContext null
+        val map = infoMap() ?: return@withContext null
+        runCatching { src.evalJS(name) { put("infoMap", map) }.toString() }
+            .onFailure { AppLog.put("exploreUi err: ${it.localizedMessage}", it) }
+            .getOrDefault("err")
+    }
+
+    /** button / toggle / text / select 的 action，等价于旧版 evalButtonClick */
+    fun evalKindAction(kind: ExploreKind, java: SourceLoginJsExtensions?) {
+        val action = kind.action?.takeIf { it.isNotBlank() } ?: return
+        val src = source ?: return
+        val map = infoMap() ?: return
+        execute {
+            runCatching {
+                src.evalJS(action) {
+                    if (java != null) put("java", java)
+                    put("infoMap", map)
+                }
+            }.onFailure {
+                AppLog.put("ExploreUI Button ${kind.title} JavaScript error", it)
+            }
+        }
+    }
+
+    /** JS 里 java.refreshExplore() / upUiData 之后重绘分类 */
+    fun refreshKinds() {
+        val url = sourceUrl ?: return
+        execute {
+            val src = appDb.bookSourceDao.getBookSource(url) ?: return@execute
+            runCatching {
+                // 旧版 refreshExplore 会先清缓存，否则 JS 改过的分类读到的仍是旧列表
+                src.clearExploreKindsCache()
+                src.exploreKinds()
+            }
+                .onFailure { AppLog.put("刷新分类失败\n${it.localizedMessage}", it) }
+                .getOrNull()?.let { kinds.postValue(it) }
+        }
     }
 
     fun loadMore() {
