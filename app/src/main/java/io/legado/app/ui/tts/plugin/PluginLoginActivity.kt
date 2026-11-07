@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -21,6 +22,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import org.apache.commons.text.StringEscapeUtils
+import org.json.JSONObject
+import java.util.UUID
 
 /**
  * 插件变量登录页（移植自 TTS_Server_Android PluginLoginActivity，View 版实现）：
@@ -35,6 +38,12 @@ import org.apache.commons.text.StringEscapeUtils
  * 顶栏按钮（从左到右）：[UA模式切换] 刷新 保存。
  * UA 模式默认电脑模式（vars 里 ua=mobile/android 时默认手机模式，ua 为自定义串时作为电脑模式），
  * 点模式按钮在「电脑模式 / 安卓手机模式」间切换：切换即清缓存重载页面（不动 Cookie，登录态保留）。
+ *
+ * 账号/密码记忆：注入 JS 监听登录页输入框，用户一输入就把值经 JS 桥存到 App 私有
+ * SharedPreferences（按 loginUrl 域名隔离，网页脚本读不到）；下次打开同一站点时注入 JS
+ * 用原生 setter + input 事件回填，兼容 React/Vue 受控输入框及两步式登录页。
+ * 系统 WebView 的 saveFormData 已废弃且对这类 SPA 无效，所以不用它。
+ * 注意：凭据是明文存在本机私有目录（与已保存的 cookie 同级），长按顶栏说明文字可清除。
  */
 class PluginLoginActivity : Activity() {
 
@@ -98,6 +107,139 @@ class PluginLoginActivity : Activity() {
             }
             return map
         }
+
+        private const val AUTOFILL_PREFS = "plugin_login_autofill"
+        private const val AUTOFILL_BRIDGE = "JReadAutoFill"
+
+        /**
+         * 定位登录表单：密码框 = 第一个可见的 password（或 autocomplete=current-password），
+         * 账号框 = 它之前最后一个可见文本输入框（排除验证码/隐藏域/按钮等）。
+         * 两步式登录页只有账号框时也能命中，密码框随后出现由 MutationObserver 补填。
+         */
+        private val FIND_FIELDS_JS = """
+            function __jreadVisible(el) {
+              var r = el.getBoundingClientRect();
+              var s = window.getComputedStyle(el);
+              return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+            }
+            function __jreadIsPwd(el) {
+              var t = (el.type || '').toLowerCase();
+              var a = (el.getAttribute('autocomplete') || '').toLowerCase();
+              return t === 'password' || a === 'current-password' || a === 'new-password';
+            }
+            function __jreadIsUser(el) {
+              if (__jreadIsPwd(el)) return false;
+              var t = (el.type || 'text').toLowerCase();
+              if (!t || 'hidden checkbox radio button submit reset file image range color'.indexOf(t) >= 0) return false;
+              var hint = ((el.getAttribute('placeholder') || '') + ' ' +
+                (el.getAttribute('name') || '') + ' ' +
+                (el.getAttribute('autocomplete') || '')).toLowerCase();
+              if (/验证码|校验码|otp|one-time|captcha|code/.test(hint)) return false;
+              return __jreadVisible(el);
+            }
+            function __jreadFields() {
+              var list = Array.prototype.slice.call(document.querySelectorAll('input'));
+              var pwd = null, user = null, i;
+              for (i = 0; i < list.length; i++) {
+                if (__jreadIsPwd(list[i]) && __jreadVisible(list[i])) { pwd = list[i]; break; }
+              }
+              var end = pwd ? list.indexOf(pwd) : list.length;
+              for (i = end - 1; i >= 0; i--) {
+                if (__jreadIsUser(list[i])) { user = list[i]; break; }
+              }
+              if (!user) {
+                for (i = 0; i < list.length; i++) {
+                  if (__jreadIsUser(list[i])) { user = list[i]; break; }
+                }
+              }
+              return { user: user, pwd: pwd };
+            }
+        """
+
+        /** 常驻监听输入：账号/密码变化即回传本机保存；点页面任意按钮时同步补一次，防跳转来不及 */
+        private fun captureScript(host: String, token: String): String = """
+            (function () {
+              if (location.hostname !== ${JSONObject.quote(host)}) return;
+              if (window.__jreadAutofillCapture) return;
+              window.__jreadAutofillCapture = true;
+              $FIND_FIELDS_JS
+              var timer = null;
+              function report() {
+                timer = null;
+                var f = __jreadFields();
+                var account = f.user ? String(f.user.value || '') : '';
+                var password = f.pwd ? String(f.pwd.value || '') : '';
+                if (!account && !password) return;
+                try {
+                  $AUTOFILL_BRIDGE.onCredentials(${JSONObject.quote(token)}, account, password);
+                } catch (e) {}
+              }
+              function schedule() {
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(report, 400);
+              }
+              document.addEventListener('input', schedule, true);
+              document.addEventListener('change', schedule, true);
+              document.addEventListener('click', function () {
+                if (timer) { clearTimeout(timer); timer = null; }
+                report();
+              }, true);
+            })();
+        """.trimIndent()
+
+        /** 回填：React/Vue 受控输入框必须用原型 setter + input 事件，页面 state 才会更新 */
+        private fun fillScript(host: String, account: String, password: String): String {
+            if (account.isBlank() && password.isBlank()) return ""
+            return """
+                (function () {
+                  if (location.hostname !== ${JSONObject.quote(host)}) return;
+                  if (window.__jreadAutofillFill) return;
+                  window.__jreadAutofillFill = true;
+                  $FIND_FIELDS_JS
+                  var account = ${JSONObject.quote(account)};
+                  var password = ${JSONObject.quote(password)};
+                  var filling = false, touchedUser = false, touchedPwd = false, tries = 0;
+                  document.addEventListener('input', function (e) {
+                    if (filling) return;
+                    var f = __jreadFields();
+                    if (e.target === f.user) touchedUser = true;
+                    if (e.target === f.pwd) touchedPwd = true;
+                  }, true);
+                  function setValue(el, value) {
+                    if (!el || !value || el.value === value) return;
+                    var proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+                    var desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+                    filling = true;
+                    try {
+                      if (desc && desc.set) desc.set.call(el, value); else el.value = value;
+                      el.dispatchEvent(new Event('input', { bubbles: true }));
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                    } finally { filling = false; }
+                  }
+                  function attempt() {
+                    var f = __jreadFields();
+                    if (!touchedUser) setValue(f.user, account);
+                    if (!touchedPwd) setValue(f.pwd, password);
+                    return (!account || touchedUser || (f.user && f.user.value === account)) &&
+                      (!password || touchedPwd || (f.pwd && f.pwd.value === password));
+                  }
+                  if (attempt()) return;
+                  var observer = null;
+                  try {
+                    observer = new MutationObserver(function () {
+                      if (attempt()) observer.disconnect();
+                    });
+                    observer.observe(document.documentElement, { childList: true, subtree: true });
+                  } catch (e) {}
+                  var interval = setInterval(function () {
+                    if (++tries > 30 || attempt()) {
+                      clearInterval(interval);
+                      if (observer) observer.disconnect();
+                    }
+                  }, 300);
+                })();
+            """.trimIndent()
+        }
     }
 
     private var binding = ""
@@ -107,6 +249,41 @@ class PluginLoginActivity : Activity() {
     /** 插件 vars 里传入的自定义 UA（既不是 pc 也不是 mobile 时），切换时作为电脑模式使用 */
     private var customUa: String? = null
     private val scope = MainScope()
+
+    /** 记住的账号密码：按登录域名隔离，存 App 私有目录，网页 JS 无法直接读取 */
+    private val autofillPrefs by lazy { getSharedPreferences(AUTOFILL_PREFS, MODE_PRIVATE) }
+    private val autofillHost by lazy {
+        runCatching { java.net.URI(loginUrl).host }.getOrNull().orEmpty()
+    }
+
+    /** 每次打开页面随机生成，防止网页脚本随意调用 JS 桥写入凭据 */
+    private val autofillToken = UUID.randomUUID().toString()
+
+    private fun readAutofill(): JSONObject = runCatching {
+        JSONObject(autofillPrefs.getString(autofillHost, null) ?: "{}")
+    }.getOrDefault(JSONObject())
+
+    /** JavaBridge 线程回调：只覆盖非空且与旧值不同的字段，避免反复写盘 */
+    private fun onCredentialsFromPage(token: String, account: String, password: String) {
+        if (token != autofillToken || autofillHost.isBlank()) return
+        val saved = readAutofill()
+        var changed = false
+        if (account.isNotEmpty() && account != saved.optString("account")) {
+            saved.put("account", account)
+            changed = true
+        }
+        if (password.isNotEmpty() && password != saved.optString("password")) {
+            saved.put("password", password)
+            changed = true
+        }
+        if (changed) autofillPrefs.edit().putString(autofillHost, saved.toString()).apply()
+    }
+
+    inner class AutoFillBridge {
+        @JavascriptInterface
+        fun onCredentials(token: String, account: String, password: String) =
+            onCredentialsFromPage(token, account, password)
+    }
 
     /** 当前模式对应的 UA */
     private fun currentUa(): String = when (uaMode) {
@@ -169,6 +346,8 @@ class PluginLoginActivity : Activity() {
             return
         }
         withContext(Dispatchers.Main) {
+            // 确保 WebView 登录 cookie 落盘：下次打开若登录态还在，连账号密码都不用再填
+            CookieManager.getInstance().flush()
             setResult(OK, Intent().apply { putExtra(RESULT, value) })
             finish()
         }
@@ -215,6 +394,12 @@ class PluginLoginActivity : Activity() {
             maxLines = 2
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
+        // 长按说明文字清除本机记住的账号密码
+        tvDesc.setOnLongClickListener {
+            autofillPrefs.edit().remove(autofillHost).apply()
+            android.widget.Toast.makeText(this, "已清除记住的账号密码", android.widget.Toast.LENGTH_SHORT).show()
+            true
+        }
         // UA 模式切换：默认电脑模式，点一下切安卓手机模式，再点切回；切换后清缓存重载
         // （只清缓存不动 Cookie，登录态保留）
         val btnUaMode = Button(this).apply {
@@ -248,6 +433,8 @@ class PluginLoginActivity : Activity() {
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            // 注入脚本通过它把账号密码写回本机；minSdk 23，仅 @JavascriptInterface 方法对页面可见
+            addJavascriptInterface(this@PluginLoginActivity.AutoFillBridge(), AUTOFILL_BRIDGE)
             // 直接写 settings.userAgentString（而非仅首帧请求头）：页面内跳转/子请求也保持该 UA
             settings.userAgentString = currentUa()
             // 桌面版页面按 PC 视口渲染，宽度远超手机屏：必须允许缩放 + 宽视口，
@@ -302,6 +489,16 @@ class PluginLoginActivity : Activity() {
                     if (uaMode == "pc") {
                         view.evaluateJavascript(FIX_VIEWPORT_JS, null)
                     }
+                    if (autofillHost.isBlank()) return
+                    // 1) 常驻监听输入框，用户一输入就把账号/密码存到本机
+                    view.evaluateJavascript(captureScript(autofillHost, autofillToken), null)
+                    // 2) 回填上次保存的值；输入框异步渲染或两步式登录时用 MutationObserver 重试
+                    val saved = readAutofill()
+                    fillScript(
+                        autofillHost,
+                        saved.optString("account"),
+                        saved.optString("password"),
+                    ).takeIf { it.isNotBlank() }?.let { view.evaluateJavascript(it, null) }
                 }
             }
         }
