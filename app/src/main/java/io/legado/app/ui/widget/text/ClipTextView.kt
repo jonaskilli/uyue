@@ -31,6 +31,11 @@ class ClipTextView @JvmOverloads constructor(
         val content = text?.toString().orEmpty()
         if (content.isEmpty()) return
         val p = paint
+        // TextView 只在自己的 onDraw() 里执行 mTextPaint.setColor(mCurTextColor)，
+        // 而本类重写 onDraw 且不调用 super，paint 会永远停在构造时的默认纯黑：
+        // 于是 XML 的 android:textColor 与代码里的 setTextColor() 都形同虚设，
+        // 夜间模式下书源列表就是黑字压深底。这里每次绘制前手动同步当前文字色。
+        p.color = currentTextColor
         val fm = p.fontMetrics
         // 垂直居中；从 paddingLeft 起画，右侧超出 View 边界的部分由 Canvas 裁切
         val baseline = height / 2f - (fm.ascent + fm.descent) / 2f

@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import splitties.init.appCtx
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -135,6 +136,13 @@ object SourceVideoPlayerSession {
      * 就只能用内存里那份旧目录，新集要等杀进程重建会话才看得到。
      */
     private var chapterRefreshJob: Job? = null
+    /**
+     * 当前会话是否由「下载记录」离线开播。
+     * 竖滑切到 feed 里的下一部已下载视频时沿用同样的本地优先路径，
+     * 否则会出现「第一部能播、滑到第二部又去联网」的反复。
+     */
+    @Volatile
+    private var offlineSession = false
     /**
      * 预取地址的存活时间。
      *
@@ -345,6 +353,9 @@ object SourceVideoPlayerSession {
     }
 
     fun load(bookUrl: String, startIndex: Int) {
+        // 不再依赖"从哪个入口进来"的标记：任何入口都先试本地缓存。
+        // 之前只有下载列表带 fromDownloads，历史/通知栏/重试/竖滑都会掉回在线链路，
+        // 白名单源随即拉起内置浏览器，把"获取出错"弹到前台挡住播放。
         // **必须在早退分支之前把"切换列表"挂上**。
         // 重新进入播放器时若还是同一部视频（无限刷的续播列表第一条常常就是上次正在看的那条），
         // 下面会走"剧集已就绪"的早退分支；feed 只在 loadInternal 里取的话就永远挂不上，
@@ -368,6 +379,14 @@ object SourceVideoPlayerSession {
                 coverUrl = incomingCover,
                 coverOrigin = if (incomingCover.isBlank()) "" else (incomingOrigin ?: ""),
             )
+        }
+        // 从下载记录进入：只读本地缓存目录 + 下载索引 + 磁盘文件，完全不联网。
+        // 站点挂了、目录表被清也不影响已缓存的 MP4 / 分片缓存（含本地 key.bin）播放；
+        // 联网刷新由 refreshChaptersIfNeeded() 在后台做，只追加新集、失败不动库。
+        // 只要本地有缓存（目录/下载索引 + 磁盘文件）就立即开播，
+        // 目录/详情的联网刷新由 buildOfflineSession 放到后台，结果不弹前台。
+        if (buildOfflineSession(bookUrl, startIndex)) {
+            return
         }
         // 同一本书且剧集已就绪（退出后再打开）：同步索引并重置解析结果。
         // 关键点：重新进入必须把上次的直链/网页地址清空、重新解析，
@@ -454,6 +473,126 @@ object SourceVideoPlayerSession {
     }
 
     /**
+     * 从下载记录进入时的「离线开播」：只读本地库与磁盘，绝不联网、不等待。
+     *
+     * 目录表本来就是本地缓存（bookChapterDao.getChapterList），这里直接读它；
+     * 即使目录被清掉，也能用下载索引里的 index / chapterTitle 还原集号，再按
+     * findLocalFile() 命中合并好的 <标题>.mp4 或带 key.bin 的分片缓存文件夹。
+     * 联网刷新交给 refreshChaptersIfNeeded() 在后台做，只追加新集、失败不动库。
+     *
+     * @return 是否至少命中一个本地可播文件；false 时调用方回退到在线加载。
+     */
+    private fun buildOfflineSession(bookUrl: String, startIndex: Int): Boolean {
+        val book = appDb.bookDao.getBook(bookUrl)
+            ?: VideoDownloader.offlineBook(bookUrl)
+            ?: return false
+        val source = runCatching {
+            appDb.bookSourceDao.getBookSource(book.origin)
+        }.getOrNull() ?: VideoDownloader.offlineSource(bookUrl)
+        // 1) 本地缓存目录：正常情况一直都在，不需要重新联网获取
+        val dbChapters = appDb.bookChapterDao.getChapterList(bookUrl)
+        // 2) 下载索引：目录表缺失时用它还原集号与标题
+        val records = VideoDownloader.offlineEpisodes(bookUrl)
+        val maxIndex = maxOf(dbChapters.lastIndex, records.maxOfOrNull { it.index } ?: -1)
+        if (maxIndex < 0) return false
+        val base = (0..maxIndex).map { i ->
+            dbChapters.getOrNull(i) ?: run {
+                val rec = records.firstOrNull { it.index == i }
+                BookChapter(
+                    url = rec?.chapterUrl.orEmpty(),
+                    title = rec?.title?.takeIf { it.isNotBlank() } ?: "第${i + 1}集",
+                    bookUrl = bookUrl,
+                    index = i,
+                )
+            }
+        }
+        // 磁盘上的文件名是下载当时的集名，目录表里的 title 可能已被站点改过。
+        // 两个名字都试一遍，命中哪个就用哪个（后续 resolveEpisode / 边看边存也靠它），
+        // 否则会出现"明明有缓存却全找不到、掉回在线链路弹浏览器"。
+        val resolved = base.mapIndexed { i, chapter ->
+            val rec = records.firstOrNull { it.index == i }
+            val titles = listOfNotNull(
+                rec?.title?.takeIf { it.isNotBlank() },
+                chapter.title.takeIf { it.isNotBlank() },
+                "第${i + 1}集",
+            ).distinct()
+            val hit = titles.firstNotNullOfOrNull { t ->
+                VideoDownloader.findLocalFile(book.name, i, t)?.let { t to it }
+            }
+            val local = hit?.second
+            val usedTitle = hit?.first ?: chapter.title
+            val fixed = if (local != null && usedTitle != chapter.title) {
+                chapter.copy(title = usedTitle)
+            } else chapter
+            fixed to LocalVideo(
+                uri = local?.let { Uri.fromFile(it) } ?: Uri.EMPTY,
+                name = usedTitle,
+                path = chapter.url,
+                size = local?.length() ?: 0L,
+                dateModified = 0L,
+            )
+        }
+        val merged = resolved.map { it.first }
+        val episodes = resolved.map { it.second }
+        // 一个本地文件都没命中：交给在线路径，别给用户一个空播放器
+        if (episodes.none { it.uri != Uri.EMPTY }) return false
+        // 起始集若没缓存，落到最近的一集已缓存集：
+        // 否则一进页面就对 EMPTY 集联网解析，失败会把内置浏览器弹到前台
+        val wanted = startIndex.coerceIn(0, episodes.lastIndex)
+        val index = if (episodes[wanted].uri != Uri.EMPTY) {
+            wanted
+        } else {
+            episodes.indices
+                .filter { episodes[it].uri != Uri.EMPTY }
+                .minByOrNull { kotlin.math.abs(it - wanted) }
+                ?: wanted
+        }
+        val headers = source?.let { src ->
+            runCatching { HashMap(src.getHeaderMap(true)) }.getOrNull()
+        } ?: HashMap<String, String>()
+        // 会话状态与 loadInternal 对齐：切集、进度、边看边存都复用同一套逻辑
+        this@SourceVideoPlayerSession.book = book
+        this@SourceVideoPlayerSession.source = source
+        this@SourceVideoPlayerSession.chapters = merged
+        resolving.clear()
+        resolvedAt.clear()
+        prefetchedNext = null
+        prefetchJob?.cancel()
+        prefetchJob = null
+        prefetchFailedAt = 0L
+        activeWatchIndex = -1
+        savedIndex = index
+        savedPositionMs = book.durChapterPos.toLong()
+        offlineSession = true
+        _uiState.update {
+            it.copy(
+                loading = false,
+                error = null,
+                playbackError = null,
+                fallbackIndex = null,
+                fallbackLaunched = false,
+                fallbackFailed = null,
+                bookName = book.name,
+                bookUrl = book.bookUrl,
+                sourceOrigin = book.origin,
+                currentIndex = index,
+                startIndex = index,
+                startPositionMs = book.durChapterPos.toLong().coerceAtLeast(0),
+                feedEnabled = (feed?.urls()?.size ?: 0) > 1,
+                reverseOrder = isReverseOrder(book.bookUrl),
+                coverUrl = book.coverUrl ?: "",
+                coverOrigin = book.origin,
+                episodes = episodes,
+                headers = headers,
+            )
+        }
+        markResolvedAt(0, episodes)
+        // 后台刷新只用来发现新集：带超时、失败不改库、不碰当前集
+        refreshChaptersIfNeeded()
+        return true
+    }
+
+    /**
      * 确保"切换列表"已挂到当前视频上：命中现有列表就沿用，否则依次尝试
      * 一次性 feed（[VideoFeedStore.take]）与无限刷常驻 feed（[VideoFeedStore.peekPersistent]）。
      */
@@ -512,9 +651,14 @@ object SourceVideoPlayerSession {
         chapterRefreshJob?.cancel()
         chapterRefreshJob = scope.launch {
             runCatching {
-                // 用库里现取的副本，别把内存那份（播放进度等可能已滞后）直接写回库
-                val target = appDb.bookDao.getBook(b.bookUrl) ?: b
-                VideoSourcePlayer.prepareChapters(target, s, forceRefresh = true)
+                // 后台确认有没有新集：站点延迟/关站时超时即放弃。
+                // 这里只负责"看有没有更新"，绝不写 error、不重建播放器，
+                // 已缓存的集始终按本地记录播放。
+                withTimeout(10_000L) {
+                    // 用库里现取的副本，别把内存那份（播放进度等可能已滞后）直接写回库
+                    val target = appDb.bookDao.getBook(b.bookUrl) ?: b
+                    VideoSourcePlayer.prepareChapters(target, s, forceRefresh = true)
+                }
             }.onSuccess { list ->
                 appendNewChapters(list)
             }.onFailure { e ->
@@ -545,6 +689,8 @@ object SourceVideoPlayerSession {
         this@SourceVideoPlayerSession.book = book
         this@SourceVideoPlayerSession.source = source
         this@SourceVideoPlayerSession.chapters = chapters
+        // 走到了在线加载：后面该视频若解析失败，仍按原逻辑允许回退内置播放器
+        offlineSession = false
         resolving.clear()
         // 换视频了，上一部各集的解析时刻作废（index 是按集序号记的，两部之间不通用）
         resolvedAt.clear()
@@ -795,8 +941,9 @@ object SourceVideoPlayerSession {
                 if (url.isNullOrBlank()
                     || (!url.startsWith("file:") && !url.startsWith("http", ignoreCase = true))
                 ) {
-                    // 预取：只解析不播，避免还没滑到就弹出内置播放器
-                    if (!prefetch) {
+                    // 预取不弹兜底；离线会话里没缓存的集同样不拉起内置播放器：
+                    // 本地缓存照常播，解析失败只留占位，不把"获取出错"抢到前台
+                    if (!prefetch && !offlineSession) {
                         _uiState.update { it.copy(fallbackIndex = index) }
                     }
                     return@onSuccess
@@ -814,8 +961,8 @@ object SourceVideoPlayerSession {
                 // 取消不是失败：不要因为页面切走就把这一集判成"解析不出直链"弹出兜底播放器
                 if (e is CancellationException) return@onFailure
                 AppLog.put("解析第 ${index + 1} 集失败\n${e.localizedMessage}", e)
-                // 预取失败不弹兜底，等用户真滑到这一集再重试
-                if (!prefetch) {
+                // 预取失败不弹兜底；离线会话只记日志，绝不拉起内置浏览器
+                if (!prefetch && !offlineSession) {
                     _uiState.update { s -> s.copy(fallbackIndex = index) }
                 }
             }
@@ -992,6 +1139,9 @@ object SourceVideoPlayerSession {
         }
     }
 
+    /** 当前是否为离线开播会话：界面据此禁止把内置浏览器拉到前台 */
+    fun isOfflineSession(): Boolean = offlineSession
+
     /** 供首页下载等场景取当前书籍/书源/章节列表 */
     fun getBook(): Book? = book
     fun getSource(): BookSource? = source
@@ -1139,6 +1289,7 @@ object SourceVideoPlayerSession {
                 _uiState.update { s -> s.copy(coverUrl = cover, coverOrigin = incomingOrigin ?: "") }
             }
         }
+        // 一律先试本地缓存，切到没有本地文件的视频才走在线加载
         load(url, feed?.startIndexOf(url) ?: 0)
         return true
     }

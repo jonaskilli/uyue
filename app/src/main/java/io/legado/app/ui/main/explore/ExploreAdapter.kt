@@ -35,6 +35,7 @@ import io.legado.app.databinding.ItemFilletTextBinding
 import io.legado.app.databinding.ItemFindBookBinding
 import io.legado.app.databinding.ItemFilletSelectorSingleBinding
 import io.legado.app.databinding.ItemFilletCompleteTextBinding
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.source.clearExploreKindsCache
 import io.legado.app.help.source.exploreKinds
@@ -46,6 +47,7 @@ import io.legado.app.ui.widget.text.AccentTextView
 import io.legado.app.utils.InfoMap
 import io.legado.app.utils.activity
 import io.legado.app.utils.dpToPx
+import io.legado.app.utils.getCompatColor
 import io.legado.app.utils.gone
 import io.legado.app.utils.removeLastElement
 import io.legado.app.utils.setSelectionSafely
@@ -98,12 +100,29 @@ class ExploreAdapter(context: Context, val callBack: CallBack) :
             tvName.text = item.bookSourceName
             tvName.textSize = 13f
             tvName.maxLines = 1
+            // 书源列表文字不依赖 inflate 时的 values-night 解析，直接按主题开关
+            // 取两个不受夜间配置影响的固定色：
+            //   md_dark_primary_text  = #FFFFFFFF（夜间白字）
+            //   md_light_primary_text = #DE000000（白天黑字）
+            // 注意别用 getPrimaryTextColor()：它的参数是「背景是否浅色」，
+            // 传 isNightTheme 会在夜间反而拿到黑字。
+            val night = AppConfig.isNightTheme
+            tvName.setTextColor(
+                context.getCompatColor(
+                    if (night) R.color.md_dark_primary_text
+                    else R.color.md_light_primary_text
+                )
+            )
             // ClipTextView 按像素裁剪：不用省略号，也不按字素簇整段丢弃，
             // 最后一个字哪怕只显示一半也要显示出来
             tvName.ellipsize = null
             val selected = item.bookSourceUrl == selectedSourceUrl
             llTitle.setBackgroundColor(
-                if (selected) Color.argb(70, 128, 128, 128) else Color.TRANSPARENT
+                when {
+                    !selected -> Color.TRANSPARENT
+                    night -> Color.argb(70, 255, 255, 255)
+                    else -> Color.argb(70, 128, 128, 128)
+                }
             )
             ivStatus.gone()
             rotateLoading.gone()

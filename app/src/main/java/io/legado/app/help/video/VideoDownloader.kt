@@ -684,6 +684,43 @@ object VideoDownloader {
     fun downloadedBookUrls(): List<String> =
         _videoGroups.value.mapNotNull { g -> g.key.takeUnless { it.startsWith("dir:") } }
 
+    /** 离线播放用：下载记录里某一集的信息（目录表缺失时靠它还原播放列表） */
+    data class OfflineEpisode(
+        val index: Int,
+        val title: String,
+        val chapterUrl: String,
+        val completed: Boolean,
+    )
+
+    /**
+     * 离线播放用：按 bookUrl 取出下载索引里的集（序号 / 标题 / 章节地址）。
+     * 纯本地读取，不联网；目录表被清掉或从未成功拉过目录时，
+     * 靠这份记录也能把磁盘上的 MP4、分片缓存还原成可播列表。
+     */
+    fun offlineEpisodes(bookUrl: String): List<OfflineEpisode> =
+        synchronized(statesMap) {
+            statesMap.values
+                .filter { it.task.book.bookUrl == bookUrl }
+                .map {
+                    OfflineEpisode(
+                        it.task.index,
+                        it.task.chapter.title,
+                        it.task.chapter.url,
+                        it.status == DlStatus.COMPLETED,
+                    )
+                }
+        }.sortedBy { it.index }
+
+    /** 书库里这本书已被删时，从下载记录兜底取回 Book（含剧名，用来定位保存目录） */
+    fun offlineBook(bookUrl: String): Book? = synchronized(statesMap) {
+        statesMap.values.firstOrNull { it.task.book.bookUrl == bookUrl }?.task?.book
+    }
+
+    /** 同上：书源被删时兜底，供后台刷新目录用 */
+    fun offlineSource(bookUrl: String): BookSource? = synchronized(statesMap) {
+        statesMap.values.firstOrNull { it.task.book.bookUrl == bookUrl }?.task?.source
+    }
+
     /** 某部视频第一集已下载的集序号；一集都没下完则返回 null */
     fun firstCompletedIndex(bookUrl: String): Int? =
         synchronized(statesMap) {

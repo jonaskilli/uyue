@@ -33,6 +33,7 @@ import io.legado.app.ui.book.search.SearchScope
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.main.explore.compose.ExplorePane
+import io.legado.app.ui.main.explore.compose.ExplorePaneTheme
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.flowWithLifecycleAndDatabaseChange
 import io.legado.app.utils.setEdgeEffectColor
@@ -88,11 +89,13 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
                 ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed
             )
             setContent {
-                ExplorePane(
-                    viewModel = paneViewModel,
-                    onBookClick = { book -> openBookInfo(book) },
-                    onBookLongClick = { book -> openBookInfo(book) }
-                )
+                ExplorePaneTheme {
+                    ExplorePane(
+                        viewModel = paneViewModel,
+                        onBookClick = { book -> openBookInfo(book) },
+                        onBookLongClick = { book -> openBookInfo(book) }
+                    )
+                }
             }
         }
         initRecyclerView()

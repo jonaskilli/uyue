@@ -56,6 +56,7 @@ import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.main.explore.ExploreAdapter
 import io.legado.app.ui.main.explore.ExplorePaneViewModel
 import io.legado.app.ui.main.explore.compose.ExplorePane
+import io.legado.app.ui.main.explore.compose.ExplorePaneTheme
 import io.legado.app.ui.main.explore.ExploreDiffItemCallBack
 import io.legado.app.ui.main.video.VideoHistoryActivity
 import io.legado.app.utils.applyTint
@@ -131,14 +132,16 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
                 ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed
             )
             setContent {
-                ExplorePane(
-                    viewModel = paneViewModel,
-                    // 左侧分类列表走旧版 ExploreShowActivity 的「点封面即播」链路：
-                    // 全屏播放 + 当前分类作为切换列表。showBookInfo 是搜索结果专用的
-                    // 首页模式(homeMode = true)，两者不能混用。
-                    onBookClick = { book -> playPaneVideo(book) },
-                    onBookLongClick = { book -> openPaneBookInfo(book) }
-                )
+                ExplorePaneTheme {
+                    ExplorePane(
+                        viewModel = paneViewModel,
+                        // 左侧分类列表走旧版 ExploreShowActivity 的「点封面即播」链路：
+                        // 全屏播放 + 当前分类作为切换列表。showBookInfo 是搜索结果专用的
+                        // 首页模式(homeMode = true)，两者不能混用。
+                        onBookClick = { book -> playPaneVideo(book) },
+                        onBookLongClick = { book -> openPaneBookInfo(book) }
+                    )
+                }
             }
         }
         initRecyclerView()
@@ -477,6 +480,10 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
         binding.composeVideoPane.isGone = searching
         binding.paneDivider.isGone = searching
         val lp = binding.rvFind.layoutParams as ConstraintLayout.LayoutParams
+        // 非搜索时右侧书源列表从全宽头部（源名 + 分类条）下方开始；
+        // 搜索时头部隐藏、列表全宽，顶上不再需要这段偏移
+        lp.topMargin = if (searching) 0 else
+            resources.getDimensionPixelSize(R.dimen.pane_header_height)
         if (searching) {
             lp.leftToRight = ConstraintLayout.LayoutParams.UNSET
             lp.leftToLeft = ConstraintLayout.LayoutParams.PARENT_ID

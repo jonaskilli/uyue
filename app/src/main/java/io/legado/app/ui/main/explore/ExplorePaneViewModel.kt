@@ -28,6 +28,9 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
     val loading = MutableLiveData(false)
     val message = MutableLiveData<String?>(null)
     val page = MutableLiveData(1)
+    /** 换源 / 换分类 / 刷新（全新内容）时自增，用来把列表滚回顶部；
+     *  自动分页 loadMore 不触发，否则加载下一页会把用户弹回顶部 */
+    val contentEpoch = MutableLiveData(0)
 
     private var source: BookSource? = null
     private var sourceUrl: String? = null
@@ -35,10 +38,10 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
     /** 仅用于区分发现页 / 视频页各自的网格列表偏好键 */
     var videoPage = false
     /** 自动分页：原子防重复 + 空结果停止 + 换源代际校验 */
-    /** 网格/列表状态按页面分别记住，退出 APP 再进不再回到列表 */
+    /** 网格/列表状态按页面分别记住；没有保存过偏好时默认网格 */
     var gridMode: Boolean
         get() = context.getPrefBoolean(
-            if (videoPage) "videoPaneGridMode" else "explorePaneGridMode", false
+            if (videoPage) "videoPaneGridMode" else "explorePaneGridMode", true
         )
         set(value) {
             context.putPrefBoolean(
@@ -50,6 +53,7 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
     private var loadingMore = false
     private var hasMore = true
     private var generation = 0
+    private var epoch = 0
     /** 当前源所有在飞的请求；切源时全部 cancel，OkHttp 底层会真的 call.cancel() */
     private val inflight = Collections.synchronizedSet(mutableSetOf<Coroutine<*>>())
 
@@ -64,6 +68,7 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
             inflight.clear()
         }
         generation++
+        contentEpoch.postValue(++epoch)
         loadingMore = false
         hasMore = true
         loading.postValue(false)

@@ -15,7 +15,9 @@
         app:layout_constraintTop_toTopOf="parent"
         app:title="@string/discovery" />
 
-    <!-- 左 75%：Max 版式的内容区（分类 + 带封面书籍），右 25%：原书源列表 -->
+    <!-- 顶部整行让给「源名/刷新/网格 + 分类条」（全宽），下面才是
+         左 70% 内容区 + 右 30% 书源列表。ComposeView 横跨全宽，
+         内部把内容区限制在左 70%，右侧空出来给 rv_find。 -->
     <androidx.constraintlayout.widget.Guideline
         android:id="@+id/guideline_pane"
         android:layout_width="wrap_content"
@@ -28,7 +30,7 @@
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintLeft_toLeftOf="parent"
-        app:layout_constraintRight_toLeftOf="@id/guideline_pane"
+        app:layout_constraintRight_toRightOf="parent"
         app:layout_constraintTop_toBottomOf="@id/title_bar"
         app:layout_constraintBottom_toBottomOf="parent" />
 
@@ -36,9 +38,10 @@
         android:id="@+id/pane_divider"
         android:layout_width="1dp"
         android:layout_height="0dp"
-        android:background="@android:color/darker_gray"
+        android:background="@color/darker_gray"
         app:layout_constraintLeft_toLeftOf="@id/guideline_pane"
-        app:layout_constraintTop_toBottomOf="@id/title_bar"
+        app:layout_constraintTop_toTopOf="@id/compose_explore_pane"
+        android:layout_marginTop="@dimen/pane_header_height"
         app:layout_constraintBottom_toBottomOf="parent" />
 
     <io.legado.app.ui.widget.recycler.RecyclerViewAtPager2
@@ -47,7 +50,8 @@
         android:layout_height="0dp"
         app:layout_constraintLeft_toRightOf="@id/guideline_pane"
         app:layout_constraintRight_toRightOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/title_bar"
+        app:layout_constraintTop_toTopOf="@id/compose_explore_pane"
+        android:layout_marginTop="@dimen/pane_header_height"
         app:layout_constraintBottom_toBottomOf="parent"
         tools:listitem="@layout/item_find_book" />
 
