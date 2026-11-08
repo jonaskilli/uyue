@@ -30,6 +30,11 @@ import io.legado.app.utils.toastOnUi
 import splitties.init.appCtx
 import java.io.File
 import io.legado.app.utils.FileUtils
+import io.legado.app.help.book.BookHelp
+import io.legado.app.service.AiEffectStore
+import io.legado.app.service.BgmTimelineStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.net.InetAddress
 
 @Suppress("MemberVisibilityCanBePrivate", "ConstPropertyName")
@@ -1184,6 +1189,25 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
                 FileUtils.delete(it.absolutePath)
             }
         }
+    }
+
+    /**
+     * 清理全部临时缓存：
+     * - 朗读音频缓存（httpTTS / httpTTS_cache / systemTTS）
+     * - 应用内部 cacheDir、externalCacheDir（系统垃圾清理会扫到的临时文件）
+     * - BGM / AI 音效识别记录
+     *
+     * 不删 book_cache（已下载书籍/章节正文）、书架数据库、外部 Download 配置。
+     * 目录只清空内容不删根，避免 lazy File 缓存路径失效。
+     */
+    suspend fun clearAllAppCache() = withContext(Dispatchers.IO) {
+        clearTtsCache()
+        BookHelp.clearInternalCache()
+        appCtx.externalCacheDir?.let {
+            FileUtils.delete(it.absolutePath, false)
+        }
+        BgmTimelineStore.clearAll()
+        AiEffectStore.clearAll()
     }
 
     /**

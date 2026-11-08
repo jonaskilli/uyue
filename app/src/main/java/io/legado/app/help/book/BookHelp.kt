@@ -75,7 +75,9 @@ object BookHelp {
      * 必须在后台线程调用。
      */
     fun clearInternalCache() {
-        FileUtils.delete(appCtx.cacheDir.absolutePath)
+        // 只清空目录内容，保留 cacheDir 根目录：部分模块的缓存路径是 lazy File，
+        // 删掉根目录后不会自动重建，下次写缓存可能失败。
+        FileUtils.delete(appCtx.cacheDir.absolutePath, false)
     }
 
     /**

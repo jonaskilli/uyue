@@ -33,6 +33,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ThemeConfig
 import io.legado.app.help.loadGif
+import io.legado.app.help.MiyueKeyManager
 import io.legado.app.lib.dialogs.selector
 import io.legado.app.lib.theme.ThemeStore
 import io.legado.app.lib.theme.bottomBackground
@@ -80,7 +81,8 @@ import android.view.MotionEvent
 import android.view.Window
 import androidx.appcompat.app.AlertDialog
 
-class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
+class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud),
+    SpeakEngineDialog.CallBack {
 
     companion object {
         /** 弹幕发射统一延后时长（毫秒）：AI 弹幕按段落起点触发，延后 1 秒让弹幕与朗读情节对齐 */
@@ -334,11 +336,18 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
 
     override fun onStart() {
         super.onStart()
+        // 书籍级/全局引擎都可能在别处改过，每次显示都按当前引擎重算左侧按钮
+        updateTtsAppButton()
         // 根据是否显示封面字幕面板，选择全屏延伸 / 底部面板两套窗口模式。
         // 不附加 isRun 条件：未朗读时也要能显示全屏界面并左右滑切换
         applyWindowMode(AppConfig.showReadAloudCoverSubtitle)
         // 必须在 applyWindowMode 之后：isFullscreen 由它赋值，顺序颠倒会导致手势挂不上
         installWindowGestures()
+    }
+
+    /** 朗读引擎选择页点「本书 / 全局」后回调，立刻把左侧按钮切成对应状态 */
+    override fun upSpeakEngineSummary() {
+        if (view != null) updateTtsAppButton()
     }
 
     override fun onStop() {
@@ -1070,10 +1079,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
         llConfigList.setOnClickListener {
             startActivity(android.content.Intent(requireContext(), io.legado.app.ui.tts.plugin.TtsPluginActivity::class.java))
         }
-        // 打开当前 TTS 应用
-        llOpenTtsApp.setOnClickListener {
-            openCurrentTtsApp()
-        }
+        // 左侧按钮按当前引擎在 updateTtsAppButton() 里设置文字/图标/点击目标：
+        // 内置TTS插件 → 密钥管理；其它引擎 → 保持打开当前 TTS 应用
         // 打开朗读引擎选择页面
         llSpeakEngine.setOnClickListener {
             SpeakEngineDialog().show(childFragmentManager, "speakEngineDialog")
@@ -2014,6 +2021,31 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud) {
                 cancelAiHistoryReset()
                 aiHistoryImages = emptyList()
                 aiHistoryIndex = -1
+            }
+        }
+    }
+
+    /**
+     * 左侧按钮按当前朗读引擎切换：
+     * - 内置TTS插件：图标/文字变成「密钥管理」，点击复用角色管理顶部「密钥管理」
+     *   的入口 [MiyueKeyManager.restoreKey]，一步直达；
+     * - 其它引擎：保持原来的「TTS应用」与打开 TTS 应用逻辑。
+     *
+     * 判定复用 [CharacterVoiceHelper.isUsingBuiltinTtsPlugin]，与目录切换、
+     * 强制转 WAV 用的是同一套规则。
+     */
+    private fun updateTtsAppButton() = binding.run {
+        val builtin = CharacterVoiceHelper.isUsingBuiltinTtsPlugin()
+        ivOpenTtsApp.setImageResource(
+            if (builtin) R.drawable.ic_lock_outline else R.drawable.ic_tts_app
+        )
+        ivOpenTtsApp.setColorFilter(tvCatalog.currentTextColor)
+        tvOpenTtsApp.text = if (builtin) "密钥管理" else "TTS应用"
+        llOpenTtsApp.setOnClickListener {
+            if (builtin) {
+                MiyueKeyManager.restoreKey(requireContext())
+            } else {
+                openCurrentTtsApp()
             }
         }
     }

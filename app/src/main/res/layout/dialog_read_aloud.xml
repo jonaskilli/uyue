@@ -320,12 +320,14 @@
             android:padding="4dp">
 
             <androidx.appcompat.widget.AppCompatImageView
+                android:id="@+id/iv_open_tts_app"
                 android:layout_width="24dp"
                 android:layout_height="24dp"
                 android:src="@drawable/ic_tts_app"
                 app:tint="@color/primaryText" />
 
             <TextView
+                android:id="@+id/tv_open_tts_app"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
