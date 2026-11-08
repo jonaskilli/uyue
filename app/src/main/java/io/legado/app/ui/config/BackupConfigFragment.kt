@@ -342,12 +342,36 @@ class BackupConfigFragment : PreferenceFragment(),
     }
 
     /**
-     * TTS 备份入口: 没配 webDav 就直接导出到本地, 配了就让用户选导出到哪
+     * TTS 备份入口: 先在 IO 线程统计各模块大小, 再弹多选让用户勾选。
      */
     private fun ttsBackup() {
-        val items = TtsBackup.packableItems()
-        val titles = items.map { it.title }.toTypedArray()
-        val checked = BooleanArray(items.size) { true }
+        waitDialog.setText("统计备份内容…")
+        waitDialog.show()
+        val job = lifecycleScope.launch {
+            try {
+                val items = withContext(IO) { TtsBackup.packableItems() }
+                if (!isAdded) return@launch
+                showTtsBackupPicker(items)
+            } catch (e: Throwable) {
+                currentCoroutineContext().ensureActive()
+                AppLog.put("统计TTS备份内容失败\n${e.localizedMessage}", e)
+                appCtx.toastOnUi("统计TTS备份内容失败\n${e.localizedMessage}")
+            } finally {
+                waitDialog.dismiss()
+            }
+        }
+        waitDialog.setOnCancelListener {
+            job.cancel()
+        }
+    }
+
+    private fun showTtsBackupPicker(items: List<TtsBackup.TtsBackupItem>) {
+        val titles = items.map { "${it.title}（${it.detail}）" }.toTypedArray()
+        // 角色立绘在外部文件夹且体积可能很大，默认不参与备份；
+        // 只有手动勾上才会写进 zip，其余模块仍保持默认全选。
+        val checked = BooleanArray(items.size) { index ->
+            items[index].key != TtsBackup.K_AVATARS
+        }
         // 与恢复同理: 提示只能放标题, setMessage 会让 multiChoiceItems 整个不渲染
         val title = "%s（%s）".format(
             getString(R.string.tts_backup_t),

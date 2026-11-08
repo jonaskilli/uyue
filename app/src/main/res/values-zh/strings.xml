@@ -813,11 +813,11 @@
     <string name="restore_summary">优先从 WebDav 恢复，长按从本地恢复</string>
     <string name="import_old_summary">选择旧版备份文件夹</string>
     <string name="tts_backup_t">TTS/AI 备份</string>
-    <string name="tts_backup_s">单独导出朗读脚本、TTS插件、混元太极、AI模板等，不写入主备份</string>
-    <string name="tts_backup_pick_msg">勾选要备份的内容，默认全选</string>
+    <string name="tts_backup_s">单独导出朗读脚本、TTS插件、混元太极、AI模板、朗读/AI设置与角色立绘等，不写入主备份</string>
+    <string name="tts_backup_pick_msg">勾选要备份的内容，括号内为大小；角色立绘默认不勾选</string>
     <string name="tts_restore_t">TTS/AI 恢复</string>
-    <string name="tts_restore_s">从 TTS 备份文件导入，同名配置会被覆盖</string>
-    <string name="tts_restore_pick_msg">勾选要恢复的内容，默认全选</string>
+    <string name="tts_restore_s">从 TTS 备份文件导入，可勾选要恢复的内容，同名配置会被覆盖</string>
+    <string name="tts_restore_pick_msg">勾选要恢复的内容，括号内为大小，默认全选</string>
     <string name="character_profile_manage">角色档案总揽</string>
     <string name="character_profile_empty">还没有任何角色档案。\n朗读过程中 AI 自动建档后，会按书集中显示在这里。</string>
     <string name="character_profile_delete_title">删除角色档案</string>

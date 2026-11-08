@@ -943,6 +943,8 @@ sk-aaa@@sk-bbb@@sk-ccc
                 toastOnUi("已将「${tmpl.name}」从当前书籍移除")
             }
         }
+        // getBoundTemplateIds 已过滤掉指向已删除/不可用模板的旧记录，
+        // 这里显示的就是当前实际生效的绑定数，和生图轮换使用的列表一致
         val boundCount = AiImageGenerator.getBoundTemplateIds(book.name, book.bookUrl).size
         bindHint.text = if (boundCount == 0) {
             "未绑定任何模板，将使用默认模板。可开启多个模板实现轮换生图。"

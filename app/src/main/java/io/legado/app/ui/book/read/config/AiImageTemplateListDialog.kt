@@ -85,6 +85,9 @@ class AiImageTemplateListDialog : BaseDialogFragment(R.layout.dialog_ai_image_te
         val bookName = book?.name.orEmpty()
         val bookUrl = book?.bookUrl.orEmpty()
         execute {
+            // 打开列表时先清掉指向已删除/不可用模板的旧绑定记录，
+            // 保证开关状态与「已绑定 N 个」的计数都按当前数据库里的模板算
+            AiImageGenerator.getBoundTemplateIds(bookName, bookUrl)
             appDb.aiImageTemplateDao.getAllList()
         }.onSuccess(Dispatchers.Main) { list ->
             val adapter = AiImageTemplateListAdapter(
