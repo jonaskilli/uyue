@@ -3,6 +3,8 @@
 // Kotlin 侧以函数调用方式驱动；慢的 HTTP 请求由 Kotlin 并发调度。
 // 可用绑定：analysisJson / taskJson / recordsJson / nameResultJson / aliasMetaJson / body / java
 var MAX_CHARACTER = 800;
+var AI_TIMEOUT = 25000;
+var MAX_RACE_RETRY = 5;
 var NL = String.fromCharCode(10);
 var DEFAULT_API_CONFIG = {
     endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
@@ -88,10 +90,10 @@ function _apiConfigs(scene, keyIndex) {
     if (list.length === 0) list = [DEFAULT_API_CONFIG];
     return list;
 }
-function _requestList(systemPrompt, userContent, scene, keyIndex) {
+function _requestList(systemPrompt, userContent, scene, keyIndex, expectedKeys) {
     var cfgs = _apiConfigs(scene, keyIndex || 0);
     var out = [];
-    for (var i = 0; i < 3; i++) {
+    for (var i = 0; i < MAX_RACE_RETRY; i++) {
         var cfg = cfgs[((keyIndex || 0) + i) % cfgs.length];
         var body = JSON.stringify({
             model: cfg.model,
@@ -110,7 +112,10 @@ function _requestList(systemPrompt, userContent, scene, keyIndex) {
             url: cfg.endpoint,
             method: "POST",
             body: body,
-            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + cfg.key }
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + cfg.key },
+            timeout: AI_TIMEOUT,
+            validScene: scene === "alias" ? "alias" : "name",
+            validExpected: _isArray(expectedKeys) ? expectedKeys : []
         }));
     }
     return out;
@@ -213,7 +218,9 @@ function prepareNameRequest(taskJson) {
     var above = String(t.above || "");
     if (above !== "") userContent += "【上文历史内容】" + NL + above + NL;
     userContent += "【当前待分析对话内容】" + NL + seq.text;
-    var requests = _requestList(buildAnalyzePrompt(), userContent, "name", t.keyIndex || 0);
+    var expectedKeys = [];
+    for (var ei = 0; ei < seq.pairs.length; ei++) expectedKeys.push(seq.pairs[ei].localSeq);
+    var requests = _requestList(buildAnalyzePrompt(), userContent, "name", t.keyIndex || 0, expectedKeys);
     return JSON.stringify({ requests: requests, pairs: seq.pairs });
 }
 
@@ -354,7 +361,9 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
             "【输出要求】" + NL +
             "输出严格JSON格式，键为序号（如" + Q + "01" + Q + "），值为 {isAlias: true/false, mainName: " + Q + "匹配的主名或null" + Q + "}。" + NL +
             "必须覆盖所有序号。";
-        requests = _requestList("严格遵守格式要求，仅输出JSON", prompt, "alias", t.keyIndex || 0);
+        var aliasExpectedKeys = [];
+        for (var aki = 0; aki < unknown.length; aki++) aliasExpectedKeys.push(padZero(aki + 1, 2));
+        requests = _requestList("严格遵守格式要求，仅输出JSON", prompt, "alias", t.keyIndex || 0, aliasExpectedKeys);
     }
     return JSON.stringify({
         requests: requests,

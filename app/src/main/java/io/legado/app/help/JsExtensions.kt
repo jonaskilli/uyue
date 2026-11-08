@@ -293,6 +293,163 @@ interface JsExtensions : JsEncodeUtils {
         return resultRef.get()
     }
 
+    /**
+     * 阶梯式并发竞速访问网络：
+     * - 第 1 阶立刻发；
+     * - 任一阶返回 body 后，先校验业务 JSON；
+     * - 校验失败或 HTTP 失败，立刻放行下一阶，不等固定阶梯时间；
+     * - 若前序请求一直无结果，则仍按 delayMs 阶梯时间自动放行后续请求；
+     * - 只有合法业务结果才算成功并返回。
+     *
+     * 每个 request JSON 可携带：
+     *   timeout: 单请求超时毫秒
+     *   validScene: "name" / "alias"
+     *   validExpected: ["01","02",...] 本次必须覆盖的局部序号
+     */
+    fun ajaxRaceDelayedValidated(
+        requestList: Array<String>,
+        delayMs: Long = 25_000L
+    ): String? {
+        if (requestList.isEmpty()) return null
+        val stageCount = requestList.size
+        val stageDelay = delayMs.coerceAtLeast(0L)
+        val requestTimeout = requestTimeoutOf(requestList[0])
+        val maxWait = (stageCount - 1).coerceAtLeast(0) * stageDelay + requestTimeout + 10_000L
+        val resultLatch = CountDownLatch(1)
+        val resultRef = AtomicReference<String?>(null)
+        val stageGates = Array(stageCount) { CountDownLatch(1) }
+        stageGates[0].countDown()
+
+        val timerThreads = mutableListOf<Thread>()
+        for (i in 1 until stageCount) {
+            val timer = Thread {
+                try {
+                    Thread.sleep(i * stageDelay)
+                } catch (_: InterruptedException) {
+                    // ignore
+                } finally {
+                    stageGates[i].countDown()
+                }
+            }
+            timer.isDaemon = true
+            timerThreads.add(timer)
+            timer.start()
+        }
+
+        val completed = AtomicInteger(0)
+        val workerThreads = mutableListOf<Thread>()
+        requestList.forEachIndexed { index, reqJson ->
+            val thread = Thread {
+                try {
+                    if (resultRef.get() != null) return@Thread
+                    stageGates[index].await(maxWait, TimeUnit.MILLISECONDS)
+                    if (resultRef.get() != null) return@Thread
+                    val result = runCatching {
+                        executeAjaxRequest(reqJson, ignoreTimeout = false)
+                    }.onFailure {
+                        AppLog.put("ajaxRaceDelayedValidated error\n${it.localizedMessage}", it)
+                    }.getOrNull()
+                    val valid = result != null && isValidAiRaceBody(result, reqJson)
+                    if (valid && resultRef.compareAndSet(null, result)) {
+                        resultLatch.countDown()
+                    } else {
+                        AppLog.put("ajaxRaceDelayedValidated: 第${index + 1}阶未返回有效结果")
+                        if (index + 1 < stageCount) stageGates[index + 1].countDown()
+                    }
+                } catch (_: InterruptedException) {
+                    // ignore
+                } finally {
+                    if (resultRef.get() == null && index + 1 < stageCount) {
+                        stageGates[index + 1].countDown()
+                    }
+                    if (completed.incrementAndGet() == stageCount) {
+                        resultLatch.countDown()
+                    }
+                }
+            }
+            thread.isDaemon = true
+            workerThreads.add(thread)
+            thread.start()
+        }
+
+        runCatching {
+            resultLatch.await(maxWait, TimeUnit.MILLISECONDS)
+        }
+        workerThreads.forEach { it.interrupt() }
+        timerThreads.forEach { it.interrupt() }
+        return resultRef.get()
+    }
+
+    private fun requestTimeoutOf(reqJson: String): Long {
+        return runCatching {
+            val obj = org.json.JSONObject(reqJson)
+            when (val raw = obj.opt("timeout")) {
+                is Number -> raw.toLong()
+                else -> raw?.toString()?.toLongOrNull() ?: 25_000L
+            }
+        }.getOrDefault(25_000L).coerceAtLeast(1_000L)
+    }
+
+    private fun isValidAiRaceBody(body: String, reqJson: String): Boolean = runCatching {
+        val req = org.json.JSONObject(reqJson)
+        val scene = req.optString("validScene")
+        val expected = linkedSetOf<Int>()
+        val expectedArray = req.optJSONArray("validExpected")
+        if (expectedArray != null) {
+            for (i in 0 until expectedArray.length()) {
+                expectedArray.optString(i).toIntOrNull()?.let { expected.add(it) }
+            }
+        }
+        val outer = org.json.JSONObject(body)
+        val choices = outer.optJSONArray("choices") ?: return@runCatching false
+        val message = choices.optJSONObject(0)?.optJSONObject("message")
+            ?: return@runCatching false
+        val content = message.optString("content")
+        if (content.isBlank()) return@runCatching false
+        val parsed = extractAiJsonObject(content) ?: return@runCatching false
+        val got = linkedSetOf<Int>()
+        val keys = parsed.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val seq = key.toIntOrNull() ?: return@runCatching false
+            val item = parsed.optJSONObject(key) ?: return@runCatching false
+            if (scene == "alias") {
+                if (item.opt("isAlias") !is Boolean) return@runCatching false
+                if (!item.has("mainName")) return@runCatching false
+            } else {
+                if (item.optString("name").isBlank()
+                    || item.optString("gender").isBlank()
+                    || item.optString("age").isBlank()
+                ) return@runCatching false
+            }
+            got.add(seq)
+        }
+        if (got.isEmpty()) return@runCatching false
+        return@runCatching expected.all { it in got }
+    }.getOrDefault(false)
+
+    private fun extractAiJsonObject(content: String): org.json.JSONObject? {
+        var c = content.trim()
+        if (c.startsWith("```")) {
+            c = c.substring(3).trim()
+            if (c.regionMatches(0, "json", 0, 4, true)) c = c.substring(4).trim()
+            val end = c.lastIndexOf("```")
+            if (end >= 0) c = c.substring(0, end).trim()
+        }
+        val candidates = mutableListOf<String>()
+        val first = c.indexOf('{')
+        val last = c.lastIndexOf('}')
+        if (first >= 0 && last > first) candidates.add(c.substring(first, last + 1))
+        candidates.add(c)
+        candidates.add("{" + c + "}")
+        for (candidate in candidates) {
+            runCatching {
+                return org.json.JSONObject(candidate)
+            }
+        }
+        return null
+    }
+
 /**
  * 响应头侧存：把本次请求的全部响应头（含 Set-Cookie）按 URL 写入 response_headers.json。
  *

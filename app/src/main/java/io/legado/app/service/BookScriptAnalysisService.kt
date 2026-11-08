@@ -793,7 +793,7 @@ class BookScriptAnalysisService : BaseService() {
         if (requests.isEmpty()) return@withContext null
         aiSemaphore.acquire()
         try {
-            analysisJsExtensions.ajaxRaceDelayed(requests, RACE_DELAY)
+            analysisJsExtensions.ajaxRaceDelayedValidated(requests, RACE_DELAY)
         } finally {
             aiSemaphore.release()
         }
