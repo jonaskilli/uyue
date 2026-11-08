@@ -38,7 +38,7 @@ import java.util.concurrent.ConcurrentHashMap
  * 根据朗读场景（背景音乐切换）生成 AI 图片，与 BGM 同步切换，使用 BGM 收集的文本。
  *
  * 配置以「模板」为单位存储在数据库（AiImageTemplate）。
- * 每本书可绑定一个模板；未显式绑定时使用默认模板。
+ * 每本书可绑定多个模板轮换生图；未显式绑定或绑定全部失效时使用默认模板。
  * 生图失败时用原提示词重试一次，再失败则放弃本次生图，等待下次触发。
  */
 object AiImageGenerator {
@@ -146,22 +146,28 @@ object AiImageGenerator {
     // ========== 模板与书籍绑定（支持多模板轮换） ==========
 
     /**
+     * 模板是否真的能用于生图：
+     * - 接口地址与模型名齐全；或
+     * - 地址、模型名、密钥全空（走内置 Gradio 免费兜底）。
+     * 只填了一部分的模板发不出请求，不应算作「已绑定」。
+     */
+    private fun isTemplateUsable(template: AiImageTemplate): Boolean {
+        val allBlank = template.modelUrl.isBlank()
+                && template.modelName.isBlank()
+                && template.modelKey.isBlank()
+        val hasUrlAndName = template.modelUrl.isNotBlank() && template.modelName.isNotBlank()
+        return hasUrlAndName || allBlank
+    }
+
+    /**
      * 获取书籍当前生效的模板列表。
-     * 若该书籍绑定了多个模板则返回这些模板；未绑定时返回默认模板。
+     * 只返回数据库中仍存在、且可用于生图的绑定模板；无有效绑定时回退默认模板。
      * 生图时按场景索引轮换使用列表中的模板。
      * 绑定维度为【书名】（换书源不失效），bookUrl 仅用于兼容旧版数据。
      */
     fun getActiveTemplates(bookName: String, bookUrl: String): List<AiImageTemplate> {
-        val boundIds = getBoundTemplateIds(bookName, bookUrl)
-        if (boundIds.isNotEmpty()) {
-            val templates = boundIds.mapNotNull { appDb.aiImageTemplateDao.getById(it) }
-                .filter { t ->
-                    val allBlank = t.modelUrl.isBlank() && t.modelName.isBlank() && t.modelKey.isBlank()
-                    val hasUrlAndName = t.modelUrl.isNotBlank() && t.modelName.isNotBlank()
-                    hasUrlAndName || allBlank
-                }
-            if (templates.isNotEmpty()) return templates
-        }
+        val templates = getBoundTemplates(bookName, bookUrl)
+        if (templates.isNotEmpty()) return templates
         val default = appDb.aiImageTemplateDao.getDefault() ?: builtinDefaultTemplate()
         return listOf(default)
     }
@@ -171,10 +177,23 @@ object AiImageGenerator {
         return appDb.aiImageTemplateDao.getDefault()?.id ?: DEFAULT_TEMPLATE_ID
     }
 
-    /** 读取书籍绑定的模板 id 列表，未绑定返回空列表（表示使用默认模板）。按书名绑定，兼容旧版 bookUrl 数据 */
+    /** 当前书籍实际绑定且仍可用的模板对象，顺序与绑定列表一致 */
+    fun getBoundTemplates(bookName: String, bookUrl: String): List<AiImageTemplate> =
+        getBoundTemplateIds(bookName, bookUrl)
+            .mapNotNull { appDb.aiImageTemplateDao.getById(it) }
+            .filter { isTemplateUsable(it) }
+
+    /**
+     * 读取书籍绑定的模板 id 列表，未绑定返回空列表（表示使用默认模板）。
+     *
+     * 恢复备份后可能残留指向已删除模板的 id。这里按当前数据库逐一校验，
+     * 顺手把失效/重复 id 从 SharedPreferences 里清掉，让计数、绑定开关、
+     * 生图轮换和 [MAX_BOUND_TEMPLATES] 上限判断用的是同一份「实际生效」列表。
+     * 按书名绑定，兼容旧版 bookUrl 数据。
+     */
     fun getBoundTemplateIds(bookName: String, bookUrl: String): List<Long> {
         if (bookName.isBlank() && bookUrl.isBlank()) return emptyList()
-        return AiImageBookPrefs.getString(
+        val rawIds = AiImageBookPrefs.getString(
             PreferKey.aiImageTemplateBindNamePrefix,
             PreferKey.aiImageTemplateBindPrefix,
             bookName,
@@ -184,6 +203,16 @@ object AiImageGenerator {
             ?.mapNotNull { it.trim().toLongOrNull() }
             ?.filter { it > 0 }
             ?: emptyList()
+        if (rawIds.isEmpty()) return emptyList()
+        val validIds = rawIds.distinct().filter { id ->
+            val template = appDb.aiImageTemplateDao.getById(id)
+            template != null && isTemplateUsable(template)
+        }
+        // 有失效/重复记录：回写清理后的列表，避免下次重复校验，也让旧版 bookUrl key 同步
+        if (validIds.size != rawIds.size) {
+            setBoundTemplateIds(bookName, bookUrl, validIds)
+        }
+        return validIds
     }
 
     /** 设置书籍绑定的模板 id 列表（按书名存储，同时同步旧版 bookUrl key） */
@@ -260,7 +289,7 @@ object AiImageGenerator {
 
     /**
      * 判断书籍是否绑定了指定模板。按书名判断，兼容旧版 bookUrl 数据。
-     * 未显式绑定时视为绑定到默认模板。
+     * 未显式绑定、或绑定记录已全部失效时，视为绑定到默认模板。
      */
     fun isBookBoundToTemplate(bookName: String, bookUrl: String, templateId: Long, isDefault: Boolean): Boolean {
         val ids = getBoundTemplateIds(bookName, bookUrl)
