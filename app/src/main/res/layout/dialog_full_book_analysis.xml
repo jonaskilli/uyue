@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingTop="6dp"
+    android:paddingBottom="10dp">
+
+    <TextView
+        android:id="@+id/tv_analysis_from_current"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="13dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="13dp"
+        android:text="从当前章开始分析"
+        android:textColor="@color/primaryText"
+        android:textSize="15sp" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/bg_divider_line" />
+
+    <TextView
+        android:id="@+id/tv_analysis_from_start"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="13dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="13dp"
+        android:text="从小说开头开始分析"
+        android:textColor="@color/primaryText"
+        android:textSize="15sp" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/bg_divider_line" />
+
+    <TextView
+        android:id="@+id/tv_analysis_script"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="13dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="13dp"
+        android:text="分析脚本"
+        android:textColor="@color/primaryText"
+        android:textSize="15sp" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="6dp"
+        android:background="@color/divider" />
+
+    <TextView
+        android:id="@+id/tv_analysis_progress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="20dp"
+        android:layout_marginTop="12dp"
+        android:layout_marginEnd="20dp"
+        android:text="已分析 0 / 共 0 章（0%）"
+        android:textColor="@color/primaryText"
+        android:textSize="12sp" />
+
+    <ProgressBar
+        android:id="@+id/pb_analysis_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="20dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="20dp"
+        android:max="1"
+        android:progress="0" />
+
+    <LinearLayout
+        android:id="@+id/ll_analysis_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
+        android:layout_marginTop="10dp"
+        android:layout_marginEnd="14dp"
+        android:background="@color/bg_divider_line"
+        android:orientation="vertical"
+        android:paddingLeft="10dp"
+        android:paddingTop="8dp"
+        android:paddingRight="10dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/tv_analysis_book"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="书名：—"
+                    android:textColor="@color/primaryText"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_analysis_chapter"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="当前章节：—"
+                    android:textColor="@color/primaryText"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_analysis_paragraph"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp"
+                    android:text="段落进度：0 / 0 段"
+                    android:textColor="@color/primary"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tv_analysis_chapters"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="全书进度：共 0 章 · 已分析 0 章（0%）"
+                    android:textColor="@color/primaryText"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/btn_stop_analysis"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="10dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true"
+                android:padding="6dp"
+                android:text="停止"
+                android:textColor="@color/primary"
+                android:textSize="14sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+</LinearLayout>

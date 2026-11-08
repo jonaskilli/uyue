@@ -828,7 +828,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                         // 文件不存在或已删除 → 落到下面的合成流程
                     }
 
-                    text = applyTtsScripts(text)
+                    text = applyTtsScripts(text, paragraphIndex = index)
                     val speakText = purifySpeakText(text)
                         .replace(AppPattern.notReadAloudRegex, "")
                     
@@ -947,7 +947,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                 segments.forEachIndexed { segIdx, rawText ->
                     currentCoroutineContext().ensureActive()
                     val fileName = getFileNameHelper(chapter.title, rawText, segIdx)
-                    val segmentText = applyTtsScripts(rawText)
+                    val segmentText = applyTtsScripts(rawText, paragraphIndex = segIdx, chapterTitle = chapter.title, chapterParagraphs = segments)
                     val speakText = purifySpeakText(segmentText)
                         .replace(AppPattern.notReadAloudRegex, "")
 
@@ -1020,7 +1020,7 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
                     }
                     val currentTitle = textChapter?.chapter?.title ?: ""
                     val fileName = getFileNameHelper(currentTitle, text, index)
-                    text = applyTtsScripts(text)
+                    text = applyTtsScripts(text, paragraphIndex = index)
                     val speakText = purifySpeakText(text)
                         .replace(AppPattern.notReadAloudRegex, "")
                     

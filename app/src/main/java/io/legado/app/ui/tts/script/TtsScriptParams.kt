@@ -33,7 +33,7 @@ object TtsScriptParams {
 
     /** 4 个可配置参数（顺序即对话框与摘要顺序） */
     val PARAMS: List<Param> = listOf(
-        Param("MAX_CHARACTER", "最多保存角色数量", min = 1.0, max = 500.0),
+        Param("MAX_CHARACTER", "最多保存角色数量", min = 1.0, max = 800.0),
         Param("EXTRACT_LENGTH", "每次分析字数", min = 50.0, max = 5000.0),
         Param("MAX_RETRY", "重试次数", min = 0.0, max = 10.0),
         Param("NAME_ANALYZE_TIMEOUT", "最大等待时间", min = 0.1, max = 300.0, isMillis = true)
@@ -75,7 +75,7 @@ object TtsScriptParams {
         }
     }
 
-    /** 条目摘要，无参数返回 null：角色上限 100 · 分析字数 1000 · 重试 3 次 · 超时 25 秒 */
+    /** 条目摘要，无参数返回 null：角色上限 800 · 分析字数 1000 · 重试 3 次 · 超时 25 秒 */
     fun summary(code: String): String? {
         val v = parse(code) ?: return null
         return buildString {

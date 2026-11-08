@@ -514,7 +514,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
     private suspend fun synthesizeSingle(index: Int): File? {
         val rawText = getRawText(index)
-        val text = applyTtsScripts(rawText)
+        val text = applyTtsScripts(rawText, paragraphIndex = index)
         if (text.matches(AppPattern.notReadAloudRegex)) {
             val fileName = getFileNameHelper(textChapter?.chapter?.title ?: "", rawText, index)
             if (!hasSpeakFile(fileName)) createSilentSound(fileName)
@@ -580,7 +580,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 ensureActive()
 
                 val rawText = getRawText(i)
-                val speakText = applyTtsScripts(rawText)
+                val speakText = applyTtsScripts(rawText, paragraphIndex = i)
                 val isEndMarker = i == contentList.lastIndex
                 val file = if (isEndMarker || speakText.matches(AppPattern.notReadAloudRegex)) {
                     if (isEndMarker) {
@@ -1113,7 +1113,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 for (i in segments.indices) {
                     ensureActive()
                     val rawText = segments[i]
-                    val text = applyTtsScripts(rawText)
+                    val text = applyTtsScripts(
+                        rawText,
+                        paragraphIndex = i,
+                        chapterTitle = segmentTitle,
+                        chapterParagraphs = segments
+                    )
                     if (text.matches(AppPattern.notReadAloudRegex)) continue
 
                     val cacheFile = getCacheFileForText(rawText, i, segmentTitle)
@@ -1196,7 +1201,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 return rawText
             }
         }
-        return applyTtsScripts(rawText)
+        return applyTtsScripts(rawText, paragraphIndex = index)
     }
 
     private fun getFileNameHelper(title: String, content: String, index: Int = -1): String {

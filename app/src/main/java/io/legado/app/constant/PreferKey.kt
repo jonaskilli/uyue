@@ -345,6 +345,9 @@ object PreferKey {
     // 转换为 WAV 时的音量增益倍数（默认 1.0，最大 3.0，超过自动截断为 3.0）
     const val convertCacheToWavGain = "convertCacheToWavGain"
 
+    // 全书分析专用脚本（用户编辑后的 JS 代码）
+    const val bookAnalysisScript = "bookAnalysisScript"
+
     // 朗读播放时的音量增益倍数（默认 1.0，范围 0.5~5.0，超过自动截断为 5.0）
     const val readAloudVolumeGain = "readAloudVolumeGain"
 

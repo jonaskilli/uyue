@@ -833,7 +833,19 @@ abstract class BaseReadAloudService : BaseService(),
      * 脚本通过变量 text 获取当前文本，通过 java 调用 ajax、readFile、writeTxtFile 等扩展方法，
      * 返回值为修改后的文本。
      */
-    protected fun applyTtsScripts(text: String): String {
+    /**
+     * 应用朗读脚本，按顺序执行启用的JS脚本，修改待朗读文本。
+     *
+     * [paragraphIndex] 是「当前正在合成的段落在合成内容列表里的下标」，不是 nowSpeak；
+     * 朗读会提前预合成后续段落，所以不能用当前播放位置推断脚本处理的是哪一段。
+     * 老脚本不会读取 ttsMeta；新脚本会尝试读取，读不到或校验失败就回退旧的全文定位。
+     */
+    protected fun applyTtsScripts(
+        text: String,
+        paragraphIndex: Int = -1,
+        chapterTitle: String? = null,
+        chapterParagraphs: List<String>? = null
+    ): String {
         if (text.isEmpty() || text == " ") return text
         val scripts = try {
             appDb.ttsScriptDao.all.filter { it.isEnabled }.sortedBy { it.order }
@@ -842,6 +854,7 @@ abstract class BaseReadAloudService : BaseService(),
         }
         if (scripts.isEmpty()) return text
         val currentEngineName = getCurrentTtsEngineName()
+        val ttsMetaJson = buildTtsMetaJson(text, paragraphIndex, chapterTitle, chapterParagraphs)
         var result = text
         scripts.forEach { script ->
             if (script.code.isBlank()) return@forEach
@@ -861,6 +874,9 @@ abstract class BaseReadAloudService : BaseService(),
                         bindings["text"] = result
                         bindings["source"] = ReadAloud.httpTTS
                         bindings["speakText"] = text
+                        if (ttsMetaJson != null) {
+                            bindings["ttsMeta"] = ttsMetaJson
+                        }
                     }
                     eval(script.code, bindings)
                 }
@@ -872,6 +888,51 @@ abstract class BaseReadAloudService : BaseService(),
             }
         }
         return result
+    }
+
+    private fun buildTtsMetaJson(
+        text: String,
+        paragraphIndex: Int,
+        chapterTitle: String?,
+        chapterParagraphs: List<String>?
+    ): String? {
+        if (paragraphIndex < 0) return null
+        val paragraphs = chapterParagraphs ?: contentList
+        if (paragraphs.isEmpty()) return null
+        val title = (chapterTitle ?: textChapter?.title ?: textChapter?.chapter?.title ?: "").trim()
+        val bodyStart = if (isLikelyChapterTitleLine(paragraphs.firstOrNull().orEmpty(), title)) 1 else 0
+        val safeIndex = paragraphIndex.coerceIn(0, paragraphs.lastIndex)
+        val fullParagraph = paragraphs.getOrNull(safeIndex).orEmpty()
+        val skippedPrefix = if (fullParagraph.isNotEmpty() && fullParagraph != text && fullParagraph.endsWith(text)) {
+            fullParagraph.substring(0, fullParagraph.length - text.length)
+        } else ""
+        val beforeCount = paragraphs.subList(bodyStart, safeIndex.coerceAtLeast(bodyStart))
+            .sumOf { it.count { ch -> ch == '“' } } + skippedPrefix.count { ch -> ch == '“' }
+        val chapterDialogueCount = paragraphs.subList(bodyStart, paragraphs.size)
+            .sumOf { it.count { ch -> ch == '“' } }
+        val dialogCount = text.count { ch -> ch == '“' }
+        val dialogSeqs = org.json.JSONArray()
+        for (i in 0 until dialogCount) {
+            dialogSeqs.put(beforeCount + i + 1)
+        }
+        return org.json.JSONObject()
+            .put("schema", 1)
+            .put("paragraphIndex", (safeIndex - bodyStart).coerceAtLeast(0))
+            .put("rawParagraphIndex", safeIndex)
+            .put("chapterTitle", title)
+            .put("paragraphText", text)
+            .put("dialogStartSeq", beforeCount + 1)
+            .put("dialogSeqs", dialogSeqs)
+            .put("chapterDialogueCount", chapterDialogueCount)
+            .put("chapterParagraphCount", (paragraphs.size - bodyStart).coerceAtLeast(0))
+            .toString()
+    }
+
+    private fun isLikelyChapterTitleLine(line: String, title: String): Boolean {
+        val s = line.trim()
+        if (s.isEmpty()) return false
+        if (title.isNotBlank() && s == title.trim()) return true
+        return Regex("""^第\s*[0-9一二三四五六七八九十百千零〇两]+\s*章""").containsMatchIn(s)
     }
 
     // ========== 音效处理 ==========

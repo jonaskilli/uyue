@@ -61,13 +61,6 @@ object ReadAloud {
          */
         continueFromParagraph: Boolean = false
     ) {
-        // 全书分析进行中禁止朗读：朗读与分析共用 data.json（脚本上下文），
-        // 并行会互相覆盖导致章节定位错乱
-        if (io.legado.app.service.BookScriptAnalysisService.isRun) {
-            AppLog.put("全书分析进行中，已拦截朗读启动")
-            context.toastOnUi("全书分析进行中，已禁止朗读\n如需朗读请先下拉通知栏取消分析")
-            return
-        }
         postEvent(EventBus.READ_ALOUD_STARTING, true)
         val intent = Intent(context, aloudClass)
         intent.action = IntentAction.play

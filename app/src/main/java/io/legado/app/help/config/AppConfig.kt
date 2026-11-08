@@ -576,6 +576,22 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     /**
+     * 全书分析专用脚本。
+     * 未编辑过时读取 assets 里的内置默认脚本；编辑后存默认 SharedPreferences，
+     * 并随 TTS/AI 偏好设置一起备份。
+     */
+    var bookAnalysisScript: String
+        get() = appCtx.getPrefString(PreferKey.bookAnalysisScript)
+            ?: defaultBookAnalysisScript()
+        set(value) {
+            appCtx.putPrefString(PreferKey.bookAnalysisScript, value)
+        }
+
+    fun defaultBookAnalysisScript(): String = runCatching {
+        String(appCtx.assets.open("defaultData/bookAnalysisScript.js").readBytes(), Charsets.UTF_8)
+    }.getOrDefault("")
+
+    /**
      * 系统TTS引擎包名
      * 用于系统TTS模式下的定时激活和前台保活
      */

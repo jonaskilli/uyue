@@ -337,6 +337,12 @@
             android:configChanges="locale|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize|stateHidden" />
+        <!-- 全书分析专用脚本编辑 -->
+        <activity
+            android:name=".ui.book.read.config.BookAnalysisScriptEditActivity"
+            android:configChanges="locale|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize|stateHidden" />
         <!-- 书籍管理 -->
         <activity
             android:name=".ui.book.manage.BookshelfManageActivity"
