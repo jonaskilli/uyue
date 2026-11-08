@@ -14,6 +14,7 @@ import io.legado.app.R
 import io.legado.app.base.BaseDialogFragment
 import io.legado.app.constant.EventBus
 import io.legado.app.databinding.DialogBgmConfigBinding
+import io.legado.app.databinding.DialogFullBookAnalysisBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.lib.theme.getPrimaryTextColor
@@ -52,6 +53,8 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
     private val binding by viewBinding(DialogBgmConfigBinding::bind)
 
     private var analysisStatusJob: Job? = null
+    private var analysisDialog: AlertDialog? = null
+    private var analysisDialogBinding: DialogFullBookAnalysisBinding? = null
 
     // SAF 目录选择
     private val selectDir = registerForActivityResult(HandleFileContract()) {
@@ -84,6 +87,10 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
 
     override fun onDismiss(dialog: DialogInterface) {
         super.onDismiss(dialog)
+        analysisStatusJob?.cancel()
+        analysisDialog?.dismiss()
+        analysisDialog = null
+        analysisDialogBinding = null
         (activity as? ReadBookActivity)?.let {
             if (it.bottomDialog > 0) it.bottomDialog--
         }
@@ -121,7 +128,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         switchBgm.setTextColor(textColor)
         tvAiImageEnable.setTextColor(textColor)
         tvAiImageSave.setTextColor(textColor)
-        tvAnalysisStatus.setTextColor(textColor)
         }
 
         initData()
@@ -335,14 +341,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             showFullBookAnalysisDialog()
         }
 
-        binding.rootView.findViewById<View>(R.id.btn_stop_analysis)?.setOnClickListener {
-            val intent = Intent(requireContext(), BookScriptAnalysisService::class.java).apply {
-                action = IntentAction.stop
-            }
-            requireContext().startService(intent)
-            toastOnUi("已请求停止全书分析")
-        }
-
         binding.rootView.findViewById<View>(R.id.btn_ai_config)?.setOnClickListener {
             BgmAISettingsDialog().show(parentFragmentManager, "bgmAISettings")
         }
@@ -354,8 +352,17 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         startAnalysisStatusPolling()
     }
 
-    /** 实时展示全书分析进度：每 500ms 轮询服务暴露的状态（分析中才显示状态区） */
+    /** 每 500ms 刷新「全书分析」弹窗里的状态与进度 */
     private fun startAnalysisStatusPolling() {
+        ReadBook.book?.let { book ->
+            lifecycleScope.launch(Dispatchers.IO) {
+                BookScriptAnalysisService.refreshAnalyzedCount(book)
+                withContext(Dispatchers.Main) {
+                    refreshAnalysisProgress()
+                    refreshAnalysisStatus()
+                }
+            }
+        }
         analysisStatusJob?.cancel()
         analysisStatusJob = lifecycleScope.launch {
             while (true) {
@@ -365,54 +372,117 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         }
     }
 
-    private fun refreshAnalysisStatus() = binding.run {
+    private fun refreshAnalysisStatus() {
+        val dialogBinding = analysisDialogBinding ?: return
+        refreshAnalysisProgress()
         if (!BookScriptAnalysisService.isRun) {
-            llAnalysisStatus.visibility = View.GONE
-            return@run
+            dialogBinding.llAnalysisStatus.visibility = View.GONE
+            return
         }
-        llAnalysisStatus.visibility = View.VISIBLE
-        val parts = mutableListOf<String>()
-        BookScriptAnalysisService.runningBookName?.let { parts.add("《$it》") }
-        BookScriptAnalysisService.currentChapterTitle?.let { parts.add("「${it.take(16)}」") }
-        BookScriptAnalysisService.statusText?.let { parts.add(it) }
-        tvAnalysisStatus.text = parts.joinToString(" · ").ifBlank { "分析中…" }
+        dialogBinding.llAnalysisStatus.visibility = View.VISIBLE
+        val total = BookScriptAnalysisService.analyzedTotalCount
+        val analyzed = BookScriptAnalysisService.analyzedChapterCount.coerceIn(0, total.coerceAtLeast(1))
+        val percent = if (total > 0) analyzed * 100 / total else 0
+        val bookName = BookScriptAnalysisService.runningBookName ?: "未知"
+        val chapterTitle = BookScriptAnalysisService.currentChapterTitle?.take(16)
+        dialogBinding.tvAnalysisBook.text = "书名：《$bookName》"
+        dialogBinding.tvAnalysisChapter.text = buildString {
+            append("当前章节：第${BookScriptAnalysisService.currentChapterIndex}")
+            if (total > 0) append(" / $total 章")
+            if (!chapterTitle.isNullOrBlank()) append(" · 「$chapterTitle」")
+        }
+        val p = BookScriptAnalysisService.currentParagraphIndex
+        val pTotal = BookScriptAnalysisService.currentParagraphTotal
+        dialogBinding.tvAnalysisParagraph.text = if (pTotal > 0) {
+            "段落进度：第 $p / $pTotal 段"
+        } else {
+            "段落进度：准备中"
+        }
+        dialogBinding.tvAnalysisChapters.text =
+            "全书进度：共 $total 章 · 已分析 $analyzed 章（$percent%）"
     }
 
-    /**
-     * 全书分析：调用朗读脚本把整本书按章节顺序做一遍角色标注/别名合并，
-     * 只分析不合成音频。分析到哪个位置就把 data.json 刷成哪个位置的上下文。
-     */
+    /** 粗略进度：当前书已落盘的章节缓存文件数 / 本书总章数 */
+    private fun refreshAnalysisProgress() {
+        val dialogBinding = analysisDialogBinding ?: return
+        val total = BookScriptAnalysisService.analyzedTotalCount
+        val max = total.coerceAtLeast(1)
+        val analyzed = BookScriptAnalysisService.analyzedChapterCount.coerceIn(0, max)
+        dialogBinding.pbAnalysisProgress.max = max
+        dialogBinding.pbAnalysisProgress.progress = analyzed
+        val percent = if (total > 0) analyzed * 100 / total else 0
+        dialogBinding.tvAnalysisProgress.text = if (total > 0) {
+            "已分析 $analyzed / 共 $total 章（$percent%）"
+        } else {
+            "已分析 0 / 共 0 章（0%）"
+        }
+    }
+
+    /** 全书分析选项弹窗：三个选项下面直接显示进度、状态与停止按钮 */
     private fun showFullBookAnalysisDialog() {
         val book = ReadBook.book
         if (book == null) {
             toastOnUi("未打开书籍")
             return
         }
-        val items = arrayOf(
-            "从当前章开始分析（第${ReadBook.durChapterIndex + 1}章）",
-            "从小说开头开始分析"
-        )
-        // 注意：AlertDialog 的 setMessage 与 setItems 互斥（消息会顶掉选项列表），
-        // 说明文字并进标题，保证两个选项可见
-        AlertDialog.Builder(requireContext())
+        analysisDialog?.dismiss()
+        val dialogBinding = DialogFullBookAnalysisBinding.inflate(layoutInflater)
+        dialogBinding.tvAnalysisFromCurrent.text =
+            "从当前章开始分析（第${ReadBook.durChapterIndex + 1}章）"
+        val dialog = AlertDialog.Builder(requireContext())
             .setTitle("全书分析 · ${book.name}（共${ReadBook.chapterSize}章，不合成音频）")
-            .setItems(items) { _, which ->
-                val startIndex = if (which == 0) ReadBook.durChapterIndex else 0
-                startFullBookAnalysis(startIndex)
-            }
+            .setView(dialogBinding.root)
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+
+        dialogBinding.tvAnalysisFromCurrent.setOnClickListener {
+            dialog.dismiss()
+            startFullBookAnalysis(ReadBook.durChapterIndex)
+        }
+        dialogBinding.tvAnalysisFromStart.setOnClickListener {
+            dialog.dismiss()
+            startFullBookAnalysis(0)
+        }
+        dialogBinding.tvAnalysisScript.setOnClickListener {
+            dialog.dismiss()
+            startActivity(BookAnalysisScriptEditActivity.startIntent(requireContext()))
+        }
+        dialogBinding.btnStopAnalysis.setOnClickListener {
+            val intent = Intent(requireContext(), BookScriptAnalysisService::class.java).apply {
+                action = IntentAction.stop
+            }
+            requireContext().startService(intent)
+            toastOnUi("已请求停止全书分析")
+        }
+
+        analysisDialog = dialog
+        analysisDialogBinding = dialogBinding
+        dialog.setOnDismissListener {
+            analysisDialogBinding = null
+            analysisDialog = null
+        }
+        dialog.show()
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.9f).toInt(),
+            WindowManager.LayoutParams.WRAP_CONTENT
+        )
+        refreshAnalysisProgress()
+        refreshAnalysisStatus()
+        ReadBook.book?.let { currentBook ->
+            lifecycleScope.launch(Dispatchers.IO) {
+                BookScriptAnalysisService.refreshAnalyzedCount(currentBook)
+                withContext(Dispatchers.Main) {
+                    refreshAnalysisProgress()
+                    refreshAnalysisStatus()
+                }
+            }
+        }
     }
 
     private fun startFullBookAnalysis(startIndex: Int) {
-        // 分析与朗读互斥（共用 data.json 脚本上下文）：开始分析先停止朗读，
-        // 分析期间朗读启动会被拦截（ReadAloud.play 统一拦截）
-        if (BaseReadAloudService.isRun) {
-            ReadAloud.stop(requireContext())
-            toastOnUi("已停止朗读，开始全书分析")
-        } else {
-            toastOnUi("全书分析已开始")
-        }
+        // 全书分析已改用专用脚本，不再读写 data.json / 进度指针等朗读运行时文件，
+        // 因此不再停止朗读，也不再由 ReadAloud.play 拦截。
+        toastOnUi("全书分析已开始")
         val intent = Intent(requireContext(), BookScriptAnalysisService::class.java).apply {
             putExtra(BookScriptAnalysisService.EXTRA_START_INDEX, startIndex)
         }

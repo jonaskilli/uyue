@@ -272,6 +272,7 @@ object TtsBackup {
         PreferKey.readAloudFloatWindow, PreferKey.readAloudFloatClickSwap,
         PreferKey.readAloudFloatX, PreferKey.readAloudFloatY,
         PreferKey.readAloudFloatEdgeOffset,
+        PreferKey.bookAnalysisScript,
         PreferKey.readAloudCoverMarqueeEnabled, PreferKey.readAloudCoverMarqueeSpeed,
         PreferKey.marqueeBgmLinkEnabled, PreferKey.showAudioCacheIndicator,
         PreferKey.readAloudImageInReadPage, PreferKey.readAloudImageShowing,
