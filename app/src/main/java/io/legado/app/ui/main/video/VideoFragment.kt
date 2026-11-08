@@ -473,21 +473,29 @@ class VideoFragment() : VMBaseFragment<VideoViewModel>(R.layout.fragment_video),
     }
 
     /**
-     * 搜索视频名时，rv_find 装的是搜索结果，25% 宽放不下：
-     * 临时隐藏左侧内容区并把列表拉回全宽，退出搜索再恢复 75/25。
+     * 搜索视频名时，rv_find 装的是搜索结果，30% 宽放不下：
+     * 临时隐藏左侧内容区并把列表拉回全宽，退出搜索再恢复 70/30。
+     *
+     * 只改左右约束还不够：rv_find 的 top 原本挂在 compose_video_pane 上，
+     * 搜索时把 0dp 高的 composeVideoPane 设为 GONE 后，ConstraintLayout 会把它
+     * 解析成约束区间中间的一个点，导致列表从屏幕中部才开始、上半屏留白。
+     * 搜索态必须把 top 改挂到 chip_scroll 底部（筛选条还没出现时就贴着标题栏），
+     * 退出搜索再挂回 composeVideoPane 并恢复 72dp 的头部偏移。
      */
     private fun updatePaneForSearch(searching: Boolean) {
         binding.composeVideoPane.isGone = searching
         binding.paneDivider.isGone = searching
         val lp = binding.rvFind.layoutParams as ConstraintLayout.LayoutParams
-        // 非搜索时右侧书源列表从全宽头部（源名 + 分类条）下方开始；
-        // 搜索时头部隐藏、列表全宽，顶上不再需要这段偏移
-        lp.topMargin = if (searching) 0 else
-            resources.getDimensionPixelSize(R.dimen.pane_header_height)
         if (searching) {
+            lp.topToTop = ConstraintLayout.LayoutParams.UNSET
+            lp.topToBottom = R.id.chip_scroll
+            lp.topMargin = 0
             lp.leftToRight = ConstraintLayout.LayoutParams.UNSET
             lp.leftToLeft = ConstraintLayout.LayoutParams.PARENT_ID
         } else {
+            lp.topToBottom = ConstraintLayout.LayoutParams.UNSET
+            lp.topToTop = R.id.compose_video_pane
+            lp.topMargin = resources.getDimensionPixelSize(R.dimen.pane_header_height)
             lp.leftToLeft = ConstraintLayout.LayoutParams.UNSET
             lp.leftToRight = R.id.guideline_video_pane
         }

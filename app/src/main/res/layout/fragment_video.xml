@@ -40,7 +40,9 @@
     <!-- 顶部整行让给「源名/刷新/网格 + 分类条」（全宽），下面才是
          左 70% 内容区 + 右 30% 视频源列表。ComposeView 横跨全宽，
          内部把内容区限制在左 70%，右侧空出来给 rv_find。
-         搜索视频名时由 VideoFragment 把 rv_find 临时改成全宽。 -->
+         搜索视频名时由 VideoFragment 把 rv_find 临时改成全宽，并把 top 约束
+         从 compose_video_pane 改挂到 chip_scroll：GONE 的 0dp ComposeView
+         会被解析成屏幕中部的一个点，继续挂它会导致列表只占下半屏。 -->
     <androidx.constraintlayout.widget.Guideline
         android:id="@+id/guideline_video_pane"
         android:layout_width="wrap_content"
