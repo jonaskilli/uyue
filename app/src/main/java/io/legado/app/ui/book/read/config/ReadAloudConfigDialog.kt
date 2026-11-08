@@ -350,6 +350,9 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
                 findPreference(PreferKey.ttsEngine),
                 speakEngineSummary
             )
+            // 朗读面板可能还在这个设置弹窗底下显示；引擎一变就同步刷新左侧按钮
+            (parentFragment?.parentFragment as? SpeakEngineDialog.CallBack)
+                ?.upSpeakEngineSummary()
         }
     }
 }

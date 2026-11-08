@@ -77,8 +77,9 @@ object MiyueKeyManager {
      *  - @@方式：一个输入框，直接粘贴脚本侧约定的 `地址@@模型@@密钥` 文本。
      * 两种方式最终都存成同一格式（传统方式由三个框拼成一组 @@ 格式）。
      * 校验不过不关弹窗，改完直接再点保存。
+     * @param onSaved 保存成功后的回调，用于密钥管理列表原地刷新。
      */
-    fun saveKey(context: Context) {
+    fun saveKey(context: Context, onSaved: (() -> Unit)? = null) {
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 20, 50, 20)
@@ -276,6 +277,7 @@ object MiyueKeyManager {
                 return@setOnClickListener
             }
             saveKeyToJson(name, content)
+            onSaved?.invoke()
             toast(context, "密钥已保存: $name")
             dialog.dismiss()
         }
@@ -287,17 +289,13 @@ object MiyueKeyManager {
      * 顶部 = 当前生效的密钥单独一块（卡片底色 + 粗分隔线与下方隔开，右侧无「使用」按钮）；
      * 下方组 = 一个已保存的密钥（整行点击展开/折叠，右侧可 恢复 / 测试整份 / 修改）；
      * 子 = 该密钥里解析出来的每一个 API（只显示模型名，右侧可单独 测试 / 取该接口的全部模型）。
-     * 底部「测试全部」一次性把所有密钥里的所有 API 都测一遍。
+     * 底部四个按钮：测试全部 / 删除密钥 / 新增 / 取消。「新增」直接复用 [saveKey]，
+     * 保存后原地刷新列表，因此没有密钥时也能打开空界面添加第一把。
      * 两个分区共用本适配器，任一区改动后互相刷新，永远显示最新状态。
      */
     fun restoreKey(context: Context) {
         val keyMap = getKeyMap()
         val names = getKeyNames(keyMap)
-
-        if (names.isEmpty()) {
-            toast(context, "没有已保存的密钥")
-            return
-        }
 
         val dialog = Dialog(context)
         dialog.setContentView(R.layout.dialog_key_list)
@@ -311,9 +309,13 @@ object MiyueKeyManager {
         val tvCurrentMissing = dialog.findViewById<TextView>(R.id.tv_current_missing)
         val btnTestAll = dialog.findViewById<Button>(R.id.btn_test_all)
         val btnDelete = dialog.findViewById<Button>(R.id.btn_delete_key)
+        val btnAdd = dialog.findViewById<Button>(R.id.btn_add_key)
         val btnCancel = dialog.findViewById<Button>(R.id.btn_cancel)
 
         val tvHint = dialog.findViewById<TextView>(R.id.tv_key_hint)
+        if (names.isEmpty()) {
+            tvHint.text = "暂无已保存的密钥，点下方「新增」添加"
+        }
 
         // 分隔线必须显式给成 Drawable：
         // ExpandableListView 画子项分隔线用的是 mChildDivider，而它默认不跟随 divider 属性，
@@ -474,10 +476,18 @@ object MiyueKeyManager {
                 }
             )
         }
-        // 下面两个都只是「在上面叠一层」，不再先关掉密钥列表——
-        // 关掉的话做完一步就得重新点「恢复密钥」进来，来回很烦
+        // 下面三个都只是「在上面叠一层」，不再先关掉密钥列表——
+        // 删除、新增做完都原地刷新，取消才关窗
         btnDelete.setOnClickListener {
             selectKeyToDelete(context) { adapter.refresh() }
+        }
+        btnAdd.setOnClickListener {
+            // 直接复用「保存密钥」窗口；保存成功后 adapter 会重读 keys.json，
+            // 并通过 onDataChanged 顺带刷新顶部「正在使用」分区
+            saveKey(context) {
+                adapter.refresh()
+                tvHint.text = "展开密钥可查看并测试其中的 API"
+            }
         }
         btnCancel.setOnClickListener {
             dialog.dismiss()

@@ -199,6 +199,7 @@
     <string name="clear_bgm_timeline_current_chapter">Delete recognized background music and AI sound effects of current chapter</string>
     <string name="clear_bgm_timeline_current_done">Deleted background music and AI sound effects record of current chapter</string>
     <string name="clear_bgm_timeline_current_none">No background music or AI sound effects record in current chapter</string>
+    <string name="clear_all_app_cache">Clear all cache</string>
     <string name="action_save">Save</string>
     <string name="edit_source">Edit source</string>
     <string name="edit_book_source">Edit Book source</string>

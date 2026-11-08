@@ -1,13 +1,18 @@
 package io.legado.app.ui.book.read.config
 
 import android.content.Context
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import androidx.appcompat.app.AlertDialog
+import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ArrayAdapter
+import android.view.WindowManager
 import android.widget.RadioButton
+import android.widget.Toast
 import androidx.appcompat.widget.Toolbar
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
@@ -19,11 +24,14 @@ import io.legado.app.base.adapter.RecyclerAdapter
 import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.HttpTTS
+import io.legado.app.databinding.DialogClearCacheBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.databinding.DialogRecyclerViewBinding
 import io.legado.app.databinding.ItemHttpTtsBinding
 import io.legado.app.help.DirectLinkUpload
 import io.legado.app.help.config.AppConfig
+import io.legado.app.service.AiEffectStore
+import io.legado.app.service.BgmTimelineStore
 import io.legado.app.lib.dialogs.SelectItem
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.primaryColor
@@ -51,6 +59,7 @@ import io.legado.app.utils.viewbindingdelegate.viewBinding
 import io.legado.app.utils.visible
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.conflate
@@ -250,113 +259,122 @@ class SpeakEngineDialog() : BaseDialogFragment(R.layout.dialog_recycler_view),
         }
 
         /**
-         * 朗读引擎长按弹窗：清除全部 / 仅删除当前章节缓存音频
+         * 朗读引擎长按弹窗：贴底圆角纯文字列表。
+         * 只保留原有选项文字，底部单独增加「清理全部缓存」；不做二次确认。
          */
         fun showClearCacheDialog(context: Context) {
-            val items = arrayOf(
-                context.getString(R.string.clear_tts_cache_all),
-                context.getString(R.string.clear_tts_cache_current_chapter),
-                context.getString(R.string.clear_tts_role_current_chapter),
-                context.getString(R.string.clear_bgm_timeline_current_chapter)
-            )
-            // 自定义适配器：增大每个选项的上下间距（约原默认行高的 130%）以防误触
-            val adapter = object : ArrayAdapter<String>(
-                context,
-                android.R.layout.simple_list_item_1,
-                android.R.id.text1,
-                items
-            ) {
-                override fun getView(
-                    position: Int,
-                    convertView: android.view.View?,
-                    parent: android.view.ViewGroup
-                ): android.view.View {
-                    val view = super.getView(position, convertView, parent) as android.widget.TextView
-                    val padV = (16.8f * context.resources.displayMetrics.density).toInt() // 原约12.9dp -> 130%
-                    view.setPadding(view.paddingLeft, padV, view.paddingRight, padV)
-                    view.gravity = android.view.Gravity.CENTER_VERTICAL
-                    return view
-                }
+            val appContext = context.applicationContext
+            val binding = DialogClearCacheBinding.inflate(LayoutInflater.from(context))
+            val dialog = AlertDialog.Builder(context)
+                .setView(binding.root)
+                .setCancelable(true)
+                .create()
+
+            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            dialog.show()
+            dialog.window?.let { window ->
+                window.setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+                window.setLayout(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT
+                )
+                window.setDimAmount(0.55f)
             }
-            AlertDialog.Builder(context)
-                .setTitle(R.string.clear_tts_cache_title)
-                .setAdapter(adapter) { _, which ->
-                    kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        ReadAloud.upReadAloudClass()
-                        when (which) {
-                            0 -> {
-                                AppConfig.clearTtsCache()
-                                // 缓存音频已全部清除，BGM 播放记录与 AI 音效识别记录
-                                // 都失去了对应的音频，留着只会让下次合并按已不存在的缓存
-                                // 选曲/配音效，故一并清掉。
-                                io.legado.app.service.BgmTimelineStore.clearAll()
-                                io.legado.app.service.AiEffectStore.clearAll()
-                                withContext(Dispatchers.Main) {
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        context.getString(R.string.clear_cache_success),
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                            1 -> {
-                                val count = AppConfig.deleteCurrentChapterCache()
-                                withContext(Dispatchers.Main) {
-                                    val msg = if (count < 0) {
-                                        context.getString(R.string.clear_tts_cache_no_chapter)
-                                    } else {
-                                        context.getString(R.string.clear_tts_cache_current_done, count)
-                                    }
-                                    android.widget.Toast.makeText(
-                                        context, msg, android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                            2 -> {
-                                val deleted = AppConfig.deleteCurrentChapterRoleCache()
-                                withContext(Dispatchers.Main) {
-                                    val msg = if (!deleted) {
-                                        context.getString(R.string.clear_tts_cache_no_chapter)
-                                    } else {
-                                        context.getString(R.string.clear_tts_role_current_done)
-                                    }
-                                    android.widget.Toast.makeText(
-                                        context, msg, android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                            3 -> {
-                                // 清理当前章节的背景音乐与 AI 音效识别记录
-                                // （下次合并/朗读将重新选曲与配音效）
-                                val book = io.legado.app.model.ReadBook.book
-                                val deleted = if (book == null) {
-                                    false
-                                } else {
-                                    val url = book.bookUrl
-                                    val idx = io.legado.app.model.ReadBook.durChapterIndex
-                                    val bgmDeleted =
-                                        io.legado.app.service.BgmTimelineStore.deleteChapter(url, idx)
-                                    val effectDeleted =
-                                        io.legado.app.service.AiEffectStore.deleteChapter(url, idx)
-                                    // 任一存在即算删除成功，提示语只区分「有/无记录」
-                                    bgmDeleted || effectDeleted
-                                }
-                                withContext(Dispatchers.Main) {
-                                    val msg = if (!deleted) {
-                                        context.getString(R.string.clear_bgm_timeline_current_none)
-                                    } else {
-                                        context.getString(R.string.clear_bgm_timeline_current_done)
-                                    }
-                                    android.widget.Toast.makeText(
-                                        context, msg, android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
+            dialog.setCanceledOnTouchOutside(true)
+
+            binding.tvClearAllAudio.setOnClickListener {
+                dialog.dismiss()
+                performClear(appContext, ClearAction.ALL_AUDIO)
+            }
+            binding.tvClearChapterAudio.setOnClickListener {
+                dialog.dismiss()
+                performClear(appContext, ClearAction.CHAPTER_AUDIO)
+            }
+            binding.tvClearChapterRole.setOnClickListener {
+                dialog.dismiss()
+                performClear(appContext, ClearAction.CHAPTER_ROLE)
+            }
+            binding.tvClearChapterBgm.setOnClickListener {
+                dialog.dismiss()
+                performClear(appContext, ClearAction.CHAPTER_BGM)
+            }
+            binding.tvClearAllCache.setOnClickListener {
+                dialog.dismiss()
+                performClear(appContext, ClearAction.ALL_CACHE)
+            }
+            binding.btnCancel.setOnClickListener { dialog.dismiss() }
+        }
+
+        private enum class ClearAction {
+            ALL_AUDIO,
+            CHAPTER_AUDIO,
+            CHAPTER_ROLE,
+            CHAPTER_BGM,
+            ALL_CACHE
+        }
+
+        private fun performClear(context: Context, action: ClearAction) {
+            GlobalScope.launch(IO) {
+                ReadAloud.upReadAloudClass()
+                when (action) {
+                    ClearAction.ALL_AUDIO -> {
+                        AppConfig.clearTtsCache()
+                        BgmTimelineStore.clearAll()
+                        AiEffectStore.clearAll()
+                        toast(context, R.string.clear_cache_success)
+                    }
+                    ClearAction.CHAPTER_AUDIO -> {
+                        val count = AppConfig.deleteCurrentChapterCache()
+                        val msg = if (count < 0) {
+                            context.getString(R.string.clear_tts_cache_no_chapter)
+                        } else {
+                            context.getString(R.string.clear_tts_cache_current_done, count)
                         }
+                        toast(context, msg)
+                    }
+                    ClearAction.CHAPTER_ROLE -> {
+                        val deleted = AppConfig.deleteCurrentChapterRoleCache()
+                        val msg = if (!deleted) {
+                            context.getString(R.string.clear_tts_cache_no_chapter)
+                        } else {
+                            context.getString(R.string.clear_tts_role_current_done)
+                        }
+                        toast(context, msg)
+                    }
+                    ClearAction.CHAPTER_BGM -> {
+                        val book = ReadBook.book
+                        val deleted = if (book == null) {
+                            false
+                        } else {
+                            val url = book.bookUrl
+                            val idx = ReadBook.durChapterIndex
+                            val bgmDeleted = BgmTimelineStore.deleteChapter(url, idx)
+                            val effectDeleted = AiEffectStore.deleteChapter(url, idx)
+                            bgmDeleted || effectDeleted
+                        }
+                        val msg = if (!deleted) {
+                            context.getString(R.string.clear_bgm_timeline_current_none)
+                        } else {
+                            context.getString(R.string.clear_bgm_timeline_current_done)
+                        }
+                        toast(context, msg)
+                    }
+                    ClearAction.ALL_CACHE -> {
+                        AppConfig.clearAllAppCache()
+                        toast(context, R.string.clear_cache_success)
                     }
                 }
-                .setNegativeButton(android.R.string.cancel, null)
-                .show()
+            }
+        }
+
+        private suspend fun toast(context: Context, message: String) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        private suspend fun toast(context: Context, resId: Int) {
+            toast(context, context.getString(resId))
         }
     }
 
