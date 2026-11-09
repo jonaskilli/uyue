@@ -848,6 +848,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
 
         if (hasNext) {
+            // 下一章若还在自动分析中，直接停掉：分析完再写回会把刚落盘的内容弄乱
+            ReadBook.book?.let { AiChapterFixService.cancelAutoJob(it.bookUrl) }
+            // 自动切章：下一章通常已排版好，不会走 newReadAloud / contentLoadFinish，
+            // 必须在恢复合成前同步重落盘 data.json，保证朗读脚本读到的是新窗口内容
+            ReadBook.saveTtsTextJson(force = true)
             // 跨章接续：上一章放到一半的歌，本章接着放后半段
             recordBgmChapterStart(ReadBook.durChapterIndex)
             resumeReadAloud()

@@ -3595,6 +3595,9 @@ abstract class BaseReadAloudService : BaseService(),
             stopSelf()
             return
         }
+        // 自动切章时下一章通常已预加载排版好，不会走 contentLoadFinish / newReadAloud
+        // 的强制落盘点；必须在恢复合成前同步重写 data.json，否则朗读脚本会读到旧窗口内容
+        ReadBook.saveTtsTextJson(force = true)
         // 进入新章节：从脚本章节缓存提取角色，触发 AI 角色档案的建档/增量更新（全容错）
         runCatching {
             ReadBook.book?.let { book ->
