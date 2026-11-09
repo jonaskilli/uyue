@@ -1027,6 +1027,11 @@ class ReadBookActivity : BaseReadBookActivity(),
      */
     override fun onMenuItemSelected(itemId: Int): Boolean {
         when (itemId) {
+            R.id.menu_edit_paragraph -> {
+                showEditParagraphDialog(binding.readView.getSelectedParagraphs())
+                return true
+            }
+
             R.id.menu_aloud -> when (AppConfig.contentSelectSpeakMod) {
                 1 -> lifecycleScope.launch {
                     binding.readView.aloudStartSelect()
@@ -1084,6 +1089,93 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onMenuActionFinally() = binding.run {
         textActionMenu.dismiss()
         readView.cancelSelect()
+    }
+
+    /**
+     * 长按选中文字后，直接编辑选区覆盖的整段（可跨多个段落）。
+     */
+    private fun showEditParagraphDialog(paragraphs: List<Pair<Int, String>>) {
+        if (paragraphs.isEmpty()) {
+            toastOnUi("未定位到段落")
+            return
+        }
+        val editText = EditText(this).apply {
+            setText(paragraphs.joinToString("\n") { it.second })
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            textSize = 15f
+            setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
+            gravity = Gravity.TOP or Gravity.START
+            setSelection(0)
+        }
+        val scrollView = ScrollView(this).apply {
+            addView(
+                editText,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+        AlertDialog.Builder(this)
+            .setTitle(if (paragraphs.size > 1) "修改${paragraphs.size}个段落" else "修改当前段落")
+            .setView(scrollView)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存") { _, _ ->
+                saveEditedParagraphs(paragraphs, editText.text?.toString().orEmpty())
+            }
+            .show()
+    }
+
+    /**
+     * 把编辑后的段落写回章节内容，再触发重新净化、排版与刷新。
+     *
+     * 按「章节内段落号」定位，不用段落文字去原文里匹配，避免重复文本、
+     * 缩进或净化差异导致错段、漏改。注意排版时章节标题也算一个段落
+     * （isTitle 行同样参与 paragraphNum 编号），而 includeTitle=false 的
+     * 净化后段落列表不含标题，所以下标要再扣掉标题段数量。
+     */
+    private fun saveEditedParagraphs(
+        paragraphs: List<Pair<Int, String>>,
+        edited: String
+    ) {
+        if (edited.isBlank()) {
+            toastOnUi("内容为空，未保存")
+            return
+        }
+        // 主线程快照排版段落，算出开头标题段的数量
+        val layoutParagraphs = ReadBook.curTextChapter?.getParagraphs(false).orEmpty()
+        val titleCount = layoutParagraphs.indexOfFirst { !it.firstLine.isTitle }
+            .let { if (it < 0) layoutParagraphs.size else it }
+        Coroutine.async(lifecycleScope, IO) {
+            val book = ReadBook.book ?: return@async
+            val chapter = appDb.bookChapterDao
+                .getChapter(book.bookUrl, ReadBook.durChapterIndex) ?: return@async
+            val raw = BookHelp.getContent(book, chapter) ?: return@async
+            // 与右上角「编辑内容」同口径的净化后章节段落（整章，不受排版进度影响）
+            val displayLines = ContentProcessor.get(book)
+                .getContent(book, chapter, raw, includeTitle = false)
+                .textList.toMutableList()
+            val nums = paragraphs.map { it.first - 1 - titleCount }
+            if (nums.isEmpty() || nums.any { it !in displayLines.indices }) {
+                withContext(Main) { toastOnUi("段落已变化，请重新选择") }
+                return@async
+            }
+            val newLines = edited.split("\n")
+            if (newLines.size == paragraphs.size) {
+                // 只改文字：逐个替换选中的段落，其余段落完全不动
+                nums.forEachIndexed { i, index -> displayLines[index] = newLines[i] }
+            } else {
+                // 删/增段落：整体替换覆盖的段落区间，删掉的那段会真正消失
+                val first = nums.minOrNull() ?: return@async
+                val last = nums.maxOrNull() ?: return@async
+                displayLines.subList(first, last + 1).clear()
+                displayLines.addAll(first, newLines)
+            }
+            BookHelp.saveText(book, chapter, displayLines.joinToString("\n"))
+            ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
+            withContext(Main) { toastOnUi("段落已修改") }
+        }
     }
 
     private fun speak(text: String) {

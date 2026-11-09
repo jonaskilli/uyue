@@ -507,5 +507,8 @@ class PageView(context: Context) : FrameLayout(context) {
 
     val selectedText: String get() = binding.contentTextView.getSelectedText()
 
+    val selectedParagraphs: List<Pair<Int, String>>
+        get() = binding.contentTextView.getSelectedParagraphs()
+
     val selectStartPos get() = binding.contentTextView.selectStart
 }

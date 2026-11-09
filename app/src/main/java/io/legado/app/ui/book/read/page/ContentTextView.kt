@@ -976,6 +976,38 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
         return builder.toString()
     }
 
+    /**
+     * 当前选区覆盖到的完整段落：即使只长按选中一个字，也返回该字所在的整段；
+     * 拖动游标跨段时返回覆盖的全部段落。返回「章节内段落号 -> 段落文本」。
+     */
+    fun getSelectedParagraphs(): List<Pair<Int, String>> {
+        if (!selectStart.isSelected() || !selectEnd.isSelected()) return emptyList()
+        val nums = LinkedHashSet<Int>()
+        val textPos = TextPos(0, 0, 0)
+        for (relativePos in selectStart.relativePagePos..selectEnd.relativePagePos) {
+            val page = relativePage(relativePos)
+            textPos.relativePagePos = relativePos
+            page.lines.forEachIndexed { lineIndex, textLine ->
+                textPos.lineIndex = lineIndex
+                textLine.columns.forEachIndexed { charIndex, column ->
+                    textPos.columnIndex = charIndex
+                    if (column is TextBaseColumn
+                        && textLine.paragraphNum > 0
+                        && textPos.compare(selectStart) >= 0
+                        && textPos.compare(selectEnd) <= 0
+                    ) {
+                        nums.add(textLine.paragraphNum)
+                    }
+                }
+            }
+        }
+        if (nums.isEmpty()) return emptyList()
+        val chapter = relativePage(selectStart.relativePagePos).getTextChapter()
+        return chapter.getParagraphs(false)
+            .filter { it.num in nums && !it.firstLine.isTitle }
+            .map { it.num to it.text.trimStart('　', ' ', '\t') }
+    }
+
     fun createBookmark(): Bookmark? {
         val page = relativePage(selectStart.relativePagePos)
         page.getTextChapter().let { chapter ->
