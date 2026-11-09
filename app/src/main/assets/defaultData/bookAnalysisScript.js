@@ -154,11 +154,13 @@ function _isChapterTitleLine(line) {
     var s = String(line || "");
     return /^\s*第\s*[0-9一二三四五六七八九十百千零〇两]+\s*章/.test(s);
 }
-function _buildSeqContent(t) {
-    var currentDialogs = _isArray(t.dialogs) ? t.dialogs : [];
-    var below = String(t.below || "");
-    var lines = below.split(NL);
-    var belowDialogs = [], offset = 0;
+/**
+ * 与内置朗读脚本 Z3.3 的 scanBelowDialogs 同口径，额外保留左引号在下文里的偏移，
+ * 供 Kotlin 把结果写回对应章节缓存。
+ */
+function _scanBelowDialogs(belowText) {
+    var lines = String(belowText || "").split(/\r?\n/);
+    var out = [], lineStart = 0;
     for (var li = 0; li < lines.length; li++) {
         var line = lines[li];
         if (!_isChapterTitleLine(line)) {
@@ -167,44 +169,83 @@ function _buildSeqContent(t) {
                 var left = line.indexOf("“", idx);
                 if (left < 0) break;
                 var right = line.indexOf("”", left + 1);
-                var rawText = right >= 0 ? line.substring(left + 1, right) : line.substring(left + 1, Math.min(line.length, left + 1000));
-                var dialogText = String(rawText || "")
-                    .replace(/^【[0-9]+】/, "")
-                    .replace(/[『「【〈〉〔'']/g, "");
-                if (dialogText && dialogText.trim() !== "") {
-                    belowDialogs.push({ text: dialogText, sourceOffset: offset + left });
-                }
+                var rawText = right >= 0
+                    ? line.substring(left + 1, right)
+                    : line.substring(left + 1, Math.min(line.length, left + 1000));
+                var text = String(rawText || "").replace(/^【[0-9]+】/, "");
+                if (text && text.trim() !== "") out.push({ text: text, sourceOffset: lineStart + left });
                 idx = right >= 0 ? right + 1 : line.length;
             }
         }
-        offset += line.length + 1;
+        lineStart += line.length + 1;
     }
-    var all = [];
+    return out;
+}
+
+/**
+ * 与内置朗读脚本 Z3.3 的 generateBatchSeqContent 完全同口径：
+ * 当前段对话重包引号 + 下文 1000 字「原文」（保留叙述、动作、"XX说道"等提示词），
+ * 补右引号后只给前 80% 的左引号编号，尾部留作只供参考的上下文。
+ * 返回的 pairs 仍带 isCurrent / sourceOffset，供 Kotlin 定位章节缓存。
+ */
+function _buildSeqContent(t) {
+    var currentDialogs = _isArray(t.dialogs) ? t.dialogs : [];
+    var below = String(t.below || "");
+
+    var cleanedDialogues = "";
     for (var i = 0; i < currentDialogs.length; i++) {
-        all.push({
-            text: _stripSeqPrefix(String(currentDialogs[i].text || "")),
-            isCurrent: true,
-            sourceOffset: 0
-        });
+        var dialogText = String(currentDialogs[i].text || "").replace(/^【\d+】/, "");
+        cleanedDialogues += "“" + dialogText + "”" + NL;
     }
-    for (var j = 0; j < belowDialogs.length; j++) {
-        all.push({
-            text: belowDialogs[j].text,
-            isCurrent: false,
-            sourceOffset: belowDialogs[j].sourceOffset
-        });
-    }
-    var seqContent = "", pairs = [];
-    for (var k = 0; k < all.length; k++) {
-        var localSeq = padZero(k + 1, 2);
-        var dialogText2 = String(all[k].text || "").replace(/^【[0-9]+】/, "");
-        seqContent += "【" + localSeq + "】“" + dialogText2 + "”" + NL;
+    var cleanedBelow = below.replace(/【\d+】/g, "");
+    var fullRawText = cleanedDialogues + cleanedBelow;
+    fullRawText = fullRawText.replace(/(“[^“”\n]*)(\n[^“”]+)($|“)/g, "$1”$2$3");
+    fullRawText = fullRawText.replace(/(“[^“”\n]*)($|“)/g, "$1”$2");
+    fullRawText = fullRawText.replace(/【\d{1,4}】/g, "");
+    fullRawText = fullRawText.replace(/[『「【〈〉〔'']/g, "");
+
+    var allLeftQuotes = fullRawText.match(/“/g);
+    var totalQuoteCount = allLeftQuotes ? allLeftQuotes.length : 0;
+    var stopAddIndex = totalQuoteCount <= 5
+        ? totalQuoteCount
+        : Math.max(Math.floor(totalQuoteCount * 0.8), 1);
+    // 80% 截断只给下文尾部留缓冲，当前段对话必须全部编号
+    if (stopAddIndex < currentDialogs.length) stopAddIndex = currentDialogs.length;
+    var seqCounter = 0;
+    var seqContent = fullRawText.replace(/“/g, function (match) {
+        seqCounter++;
+        if (seqCounter <= stopAddIndex) return "【" + padZero(seqCounter, 2) + "】" + match;
+        return match;
+    });
+
+    var pairs = [];
+    var belowDialogs = _scanBelowDialogs(below);
+    var seqReg = /【(\d{1,4})】“([^”]*)”/g;
+    var m, k = 0;
+    while ((m = seqReg.exec(seqContent)) !== null) {
+        var isCurrent = k < currentDialogs.length;
+        var sourceOffset = 0;
+        if (!isCurrent) {
+            var bd = belowDialogs[k - currentDialogs.length];
+            sourceOffset = bd ? bd.sourceOffset : 0;
+        }
         pairs.push({
-            localSeq: localSeq,
-            text: dialogText2,
-            isCurrent: all[k].isCurrent,
-            sourceOffset: all[k].sourceOffset || 0
+            localSeq: m[1],
+            text: m[2],
+            isCurrent: isCurrent,
+            sourceOffset: sourceOffset
         });
+        k++;
+    }
+    if (pairs.length === 0) {
+        for (var f = 0; f < currentDialogs.length; f++) {
+            pairs.push({
+                localSeq: padZero(f + 1, 2),
+                text: String(currentDialogs[f].text || "").replace(/^【\d+】/, ""),
+                isCurrent: true,
+                sourceOffset: 0
+            });
+        }
     }
     return { text: seqContent, pairs: pairs };
 }
@@ -213,10 +254,8 @@ function prepareNameRequest(taskJson) {
     var t = _task(taskJson);
     var seq = _buildSeqContent(t);
     var userContent = "";
-    var prevPara = String(t.prevParagraph || "");
-    if (prevPara !== "") userContent += "【上一段落】" + NL + prevPara + NL;
     var above = String(t.above || "");
-    if (above !== "") userContent += "【上文历史内容】" + NL + above + NL;
+    if (above.trim() !== "") userContent += "【上文历史内容】" + NL + above + NL;
     userContent += "【当前待分析对话内容】" + NL + seq.text;
     var expectedKeys = [];
     for (var ei = 0; ei < seq.pairs.length; ei++) expectedKeys.push(seq.pairs[ei].localSeq);
@@ -357,7 +396,7 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
             "4. 全新角色（从未出现过）判定为非别名" + NL + NL +
             (ctxText ? "【小说上下文片段】" + NL + ctxText + NL + NL : "") +
             "【已有角色列表】" + NL + JSON.stringify(existingRolesList) + NL + NL +
-            "【待确认名字列表】" + NL + nameSeqText + NL +
+            "【待确认名字列表】" + NL + nameSeqText + NL + NL +
             "【输出要求】" + NL +
             "输出严格JSON格式，键为序号（如" + Q + "01" + Q + "），值为 {isAlias: true/false, mainName: " + Q + "匹配的主名或null" + Q + "}。" + NL +
             "必须覆盖所有序号。";
