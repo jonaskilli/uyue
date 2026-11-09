@@ -7,6 +7,10 @@
         android:title="@string/replace" />
 
     <item
+        android:id="@+id/menu_edit_paragraph"
+        android:title="@string/edit_paragraph" />
+
+    <item
         android:id="@+id/menu_copy"
         android:title="@android:string/copy" />
 

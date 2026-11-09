@@ -55,6 +55,11 @@ object AiChapterFixService {
     /** 并发请求数上限 */
     const val MAX_CONCURRENCY = 20
 
+    /** AI 单段最多允许展开成几段，超过视为误把上下文/整章抄进返回值 */
+    private const val MAX_AI_EXPAND = 8
+
+    private val PROMPT_BLOCK_REGEX = Regex("^【\\d+】")
+
     /** 默认模板的固定 id，首次初始化时使用 */
     const val DEFAULT_TEMPLATE_ID = 1L
 
@@ -70,6 +75,8 @@ object AiChapterFixService {
         - 只输出需要修改的段落；没有问题的段落不要出现在 JSON 里。
         - 整段广告需要删除时，该段落的值写空字符串 ""。
         - 值里允许包含换行符 \n：一段需要拆成多段时就用 \n 分隔。
+        - 值只能是该编号段落修正后的文本：不要复制上文/后续/其他编号段落的内容，不要带【编号】或【上文】等标记。
+        - 不要把同一段文字重复写两遍；拆段时拆出的每一段内容必须不同。
         - 如果整章都没有问题，输出 {}。
 
         示例：{"3":"修正后的第三段文字","7":"拆出来的第一小段\n拆出来的第二小段","12":""}
@@ -346,21 +353,19 @@ object AiChapterFixService {
         if (paragraphs.isEmpty()) {
             return OneOutcome(Outcome.FAILED, "《$title》正文为空")
         }
-        // 3. 上下文参考：正文上、下分别附上一章结尾 / 下一章开头该字数的内容，
-        //    供 AI 理解断章处的情节；只用已缓存的正文，不额外下载
+        // 3. 上下文参考：与编号正文完全同口径（同样过一遍净化），
+        //    避免 AI 同时看到「净化后正文 + 未净化原文」两种文本而误抄
         val contextLength = template.contextLength.coerceAtLeast(0)
         var contextBefore = ""
         var contextAfter = ""
         if (contextLength > 0) {
             if (chapterIndex > 0) {
                 contextBefore = appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex - 1)
-                    ?.let { BookHelp.getContent(book, it) }
-                    ?.takeLast(contextLength)
+                    ?.let { purifiedExcerpt(book, it, contextLength, tail = true) }
                     .orEmpty()
             }
             contextAfter = appDb.bookChapterDao.getChapter(book.bookUrl, chapterIndex + 1)
-                ?.let { BookHelp.getContent(book, it) }
-                ?.take(contextLength)
+                ?.let { purifiedExcerpt(book, it, contextLength, tail = false) }
                 .orEmpty()
         }
         // 4. 超过阈值的长章先均分成多块（阈值 <= 0 表示不拆分），逐块送 AI；
@@ -423,29 +428,38 @@ object AiChapterFixService {
                 result.forEach { (index, text) -> fixes[offsets[blockIndex] + index] = text }
             }
         }
-        // 7. 按序号原位替换；值为空 = 删除该段，值含换行 = 一段展开成多段
+        // 7. 以「净化后段落列表」为唯一基准做原位替换，并严格校验 AI 返回值：
+        //    同一段被写两遍 / 抄进上下文或其他段落 / 一次展开过多段，都视为无效修正
         val newParagraphs = ArrayList<String>(paragraphs.size)
         paragraphs.forEachIndexed { i, p ->
             val fixed = fixes[i + 1]
             if (fixed == null) {
                 newParagraphs.add(p)
+                return@forEachIndexed
+            }
+            val parts = fixed.split("\n")
+                .map { cleanFixedLine(it, indent) }
+                .filter { it.isNotEmpty() }
+                .distinct()
+            val others = paragraphs.filterIndexed { j, _ -> j != i }.map { it.trim() }.toHashSet()
+            val usable = parts
+                .filter { parts.size <= 1 || it.trim() !in others }
+                .filter { !isPromptBlock(it) }
+            if (usable.isEmpty() || usable.size > MAX_AI_EXPAND) {
+                AppLog.put("$TAG: 《$title》第${i + 1}段修正被忽略（展开${parts.size}段）")
+                newParagraphs.add(p)
             } else {
-                fixed.split("\n")
-                    .map { line ->
-                        val t = line.trim()
-                        if (indent.isNotEmpty() && t.startsWith(indent)) t.removePrefix(indent) else t
-                    }
-                    .filter { it.isNotEmpty() }
-                    .forEach { newParagraphs.add(it) }
+                newParagraphs.addAll(usable)
             }
         }
-        val newContent = newParagraphs.joinToString("\n")
-        if (newContent == paragraphs.joinToString("\n")) {
+        if (newParagraphs == paragraphs) {
             // AI 回了内容但实际没改动，按「无需修改」记，避免以后重复花钱
             AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_CLEAN)
             return OneOutcome(Outcome.CLEAN, "《$title》检查完毕：无需修改")
         }
-        // 8. 写回缓存正文
+        // 8. 整章写回：AI 的修正值本就是净化后的段落文本，必须整份落回同一口径，
+        //    不能把净化后的段落混进未净化的原文行里（两者行数/文字不对应会错位）
+        val newContent = newParagraphs.joinToString("\n")
         BookHelp.saveText(book, chapter, newContent)
         AiChapterFixStore.mark(
             book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_FIXED, fixes.size
@@ -457,6 +471,38 @@ object AiChapterFixService {
             Outcome.FIXED,
             "《$title》已处理${if (blocks != null) "（分 ${blocks.size} 块）" else ""}：修改 ${fixes.size} 段"
         )
+    }
+
+    /** 与编号正文完全同口径地净化相邻章，再截取前/后若干字作为上下文参考 */
+    private fun purifiedExcerpt(
+        book: Book,
+        chapter: BookChapter,
+        length: Int,
+        tail: Boolean
+    ): String {
+        val raw = BookHelp.getContent(book, chapter) ?: return ""
+        if (raw.isBlank()) return ""
+        val text = runCatching {
+            ContentProcessor.get(book)
+                .getContent(book, chapter, raw, includeTitle = false)
+                .textList.joinToString("\n")
+        }.getOrDefault(raw)
+        return if (tail) text.takeLast(length) else text.take(length)
+    }
+
+    /** 清掉 AI 返回行里的段首缩进与首尾空白 */
+    private fun cleanFixedLine(line: String, indent: String): String {
+        var t = line.trim()
+        if (indent.isNotEmpty() && t.startsWith(indent)) t = t.removePrefix(indent)
+        return t.trim()
+    }
+
+    /** 识别模型把提示词里的编号/上下文标记误抄进正文 */
+    private fun isPromptBlock(line: String): Boolean {
+        if (line.startsWith("【上文") || line.startsWith("【后续") ||
+            line.startsWith("【正文段落")
+        ) return true
+        return PROMPT_BLOCK_REGEX.containsMatchIn(line)
     }
 
     /**

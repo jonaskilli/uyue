@@ -799,6 +799,13 @@ class ReadView(context: Context, attrs: AttributeSet) :
         return curPage.selectedText
     }
 
+    /**
+     * 选区覆盖到的完整段落（段落号 + 段落文本）
+     */
+    fun getSelectedParagraphs(): List<Pair<Int, String>> {
+        return curPage.selectedParagraphs
+    }
+
     fun getCurVisiblePage(): TextPage {
         return curPage.getCurVisiblePage()
     }
