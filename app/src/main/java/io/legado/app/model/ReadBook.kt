@@ -1082,7 +1082,11 @@ object ReadBook : CoroutineScope by MainScope() {
                     val clean = cleanContentForTts(book, ch, raw)
                     if (clean.isNotBlank()) {
                         if (sb.isNotEmpty()) sb.append("\n")
-                        sb.append(clean)
+                        // data.json 每章第一行统一放原始章节名：脚本按这个标题定位章节，
+                        // 角色识别 json 也按原始章节名命名，三处必须是同一个名字。
+                        val lines = clean.split("\n").toMutableList()
+                        lines[0] = ch.title.replace(Regex("[\r\n]"), "")
+                        sb.append(lines.joinToString("\n"))
                         chapterCount++
                     }
                 }

@@ -899,7 +899,11 @@ abstract class BaseReadAloudService : BaseService(),
         if (paragraphIndex < 0) return null
         val paragraphs = chapterParagraphs ?: contentList
         if (paragraphs.isEmpty()) return null
-        val title = (chapterTitle ?: textChapter?.title ?: textChapter?.chapter?.title ?: "").trim()
+        // 与 data.json 每章第一行、角色缓存 json 文件名统一用原始章节名；
+        // 不再用排版用的 displayTitle（会被标题替换规则改掉，导致对不上）。
+        val title = (chapterTitle?.takeIf { it.isNotBlank() }
+            ?: textChapter?.chapter?.title
+            ?: "").trim()
         val bodyStart = if (isLikelyChapterTitleLine(paragraphs.firstOrNull().orEmpty(), title)) 1 else 0
         val safeIndex = paragraphIndex.coerceIn(0, paragraphs.lastIndex)
         val fullParagraph = paragraphs.getOrNull(safeIndex).orEmpty()
