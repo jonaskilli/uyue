@@ -82,6 +82,12 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             
             // 【修改】居中弹窗宽度不建议 MATCH_PARENT，改为屏幕宽度的 90%
             setLayout(0.9f, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+            // 内容收紧后整体再略微上移，底部四个按钮不用够着屏幕最下方点
+            val offset = (24 * resources.displayMetrics.density).toInt()
+            val lp = attributes
+            lp.y = -offset
+            attributes = lp
         }
     }
 
@@ -372,24 +378,32 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         }
     }
 
+    /** 右下角按钮：分析运行中显示「后台运行」，避免与「停止」混淆；未运行时仍为「取消」 */
+    private fun updateAnalysisNegativeButton(running: Boolean) {
+        val button = analysisDialog?.getButton(DialogInterface.BUTTON_NEGATIVE) ?: return
+        val text = if (running) "后台运行" else "取消"
+        if (button.text?.toString() != text) {
+            button.text = text
+        }
+    }
+
     private fun refreshAnalysisStatus() {
         val dialogBinding = analysisDialogBinding ?: return
         refreshAnalysisProgress()
-        if (!BookScriptAnalysisService.isRun) {
+        val running = BookScriptAnalysisService.isRun
+        updateAnalysisNegativeButton(running)
+        if (!running) {
             dialogBinding.llAnalysisStatus.visibility = View.GONE
             return
         }
         dialogBinding.llAnalysisStatus.visibility = View.VISIBLE
-        val total = BookScriptAnalysisService.analyzedTotalCount
-        val analyzed = BookScriptAnalysisService.analyzedChapterCount.coerceIn(0, total.coerceAtLeast(1))
-        val percent = if (total > 0) analyzed * 100 / total else 0
         val bookName = BookScriptAnalysisService.runningBookName ?: "未知"
         val chapterTitle = BookScriptAnalysisService.currentChapterTitle?.take(16)
         dialogBinding.tvAnalysisBook.text = "书名：《$bookName》"
-        dialogBinding.tvAnalysisChapter.text = buildString {
-            append("当前章节：第${BookScriptAnalysisService.currentChapterIndex}")
-            if (total > 0) append(" / $total 章")
-            if (!chapterTitle.isNullOrBlank()) append(" · 「$chapterTitle」")
+        dialogBinding.tvAnalysisChapter.text = if (!chapterTitle.isNullOrBlank()) {
+            "「$chapterTitle」"
+        } else {
+            "第${BookScriptAnalysisService.currentChapterIndex}章"
         }
         val p = BookScriptAnalysisService.currentParagraphIndex
         val pTotal = BookScriptAnalysisService.currentParagraphTotal
@@ -398,8 +412,6 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         } else {
             "段落进度：准备中"
         }
-        dialogBinding.tvAnalysisChapters.text =
-            "全书进度：共 $total 章 · 已分析 $analyzed 章（$percent%）"
     }
 
     /** 粗略进度：当前书已落盘的章节缓存文件数 / 本书总章数 */
@@ -436,15 +448,12 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             .create()
 
         dialogBinding.tvAnalysisFromCurrent.setOnClickListener {
-            dialog.dismiss()
             startFullBookAnalysis(ReadBook.durChapterIndex)
         }
         dialogBinding.tvAnalysisFromStart.setOnClickListener {
-            dialog.dismiss()
             startFullBookAnalysis(0)
         }
         dialogBinding.tvAnalysisScript.setOnClickListener {
-            dialog.dismiss()
             startActivity(BookAnalysisScriptEditActivity.startIntent(requireContext()))
         }
         dialogBinding.btnStopAnalysis.setOnClickListener {
@@ -482,6 +491,11 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
     private fun startFullBookAnalysis(startIndex: Int) {
         // 全书分析已改用专用脚本，不再读写 data.json / 进度指针等朗读运行时文件，
         // 因此不再停止朗读，也不再由 ReadAloud.play 拦截。
+        // 弹窗启动后不再关闭，防止用户重复点击重复发起分析
+        if (BookScriptAnalysisService.isRun) {
+            toastOnUi("全书分析正在进行中")
+            return
+        }
         toastOnUi("全书分析已开始")
         val intent = Intent(requireContext(), BookScriptAnalysisService::class.java).apply {
             putExtra(BookScriptAnalysisService.EXTRA_START_INDEX, startIndex)

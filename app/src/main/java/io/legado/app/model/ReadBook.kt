@@ -86,9 +86,11 @@ object ReadBook : CoroutineScope by MainScope() {
     private val nextChapterLoadingLock = Mutex()
     var readStartTime: Long = System.currentTimeMillis()
 
-    /* TTS 文本 JSON 上次保存状态 */
+    /* TTS 文本 JSON 上次保存状态（含净化开关，勾选变化要重新净化写入 data.json） */
     private var lastSavedBookName: String? = null
     private var lastSavedChapterIndex: Int = -1
+    private var lastSavedFixQuote: Boolean? = null
+    private var lastSavedReSegment: Boolean? = null
 
     /* 跳转进度前进度记录 */
     var lastBookProgress: BookProgress? = null
@@ -1057,7 +1059,14 @@ object ReadBook : CoroutineScope by MainScope() {
         val book = book ?: return
         val bookName = book.name
         val chapterIndex = durChapterIndex
-        if (!force && lastSavedBookName == bookName && lastSavedChapterIndex == chapterIndex) {
+        val fixQuote = book.getFixQuote()
+        val reSegment = book.getReSegment()
+        if (!force &&
+            lastSavedBookName == bookName &&
+            lastSavedChapterIndex == chapterIndex &&
+            lastSavedFixQuote == fixQuote &&
+            lastSavedReSegment == reSegment
+        ) {
             return
         }
         kotlin.runCatching {
@@ -1094,6 +1103,8 @@ object ReadBook : CoroutineScope by MainScope() {
             if (success) {
                 lastSavedBookName = bookName
                 lastSavedChapterIndex = chapterIndex
+                lastSavedFixQuote = fixQuote
+                lastSavedReSegment = reSegment
                 AppLog.putDebug(
                     "保存 TTS JSON 成功: $bookName 第${chapterIndex}章起, 实收${chapterCount}/${limit}章"
                 )
@@ -1147,11 +1158,17 @@ object ReadBook : CoroutineScope by MainScope() {
 
     /**
      * 章节正文朗读口径清洗（ContentProcessor 替换净化 + 清理残留 HTML/实体/占位符）。
-     * data.json 写入与分析器逐段执行脚本共用同一份清洗结果，保证脚本上下文一致。
+     * data.json 写入与全书分析逐章取文共用同一份清洗结果，保证脚本上下文一致。
+     * 「双引号修复」「重新分段」按阅读界面右上角菜单的按书勾选状态显式传入，
+     * 勾选时由 ContentProcessor 保证先 QuoteFix.fix 再 ContentHelp.reSegment。
      */
     fun cleanContentForTts(book: Book, ch: BookChapter, raw: String): String {
-        // 先经过 ContentProcessor 替换净化、去重标题、重新分段、简繁转换
-        val processed = ContentProcessor.get(book).getContent(book, ch, raw).toString()
+        // 先经过 ContentProcessor 替换净化、去重标题、双引号修复、重新分段、简繁转换
+        val processed = ContentProcessor.get(book).getContent(
+            book, ch, raw,
+            fixQuote = book.getFixQuote(),
+            reSegment = book.getReSegment()
+        ).toString()
         // 再清理残留的 HTML 标签、图片链接、段评占位符
         return processed
             .replace(Regex("<br\\s*/?>"), "\n")

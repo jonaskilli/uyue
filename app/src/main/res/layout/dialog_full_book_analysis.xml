@@ -132,9 +132,9 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="当前章节：—"
+                    android:text="—"
                     android:textColor="@color/primaryText"
-                    android:textSize="12sp" />
+                    android:textSize="15sp" />
 
                 <TextView
                     android:id="@+id/tv_analysis_paragraph"
@@ -147,15 +147,6 @@
                     android:textColor="@color/primary"
                     android:textSize="17sp"
                     android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/tv_analysis_chapters"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="全书进度：共 0 章 · 已分析 0 章（0%）"
-                    android:textColor="@color/primaryText"
-                    android:textSize="12sp" />
             </LinearLayout>
 
             <TextView
