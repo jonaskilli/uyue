@@ -30,6 +30,7 @@ import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.model.webBook.WebBook
+import io.legado.app.service.AiChapterFixStore
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.searchContent.SearchResult
@@ -371,6 +372,7 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
             appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)
                 ?.let { chapter ->
                     BookHelp.delContent(book, chapter)
+                    AiChapterFixStore.deleteChapter(book.bookUrl, chapter.index)
                     ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
                 }
         }
@@ -384,6 +386,7 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
                 book.totalChapterNum
             ).forEach { chapter ->
                 BookHelp.delContent(book, chapter)
+                AiChapterFixStore.deleteChapter(book.bookUrl, chapter.index)
             }
             ReadBook.loadContent(false)
         }
@@ -392,18 +395,20 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
     fun refreshContentAll(book: Book) {
         execute {
             BookHelp.clearCache(book)
+            AiChapterFixStore.deleteBook(book.bookUrl)
             ReadBook.loadContent(false)
         }
     }
 
     /**
-     * 保存内容
+     * 保存内容（单章换源重新取到网络正文时也会走这里）
      */
     fun saveContent(book: Book, content: String) {
         execute {
             appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex)
                 ?.let { chapter ->
                     BookHelp.saveText(book, chapter, content)
+                    AiChapterFixStore.deleteChapter(book.bookUrl, chapter.index)
                     ReadBook.loadContent(ReadBook.durChapterIndex, resetPageOffset = false)
                 }
         }

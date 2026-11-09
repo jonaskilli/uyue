@@ -168,10 +168,10 @@ class AiChapterFixTemplateListDialog :
                 }
                 lifecycleScope.launch(Dispatchers.IO) {
                     val dao = appDb.aiChapterFixTemplateDao
-                    // 新模板继承默认模板的可执行配置，避免建出来是空白不可用
-                    val base = dao.getDefault()
-                        ?: AiChapterFixService.builtinDefaultTemplate()
-                    val template = base.copy(
+                    // 新建模板始终取内置模板，不继承可能被改坏的默认模板；
+                    // 提示词显式写入最新内置文本，界面里能直接看到、也能复制回默认模板
+                    val template = AiChapterFixService.builtinDefaultTemplate().copy(
+                        prompt = AiChapterFixService.DEFAULT_PROMPT,
                         id = newTemplateId(dao),
                         name = name,
                         isDefault = false,

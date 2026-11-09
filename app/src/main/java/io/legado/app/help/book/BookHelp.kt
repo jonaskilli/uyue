@@ -14,6 +14,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.localBook.LocalBook
+import io.legado.app.service.AiChapterFixStore
 import io.legado.app.utils.ArchiveUtils
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.ImageUtils
@@ -198,6 +199,8 @@ object BookHelp {
         content: String
     ) {
         try {
+            // 网络正文覆盖缓存：这一章回到未处理状态，清掉 AI 处理章节的已完成标记
+            AiChapterFixStore.deleteChapter(book.bookUrl, bookChapter.index)
             saveText(book, bookChapter, content)
             //saveImages(bookSource, book, bookChapter, content)
             postEvent(EventBus.SAVE_CONTENT, Pair(book, bookChapter))
