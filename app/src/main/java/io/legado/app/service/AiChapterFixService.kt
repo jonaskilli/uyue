@@ -19,6 +19,9 @@ import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.getPrefString
 import io.legado.app.utils.putPrefBoolean
 import io.legado.app.utils.putPrefString
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -29,6 +32,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import splitties.init.appCtx
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -55,8 +59,40 @@ object AiChapterFixService {
     /** 并发请求数上限 */
     const val MAX_CONCURRENCY = 20
 
+    /** 正在跑的自动分析任务（按书），切章时取消未完成的那一章 */
+    private val autoJobs = ConcurrentHashMap<String, Job>()
+
+    /** 登记自动分析任务；同书若还有没跑完的，先取消旧的 */
+    fun registerAutoJob(bookUrl: String, job: Job) {
+        autoJobs[bookUrl]?.cancel()
+        autoJobs[bookUrl] = job
+    }
+
+    /** 任务结束（含被取消）后清掉引用 */
+    fun clearAutoJob(bookUrl: String, job: Job) {
+        autoJobs.remove(bookUrl, job)
+    }
+
+    /** 切章时调用：还没分析完就停掉，未完成的章节不写回、不落盘、不标记完成 */
+    fun cancelAutoJob(bookUrl: String) {
+        val job = autoJobs.remove(bookUrl) ?: return
+        if (job.isActive) {
+            job.cancel()
+            AppLog.put("$TAG: 切章，取消未完成的自动章节分析")
+        }
+    }
+
     /** 兜底判定「单键值吞并了别的段落」时被比对段落的最小长度，避免短对话误判 */
     private const val MIN_SWALLOW_LEN = 8
+
+    /** 分析结果里「汉字相同的重复段落」变多时，整章重新分析的最大次数 */
+    private const val MAX_DUPLICATE_RETRY = 3
+
+    /** 引号后旁白与下一段算重复时，旁白至少要有的汉字数，达到 4 个就算 */
+    private const val MIN_NARRATION_LEN = 4
+
+    /** 段落只保留汉字后比较：标点、引号、空白差异不算不同 */
+    private val HANZI_ONLY_REGEX = Regex("[^\\u4e00-\\u9fa5]")
 
     private val PROMPT_BLOCK_REGEX = Regex("^【\\d+】")
 
@@ -82,10 +118,10 @@ object AiChapterFixService {
 
     /** 内置默认提示词：只负责修错误、去广告和翻页提示；需要扩写请自行修改本提示词 */
     val DEFAULT_PROMPT = """
-        你是小说正文校对助手。请检查下面编号的每一段【正文段落】，修正以下问题：
-        1. 广告、推广、求票、求关注、微信公众号/QQ群/网址/作者说等与正文无关的内容——整段删除；
-        2. 翻页提示、分页提示，例如「本章未完，请点击下一页」「当前章节已完，请点击下一页」「未完待续」「请翻页继续阅读」等——整段删除；
-        3. 错别字、多字、漏字、乱码、标点误用、明显的书写错误——改正。
+        你是小说正文校对助手。请检查下面编号的每一段【正文段落】，只做必要的修复，不要对正文进行较大改动：
+        1. 错别字、多字、漏字（丢字）、乱码、标点误用、明显的书写错误——改正；改动尽量小，保持原句原意与文风，不要改写、扩写、增删情节或重排句子；
+        2. 广告、推广、求票、求关注、微信公众号/QQ群/网址/作者说等与正文无关的内容——只有 100% 确认整段都是广告时，才整段删除；只要有一点拿不准，就原样保留、不要删除；
+        3. 翻页提示、分页提示，例如「本章未完，请点击下一页」「当前章节已完，请点击下一页」「未完待续」「请翻页继续阅读」等——整段删除。
 
         【返回格式规范】
         - 只输出一个 JSON 对象，键是段落编号（字符串，必须与给出的编号一致），值是该段修正后的完整文本。
@@ -282,6 +318,7 @@ object AiChapterFixService {
         val effectivePrompt = template.prompt.ifBlank { DEFAULT_PROMPT }
         val n = template.chapterCount.coerceIn(1, MAX_COUNT)
         if (n == 1) {
+            currentCoroutineContext().ensureActive()
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, startIndex)
                 ?: return@withContext FixResult(false, "找不到对应的章节")
             val r = fixOneChapter(
@@ -298,6 +335,7 @@ object AiChapterFixService {
         var firstFail = ""
         val changedIndexes = ArrayList<Int>()
         for (i in 0 until n) {
+            currentCoroutineContext().ensureActive()
             val index = startIndex + i
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: break
             val r = fixOneChapter(
@@ -341,7 +379,8 @@ object AiChapterFixService {
         prompt: String,
         force: Boolean,
         onlyCached: Boolean,
-        onProgress: ((String) -> Unit)? = null
+        onProgress: ((String) -> Unit)? = null,
+        attempt: Int = 1
     ): OneOutcome {
         val title = chapter.title
         if (!force && AiChapterFixStore.isDone(book.bookUrl, chapterIndex)) {
@@ -469,14 +508,40 @@ object AiChapterFixService {
             AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_CLEAN)
             return OneOutcome(Outcome.CLEAN, "《$title》检查完毕：无需修改")
         }
+        // 重复段落校验：原文本来就有的重复允许保留，但结果比原文多出来就整章重分析，
+        // 连续三次都这样则放弃本次修改，一个字都不写回。
+        val baseDuplicates = countDuplicateParagraphs(paragraphs)
+        val afterDuplicates = countDuplicateParagraphs(newParagraphs)
+        if (afterDuplicates > baseDuplicates) {
+            if (attempt < MAX_DUPLICATE_RETRY) {
+                AppLog.put(
+                    "$TAG: 《$title》重复段落 $baseDuplicates -> $afterDuplicates，" +
+                            "放弃第 $attempt 次结果并整章重分析"
+                )
+                onProgress?.invoke("$title（第${attempt + 1}次分析）")
+                return fixOneChapter(
+                    book, bookSource, chapter, chapterIndex, template, providers,
+                    prompt, force, onlyCached, onProgress, attempt + 1
+                )
+            }
+            AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
+            return OneOutcome(
+                Outcome.FAILED,
+                "《$title》连续${MAX_DUPLICATE_RETRY}次分析都新增重复段落" +
+                        "（$baseDuplicates -> $afterDuplicates），已放弃本次修改"
+            )
+        }
         // 8. 整章写回：AI 的修正值本就是净化后的段落文本，必须整份落回同一口径，
         //    不能把净化后的段落混进未净化的原文行里（两者行数/文字不对应会错位）
+        // 取消后绝不写回：否则切章后分析结果才落盘，又会和朗读内容错开
+        currentCoroutineContext().ensureActive()
         val newContent = newParagraphs.joinToString("\n")
         BookHelp.saveText(book, chapter, newContent)
         AiChapterFixStore.mark(
             book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_FIXED, effectiveFixes.size
         )
-        // 9. 同步刷新朗读用的 data.json
+        // 9. 正文已改写：先让节流失效（保证切章/保存进度等处也会补写），再强制重落盘 data.json
+        ReadBook.invalidateTtsTextJson()
         kotlin.runCatching { ReadBook.saveTtsTextJson(force = true) }
             .onFailure { AppLog.put("$TAG: 刷新朗读JSON失败 ${it.localizedMessage}", it) }
         return OneOutcome(
@@ -516,6 +581,33 @@ object AiChapterFixService {
             t.startsWith("【正文段落")
         ) return ""
         return PROMPT_BLOCK_REGEX.replace(t, "").trim()
+    }
+
+    /**
+     * 返回「重复段落数量」，分析前（基线）与分析后都用同一套规则：
+     *  1. 整段汉字完全相同的，多出来的段数；
+     *  2. 上一段最后一个右引号之后的旁白（汉字达到 4 个），与下一段整段汉字相同，也算一处。
+     * 只比汉字，标点/引号/空白差异不算不同；纯符号段退回按原文比较。
+     */
+    private fun countDuplicateParagraphs(paragraphs: List<String>): Int {
+        if (paragraphs.size < 2) return 0
+        val keys = paragraphs.map {
+            HANZI_ONLY_REGEX.replace(it, "").ifEmpty { it.trim() }
+        }
+        val nonEmpty = keys.filter { it.isNotEmpty() }
+        var count = nonEmpty.size - nonEmpty.toHashSet().size
+        for (i in 0 until paragraphs.size - 1) {
+            val prev = paragraphs[i]
+            val quoteEnd = prev.lastIndexOf('”')
+            if (quoteEnd < 0 || quoteEnd == prev.lastIndex) continue
+            val tail = HANZI_ONLY_REGEX.replace(prev.substring(quoteEnd + 1), "")
+            if (tail.length < MIN_NARRATION_LEN) continue
+            val next = keys[i + 1]
+            if (next != tail) continue
+            if (keys[i] == next) continue   // 整段相同已计过，不重复计
+            count++
+        }
+        return count
     }
 
     /**

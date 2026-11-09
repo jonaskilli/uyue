@@ -898,8 +898,9 @@ object ReadBook : CoroutineScope by MainScope() {
             appCtx.toastOnUi("ChapterProvider ERROR:\n${it.stackTraceStr}")
         }.onSuccess {
             success?.invoke()
-            // 内容真正加载完成后，触发 TTS JSON 保存
-            saveTtsTextJson()
+            // 内容真正加载完成后，强制重落盘 TTS JSON：
+            // 正文可能已被 AI 处理章节改写，不能靠节流变量判断是否需要重写
+            saveTtsTextJson(force = true)
         }
         chapterLoadingJobs[chapter.index] = job
         job.start()
@@ -1044,6 +1045,16 @@ object ReadBook : CoroutineScope by MainScope() {
                 AppLog.put("保存书籍阅读进度信息出错\n$it", it)
             }
         }
+    }
+
+    /**
+     * 外部改写正文后调用：让下一次 data.json 保存不再被节流跳过。
+     * AI 处理章节改写的是缓存正文，不会改变书名/章号/净化开关这几个节流变量，
+     * 不失效的话切章、保存进度等处的无 force 调用会直接 return，data.json 一直停在旧文本。
+     */
+    fun invalidateTtsTextJson() {
+        lastSavedBookName = ""
+        lastSavedChapterIndex = -1
     }
 
     /**

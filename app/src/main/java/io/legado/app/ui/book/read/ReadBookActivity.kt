@@ -791,9 +791,14 @@ class ReadBookActivity : BaseReadBookActivity(),
             AppLog.put("AI处理章节: ${result.message}")
             toastOnUi(result.message)
         }
+        // 自动任务登记下来：切章时若还没跑完就直接取消，不写回、不落盘
+        if (silent) AiChapterFixService.registerAutoJob(book.bookUrl, job)
         // 调用可能比较久，允许返回键中断
         waitDialog?.setOnCancelListener { job.cancel() }
-        job.invokeOnCompletion { aiFixRunning = false }
+        job.invokeOnCompletion {
+            aiFixRunning = false
+            AiChapterFixService.clearAutoJob(book.bookUrl, job)
+        }
     }
 
     /**
