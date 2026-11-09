@@ -105,6 +105,23 @@ object AiChapterFixStore {
         }
     }
 
+    /** 删除指定章节的处理记录（章节正文重新从网络获取后调用） */
+    suspend fun deleteChapter(bookUrl: String, chapterIndex: Int): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                val f = chapterFile(bookUrl, chapterIndex)
+                val tmp = File(f.parentFile, "$chapterIndex.json.tmp")
+                if (tmp.exists()) tmp.delete()
+                if (!f.exists()) return@withContext false
+                val ok = f.delete()
+                AppLog.put("$TAG: 删除章节记录 $chapterIndex -> $ok")
+                ok
+            } catch (e: Exception) {
+                AppLog.put("$TAG: 删除章节记录失败 ${e.localizedMessage}")
+                false
+            }
+        }
+
     /** 删除整本书的记录 */
     suspend fun deleteBook(bookUrl: String): Boolean = withContext(Dispatchers.IO) {
         try {

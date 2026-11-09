@@ -55,31 +55,48 @@ object AiChapterFixService {
     /** 并发请求数上限 */
     const val MAX_CONCURRENCY = 20
 
-    /** AI 单段最多允许展开成几段，超过视为误把上下文/整章抄进返回值 */
-    private const val MAX_AI_EXPAND = 8
+    /** 兜底判定「单键值吞并了别的段落」时被比对段落的最小长度，避免短对话误判 */
+    private const val MIN_SWALLOW_LEN = 8
 
     private val PROMPT_BLOCK_REGEX = Regex("^【\\d+】")
+
+    /**
+     * 返回格式硬性契约：无论任务提示词怎么改，这一段都会追加进请求。
+     * 只约定 JSON 怎么填、段落怎么落位，不干涉要修什么。
+     */
+    private val FORMAT_CONTRACT = """
+        【返回格式契约（必须严格遵守）】
+        - 只输出一个 JSON 对象，不要解释，不要 markdown 代码块，不要多余文字。
+        - 键是段落编号（字符串），值是该段修改后的完整文本。
+        - 没有出现在 JSON 里的段落，程序会原样保留。
+        - 修改单段："3":"修改后的完整文本"。
+        - 删除整段："3":""。
+        - 一段拆成多段："3":"第一小段\n第二小段"（用 \n 分隔）。
+        - 合并连续的若干段：键写成「开始号-结束号」，例如 "3-5" 表示把第 3、4、5 段合并成一段，值是合并后的完整文本。程序会自动把这几段替换成这个值，不需要再为被合并的段单独写 ""。合并的段落必须连续，不连续的分开写。
+        - 除合并键外，键必须是单个段落编号。
+        - 整章无需修改就输出 {}。
+    """.trimIndent()
 
     /** 默认模板的固定 id，首次初始化时使用 */
     const val DEFAULT_TEMPLATE_ID = 1L
 
-    /** 内置默认提示词：以后想让 AI 扩写/改写，直接改提示词即可，代码不用动 */
+    /** 内置默认提示词：只负责修错误、去广告和翻页提示；需要扩写请自行修改本提示词 */
     val DEFAULT_PROMPT = """
-        你是小说正文校对助手。请检查下面编号的每一段【正文段落】，并修正以下问题：
+        你是小说正文校对助手。请检查下面编号的每一段【正文段落】，修正以下问题：
         1. 广告、推广、求票、求关注、微信公众号/QQ群/网址/作者说等与正文无关的内容——整段删除；
-        2. 错别字、多字、漏字、乱码、标点误用、明显的书写错误——改正。
+        2. 翻页提示、分页提示，例如「本章未完，请点击下一页」「当前章节已完，请点击下一页」「未完待续」「请翻页继续阅读」等——整段删除；
+        3. 错别字、多字、漏字、乱码、标点误用、明显的书写错误——改正。
 
-        严格按下面的要求输出：
-        - 只输出一个 JSON 对象，不要解释，不要 markdown 代码块，不要多余文字。
-        - 键是段落编号（字符串形式，必须与给出的编号一致），值是该段修正后的完整文本。
-        - 只输出需要修改的段落；没有问题的段落不要出现在 JSON 里。
-        - 整段广告需要删除时，该段落的值写空字符串 ""。
-        - 值里允许包含换行符 \n：一段需要拆成多段时就用 \n 分隔。
-        - 值只能是该编号段落修正后的文本：不要复制上文/后续/其他编号段落的内容，不要带【编号】或【上文】等标记。
-        - 不要把同一段文字重复写两遍；拆段时拆出的每一段内容必须不同。
+        【返回格式规范】
+        - 只输出一个 JSON 对象，键是段落编号（字符串，必须与给出的编号一致），值是该段修正后的完整文本。
+        - 只输出需要修改的段落；没有变化的段落不要出现在 JSON 里（程序会原样保留）。
+        - 删除整段：该编号的值写空字符串 ""。
+        - 一段拆成多段：值里用 \n 分隔。
+        - 合并连续的若干段：键写成「开始号-结束号」，例如 "3-5" 表示把第 3、4、5 段合并；值写合并后的完整文本。程序会自动把这几段替换成这个值，不要再给被合并的段单独写 ""。合并的段落必须连续。
+        - 除合并键外，键必须是单个段落编号。
         - 如果整章都没有问题，输出 {}。
 
-        示例：{"3":"修正后的第三段文字","7":"拆出来的第一小段\n拆出来的第二小段","12":""}
+        示例：{"3":"修正后的第三段","7":"拆出的第一小段\n拆出的第二小段","4-6":"第4到6段合并后的完整文本","12":""}
     """.trimIndent()
 
     /**
@@ -428,29 +445,24 @@ object AiChapterFixService {
                 result.forEach { (index, text) -> fixes[offsets[blockIndex] + index] = text }
             }
         }
-        // 7. 以「净化后段落列表」为唯一基准做原位替换，并严格校验 AI 返回值：
-        //    同一段被写两遍 / 抄进上下文或其他段落 / 一次展开过多段，都视为无效修正
+        // 7. 以「净化后段落列表」为唯一基准落位。只规整返回格式，不评判内容：
+        //    空串删段、\n 拆段、扩写/改写原样保留；
+        //    单键若吞并了别的段落，静默补删除，防 AI 没按合并键写时产生重复。
+        val effectiveFixes = normalizeFixes(paragraphs, fixes, title)
         val newParagraphs = ArrayList<String>(paragraphs.size)
         paragraphs.forEachIndexed { i, p ->
-            val fixed = fixes[i + 1]
+            val fixed = effectiveFixes[i + 1]
             if (fixed == null) {
                 newParagraphs.add(p)
                 return@forEachIndexed
             }
-            val parts = fixed.split("\n")
+            if (fixed.isBlank()) return@forEachIndexed   // 空串 = 删除该段
+            fixed.split("\n")
                 .map { cleanFixedLine(it, indent) }
+                .map { stripPromptMark(it) }
                 .filter { it.isNotEmpty() }
                 .distinct()
-            val others = paragraphs.filterIndexed { j, _ -> j != i }.map { it.trim() }.toHashSet()
-            val usable = parts
-                .filter { parts.size <= 1 || it.trim() !in others }
-                .filter { !isPromptBlock(it) }
-            if (usable.isEmpty() || usable.size > MAX_AI_EXPAND) {
-                AppLog.put("$TAG: 《$title》第${i + 1}段修正被忽略（展开${parts.size}段）")
-                newParagraphs.add(p)
-            } else {
-                newParagraphs.addAll(usable)
-            }
+                .forEach { newParagraphs.add(it) }
         }
         if (newParagraphs == paragraphs) {
             // AI 回了内容但实际没改动，按「无需修改」记，避免以后重复花钱
@@ -462,14 +474,14 @@ object AiChapterFixService {
         val newContent = newParagraphs.joinToString("\n")
         BookHelp.saveText(book, chapter, newContent)
         AiChapterFixStore.mark(
-            book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_FIXED, fixes.size
+            book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_FIXED, effectiveFixes.size
         )
         // 9. 同步刷新朗读用的 data.json
         kotlin.runCatching { ReadBook.saveTtsTextJson(force = true) }
             .onFailure { AppLog.put("$TAG: 刷新朗读JSON失败 ${it.localizedMessage}", it) }
         return OneOutcome(
             Outcome.FIXED,
-            "《$title》已处理${if (blocks != null) "（分 ${blocks.size} 块）" else ""}：修改 ${fixes.size} 段"
+            "《$title》已处理${if (blocks != null) "（分 ${blocks.size} 块）" else ""}：修改 ${effectiveFixes.size} 段"
         )
     }
 
@@ -497,12 +509,41 @@ object AiChapterFixService {
         return t.trim()
     }
 
-    /** 识别模型把提示词里的编号/上下文标记误抄进正文 */
-    private fun isPromptBlock(line: String): Boolean {
-        if (line.startsWith("【上文") || line.startsWith("【后续") ||
-            line.startsWith("【正文段落")
-        ) return true
-        return PROMPT_BLOCK_REGEX.containsMatchIn(line)
+    /** 剥离模型误带进来的格式标记，正文内容原样保留；整行是提示词块标题时返回空串 */
+    private fun stripPromptMark(line: String): String {
+        val t = line.trim()
+        if (t.startsWith("【上文") || t.startsWith("【后续") ||
+            t.startsWith("【正文段落")
+        ) return ""
+        return PROMPT_BLOCK_REGEX.replace(t, "").trim()
+    }
+
+    /**
+     * 静默兜底：正常合并请让 AI 用 "3-5" 这类合并键。若它仍按老习惯把某段原文
+     * 并进单段的值里、又没给那段发删除指令，就自动补一个 ""，避免该段被原样保留后重复。
+     * 只补格式，不丢弃任何 AI 内容（扩写、改写、新增一律放行）。
+     */
+    private fun normalizeFixes(
+        paragraphs: List<String>,
+        fixes: Map<Int, String>,
+        title: String
+    ): Map<Int, String> {
+        val result = HashMap(fixes)
+        val normalized = paragraphs.map { it.trim() }
+        for ((index, value) in fixes) {
+            if (value.isBlank()) continue
+            val text = value.trim()
+            for (j in normalized.indices) {
+                if (j + 1 == index) continue
+                val other = normalized[j]
+                if (other.length < MIN_SWALLOW_LEN) continue
+                if (!text.contains(other)) continue
+                if (result.containsKey(j + 1)) continue
+                result[j + 1] = ""
+                AppLog.putDebug("$TAG: 《$title》第${j + 1}段被第${index}段并入，自动补删除")
+            }
+        }
+        return result
     }
 
     /**
@@ -532,6 +573,8 @@ object AiChapterFixService {
         // 组装提示词：上下文只是参考，真正要修改的只有编号的正文段落
         val fullPrompt = buildString {
             append(prompt)
+            append("\n\n")
+            append(FORMAT_CONTRACT)
             if (contextBefore.isNotBlank()) {
                 append("\n\n【上文（前文情节，仅供理解上下文衔接，不要修改，也不要输出到结果里）】\n")
                 append(contextBefore)
@@ -662,18 +705,16 @@ object AiChapterFixService {
                 val arr = JSONArray(jsonText)
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
-                    val index = obj.optInt("index", obj.optInt("num", obj.optInt("id", -1)))
-                    if (index in 1..paragraphCount) {
-                        result[index] = valueToText(obj.opt("text") ?: obj.opt("content"))
-                    }
+                    val rawKey = obj.optString(
+                        "index", obj.optString("num", obj.optString("id", ""))
+                    )
+                    val text = valueToText(obj.opt("text") ?: obj.opt("content"))
+                    putFix(result, rawKey, text, paragraphCount)
                 }
             } else {
                 val obj = JSONObject(jsonText)
                 for (key in obj.keys()) {
-                    val index = key.trim().toIntOrNull() ?: continue
-                    if (index in 1..paragraphCount) {
-                        result[index] = valueToText(obj.opt(key))
-                    }
+                    putFix(result, key, valueToText(obj.opt(key)), paragraphCount)
                 }
             }
             result
@@ -689,6 +730,54 @@ object AiChapterFixService {
         is JSONObject -> value.optString("text").ifBlank { value.optString("content") }
         is JSONArray -> (0 until value.length()).joinToString("\n") { value.optString(it) }
         else -> value.toString()
+    }
+
+    /**
+     * 把一条返回值落到「段落号 -> 文本」表里。
+     * 单段键直接落；"3-5" / "3,4,5" 这种合并键一看到多个连续段号就知道是合并：
+     * 首段放合并后的完整文本，其余段由代码自动置空删除，AI 不必再单独发删除指令。
+     */
+    private fun putFix(
+        result: HashMap<Int, String>,
+        rawKey: String,
+        text: String,
+        paragraphCount: Int
+    ) {
+        val key = rawKey.trim()
+        val single = key.toIntOrNull()
+        if (single != null) {
+            if (single in 1..paragraphCount) result[single] = text
+            return
+        }
+        val merged = parseMergeKey(key, paragraphCount)
+        if (merged.size < 2) {
+            AppLog.put("$TAG: 忽略不合规的键 $key")
+            return
+        }
+        result[merged.first()] = text
+        merged.drop(1).forEach { result[it] = "" }
+    }
+
+    /** 解析合并键："3-5" 或 "3,4,5"，要求至少两段、编号连续且都在有效范围内 */
+    private fun parseMergeKey(key: String, paragraphCount: Int): List<Int> {
+        val nums: List<Int> = when {
+            key.contains('-') -> {
+                val parts = key.split('-')
+                if (parts.size != 2) return emptyList()
+                val a = parts[0].trim().toIntOrNull() ?: return emptyList()
+                val b = parts[1].trim().toIntOrNull() ?: return emptyList()
+                if (a < 1 || b < a || b > paragraphCount) return emptyList()
+                (a..b).toList()
+            }
+
+            key.contains(',') -> key.split(',').mapNotNull { it.trim().toIntOrNull() }
+            else -> emptyList()
+        }
+        if (nums.size < 2) return emptyList()
+        if (nums.any { it !in 1..paragraphCount }) return emptyList()
+        // 合并只允许连续段落
+        if (nums != (nums.first()..nums.last()).toList()) return emptyList()
+        return nums
     }
 
     /** 截取最外层 JSON（去掉 ``` 代码块标记和前后多余的说明文字） */
