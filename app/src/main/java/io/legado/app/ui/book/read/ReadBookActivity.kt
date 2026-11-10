@@ -98,7 +98,6 @@ import io.legado.app.model.localBook.MobiFile
 import io.legado.app.receiver.NetworkChangedListener
 import io.legado.app.receiver.TimeBatteryReceiver
 import io.legado.app.service.AiChapterFixService
-import io.legado.app.service.AiChapterFixStore
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.service.ReadAloudFloatService
 import io.legado.app.ui.about.AppLogDialog
@@ -282,8 +281,14 @@ class ReadBookActivity : BaseReadBookActivity(),
     private var loadStates: Boolean = false
     // AI处理章节：是否有任务在跑
     private var aiFixRunning = false
+    // 当前 AI 处理任务：切章取消后据此判断能否立刻启动下一章的预分析
+    private var aiFixJob: Job? = null
     // AI自动处理：上一次触发时的章节下标，避免翻页时重复触发
     private var lastAiAutoChapterIndex = -1
+    // 恢复进度确认框是否已显示：系统手势返回可能连发，避免对话框反复创建堆积在主线程
+    private var restoreProgressDialogShowing = false
+    // 首次 initData 是否已启动（idleHandler 与超时兜底共用，防止重复初始化）
+    private var initialDataStarted = false
     override val pageFactory get() = binding.readView.pageFactory
     override val pageDelegate get() = binding.readView.pageDelegate
     override val headerHeight: Int get() = binding.readView.curPage.headerHeight
@@ -364,18 +369,44 @@ class ReadBookActivity : BaseReadBookActivity(),
     override fun onPostCreate(savedInstanceState: Bundle?) {
         super.onPostCreate(savedInstanceState)
         viewModel.initReadBookConfig(intent)
+        // initData 跑在 IO 协程且要等主线程空闲，返回时它可能还没跑到；
+        // 这里同步把「是否在书架」先定下来，让 finish() 走正确的退出分支
+        syncInBookshelf(intent)
+        scheduleInitialData(intent)
+        justInitData = true
+    }
+
+    /** 首次 initData：优先等主线程空闲，慢设备上加超时兜底，且保证只启动一次 */
+    private fun scheduleInitialData(intent: Intent) {
         Looper.myQueue().addIdleHandler {
-            // readAloud extra 由 contentLoadFinish() 统一消费，
-            // 覆盖 resetData 与 upData（同书重开）两条路径
-            viewModel.initData(intent)
+            if (!initialDataStarted) {
+                initialDataStarted = true
+                // readAloud extra 由 contentLoadFinish() 统一消费，
+                // 覆盖 resetData 与 upData（同书重开）两条路径
+                viewModel.initData(intent)
+            }
             false
         }
-        justInitData = true
+        // 换书时排版/IO 可能让主线程长时间不空闲，idleHandler 迟迟不执行；
+        // 正常机型仍走上面的原路径，只有慢设备才会用到这个兜底
+        handler.postDelayed({
+            if (!initialDataStarted) {
+                initialDataStarted = true
+                viewModel.initData(intent)
+            }
+        }, 1200L)
+    }
+
+    /** 同步初始化「是否在书架」，与 initData 读取的是同一个 extra 默认值 */
+    private fun syncInBookshelf(intent: Intent) {
+        ReadBook.inBookshelf = intent.getBooleanExtra("inBookshelf", true)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        syncInBookshelf(intent)
+        initialDataStarted = true
         // Activity 实例复用时（如停止朗读后再次点击书架耳机按钮），
         // readAloud extra 只通过 onNewIntent 进入；由 contentLoadFinish() 统一消费
         viewModel.initData(intent)
@@ -413,6 +444,8 @@ class ReadBookActivity : BaseReadBookActivity(),
         if (bookChanged) {
             bookChanged = false
             ReadBook.callBack = this
+            // 这里已经重新初始化，标记住避免 1200ms 兜底再启动一次
+            initialDataStarted = true
             viewModel.initData(intent)
             justInitData = true
         } else {
@@ -791,12 +824,18 @@ class ReadBookActivity : BaseReadBookActivity(),
             AppLog.put("AI处理章节: ${result.message}")
             toastOnUi(result.message)
         }
+        aiFixJob = job
         // 自动任务登记下来：切章时若还没跑完就直接取消，不写回、不落盘
         if (silent) AiChapterFixService.registerAutoJob(book.bookUrl, job)
         // 调用可能比较久，允许返回键中断
         waitDialog?.setOnCancelListener { job.cancel() }
         job.invokeOnCompletion {
-            aiFixRunning = false
+            // 只有「自己仍是当前任务」时才复位守卫：切章取消旧任务后新任务可能已启动，
+            // 旧任务的完成回调不能把新任务的运行状态清掉，否则会冒出并发任务
+            if (aiFixJob === job) {
+                aiFixRunning = false
+                aiFixJob = null
+            }
             AiChapterFixService.clearAutoJob(book.bookUrl, job)
         }
     }
@@ -810,6 +849,12 @@ class ReadBookActivity : BaseReadBookActivity(),
         if (!AiChapterFixService.isAutoFixEnabled(book.name, book.bookUrl)) return
         val index = ReadBook.durChapterIndex
         if (index == lastAiAutoChapterIndex) return
+        // 切章：上一章预热出来、还没跑完的分析立刻作废，绝不让它在切章后落盘
+        // （ReadBook 的统一切章钩子已先取消一次，这里再调是幂等的）
+        AiChapterFixService.cancelAutoJob(book.bookUrl)
+        // 旧任务已取消时同步放开守卫：否则 invokeOnCompletion 还没回调，
+        // startAiChapterFix 会被 aiFixRunning 静默挡住，下下章的预分析就断了
+        if (aiFixJob?.isActive != true) aiFixRunning = false
         lastAiAutoChapterIndex = index
         val template = AiChapterFixService.getEffectiveTemplate(book.name, book.bookUrl)
         if (template.apiConfig.isBlank()) return
@@ -1493,8 +1538,11 @@ class ReadBookActivity : BaseReadBookActivity(),
         }
         val index = ReadBook.durChapterIndex
         lifecycleScope.launch {
-            // 已处理过的章节不再静默跳过，弹窗询问是否忽略记录强制重跑
-            val done = AiChapterFixStore.isDone(book.bookUrl, index)
+            // 已处理过的章节不再静默跳过，弹窗询问是否忽略标记强制重跑
+            val done = withContext(IO) {
+                val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index)
+                chapter?.let { BookHelp.hasAiFixMark(book, it) } ?: false
+            }
             withContext(Main) {
                 if (!done) {
                     startAiChapterFix(book, template, index, force = false, silent = false)
@@ -1619,17 +1667,23 @@ class ReadBookActivity : BaseReadBookActivity(),
         if (confirmRestoreProcess == true) {
             ReadBook.restoreLastBookProgress()
         } else if (confirmRestoreProcess == null) {
+            // 手势返回可能连发：对话框还在时不再新建一个，避免主线程消息堆积
+            if (restoreProgressDialogShowing) return
+            restoreProgressDialogShowing = true
             alert(R.string.draw) {
                 setMessage(R.string.restore_last_book_process)
                 yesButton {
+                    restoreProgressDialogShowing = false
                     confirmRestoreProcess = true
                     ReadBook.restoreLastBookProgress() //恢复启动全文搜索前的进度
                 }
                 noButton {
+                    restoreProgressDialogShowing = false
                     ReadBook.lastBookProgress = null
                     confirmRestoreProcess = false
                 }
                 onCancelled {
+                    restoreProgressDialogShowing = false
                     ReadBook.lastBookProgress = null
                     confirmRestoreProcess = false
                 }
@@ -2496,14 +2550,14 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     override fun finish() {
-        val book = ReadBook.book ?: return super.finish()
+        val book = ReadBook.book ?: return finishActivity()
         if (ReadBook.inBookshelf) {
             callBackBookEnd()
-            return super.finish()
+            return finishActivity()
         }
         if (!AppConfig.showAddToShelfAlert) {
             callBackBookEnd()
-            viewModel.removeFromBookshelf { super.finish() }
+            finishAfterRemovingFromShelf()
         } else {
             alert(title = getString(R.string.add_to_bookshelf)) {
                 setMessage(getString(R.string.check_add_bookshelf, book.name))
@@ -2516,10 +2570,31 @@ class ReadBookActivity : BaseReadBookActivity(),
                 }
                 noButton {
                     callBackBookEnd()
-                    viewModel.removeFromBookshelf { super.finish() }
+                    finishAfterRemovingFromShelf()
                 }
             }
         }
+    }
+
+    private fun finishActivity() {
+        if (!isFinishing) super.finish()
+    }
+
+    /**
+     * 移出书架是异步的：Coroutine 在任务极快完成时可能来不及注册 onSuccess 回调，
+     * 这里加一个延迟兜底，保证按返回一定能退出阅读界面。
+     * 删除逻辑与「加入书架」弹窗的行为都保持原样。
+     */
+    private fun finishAfterRemovingFromShelf() {
+        var done = false
+        val finishOnce = {
+            if (!done) {
+                done = true
+                finishActivity()
+            }
+        }
+        viewModel.removeFromBookshelf { handler.post { finishOnce() } }
+        handler.postDelayed({ finishOnce() }, 800L)
     }
 
     private fun callBackBookEnd() {
