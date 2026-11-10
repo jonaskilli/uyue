@@ -451,6 +451,10 @@ class SearchActivity : VMBaseActivity<ActivityBookSearchBinding, SearchViewModel
         viewModel.upAdapterLiveData.observe(this) {
             adapter.notifyItemRangeChanged(0, adapter.itemCount, bundleOf(it to null))
         }
+        // 补到详情页封面后，只重载各条目的封面，不重建整个列表
+        io.legado.app.help.book.ListCoverLoader.coverRefresh.observe(this) {
+            adapter.notifyItemRangeChanged(0, adapter.itemCount, bundleOf("cover" to null))
+        }
         viewModel.searchFinishLiveData.observe(this) { isEmpty ->
             if (!isEmpty || viewModel.searchScope.isAll()) return@observe
             alert("搜索结果为空") {

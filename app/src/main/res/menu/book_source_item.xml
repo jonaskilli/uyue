@@ -22,6 +22,10 @@
         android:title="@string/debug" />
 
     <item
+        android:id="@+id/menu_ai_verify_fix"
+        android:title="@string/ai_verify_source" />
+
+    <item
         android:id="@+id/menu_del"
         android:title="@string/delete" />
 

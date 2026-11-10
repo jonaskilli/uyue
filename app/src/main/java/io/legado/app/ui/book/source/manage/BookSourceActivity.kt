@@ -38,6 +38,7 @@ import io.legado.app.model.Debug
 import io.legado.app.ui.association.ImportBookSourceDialog
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.search.SearchScope
+import io.legado.app.ui.book.source.AiBookSourceActivity
 import io.legado.app.ui.book.source.debug.BookSourceDebugActivity
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
 import io.legado.app.ui.config.CheckSourceConfig
@@ -779,6 +780,13 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
     override fun debug(bookSource: BookSourcePart) {
         startActivity<BookSourceDebugActivity> {
             putExtra("key", bookSource.bookSourceUrl)
+        }
+    }
+
+    /** 条目菜单「AI 校验并修正」：只传书源地址，由目标界面读取完整书源并自动开跑 */
+    override fun aiVerifyFix(bookSource: BookSourcePart) {
+        startActivity<AiBookSourceActivity> {
+            putExtra(AiBookSourceActivity.EXTRA_CHECK_SOURCE_URL, bookSource.bookSourceUrl)
         }
     }
 

@@ -238,6 +238,9 @@ open class CoverImageView @JvmOverloads constructor(
         minimumWidth = width
     }
 
+    /** 当前绑定的搜索结果，封面加载失败时据此从详情页补取 */
+    private var boundSearchBook: SearchBook? = null
+
     private val glideListener by lazy {
         object : RequestListener<Drawable> {
 
@@ -249,6 +252,13 @@ open class CoverImageView @JvmOverloads constructor(
             ): Boolean {
                 triggerChannel.trySend(Unit)
                 needNameBitmap.put(bitmapPath.toString(), true)
+                // 列表已有封面地址但加载失败（404 / 防盗链）时，从详情页再补一次；
+                // 用户主动用默认封面、仅 WiFi 开关拦截的情况由 ListCoverLoader 自己判定
+                if (AppConfig.listCoverOnFailed && !AppConfig.useDefaultCover) {
+                    boundSearchBook?.let {
+                        io.legado.app.help.book.ListCoverLoader.fillOnLoadFailed(it)
+                    }
+                }
                 return false
             }
 
@@ -274,6 +284,7 @@ open class CoverImageView @JvmOverloads constructor(
         fragment: Fragment? = null,
         lifecycle: Lifecycle? = null
     ) {
+        boundSearchBook = searchBook
         load(searchBook.coverUrl, searchBook.name, searchBook.author, loadOnlyWifi, searchBook.origin, fragment, lifecycle)
     }
 
@@ -284,6 +295,8 @@ open class CoverImageView @JvmOverloads constructor(
         lifecycle: Lifecycle? = null,
         onLoadFinish: (() -> Unit)? = null
     ) {
+        // 详情页 / 书架走的是 Book，不该触发列表封面的补取
+        boundSearchBook = null
         // 视频书：若该视频已下载（下载目录里有落地封面），优先用本地封面，
         // 线上 URL 有防盗链/时效问题；没有本地封面则沿用原逻辑
         val path = if (book.isVideo) {

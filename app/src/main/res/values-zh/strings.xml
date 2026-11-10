@@ -949,6 +949,10 @@
     <string name="complete">完成</string>
     <string name="show_unread">显示未读标志</string>
     <string name="use_default_cover">总是使用默认封面</string>
+    <string name="list_cover_from_detail">列表无封面时从详情页补全</string>
+    <string name="list_cover_from_detail_summary">搜索/分类列表没有封面时，自动从书籍详情页取回封面（限并发、会缓存，有封面的书源不额外请求）</string>
+    <string name="list_cover_on_failed">列表封面加载失败时也补全</string>
+    <string name="list_cover_on_failed_summary">列表封面地址 404/被防盗链拦截时，再从详情页取一次封面兜底</string>
     <string name="use_default_cover_s">总是显示默认封面（不显示网络封面）</string>
     <string name="title_font_size">字号</string>
     <string name="title_margin_top">上边距</string>

@@ -100,10 +100,13 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
                     book.releaseHtmlData()
                 }
                 hasMore = hasMore || items.isNotEmpty()
+                // 先合并库里已补到的封面，否则本次 REPLACE 会用空值把缓存覆盖掉
+                io.legado.app.help.book.ListCoverLoader.restoreCachedCovers(items)
                 appDb.searchBookDao.insert(*items.toTypedArray())
                 mergeItems(items, precision)
                 currentCoroutineContext().ensureActive()
                 callBack.onSearchSuccess(searchBooks)
+                io.legado.app.help.book.ListCoverLoader.maybeFill(searchBooks)
             }.onCompletion {
                 if (it == null) callBack.onSearchFinish(searchBooks.isEmpty(), hasMore)
             }.catch {

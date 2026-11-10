@@ -124,8 +124,17 @@ object AiBookSourceGenerator {
     /** 目录页候选：来源决定抓取优先级，html 已抓到时复用 */
     private data class TocCandidate(val url: String, val html: String?, val source: String)
 
-    /** 验证报告条目 */
-    data class VerifyItem(val step: String, val ok: Boolean, val message: String)
+    /**
+     * 验证报告条目。
+     * blocking=false 的项（如封面）只把结果展示给用户，不参与 AI 修正、兜底与整体失败判定，
+     * 避免「站点没有封面」这种可接受的缺失把整份书源判成生成失败。
+     */
+    data class VerifyItem(
+        val step: String,
+        val ok: Boolean,
+        val message: String,
+        val blocking: Boolean = true
+    )
 
     /**
      * 跨多次实跑复用的「当前书源解析出的书 / 首章」。
@@ -758,16 +767,16 @@ object AiBookSourceGenerator {
                 val codeReport = verifySource(codeSource, testKeyword, pages, onProgress, singleBook, videoMode, holder = codeHolder)
                 val aiOk = report.count { it.ok }
                 val codeOk = codeReport.count { it.ok }
-                onProgress("双轨实测：AI 版通过 $aiOk/5，代码解析版通过 $codeOk/5")
+                onProgress("双轨实测：AI 版通过 $aiOk/${report.size}，代码解析版通过 $codeOk/${codeReport.size}")
                 if (codeOk >= aiOk) {
-                    meta["双轨择优"] = "AI 版 $aiOk/5、代码解析版 $codeOk/5，采用代码解析版"
+                    meta["双轨择优"] = "AI 版 $aiOk/${report.size}、代码解析版 $codeOk/${codeReport.size}，采用代码解析版"
                     onProgress("采用「纯代码解析版」（通过更多或持平且更可控）")
                     source = codeSource
                     report = codeReport
                     holder.book = codeHolder.book
                     holder.chapter = codeHolder.chapter
                 } else {
-                    meta["双轨择优"] = "AI 版 $aiOk/5、代码解析版 $codeOk/5，采用 AI 识别版"
+                    meta["双轨择优"] = "AI 版 $aiOk/${report.size}、代码解析版 $codeOk/${codeReport.size}，采用 AI 识别版"
                     onProgress("采用「AI 识别版」")
                 }
             }
@@ -776,8 +785,9 @@ object AiBookSourceGenerator {
             // 解决「AI 整份重写把已通过的规则改坏」的问题：每轮只把失败环节的规则交给 AI 出补丁，
             // 深合并进现有书源（已通过规则原样不动），随后只重跑失败环节；哪环现在通过了就并入成功集，
             // 没通过继续留在失败集——成功环节永远不会被复验、也不会被改坏。
-            val passed = report.filter { it.ok }.associateBy { it.step }.toMutableMap()
-            val failedItems = report.filter { !it.ok }.associateBy { it.step }.toMutableMap()
+            // 非阻塞项（封面）无论成败都留在报告里，但不进 AI 修正轮
+            val passed = report.filter { it.ok || !it.blocking }.associateBy { it.step }.toMutableMap()
+            val failedItems = report.filter { !it.ok && it.blocking }.associateBy { it.step }.toMutableMap()
             val failedSteps = failedItems.keys.toMutableSet()
             while (failedSteps.isNotEmpty() && fixRound < maxRounds) {
                 fixRound++
@@ -810,8 +820,8 @@ object AiBookSourceGenerator {
             // ---------- 阶段四：AI 修不动时的兜底 ----------
             // 只在上面 maxRounds 轮 AI 修正全部用尽后触发；触发后重新验证，
             // 并再给同样 maxRounds 轮的 AI 修正机会——兜底与原流程享有同等修复次数
-            if (report.any { !it.ok }) {
-                val beforeFail = report.count { !it.ok }
+            if (report.any { !it.ok && it.blocking }) {
+                val beforeFail = report.count { !it.ok && it.blocking }
                 val backupTocUrl = source.getBookInfoRule().tocUrl
                 val backupSearchUrl = source.searchUrl
                 val changed = applyFallbacks(
@@ -821,7 +831,7 @@ object AiBookSourceGenerator {
                     onProgress("AI 修正 $maxRounds 轮仍未通过，改用兜底方案重试…")
                     var after = verifySource(source, testKeyword, pages, onProgress, singleBook, videoMode)
                     // 兜底必须让情况变好，否则原样撤回——不能因为兜底把原本能用的一环弄坏
-                    if (after.count { !it.ok } >= beforeFail) {
+                    if (after.count { !it.ok && it.blocking } >= beforeFail) {
                         onProgress("兜底未改善，已撤回原有规则…")
                         source.getBookInfoRule().tocUrl = backupTocUrl
                         source.searchUrl = backupSearchUrl
@@ -829,11 +839,11 @@ object AiBookSourceGenerator {
                     }
                     report = after
                     var round2 = 0
-                    while (report.any { !it.ok } && round2 < maxRounds) {
+                    while (report.any { !it.ok && it.blocking } && round2 < maxRounds) {
                         round2++
                         onProgress(
                             "兜底方案仍未通过（${
-                                report.filter { !it.ok }.joinToString("、") { it.step }
+                                report.filter { !it.ok && it.blocking }.joinToString("、") { it.step }
                             }），正在让 AI 修正（第 $round2/$maxRounds 轮）…"
                         )
                         val fixed = fixSource(source, report, pages, meta, videoMode) ?: break
@@ -921,7 +931,7 @@ object AiBookSourceGenerator {
             // 确保不是"看着补上了、实际仍不可用"。
             val patchedSteps = ArrayList<String>()
             if (!singleBook) {
-                val failedSteps = report.filter { !it.ok }.map { it.step }.toSet()
+                val failedSteps = report.filter { !it.ok && it.blocking }.map { it.step }.toSet()
                 val record = AiSourceHistory.pickBest(seed, failedSteps)
                 val old = record?.let { AiSourceHistory.parse(it) }
                 if (record != null && old != null) {
@@ -939,12 +949,259 @@ object AiBookSourceGenerator {
                         patchedSteps.addAll(patchable.filter { s -> re.any { it.step == s && it.ok } })
                     }
                 }
-                // 记录本次结果（只记通过的环节），供下次同一网址生成时补齐
-                AiSourceHistory.save(seed, source, report.filter { it.ok }.map { it.step })
+                // 记录本次结果（只记通过的阻塞性环节），供下次同一网址生成时补齐
+                AiSourceHistory.save(seed, source, report.filter { it.ok && it.blocking }.map { it.step })
+            }
+
+            // ===== 封面收尾 =====
+            // 无论走 AI 版 / 代码版 / 修正 / 历史补齐哪条分支，最后都保证三处 coverUrl 有规则；
+            // 若封面验证仍失败，用完整候选链强制覆盖并复验一次，让报告反映真实结果。
+            ensureCoverRules(source, pages)
+            if (report.firstOrNull { it.step == "封面" }?.ok != true && forceCoverRules(source, pages)) {
+                onProgress("封面规则未命中，正在用完整候选链重试…")
+                val re = verifySource(
+                    source, testKeyword, pages, onProgress,
+                    skipSearch = singleBook, videoMode = videoMode,
+                    steps = setOf("详情"), holder = holder
+                )
+                val merged = report.associateBy { it.step }.toMutableMap()
+                re.forEach { v ->
+                    if (v.step == "封面" || (v.step == "详情" && v.ok)) merged[v.step] = v
+                }
+                report = merged.values.toList()
             }
 
             GenResult(source, report, fixRound, patchedSteps)
         }
+    }
+
+    // ==================== 已有书源：AI 校验并修正 ====================
+
+    /**
+     * 对一份已保存的书源做「实测校验 → 内置规则修复 → AI 辅助修正」。
+     * 与 generate 不同：不让 AI 重写整份书源，只针对验证失败的环节出补丁；
+     * 每一步改动后都复验，没变好就撤回，绝不把原本能用的环节改坏。
+     */
+    suspend fun verifyAndFix(
+        source: BookSource,
+        keyword: String? = null,
+        fixRounds: Int = 2,
+        includeExplore: Boolean = true,
+        codeAssist: Boolean = true,
+        videoMode: Boolean = false,
+        onProgress: (String) -> Unit
+    ): Result<GenResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            // 深拷贝：不直接改动 Room 里正在使用的对象，撤回时也能整份还原
+            var current: BookSource = GSON.fromJson(GSON.toJson(source), BookSource::class.java)
+                ?: error("书源解析失败")
+            val kw = keyword?.trim()?.takeIf { it.isNotBlank() } ?: DEFAULT_KEYWORD
+            val seed = current.bookSourceUrl
+            ensureMobileUa(current)
+            normalizeSourceRules(current)
+
+            val pages = collectPagesForVerify(current, kw, includeExplore, videoMode, onProgress)
+            val holder = VerifyHolder()
+            val meta = mapOf(
+                "校验模式" to "这是用户已保存的书源，只修正验证失败的环节，不要重写其它规则"
+            )
+
+            onProgress("开始逐项实测校验…")
+            var report = verifySource(
+                current, kw, pages, onProgress,
+                videoMode = videoMode, holder = holder
+            )
+            val maxRounds = fixRounds.coerceIn(0, 8)
+            var rounds = 0
+            while (report.any { !it.ok && it.blocking } && rounds < maxRounds) {
+                rounds++
+                val beforeOk = report.count { it.ok && it.blocking }
+
+                // ① 内置规则：搜索/目录容器竞速、目录最后手段、通用兜底、封面补齐
+                if (codeAssist) {
+                    onProgress("第 $rounds/$maxRounds 轮：正在用内置规则修复失败环节…")
+                    val backup = GSON.toJson(current)
+                    applyCodeFixes(current, report, pages, seed, kw, videoMode, onProgress)
+                    var after = verifySource(
+                        current, kw, pages, onProgress,
+                        videoMode = videoMode, holder = holder
+                    )
+                    if (after.count { it.ok && it.blocking } <= beforeOk) {
+                        GSON.fromJson(backup, BookSource::class.java)?.let { current = it }
+                        after = verifySource(
+                            current, kw, pages, onProgress,
+                            videoMode = videoMode, holder = holder
+                        )
+                    }
+                    report = after
+                }
+                if (report.all { it.ok || !it.blocking }) break
+
+                // ② AI 辅助：只返回失败环节的字段补丁，复验没变差才留下
+                onProgress("第 $rounds/$maxRounds 轮：内置规则未修好，交给 AI 出补丁…")
+                val failed = report.filter { !it.ok && it.blocking }
+                val fixed = fixSource(current, failed, pages, meta, videoMode)
+                if (fixed == null) {
+                    onProgress("AI 未返回可用补丁，停止修正")
+                    break
+                }
+                ensureMobileUa(fixed)
+                normalizeSourceRules(fixed)
+                val after = verifySource(
+                    fixed, kw, pages, onProgress,
+                    videoMode = videoMode, holder = holder
+                )
+                if (after.count { it.ok && it.blocking } >= report.count { it.ok && it.blocking }) {
+                    current = fixed
+                    report = after
+                } else {
+                    onProgress("AI 补丁未改善，已撤回")
+                }
+            }
+
+            // 封面收尾：规则补齐，仍失败时用完整候选链强制覆盖并复验
+            ensureCoverRules(current, pages)
+            if (report.firstOrNull { it.step == "封面" }?.ok != true && forceCoverRules(current, pages)) {
+                val re = verifySource(
+                    current, kw, pages, onProgress,
+                    videoMode = videoMode, steps = setOf("详情"), holder = holder
+                )
+                val merged = report.associateBy { it.step }.toMutableMap()
+                re.forEach { v ->
+                    if (v.step == "封面" || (v.step == "详情" && v.ok)) merged[v.step] = v
+                }
+                report = merged.values.toList()
+            }
+            onProgress("校验完成：${report.count { it.ok }}/${report.size} 项通过")
+            GenResult(current, report, rounds)
+        }
+    }
+
+    /**
+     * 按书源自己的 URL 规则采集页面源码：内置规则竞速和 AI 修正提示词都要用真实 HTML。
+     * 尽力而为——某个页面取不到就跳过，verifySource 仍会用 WebBook 引擎做真实校验。
+     */
+    private suspend fun collectPagesForVerify(
+        source: BookSource,
+        keyword: String,
+        includeExplore: Boolean,
+        videoMode: Boolean,
+        onProgress: (String) -> Unit
+    ): List<Page> {
+        val pages = ArrayList<Page>(6)
+        val seed = source.bookSourceUrl
+        onProgress("校验准备：抓取首页…")
+        val homeHtml = fetch(seed).orEmpty()
+        if (homeHtml.isNotBlank()) pages.add(Page("首页", seed, homeHtml))
+
+        val searchTpl = source.searchUrl?.trim().orEmpty()
+        var searchHtml = ""
+        if (searchTpl.isNotBlank() && !searchTpl.contains("<js>") && !searchTpl.startsWith("@js")) {
+            onProgress("校验准备：抓取搜索结果页…")
+            searchHtml = fetchPage(searchTpl.replace("{{page}}", "1"), keyword, seed).orEmpty()
+        }
+        if (searchHtml.isBlank() && homeHtml.isNotBlank()) {
+            // 书源自带的 searchUrl 已经失效：从首页表单推导候选搜索地址再试
+            onProgress("原搜索地址取不到页面，正在从首页推导搜索入口…")
+            for (tpl in deriveSearchUrls(homeHtml, seed).take(3)) {
+                searchHtml = fetchPage(tpl, keyword, seed).orEmpty()
+                if (searchHtml.isNotBlank()) break
+            }
+        }
+        if (searchHtml.isNotBlank()) pages.add(Page("搜索结果页", seed, searchHtml))
+
+        onProgress("校验准备：抓取详情页 / 目录 / 正文…")
+        val firstBook = runCatching {
+            WebBook.searchBookAwait(source, keyword, 1).firstOrNull()?.toBook()
+                ?.also { it.origin = seed }
+        }.getOrNull()
+        var detailUrl = firstBook?.bookUrl?.takeIf { it.isNotBlank() }?.let { absUrl(it, seed) }
+        if (detailUrl.isNullOrBlank() && searchHtml.isNotBlank()) {
+            detailUrl = runCatching { firstBookLink(searchHtml, seed) }.getOrNull()
+        }
+        if (detailUrl.isNullOrBlank() && homeHtml.isNotBlank()) {
+            // 搜索规则全坏时，首页推荐位通常也有书籍链接，用它兜底
+            detailUrl = runCatching { firstBookLink(homeHtml, seed) }.getOrNull()
+        }
+        val detailHtml = detailUrl?.let { fetch(it) }.orEmpty()
+        if (detailUrl != null && detailHtml.isNotBlank()) {
+            pages.add(Page("书籍详情页", detailUrl, detailHtml))
+        }
+
+        val infoBook = firstBook?.let {
+            runCatching { WebBook.getBookInfoAwait(source, it, canReName = true) }.getOrNull()
+        }
+        val tocUrl = infoBook?.tocUrl?.takeIf { it.isNotBlank() }
+            ?.let { absUrl(it, detailUrl ?: seed) } ?: detailUrl
+        val tocHtml = tocUrl?.let { fetch(it) }.orEmpty()
+        if (tocUrl != null && tocHtml.isNotBlank()) {
+            pages.add(Page("目录页", tocUrl, tocHtml))
+        }
+        var chapterUrl = infoBook?.let { b ->
+            runCatching {
+                WebBook.getChapterListAwait(source, b).getOrNull()?.firstOrNull()?.url
+            }.getOrNull()
+        }?.takeIf { it.isNotBlank() }?.let { absUrl(it, tocUrl ?: seed) }
+        if (chapterUrl.isNullOrBlank() && tocHtml.isNotBlank()) {
+            // 目录规则坏到 0 章时，直接从目录页里找第一章链接，保证 AI 能看到正文页
+            chapterUrl = runCatching {
+                val chapterName = Regex("第\\s*[0-9零〇一二两三四五六七八九十百千万]+\\s*[章节回集]")
+                Jsoup.parse(tocHtml, tocUrl ?: seed).select("a[href]")
+                    .firstOrNull { chapterName.containsMatchIn(it.text()) }
+                    ?.attr("abs:href")
+            }.getOrNull()?.takeIf { it.startsWith("http") }
+        }
+        val contentHtml = chapterUrl?.let { fetch(it) }.orEmpty()
+        if (chapterUrl != null && contentHtml.isNotBlank()) {
+            pages.add(Page(if (videoMode) "播放页" else "正文页", chapterUrl, contentHtml))
+        }
+
+        if (includeExplore) {
+            val explore = source.exploreUrl?.trim().orEmpty()
+            if (explore.isNotBlank()) {
+                onProgress("校验准备：抓取分类列表页…")
+                parseExploreFirstUrl(explore, seed)?.let { u ->
+                    fetch(u)?.takeIf { it.isNotBlank() }
+                        ?.let { pages.add(Page("分类列表页", u, it)) }
+                }
+            }
+        }
+        return pages
+    }
+
+    /** 内置规则修复：只针对失败环节跑纯代码候选竞速、通用兜底与封面补齐 */
+    private fun applyCodeFixes(
+        source: BookSource,
+        report: List<VerifyItem>,
+        pages: List<Page>,
+        seed: String,
+        keyword: String,
+        videoMode: Boolean,
+        onProgress: (String) -> Unit
+    ) {
+        val failed = report.filter { !it.ok && it.blocking }.map { it.step }.toSet()
+        if ("搜索" in failed) {
+            refineSearchRules(source, pages, onProgress)
+        }
+        if ("目录" in failed || "正文" in failed || "播放" in failed) {
+            if (videoMode) {
+                refineTocRulesVideo(source, pages, onProgress)
+            } else {
+                refineTocRules(source, pages, onProgress)
+            }
+            if ("目录" in failed) lastResortToc(source, pages)
+        }
+        ensureCoverRules(source, pages)
+        if (report.firstOrNull { it.step == "封面" }?.ok != true) {
+            forceCoverRules(source, pages)
+        }
+        val homeHtml = pages.firstOrNull { it.role == "首页" }?.html.orEmpty()
+        val infoUrl = pages.firstOrNull { it.role == "书籍详情页" }?.url
+        val tocUrl = pages.firstOrNull { it.role == "目录页" }?.url.orEmpty()
+        val contentUrl = pages.firstOrNull {
+            it.role.startsWith("正文") || it.role.startsWith("播放")
+        }?.url
+        applyFallbacks(source, report, homeHtml, seed, keyword, tocUrl, infoUrl, contentUrl)
     }
 
     // ==================== 阶段一：页面抓取 ====================
@@ -1840,7 +2097,7 @@ object AiBookSourceGenerator {
         contentUrl: String?
     ): Boolean {
         var changed = false
-        val failed = report.filter { !it.ok }.map { it.step }.toSet()
+        val failed = report.filter { !it.ok && it.blocking }.map { it.step }.toSet()
         if ("目录" in failed && tocUrl.isNotBlank()) {
             // 目录就是书籍信息页，或目录页地址被填成了第一章正文页
             // （很多站的「开始阅读」按钮 href 就是第一章，填进去目录必然为空）
@@ -1882,7 +2139,8 @@ object AiBookSourceGenerator {
         meta: Map<String, String>,
         videoMode: Boolean = false
     ): BookSource? {
-        val failed = report.filter { !it.ok }
+        val failed = report.filter { !it.ok && it.blocking }
+        if (failed.isEmpty()) return null
         val current = runCatching { GSON.toJson(source) }.getOrDefault("")
         val sb = StringBuilder()
         failed.forEach { f ->
@@ -1960,6 +2218,9 @@ object AiBookSourceGenerator {
         val baseJson = GSON.toJsonTree(base).asJsonObject.deepCopy()
         fun merge(into: JsonObject, from: JsonObject) {
             for ((k, v) in from.entrySet()) {
+                // 封面规则完全由内置预设生成（见 ensureCoverRules / buildListCoverChain）；
+                // AI 补丁里写空值或编造选择器都不采纳，避免把列表封面规则冲掉
+                if (k == "coverUrl") continue
                 if (v.isJsonObject && into.has(k) && into[k].isJsonObject) {
                     merge(into[k].asJsonObject, v.asJsonObject)
                 } else {
@@ -2874,6 +3135,206 @@ object AiBookSourceGenerator {
         return found.toList()
     }
 
+    // ==================== 封面规则预设（由 5541 个社区书源的写法统计得来） ====================
+
+    /**
+     * 一条封面候选：写进书源的规则字符串 + 与之严格对应的 Jsoup 实测方式。
+     * 只有在采集到的页面 HTML 上实测能取到封面地址的规则才会被写入，
+     * 避免把 AI 编造的、页面里根本不存在的选择器塞进 coverUrl。
+     */
+    private data class CoverProbe(val rule: String, val selector: String, val attr: String)
+
+    /** 详情页封面：og:image / id.fmimg / class.pic 等社区高频写法，按出现频次排序 */
+    private val DETAIL_COVER_PROBES = listOf(
+        CoverProbe("[property=og:image]@content", "meta[property=og:image]", "content"),
+        CoverProbe("id.fmimg@img@src", "#fmimg img", "src"),
+        CoverProbe("class.pic@img@src", ".pic img", "src"),
+        CoverProbe("class.cover@img@src", ".cover img", "src"),
+        CoverProbe("class.bookimg@img@src", ".bookimg img", "src"),
+        CoverProbe("class.imgbox@tag.img@src", ".imgbox img", "src"),
+        CoverProbe("img@data-original", "img", "data-original"),
+        CoverProbe("img@data-src", "img", "data-src"),
+        CoverProbe("tag.img@src", "img", "src"),
+        CoverProbe("[property$=image]@content", "meta[property$=image]", "content")
+    )
+
+    /** 列表页封面：规则作用在「单个书籍条目」上，先通用 img，再常见卡片容器 */
+    private val LIST_COVER_PROBES = listOf(
+        CoverProbe("img@src", "img", "src"),
+        CoverProbe("img@data-original", "img", "data-original"),
+        CoverProbe("img@data-src", "img", "data-src"),
+        CoverProbe("class.bookimg@img@src", ".bookimg img", "src"),
+        CoverProbe("class.pic@img@src", ".pic img", "src"),
+        CoverProbe("class.cover@img@src", ".cover img", "src"),
+        CoverProbe("class.imgbox@tag.img@src", ".imgbox img", "src"),
+        CoverProbe("tag.dt@tag.a@img@src", "dt a img", "src"),
+        CoverProbe("[property=og:image]@content", "meta[property=og:image]", "content")
+    )
+
+    /**
+     * JSON 接口型列表的封面写法。这类规则没法用 Jsoup 在 HTML 上实测，
+     * 但 legado 对 || 链里取不到值的规则会自动跳过，挂在链尾对 HTML 站点无害、对 API 站点有效。
+     */
+    private val JSON_COVER_RULES = listOf(
+        "$.cover", "$.coverUrl", "$.Img", "$.pic", "$.image", "$.thumb"
+    )
+
+    /** 明显不是封面的图片：站点 logo、占位图、二维码等 */
+    private val NOT_COVER_WORDS = listOf(
+        "logo", "icon", "blank", "loading", "placeholder", "1x1",
+        "spacer", "qrcode", "avatar", "advert", "banner"
+    )
+
+    private fun looksLikeCover(url: String): Boolean {
+        if (!url.startsWith("http", true)) return false
+        val low = url.lowercase()
+        return NOT_COVER_WORDS.none { low.contains(it) }
+    }
+
+    /** 相对 / 协议相对地址转绝对地址，与 legado 的 NetworkUtils.getAbsoluteURL 行为一致 */
+    private fun coverAbsUrl(base: String, raw: String): String {
+        val r = raw.trim()
+        return when {
+            r.startsWith("http", true) -> r
+            r.startsWith("//") ->
+                (runCatching { java.net.URI(base).scheme }.getOrNull() ?: "https") + ":" + r
+            else -> runCatching { java.net.URI(base).resolve(r).toString() }.getOrDefault(r)
+        }
+    }
+
+    /**
+     * 在页面 HTML 上逐条实测候选规则，返回用 || 串起的兜底链（只保留命中的规则）。
+     * legado 对 || 会按顺序取第一个非空结果，链里有几条就够应付同站不同模板。
+     */
+    private fun probeCoverRules(
+        html: String,
+        baseUrl: String,
+        probes: List<CoverProbe>,
+        limit: Int = 4
+    ): String? {
+        if (html.isBlank()) return null
+        val doc = runCatching { Jsoup.parse(html, baseUrl) }.getOrNull() ?: return null
+        val hit = LinkedHashSet<String>()
+        for (p in probes) {
+            val url = doc.select(p.selector).asSequence().mapNotNull { el ->
+                val raw = el.attr(p.attr).trim()
+                if (raw.isEmpty()) null else coverAbsUrl(baseUrl, raw).takeIf { looksLikeCover(it) }
+            }.firstOrNull()
+            if (url != null) hit.add(p.rule)
+            if (hit.size >= limit) break
+        }
+        return hit.takeIf { it.isNotEmpty() }?.joinToString("||")
+    }
+
+    /**
+     * 列表侧封面规则链：HTML 页面用实测命中的选择器 + 通用 img 兜底，
+     * JSON 接口页面用真实字段路径 + 常见 JSONPath 兜底，两者不混写。
+     *
+     * 关键：列表规则作用在「单个书籍条目」上，整页第一张图未必是封面；只按整页实测结果填写，
+     * 实测不到就留空，会让搜索列表与发现页列表永远拿不到封面（详情页有 og:image 所以不受影响）。
+     * 因此这里即便一个候选都没命中，也必须返回一条兜底链。
+     */
+    private fun buildListCoverChain(page: Page?, fallback: String? = null): String {
+        val html = page?.html?.trim().orEmpty()
+        // JSON 接口型列表：CSS 选择器必然取不到值，改用纯 JSONPath 链；
+        // 先从响应里算出真实封面字段路径（如 $.data.list[*].cover），比写死的 $.cover 准
+        if (html.startsWith("{") || html.startsWith("[")) {
+            val chain = LinkedHashSet<String>()
+            runCatching { jsonBookCandidates(html)?.cover }.getOrNull()
+                ?.takeIf { it.isNotBlank() }?.let { chain.add(it) }
+            JSON_COVER_RULES.forEach { chain.add(it) }
+            return chain.joinToString("||")
+        }
+        val chain = LinkedHashSet<String>()
+        page?.let { probeCoverRules(it.html, it.url, LIST_COVER_PROBES, 6) }
+            ?.split("||")?.map { it.trim() }?.filter { it.isNotEmpty() }
+            ?.forEach { chain.add(it) }
+        // 页面实测不到也必须给一条链：列表规则作用在单个书籍条目上，
+        // 条目里的封面通常就在 img 的 src / data-original / data-src 里
+        listOf("img@src", "img@data-original", "img@data-src", "tag.img@src")
+            .forEach { chain.add(it) }
+        fallback?.takeIf { it.isNotBlank() }
+            ?.split("||")?.map { it.trim() }?.filter { it.isNotEmpty() }
+            // 只复用同为 CSS 形态的规则，避免把 JSONPath 混进 Jsoup 选择器链
+            ?.filter { !it.startsWith('$') && !it.startsWith("{{") }
+            ?.forEach { chain.add(it) }
+        return chain.joinToString("||")
+    }
+
+    /** 按角色优先级挑一个采集页面（找不到就退回首页面） */
+    private fun coverPage(pages: List<Page>, vararg roles: String): Page? {
+        for (r in roles) {
+            val p = pages.firstOrNull { it.role.startsWith(r) }
+            if (p != null) return p
+        }
+        return pages.firstOrNull()
+    }
+
+    /**
+     * 三处 coverUrl 任一为空时都补上规则链（详情 / 搜索 / 发现），AI 已写的非空规则不覆盖。
+     * 放在 verifySource 开头调用，可覆盖 AI 版 / 代码辅助版 / 修正版 / 兜底版等所有分支。
+     */
+    private fun ensureCoverRules(source: BookSource, pages: List<Page>) {
+        val detail = coverPage(pages, "书籍详情页", "搜索结果页", "首页")
+        val search = coverPage(pages, "搜索结果页", "分类列表页", "首页")
+        val category = coverPage(pages, "分类列表页", "搜索结果页", "首页")
+
+        val info = source.getBookInfoRule()
+        if (info.coverUrl.isNullOrBlank()) {
+            val chain = LinkedHashSet<String>()
+            detail?.let { probeCoverRules(it.html, it.url, DETAIL_COVER_PROBES, Int.MAX_VALUE) }
+                ?.split("||")?.map { it.trim() }?.filter { it.isNotEmpty() }
+                ?.forEach { chain.add(it) }
+            listOf("[property=og:image]@content", "img@data-original", "img@src")
+                .forEach { chain.add(it) }
+            info.coverUrl = chain.joinToString("||")
+        }
+        val sr = source.getSearchRule()
+        if (sr.coverUrl.isNullOrBlank()) {
+            // 搜索列表：不再因为「整页实测不到封面」就留空
+            sr.coverUrl = buildListCoverChain(search)
+        }
+        val ex = source.getExploreRule()
+        if (ex.coverUrl.isNullOrBlank()) {
+            // 发现页列表：有分类页就按分类页再实测一次，否则复用搜索侧的链
+            ex.coverUrl = if (!source.exploreUrl.isNullOrBlank()) {
+                buildListCoverChain(category, sr.coverUrl)
+            } else {
+                sr.coverUrl
+            }
+        }
+    }
+
+    /** 封面验证失败时的最后手段：用完整候选链覆盖；只有 CSS 背景图站点才单独改用 JS 写法 */
+    private fun forceCoverRules(source: BookSource, pages: List<Page>): Boolean {
+        val detail = coverPage(pages, "书籍详情页", "搜索结果页", "首页")
+        val search = coverPage(pages, "搜索结果页", "分类列表页", "首页")
+        var changed = false
+        detail?.let { p ->
+            // JS 规则不能与 CSS 规则用 || 拼接：legado 会把规则串行执行，
+            // 后面的 JS 拿前面的结果当输入再算一次，反而把已取到的封面清空
+            val chain = probeCoverRules(p.html, p.url, DETAIL_COVER_PROBES, Int.MAX_VALUE)
+                ?.takeIf { it.isNotBlank() }
+                ?: CSS_COVER_RULE.takeIf { isCssBackgroundCover(p.html) }
+            if (!chain.isNullOrBlank() && chain != source.getBookInfoRule().coverUrl) {
+                source.getBookInfoRule().coverUrl = chain
+                changed = true
+            }
+        }
+        search?.let { p ->
+            val chain = buildListCoverChain(p)
+            if (chain != source.getSearchRule().coverUrl) {
+                source.getSearchRule().coverUrl = chain
+                // 发现页已有自己的实测链时不覆盖
+                if (source.getExploreRule().coverUrl.isNullOrBlank()) {
+                    source.getExploreRule().coverUrl = chain
+                }
+                changed = true
+            }
+        }
+        return changed
+    }
+
     // ==================== 阶段三：四链路实测 ====================
 
     /** 用 App 自带的 WebBook 引擎按真实使用路径验证：验证通过 = 实际可用 */
@@ -2884,8 +3345,13 @@ object AiBookSourceGenerator {
     private fun copyStepRules(from: BookSource, to: BookSource, step: String) {
         when (step) {
             "搜索" -> {
+                // 历史里那份书源可能没有封面规则，整体替换后要把本次算出的封面规则补回去
+                val cover = to.getSearchRule().coverUrl
                 to.searchUrl = from.searchUrl
                 to.ruleSearch = from.ruleSearch
+                if (to.getSearchRule().coverUrl.isNullOrBlank() && !cover.isNullOrBlank()) {
+                    to.getSearchRule().coverUrl = cover
+                }
             }
             "详情" -> {
                 to.ruleBookInfo = from.ruleBookInfo
@@ -2900,15 +3366,20 @@ object AiBookSourceGenerator {
                 to.ruleContent = from.ruleContent
             }
             "发现" -> {
+                // 同上：发现页列表封面规则不能被历史书源里的空值覆盖
+                val cover = to.getExploreRule().coverUrl
                 to.exploreUrl = from.exploreUrl
                 to.ruleExplore = from.ruleExplore
                 to.enabledExplore = from.enabledExplore
+                if (to.getExploreRule().coverUrl.isNullOrBlank() && !cover.isNullOrBlank()) {
+                    to.getExploreRule().coverUrl = cover
+                }
             }
         }
     }
 
     /**
-     * 五链路实测。
+     * 五链路实测 + 封面校验（封面在详情环节顺带验证，报告共 6 项，封面项非阻塞）。
      * @param steps 为 null 时跑全部五环（首轮 / 兜底用）；
      *             非 null 时只跑指定环节（增量修复用），其余环节直接复用 [holder] 里上轮解析出的 book / 首章，
      *             不再重新抓网、也不重写它们的通过状态。
@@ -2924,9 +3395,15 @@ object AiBookSourceGenerator {
         steps: Set<String>? = null,
         holder: VerifyHolder? = null
     ): List<VerifyItem> {
-        val report = ArrayList<VerifyItem>(4)
+        // 封面：任何一次实测前先保证三处 coverUrl 有「页面实测过」的规则，
+        // 覆盖 AI 版 / 代码辅助版 / 修正版 / 兜底版等所有分支
+        ensureCoverRules(source, pages)
+        val report = ArrayList<VerifyItem>(6)
         var book: Book? = holder?.book
         var firstChapter: io.legado.app.data.entities.BookChapter? = holder?.chapter
+        // 列表侧真实解析出的封面地址：搜索结果 / 分类列表各一个
+        var searchCover: String? = null
+        var exploreCover: String? = null
 
         if (steps == null || steps.contains("搜索")) {
             if (skipSearch) {
@@ -2943,6 +3420,7 @@ object AiBookSourceGenerator {
                     if (books.isEmpty()) error("搜索无结果")
                     val first = books.first()
                     book = first.toBook().also { it.origin = source.bookSourceUrl }
+                    searchCover = first.coverUrl?.trim()?.takeIf { it.isNotBlank() }
                     report.add(VerifyItem("搜索", true, "搜到 ${books.size} 本，第一本《${first.name}》"))
                 }.onFailure {
                     report.add(VerifyItem("搜索", false, it.message ?: "执行异常"))
@@ -2951,7 +3429,7 @@ object AiBookSourceGenerator {
         }
 
         if (steps == null || steps.contains("详情")) {
-            onProgress("验证 ②/⑤：书籍详情…")
+            onProgress("验证 ②/⑤：书籍详情 / 封面…")
             runCatching {
                 val probe = book ?: Book(
                     name = "验证测试",
@@ -3022,6 +3500,7 @@ object AiBookSourceGenerator {
                         ?: error("exploreUrl 无法解析出分类地址")
                     val books = WebBook.exploreBookAwait(source, url, 1)
                     if (books.isEmpty()) error("发现页无结果（规则或分类地址有误）")
+                    exploreCover = books.first().coverUrl?.trim()?.takeIf { it.isNotBlank() }
                     report.add(
                         VerifyItem("发现", true, "分类页取到《${books.first().name}》等 ${books.size} 本")
                     )
@@ -3029,6 +3508,39 @@ object AiBookSourceGenerator {
                     report.add(VerifyItem("发现", false, it.message ?: "执行异常"))
                 }
             }
+        }
+        // 封面验证：详情 + 搜索列表 + 发现页列表三处都要真解析出图片地址。
+        // 只验详情会漏掉「点进详情页才有封面、列表里全空」这种情况。
+        if (steps == null || steps.contains("详情")) {
+            val detailOk = report.any { it.step == "详情" && it.ok } &&
+                looksLikeCover(book?.coverUrl?.trim().orEmpty())
+            // 增量复验只跑指定环节，没跑搜索/发现时不把缺失误判成封面失败
+            val searchOk = if (steps != null || skipSearch) true
+            else looksLikeCover(searchCover.orEmpty())
+            val hasExplore = !source.exploreUrl.isNullOrBlank()
+            val exploreOk = if (steps != null || skipSearch || !hasExplore) true
+            else looksLikeCover(exploreCover.orEmpty())
+            val rulesOk = !source.getSearchRule().coverUrl.isNullOrBlank() &&
+                !source.getExploreRule().coverUrl.isNullOrBlank()
+            val coverOk = detailOk && searchOk && exploreOk && rulesOk
+            report.add(
+                VerifyItem(
+                    "封面", coverOk,
+                    buildString {
+                        append("详情 ").append(if (detailOk) "✓" else "✗")
+                        append("｜搜索列表 ").append(if (searchOk) "✓" else "✗")
+                        if (hasExplore) append("｜发现列表 ").append(if (exploreOk) "✓" else "✗")
+                        if (!rulesOk) append("｜列表规则缺失")
+                        if (steps == null && !skipSearch && searchCover.isNullOrBlank()) {
+                            append("\n搜索结果未解析出封面地址，请检查 ruleSearch.coverUrl")
+                        }
+                        if (steps == null && !skipSearch && hasExplore && exploreCover.isNullOrBlank()) {
+                            append("\n分类列表未解析出封面地址，请检查 ruleExplore.coverUrl")
+                        }
+                    },
+                    blocking = false
+                )
+            )
         }
         holder?.book = book
         holder?.chapter = firstChapter

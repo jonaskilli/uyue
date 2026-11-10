@@ -84,7 +84,9 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
                 newBooks.addAll(books)
                 books = newBooks
                 addBooksData.postValue(searchBooks)
+                io.legado.app.help.book.ListCoverLoader.restoreCachedCovers(searchBooks)
                 appDb.searchBookDao.insert(*searchBooks.toTypedArray())
+                io.legado.app.help.book.ListCoverLoader.maybeFill(searchBooks)
                 pageLiveData.postValue(page)
             }.onError {
                 it.printOnDebug()
@@ -107,7 +109,9 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
             .onSuccess(IO) { searchBooks ->
                 books.addAll(searchBooks)
                 booksData.postValue(books.toList())
+                io.legado.app.help.book.ListCoverLoader.restoreCachedCovers(searchBooks)
                 appDb.searchBookDao.insert(*searchBooks.toTypedArray())
+                io.legado.app.help.book.ListCoverLoader.maybeFill(searchBooks)
                 pageLiveData.postValue(page)
                 page++
             }.onError {

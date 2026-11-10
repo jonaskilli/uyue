@@ -101,6 +101,9 @@ class ExploreFragment() : VMBaseFragment<ExploreViewModel>(R.layout.fragment_exp
         initRecyclerView()
         initGroupData()
         upExploreData()
+        io.legado.app.help.book.ListCoverLoader.coverRefresh.observe(this) {
+            paneViewModel.refreshCovers()
+        }
     }
 
     override fun onCompatCreateOptionsMenu(menu: Menu) {

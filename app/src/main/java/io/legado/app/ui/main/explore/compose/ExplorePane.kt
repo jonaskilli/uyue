@@ -230,6 +230,11 @@ fun ExplorePane(
     val message by liveState(viewModel.message, null)
     val page by liveState(viewModel.page, 1)
     val contentEpoch by liveState(viewModel.contentEpoch, 0)
+    // 列表封面补取完成后递增：SearchBook.equals 只按 bookUrl 判等，就地改 coverUrl
+    // 不会让卡片重组，必须有一个显式变化的状态把可见项重新推过一次组合
+    val coverRevision by liveState(
+        io.legado.app.help.book.ListCoverLoader.coverVersion, 0
+    )
     var selectedUrl by remember { mutableStateOf<String?>(null) }
     var grid by remember { mutableStateOf(viewModel.gridMode) }
     var showAllKinds by remember { mutableStateOf(false) }
@@ -489,7 +494,7 @@ fun ExplorePane(
                         )
                     ) {
                         items(count = books.size) { index ->
-                            GridCard(books[index], onBookClick, onBookLongClick)
+                            GridCard(books[index], onBookClick, onBookLongClick, coverRevision)
                         }
                     }
 
@@ -502,7 +507,7 @@ fun ExplorePane(
                         )
                     ) {
                         items(count = books.size) { index ->
-                            ListCard(books[index], onBookClick, onBookLongClick)
+                            ListCard(books[index], onBookClick, onBookLongClick, coverRevision)
                         }
                     }
                 }
@@ -773,12 +778,16 @@ private fun CenteredText(text: String, onClick: (() -> Unit)? = null) {
 
 /** 复用项目自带的封面控件：它处理书源头、默认封面与 WiFi 限制 */
 @Composable
-private fun Cover(book: SearchBook, modifier: Modifier) {
+private fun Cover(book: SearchBook, modifier: Modifier, revision: Int) {
     val onlyWifi = AppConfig.loadCoverOnlyWifi
     AndroidView(
         factory = { ctx -> CoverImageView(ctx) },
         modifier = modifier,
-        update = { view -> view.load(book, onlyWifi) }
+        update = { view ->
+            // 让 lambda 捕获 revision：卡片因版本号变化而重组时，这里会重新读取已补好的 coverUrl。
+            // 注意不能写 view.tag —— Glide 用 View 的 tag 保存图片请求，覆盖会导致加载错乱
+            if (revision >= 0) view.load(book, onlyWifi)
+        }
     )
 }
 
@@ -792,7 +801,8 @@ private fun Cover(book: SearchBook, modifier: Modifier) {
 private fun GridCard(
     book: SearchBook,
     onClick: (SearchBook) -> Unit,
-    onLongClick: (SearchBook) -> Unit
+    onLongClick: (SearchBook) -> Unit,
+    revision: Int
 ) {
     Column(
         Modifier.padding(horizontal = PaneD.pad, vertical = PaneD.gridItemPadV)
@@ -808,7 +818,8 @@ private fun GridCard(
             Cover(
                 book,
                 Modifier.fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                revision
             )
         }
         // 文字区收紧 + 顶部对齐：标题紧贴封面底部，到下一排封面也更近
@@ -839,7 +850,8 @@ private fun GridCard(
 private fun ListCard(
     book: SearchBook,
     onClick: (SearchBook) -> Unit,
-    onLongClick: (SearchBook) -> Unit
+    onLongClick: (SearchBook) -> Unit,
+    revision: Int
 ) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 1.dp).combinedClickable(
@@ -850,7 +862,8 @@ private fun ListCard(
         Cover(
             book,
             Modifier.size(PaneD.listCoverW, PaneD.listCoverH)
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            revision
         )
         Spacer(Modifier.width(PaneD.gap))
         // 整列按像素裁剪：三行单行文字都允许超出边界后显示半个字
