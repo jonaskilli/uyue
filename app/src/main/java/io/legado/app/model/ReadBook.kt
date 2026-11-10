@@ -428,10 +428,22 @@ object ReadBook : CoroutineScope by MainScope() {
         return hasPrevPage
     }
 
+    /**
+     * 章节切换的统一钩子：停掉还在跑的「下一章自动 AI 分析」。
+     * 手动翻页、进度条/目录跳章、朗读自动切章都会经过这里；不取消的话，
+     * 分析结果会在切章后才写回，把正在朗读的章节正文改掉并从章首重读。
+     */
+    private fun cancelPendingAutoFix() {
+        book?.bookUrl?.takeIf { it.isNotBlank() }?.let {
+            io.legado.app.service.AiChapterFixService.cancelAutoJob(it)
+        }
+    }
+
     fun moveToNextChapter(upContent: Boolean, upContentInPlace: Boolean = true): Boolean {
         if (durChapterIndex < simulatedChapterSize - 1) {
             durChapterPos = 0
             durChapterIndex++
+            cancelPendingAutoFix()
             clearExpiredChapterLoadingJob()
             prevTextChapter = curTextChapter
             curTextChapter = nextTextChapter
@@ -467,6 +479,7 @@ object ReadBook : CoroutineScope by MainScope() {
         if (durChapterIndex < simulatedChapterSize - 1) {
             durChapterPos = 0
             durChapterIndex++
+            cancelPendingAutoFix()
             clearExpiredChapterLoadingJob()
             prevTextChapter = curTextChapter
             curTextChapter = nextTextChapter
@@ -503,6 +516,7 @@ object ReadBook : CoroutineScope by MainScope() {
         if (durChapterIndex > 0) {
             durChapterPos = if (toLast) prevTextChapter?.lastReadLength ?: Int.MAX_VALUE else 0
             durChapterIndex--
+            cancelPendingAutoFix()
             clearExpiredChapterLoadingJob()
             nextTextChapter = curTextChapter
             curTextChapter = prevTextChapter
@@ -577,6 +591,7 @@ object ReadBook : CoroutineScope by MainScope() {
             clearTextChapter()
             if (upContent) callBack?.upContent()
             durChapterIndex = index
+            cancelPendingAutoFix()
             ReadBook.durChapterPos = durChapterPos
             saveRead()
             loadContent(resetPageOffset = true) {
@@ -898,9 +913,18 @@ object ReadBook : CoroutineScope by MainScope() {
             appCtx.toastOnUi("ChapterProvider ERROR:\n${it.stackTraceStr}")
         }.onSuccess {
             success?.invoke()
-            // 内容真正加载完成后，强制重落盘 TTS JSON：
-            // 正文可能已被 AI 处理章节改写，不能靠节流变量判断是否需要重写
-            saveTtsTextJson(force = true)
+            // 内容真正加载完成后要重落盘 TTS JSON：正文可能已被 AI 处理章节改写，
+            // 不能靠节流变量判断是否需要重写。
+            // 换书时当前+前+后三章都会回调这里，「逐章读缓存 + 正则 + 写文件」这段
+            // 同步 IO 原本会在主线程跑三遍，是最容易卡住返回手势的一段。
+            if (chapter.index == durChapterIndex) {
+                // 当前章：立即写一次，保证朗读脚本读到最新窗口
+                saveTtsTextJson(force = true)
+            } else {
+                // 预加载章：主线程只让节流失效（极轻量），后续 saveRead() 在后台线程、
+                // 或切章/开始朗读时的 force 落盘会把完整窗口补齐，不丢后续章节内容
+                invalidateTtsTextJson()
+            }
         }
         chapterLoadingJobs[chapter.index] = job
         job.start()

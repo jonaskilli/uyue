@@ -46,8 +46,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *     一段被改写/扩写成多段时，会按位置展开成多段；返回空串表示删掉该段；
  *  4. 重新拼成正文写回缓存，并同步刷新「朗读文本」data.json。
  *
- * 处理结果按「已修复 / 无需修改 / 失败」记入 [AiChapterFixStore]，
- * 前两者不再重复调用 AI，失败的下次仍会重试。
+ * 处理完成的章节会在缓存文件末尾追加一个纯空白标记（BookHelp.AI_FIX_MARK），
+ * 判定「是否处理过」只看这个标记；文件被重新下载 / 刷新覆盖后标记自然消失，
+ * 下次会自动重新处理。失败不写标记，下次仍会重试。
  */
 object AiChapterFixService {
 
@@ -383,7 +384,7 @@ object AiChapterFixService {
         attempt: Int = 1
     ): OneOutcome {
         val title = chapter.title
-        if (!force && AiChapterFixStore.isDone(book.bookUrl, chapterIndex)) {
+        if (!force && BookHelp.hasAiFixMark(book, chapter)) {
             return OneOutcome(Outcome.SKIPPED, "《$title》已处理过，跳过")
         }
         val cached = BookHelp.getContent(book, chapter)
@@ -437,7 +438,7 @@ object AiChapterFixService {
                 template.retryCount, template.timeoutSeconds
             )
             if (result == null) {
-                AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
+                // 失败不写标记，下次自动重试
                 return OneOutcome(Outcome.FAILED, "《$title》$err")
             }
             fixes.putAll(result)
@@ -476,7 +477,7 @@ object AiChapterFixService {
             for ((pair, err) in results) {
                 val (blockIndex, result) = pair
                 if (result == null) {
-                    AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
+                    // 失败不写标记，下次自动重试
                     return OneOutcome(
                         Outcome.FAILED, "《$title》第 ${blockIndex + 1}/${blocks.size} 块$err"
                     )
@@ -504,8 +505,9 @@ object AiChapterFixService {
                 .forEach { newParagraphs.add(it) }
         }
         if (newParagraphs == paragraphs) {
-            // AI 回了内容但实际没改动，按「无需修改」记，避免以后重复花钱
-            AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_CLEAN)
+            // AI 回了内容但实际没改动：正文一个字不变，只在缓存文件末尾追加处理标记，
+            // 避免以后重复花钱调用 AI
+            BookHelp.appendAiFixMark(book, chapter)
             return OneOutcome(Outcome.CLEAN, "《$title》检查完毕：无需修改")
         }
         // 重复段落校验：原文本来就有的重复允许保留，但结果比原文多出来就整章重分析，
@@ -524,7 +526,7 @@ object AiChapterFixService {
                     prompt, force, onlyCached, onProgress, attempt + 1
                 )
             }
-            AiChapterFixStore.mark(book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_ERROR)
+            // 失败不写标记，下次自动重试
             return OneOutcome(
                 Outcome.FAILED,
                 "《$title》连续${MAX_DUPLICATE_RETRY}次分析都新增重复段落" +
@@ -536,10 +538,11 @@ object AiChapterFixService {
         // 取消后绝不写回：否则切章后分析结果才落盘，又会和朗读内容错开
         currentCoroutineContext().ensureActive()
         val newContent = newParagraphs.joinToString("\n")
-        BookHelp.saveText(book, chapter, newContent)
-        AiChapterFixStore.mark(
-            book.bookUrl, chapterIndex, AiChapterFixStore.STATUS_FIXED, effectiveFixes.size
-        )
+        // 写盘前再校一次：切章取消可能恰好落在上面这段同步计算期间
+        currentCoroutineContext().ensureActive()
+        // 处理结果和「已处理」标记一次性写进同一个文件：
+        // 正文被重新下载 / 刷新覆盖时标记必然一起消失，不存在两份状态不同步的问题
+        BookHelp.saveText(book, chapter, newContent + BookHelp.AI_FIX_MARK)
         // 9. 正文已改写：先让节流失效（保证切章/保存进度等处也会补写），再强制重落盘 data.json
         ReadBook.invalidateTtsTextJson()
         kotlin.runCatching { ReadBook.saveTtsTextJson(force = true) }

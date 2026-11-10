@@ -14,7 +14,6 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.localBook.LocalBook
-import io.legado.app.service.AiChapterFixStore
 import io.legado.app.utils.ArchiveUtils
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.ImageUtils
@@ -46,6 +45,7 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 import java.util.zip.ZipFile
@@ -62,6 +62,62 @@ object BookHelp {
     private val downloadImages = ConcurrentHashMap<String, Mutex>()
 
     val cachePath = FileUtils.getPath(downloadDir, cacheFolderName)
+
+    /**
+     * AI 章节处理标记：只由换行和空格组成，追加在章节缓存文件末尾。
+     * ContentProcessor 逐行 trim 后只保留非空段落、cleanContentForTts 也会压掉
+     * 连续空行并 trim，所以重新排版后的阅读界面与朗读文本里都不会出现它。
+     * 判定只看文件末尾；文件被重新下载 / 刷新 / 编辑覆盖后标记自然消失，
+     * 这一章就自动回到「未处理」，不需要再维护任何独立记录。
+     */
+    const val AI_FIX_MARK = "\n\n\n          \n"
+
+    private fun chapterCacheFile(book: Book, bookChapter: BookChapter): File =
+        downloadDir.getFile(cacheFolderName, book.getFolderName(), bookChapter.getFileName())
+
+    /**
+     * 判定该章是否已 AI 处理过：只读文件末尾十几字节，不整篇读缓存。
+     * 状态只有这一个来源：正文被重新下载 / 刷新覆盖后标记必然消失，
+     * 一律按未处理重新走 AI 流程，不需要任何「清除标记」的代码。
+     */
+    suspend fun hasAiFixMark(book: Book, chapter: BookChapter): Boolean =
+        withContext(IO) {
+            val file = chapterCacheFile(book, chapter)
+            val bytes = AI_FIX_MARK.toByteArray(Charsets.UTF_8)
+            runCatching {
+                if (!file.exists() || file.length() < bytes.size) {
+                    false
+                } else {
+                    RandomAccessFile(file, "r").use { raf ->
+                        val tail = ByteArray(bytes.size)
+                        raf.seek(file.length() - bytes.size)
+                        raf.readFully(tail)
+                        tail.contentEquals(bytes)
+                    }
+                }
+            }.getOrDefault(false)
+        }
+
+    /** 给已有缓存文件末尾追加标记（AI 判定无需修改时用，正文不变） */
+    fun appendAiFixMark(book: Book, chapter: BookChapter) {
+        runCatching {
+            val file = chapterCacheFile(book, chapter)
+            if (!file.exists()) return@runCatching
+            val bytes = AI_FIX_MARK.toByteArray(Charsets.UTF_8)
+            // 只读末尾判重，不整篇读写大章节；已有标记就不重复追加
+            if (file.length() >= bytes.size) {
+                RandomAccessFile(file, "r").use { raf ->
+                    val tail = ByteArray(bytes.size)
+                    raf.seek(file.length() - bytes.size)
+                    raf.readFully(tail)
+                    if (tail.contentEquals(bytes)) return@runCatching
+                }
+            }
+            FileOutputStream(file, true).use { it.write(bytes) }
+        }.onFailure {
+            AppLog.put("BookHelp: 追加 AI 处理标记失败 ${it.localizedMessage}")
+        }
+    }
 
     fun clearCache() {
         FileUtils.delete(
@@ -199,8 +255,8 @@ object BookHelp {
         content: String
     ) {
         try {
-            // 网络正文覆盖缓存：这一章回到未处理状态，清掉 AI 处理章节的已完成标记
-            AiChapterFixStore.deleteChapter(book.bookUrl, bookChapter.index)
+            // 网络正文覆盖缓存：文件被整体覆盖，末尾的「已处理」标记随之消失，
+            // 这一章自动回到未处理状态，无需再维护独立的记录文件
             saveText(book, bookChapter, content)
             //saveImages(bookSource, book, bookChapter, content)
             postEvent(EventBus.SAVE_CONTENT, Pair(book, bookChapter))
