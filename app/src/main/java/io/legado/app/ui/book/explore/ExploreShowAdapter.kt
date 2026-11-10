@@ -70,6 +70,7 @@ class ExploreShowAdapter(context: Context, val callBack: CallBack) :
                 when (it) {
                     "isInBookshelf" -> ivInBookshelf.isVisible =
                         callBack.isInBookshelf(item)
+                    "cover" -> ivCover.load(item, false)
                 }
             }
         }

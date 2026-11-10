@@ -102,6 +102,9 @@ class ExploreShowActivity : VMBaseActivity<ActivityExploreShowBinding, ExploreSh
         viewModel.upAdapterLiveData.observe(this) {
             adapter.notifyItemRangeChanged(0, adapter.itemCount, bundleOf(it to null))
         }
+        io.legado.app.help.book.ListCoverLoader.coverRefresh.observe(this) {
+            adapter.notifyItemRangeChanged(0, adapter.itemCount, bundleOf("cover" to null))
+        }
         viewModel.pageLiveData.observe(this) {
             menuPage.title = getString(R.string.menu_page, it)
         }

@@ -741,6 +741,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     val loadCoverOnlyWifi get() = appCtx.getPrefBoolean(PreferKey.loadCoverOnlyWifi, false)
 
+    /** 列表没有封面时，异步从详情页补取（默认开，仍受「仅 WiFi」约束） */
+    val listCoverFromDetail get() = appCtx.getPrefBoolean(PreferKey.listCoverFromDetail, true)
+
+    /** 列表封面 URL 加载失败（404/403）时也从详情页补一次 */
+    val listCoverOnFailed get() = appCtx.getPrefBoolean(PreferKey.listCoverOnFailed, true)
+
     val showAddToShelfAlert get() = appCtx.getPrefBoolean(PreferKey.showAddToShelfAlert, true)
 
     val ignoreAudioFocus get() = appCtx.getPrefBoolean(PreferKey.ignoreAudioFocus, false)

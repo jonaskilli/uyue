@@ -226,7 +226,9 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
                 val result = WebBook.exploreBookAwait(src, url, target)
                 // 切源 / 切分类后，旧请求的结果不能追加到新列表里
                 if (gen != generation) return@execute
+                io.legado.app.help.book.ListCoverLoader.restoreCachedCovers(result)
                 appDb.searchBookDao.insert(*result.toTypedArray())
+                io.legado.app.help.book.ListCoverLoader.maybeFill(result)
                 if (result.isEmpty()) hasMore = false
                 val all = books.value.orEmpty() + result
                 books.postValue(all)
@@ -263,7 +265,9 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
                     return@execute
                 }
                 // 详情页 BookInfoViewModel 只查库，发现结果必须入库
+                io.legado.app.help.book.ListCoverLoader.restoreCachedCovers(result)
                 appDb.searchBookDao.insert(*result.toTypedArray())
+                io.legado.app.help.book.ListCoverLoader.maybeFill(result)
                 val old = if (append) books.value.orEmpty() else emptyList()
                 val all = old + result
                 books.postValue(all)
@@ -279,5 +283,10 @@ class ExplorePaneViewModel(application: Application) : BaseViewModel(application
                 if (gen == generation) loading.postValue(false)
             }
         })
+    }
+
+    /** 详情页封面补取完成后触发一次重组，让封面控件重新 load 已就地更新的 coverUrl */
+    fun refreshCovers() {
+        books.postValue(ArrayList(books.value.orEmpty()))
     }
 }

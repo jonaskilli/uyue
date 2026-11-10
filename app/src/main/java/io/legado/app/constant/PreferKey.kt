@@ -17,6 +17,8 @@ object PreferKey {
     const val bookGroupStyle = "bookGroupStyle"
     const val useDefaultCover = "useDefaultCover"
     const val loadCoverOnlyWifi = "loadCoverOnlyWifi"
+    const val listCoverFromDetail = "listCoverFromDetail"
+    const val listCoverOnFailed = "listCoverOnFailed"
     const val coverShowName = "coverShowName"
     const val coverShowAuthor = "coverShowAuthor"
     const val coverShowNameN = "coverShowNameN"

@@ -4,10 +4,12 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.lifecycleScope
 import io.legado.app.R
 import io.legado.app.base.BaseActivity
+import io.legado.app.constant.BookSourceType
 import io.legado.app.constant.BookType
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
@@ -16,6 +18,7 @@ import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.databinding.ActivityAiBookSourceBinding
 import io.legado.app.help.book.removeType
 import io.legado.app.help.source.SourceHelp
+import io.legado.app.help.source.isVideoSource
 import io.legado.app.model.AiBookSourceGenerator
 import io.legado.app.model.AiSourceHistory
 import io.legado.app.model.CharacterProfileManager
@@ -49,13 +52,120 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
     /** 导入书籍：用户选中的书源地址 */
     private var selectedSourceUrl: String? = null
 
+    /** 校验模式：由书源管理条目菜单进入，载入该书源后自动校验并修正 */
+    private var checkMode = false
+    private var checkSource: BookSource? = null
+
     override fun onActivityCreated(savedInstanceState: Bundle?) {
-        binding.btnGenerate.setOnClickListener { startGenerate() }
+        val checkUrl = intent.getStringExtra(EXTRA_CHECK_SOURCE_URL)
+        checkMode = !checkUrl.isNullOrBlank()
+        binding.btnGenerate.setOnClickListener {
+            if (checkMode) startVerifyFix() else startGenerate()
+        }
         // 导入书籍：按详情页网址匹配同域书源，选中后用下方「导入书架」按钮执行
         binding.btnGenerateOne.setOnClickListener { importBook() }
         binding.btnImport.setOnClickListener { importSelected() }
         binding.btnSave.setOnClickListener { saveSource() }
         binding.btnLogin.setOnClickListener { gotoLogin() }
+        if (checkMode && checkUrl != null) {
+            binding.btnGenerate.text = "重新校验并修正"
+            binding.btnGenerateOne.visibility = View.GONE
+            binding.btnImport.visibility = View.GONE
+            loadCheckSource(checkUrl)
+        }
+    }
+
+    /**
+     * 载入书源管理里选中的书源：按书源自身的设定自动勾选校验方式，
+     * 载入完成就直接开跑，不让用户再填一遍网址和类型。
+     */
+    private fun loadCheckSource(url: String) {
+        binding.tvProgress.text = "正在读取书源…"
+        lifecycleScope.launch {
+            val source = withContext(Dispatchers.IO) {
+                appDb.bookSourceDao.getBookSource(url)
+            }
+            if (source == null) {
+                binding.tvProgress.text = "书源不存在或已被删除：$url"
+                toastOnUi("书源不存在或已被删除")
+                return@launch
+            }
+            checkSource = source
+            binding.etUrl.setText(source.bookSourceUrl)
+            binding.etKeyword.setText(source.getCheckKeyword("剑"))
+            if (!source.loginUrl.isNullOrBlank()) {
+                binding.etLoginUrl.setText(source.loginUrl)
+            }
+            // 书源自己声明的类型决定校验方式：视频源按播放地址验，文本源按正文验
+            val video = source.bookSourceType == BookSourceType.video || source.isVideoSource()
+            binding.cbVideo.isChecked = video
+            // 带发现页的书源连分类列表一起校验；内置规则修复（代码辅助）始终打开
+            binding.cbExplore.isChecked = !source.exploreUrl.isNullOrBlank()
+            binding.cbCodeAssist.isChecked = true
+            binding.etResult.setText(runCatching { GSON.toJson(source) }.getOrDefault(""))
+            binding.tvProgress.text =
+                "已载入书源「${source.bookSourceName}」（${if (video) "视频源" else "文本小说"}），正在自动校验…"
+            startVerifyFix()
+        }
+    }
+
+    /** 校验并修正已有书源：不重写整份书源，只修验证失败的环节 */
+    private fun startVerifyFix() {
+        val source = checkSource ?: run {
+            toastOnUi("正在载入书源，请稍候")
+            return
+        }
+        val keyword = binding.etKeyword.text?.toString()?.trim()
+            .takeIf { !it.isNullOrBlank() }
+        val fixRounds = binding.etFixRounds.text?.toString()?.trim()
+            ?.toIntOrNull()?.coerceIn(0, 8) ?: 2
+        generated = null
+        binding.btnSave.alpha = 0.4f
+        binding.btnGenerate.alpha = 0.4f
+        binding.tvProgress.text = "准备校验…"
+        generateJob?.cancel()
+        generateJob = lifecycleScope.launch {
+            val result = AiBookSourceGenerator.verifyAndFix(
+                source = source,
+                keyword = keyword,
+                fixRounds = fixRounds,
+                includeExplore = binding.cbExplore.isChecked,
+                codeAssist = binding.cbCodeAssist.isChecked,
+                videoMode = binding.cbVideo.isChecked
+            ) { message ->
+                runOnUiThread { binding.tvProgress.text = message }
+            }
+            binding.btnGenerate.alpha = 1f
+            result.onSuccess { res ->
+                val fixed = res.source
+                generated = fixed
+                binding.tvProgress.text = buildString {
+                    append("校验并修正完成：").append(fixed.bookSourceName)
+                    if (res.fixRounds > 0) {
+                        append("（修复 ").append(res.fixRounds).append(" 轮）")
+                    }
+                    append('\n')
+                    append("验证结果（含封面）：\n")
+                    res.verify.forEach { v ->
+                        append('[').append(if (v.ok) "通过" else "失败").append("] ")
+                            .append(v.step).append("：").append(v.message).append('\n')
+                    }
+                    if (res.verify.any { !it.ok && it.blocking }) {
+                        append("（仍有失败环节，可再点一次「重新校验并修正」重试）")
+                    } else if (res.verify.any { !it.ok }) {
+                        append("（仅封面未通过，其余链路可用）")
+                    } else {
+                        append("（全部通过）")
+                    }
+                    append("\n点「保存到书源列表」即可用修正后的规则覆盖原书源。")
+                }
+                binding.etResult.setText(runCatching { GSON.toJson(fixed) }.getOrDefault(""))
+                binding.btnSave.alpha = if (res.verify.all { it.ok }) 1f else 0.7f
+            }.onFailure {
+                binding.tvProgress.text = "校验失败：${it.message}"
+                toastOnUi(it.message ?: "校验失败")
+            }
+        }
     }
 
     /** 右上角菜单 */
@@ -369,15 +479,17 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                             .append(res.patchedSteps.joinToString("、")).append("）")
                     }
                     append('\n')
-                    append("五链路验证：\n")
+                    append("验证结果（含封面）：\n")
                     res.verify.forEach { v ->
                         append('[').append(if (v.ok) "通过" else "失败").append("] ")
                             .append(v.step).append("：").append(v.message).append('\n')
                     }
-                    if (res.verify.any { !it.ok }) {
+                    if (res.verify.any { !it.ok && it.blocking }) {
                         append("（存在失败环节的规则可能不可用，建议手动校验后再用）")
+                    } else if (res.verify.any { !it.ok }) {
+                        append("（仅封面未通过，其余链路可用；可在「书源管理」里手动补封面规则）")
                     }
-                    val okCount = res.verify.count { it.ok }
+                    val okCount = res.verify.count { it.ok && it.blocking }
                     if (!singleBook && okCount > 0) {
                         append("\n已记录该网址的 $okCount 项成功规则，下次生成同一网址可直接补齐。")
                     }
@@ -436,6 +548,9 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
     }
 
     companion object {
+        /** 书源管理条目菜单「AI 校验并修正」传入的书源地址；带此参数即进入校验模式 */
+        const val EXTRA_CHECK_SOURCE_URL = "checkSourceUrl"
+
         /** 直接进入本界面的入口（供设置页跳转） */
         val startActivityIntent get() = AiBookSourceActivity::class.java
     }

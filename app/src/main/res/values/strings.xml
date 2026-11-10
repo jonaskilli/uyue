@@ -939,6 +939,10 @@
     <string name="complete">Finished</string>
     <string name="show_unread">Show unread flag</string>
     <string name="use_default_cover">Always show default cover</string>
+    <string name="list_cover_from_detail">Fill list covers from detail page</string>
+    <string name="list_cover_from_detail_summary">When a search/category list has no cover, fetch it from the book detail page (limited concurrency, cached)</string>
+    <string name="list_cover_on_failed">Retry when a list cover fails to load</string>
+    <string name="list_cover_on_failed_summary">If a cover URL returns 404/403, fetch the detail page cover as fallback</string>
     <string name="use_default_cover_s">Always show the default cover, do not show the network cover</string>
     <string name="search_src">Search source code</string>
     <string name="boo_src">Book source code</string>
@@ -1542,6 +1546,7 @@
     <string name="ai_clear_source_history">清除网址记录</string>
     <string name="ai_set_api">设置 AI 接口</string>
     <string name="ai_set_api_hint">接口@@模型@@密钥（3 段一组，可多组追加轮换）</string>
+    <string name="ai_verify_source">AI 校验并修正</string>
     <string name="disable_source_verification">禁止弹出验证</string>
     <string name="exclude_video_source">不搜索视频源</string>
     <string name="replace_domain">替换域名</string>
