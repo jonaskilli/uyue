@@ -106,6 +106,42 @@ object SoundEffectPlayer {
         }
     }
 
+    /**
+     * 播放内存中的音频字节（修改音量对话框的试听用）。
+     *
+     * 音频已经按目标倍率改好，因此这里把 PCM 增益固定为 1.0，
+     * **不再叠加全局「音效音量」滑块**，保证听到的正好是调整后的大小。
+     * 不落盘到音效目录，只写一个临时缓存文件供 ExoPlayer 读取；
+     * 复用同一个播放器，连续点击不同段时自动停掉上一段。
+     */
+    fun playBytes(bytes: ByteArray, onResult: ((String?) -> Unit)? = null) {
+        val file = File(appCtx.cacheDir, "sfx_volume_preview.mp3")
+        try {
+            file.writeBytes(bytes)
+        } catch (e: Exception) {
+            onResult?.invoke("临时文件写入失败：${e.message}")
+            return
+        }
+        releaseJob?.cancel()
+        releaseJob = null
+        val p = getOrCreatePlayer()
+        if (p == null) {
+            onResult?.invoke("播放器创建失败")
+            return
+        }
+        try {
+            gainProcessor?.setGain(1f)
+            p.clearMediaItems()
+            p.setMediaItems(listOf(MediaItem.fromUri(Uri.fromFile(file))))
+            p.prepare()
+            p.play()
+            onResult?.invoke(null)
+        } catch (e: Exception) {
+            AppLog.put("[音效试听] 内存试听失败：${e.message}", e)
+            onResult?.invoke("播放失败：${e.message}")
+        }
+    }
+
     private fun startPlay(files: List<File>, onResult: ((String?) -> Unit)?) {
         releaseJob?.cancel()
         releaseJob = null

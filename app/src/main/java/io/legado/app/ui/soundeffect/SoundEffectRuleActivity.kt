@@ -18,10 +18,12 @@ import io.legado.app.base.VMBaseActivity
 import io.legado.app.constant.AppLog
 import io.legado.app.databinding.ActivitySoundEffectRuleBinding
 import io.legado.app.databinding.DialogEditTextBinding
+import io.legado.app.help.audio.Mp3GainUtil
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.lib.theme.primaryTextColor
+import io.legado.app.service.AiEffectDownloader
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.widget.SelectActionBar
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
@@ -37,6 +39,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * 音效规则管理。
@@ -387,6 +390,131 @@ class SoundEffectRuleActivity :
             showRenameAiSoundDialog(rule)
         } else {
             startEdit(rule, findGroupOfRule(rule.id)?.group?.id ?: defaultGroupId())
+        }
+    }
+
+    /**
+     * 修改音量，两类数据源共用同一个对话框与同一套差量算法：
+     * - 前三种模式：`replacement` 里的 `(音效名)` 指向 `bendiyinxiao2` 目录下的音效 JSON，
+     *   把 `audios` 数组中的每个 base64 展开成一段；
+     * - AI 音效模式：`rule.pattern` 是音效库相对路径，直接读对应的**裸 MP3**，单段。
+     * 没有标记 / 文件不存在时段列表为空，对话框显示空白即可。
+     */
+    override fun adjustVolume(rule: SoundEffectRule) {
+        val cn = arrayOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+        // 外显名字与列表里保持一致：规则名，空则回退到匹配文本 / 库内路径
+        val displayName = rule.name.ifBlank { rule.pattern }
+        val segments = ArrayList<SoundEffectVolumeDialog.Segment>()
+        if (viewModel.mode == SoundEffectRuleManager.MODE_AI) {
+            // 只读本地已有的 MP3，不触发远端下载（避免打开对话框被网络阻塞）
+            val file = AiEffectDownloader.localFileOf(rule.pattern)
+            val bytes = if (file.exists() && file.length() > 0L) {
+                runCatching { file.readBytes() }.getOrNull()
+            } else null
+            if (bytes != null) {
+                val info = Mp3GainUtil.readGain(bytes)
+                val v = Mp3GainUtil.validate(bytes)
+                segments.add(
+                    SoundEffectVolumeDialog.Segment(
+                        effectName = rule.pattern,
+                        indexInFile = 0,
+                        displayName = displayName,
+                        effectLabel = "",
+                        label = "音效一",
+                        originalBytes = bytes,
+                        supported = v.ok,
+                        reason = v.reason,
+                        currentGain = info.current,
+                        audioFile = file
+                    )
+                )
+            }
+        } else {
+            val names = SoundEffectPlayer.extractEffectNames(rule.replacement)
+            names.forEach { name ->
+                val audio = SoundEffectFileManager.readAudioJson(name) ?: return@forEach
+                audio.audios.forEachIndexed { index, item ->
+                    val info = Mp3GainUtil.readGain(item)
+                    val v = Mp3GainUtil.validate(item)
+                    segments.add(
+                        SoundEffectVolumeDialog.Segment(
+                            effectName = name,
+                            indexInFile = index,
+                            displayName = displayName,
+                            effectLabel = "($name)",
+                            label = "音效" + (cn.getOrNull(segments.size)
+                                ?: (segments.size + 1).toString()),
+                            originalBytes = item,
+                            supported = v.ok,
+                            reason = v.reason,
+                            currentGain = info.current
+                        )
+                    )
+                }
+            }
+        }
+        SoundEffectVolumeDialog(this, segments) { states -> saveVolumes(states) }.show()
+    }
+
+    /** 点「保存」才落盘：按音效名分组，把各段结果放回原 `audios` 位置并保留轮换索引。 */
+    private fun saveVolumes(states: List<SoundEffectVolumeDialog.SegmentState>) {
+        if (states.isEmpty()) {
+            toastOnUi("没有可保存的音效")
+            return
+        }
+        showLoading("正在保存音量…")
+        lifecycleScope.launch {
+            val errors = withContext(IO) {
+                val errs = ArrayList<String>()
+                // AI 音效（裸 MP3）：调整结果直接写回原文件
+                states.filter { it.segment.audioFile != null }.forEach { st ->
+                    val file = st.segment.audioFile ?: return@forEach
+                    writeAiEffectMp3(file, st.bytes)?.let { errs.add("${file.name}: $it") }
+                }
+                // 前三种（base64 JSON）：按音效名分组，放回 audios 并保留 currentIndex
+                states.filter { it.segment.audioFile == null }
+                    .groupBy { it.segment.effectName }
+                    .forEach { (name, list) ->
+                        val json = SoundEffectFileManager.readAudioJson(name)
+                        if (json == null) {
+                            errs.add(name)
+                            return@forEach
+                        }
+                        val newAudios = json.audios.toMutableList()
+                        list.forEach { st ->
+                            if (st.segment.indexInFile < newAudios.size) {
+                                newAudios[st.segment.indexInFile] = st.bytes
+                            }
+                        }
+                        SoundEffectFileManager.saveAudioJson(name, json.currentIndex, newAudios)
+                            ?.let { errs.add("$name: $it") }
+                    }
+                errs
+            }
+            hideLoading()
+            if (errors.isEmpty()) {
+                toastOnUi("音量已保存")
+            } else {
+                toastOnUi("保存失败：${errors.joinToString("、")}")
+            }
+        }
+    }
+
+    /** AI 音效：把调整后的 MP3 字节原子写回原文件（同一目录 tmp + rename，不产生额外副本） */
+    private fun writeAiEffectMp3(file: File, bytes: ByteArray): String? {
+        val tmp = File(file.absolutePath + ".tmp")
+        return try {
+            tmp.writeBytes(bytes)
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, true)
+                tmp.delete()
+            }
+            AppLog.put("[音效文件] AI音效音量已写回：${file.absolutePath}")
+            null
+        } catch (e: Exception) {
+            tmp.delete()
+            AppLog.put("[音效文件] AI音效写入失败：${e.message}", e)
+            e.message ?: "保存失败"
         }
     }
 
