@@ -312,6 +312,7 @@ object SoundEffectRuleManager {
                 listArr.put(
                     JSONObject().apply {
                         put("id", rule.id)
+                        put("groupId", gwr.group.id)
                         put("name", rule.name)
                         put("isEnabled", rule.isEnabled)
                         put("isRegex", rule.isRegex)
@@ -325,7 +326,8 @@ object SoundEffectRuleManager {
             groupObj.put("list", listArr)
             arr.put(groupObj)
         }
-        return arr.toString()
+        // 与原文件一致的多行缩进排版（JSON 解析器忽略空白，不影响朗读侧读取）
+        return arr.toString(4)
     }
 
     /**

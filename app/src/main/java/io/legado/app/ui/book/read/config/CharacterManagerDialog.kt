@@ -32,6 +32,7 @@ class CharacterManagerDialog : DialogFragment() {
     private lateinit var contentLayout: LinearLayout
     private lateinit var rvCharacters: RecyclerView
     private lateinit var tvCharacterLabel: TextView
+    private lateinit var tvCharacterCount: TextView
     private lateinit var spinnerBook: Spinner
     private lateinit var btnSaveKey: Button
     private lateinit var btnRestoreKey: Button
@@ -137,6 +138,7 @@ class CharacterManagerDialog : DialogFragment() {
         contentLayout = rootView.findViewById(R.id.content_layout)
         rvCharacters = rootView.findViewById(R.id.rv_characters)
         tvCharacterLabel = rootView.findViewById(R.id.tv_character_label)
+        tvCharacterCount = rootView.findViewById(R.id.tv_character_count)
         spinnerBook = rootView.findViewById(R.id.spinner_book)
         btnSaveKey = rootView.findViewById(R.id.btn_save_key)
         btnRestoreKey = rootView.findViewById(R.id.btn_restore_key)
@@ -486,6 +488,8 @@ class CharacterManagerDialog : DialogFragment() {
             }
         }
         characterAdapter.notifyDataSetChanged()
+        // 只统计角色主名（每条记录一个主名，aliases 里的别名不单独计数）
+        tvCharacterCount.text = "共 ${characterRecords.length()} 个角色"
     }
 
     private fun updateLabel() {

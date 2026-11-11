@@ -177,6 +177,9 @@ class BookScriptAnalysisService : BaseService() {
     private val jsDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     private val nl = System.lineSeparator()
 
+    /** 角色记录内存快照：分析开始时读一次磁盘，之后所有读取与修改只基于它 */
+    private var recordsSnapshot: String = "[]"
+
     private val analysisJsExtensions = object : JsExtensions {
         override fun getSource(): BaseSource? = null
         override fun getTag(): String = "BookAnalysis"
@@ -353,6 +356,18 @@ class BookScriptAnalysisService : BaseService() {
         analyzedChapterCount = countAnalyzedChapterFiles(book, total)
         val engineDir = EngineDataDir.baseDir()
         AppLog.put("全书分析: 《${book.name}》全书共${total}章，从第${startIndex + 1}章开始，目录 $engineDir")
+
+        // 分析开始时按 cunfang.txt 判定读源，角色记录只读这一次磁盘，之后全程使用内存快照
+        val initAnalysisJson = JSONObject()
+            .put("bookName", book.name)
+            .put("engineDir", engineDir)
+            .put("cunfangPath", engineDir + "cunfang.txt")
+            .put("characterRecordsPath", engineDir + "characterRecords.json")
+            .put("shumingPath", engineDir + "shuming." + book.name + ".json")
+            .toString()
+        recordsSnapshot = readFileOrEmpty(
+            resolveRecordsTarget(initAnalysisJson, JSONObject(initAnalysisJson))
+        ).ifBlank { "[]" }
 
         for (idx in startIndex until total) {
             currentCoroutineContext().ensureActive()
@@ -735,16 +750,10 @@ class BookScriptAnalysisService : BaseService() {
 
     private suspend fun doAliasAndWrite(outcome: NameOutcome, analysisJson: String) {
         val analysisObj = JSONObject(analysisJson)
-        val engineDir = analysisObj.optString("engineDir")
         val aliasTaskJson = JSONObject(buildTaskJson(outcome.task))
             .put("keyIndex", keyIndex.getAndIncrement())
             .toString()
-        val target = evalString(
-            "resolveRecordsTarget()",
-            mapOf("analysisJson" to analysisJson)
-        )?.takeIf { it.startsWith(engineDir) }
-            ?: analysisObj.optString("shumingPath")
-        val recordsJson = readFileOrEmpty(target).ifBlank { "[]" }
+        val recordsJson = recordsSnapshot
 
         val values = mutableMapOf<String, Any?>(
             "analysisJson" to analysisJson,
@@ -765,7 +774,8 @@ class BookScriptAnalysisService : BaseService() {
             values
         )
         if (!merged.isNullOrBlank()) {
-            writeRecords(target, merged, analysisObj)
+            recordsSnapshot = merged
+            writeRecords(merged, analysisObj, analysisJson)
         }
         val newFiles = writeChapterPatches(outcome.chapterPatches)
         bumpAnalyzedChapterCount(analysisObj.optString("bookName"), newFiles)
@@ -814,14 +824,24 @@ class BookScriptAnalysisService : BaseService() {
         if (file.isFile) file.readText() else ""
     }.getOrDefault("")
 
-    private fun writeRecords(target: String, merged: String, analysisObj: JSONObject) {
+    /**
+     * 每次调用都会重新读取 cunfang.txt：是当前分析的书 → characterRecords.json，
+     * 否则 → shuming.<书名>.json。启动时用于选定读源，落盘前用于选定写目标。
+     */
+    private suspend fun resolveRecordsTarget(analysisJson: String, analysisObj: JSONObject): String {
         val engineDir = analysisObj.optString("engineDir")
-        if (!target.startsWith(engineDir)) return
+        return evalString(
+            "resolveRecordsTarget()",
+            mapOf("analysisJson" to analysisJson)
+        )?.takeIf { it.startsWith(engineDir) }
+            ?: analysisObj.optString("shumingPath")
+    }
+
+    /** 落盘前按 cunfang.txt 当前内容重新判定目标，只写这一个文件 */
+    private suspend fun writeRecords(merged: String, analysisObj: JSONObject, analysisJson: String) {
+        val target = resolveRecordsTarget(analysisJson, analysisObj)
+        if (!target.startsWith(analysisObj.optString("engineDir"))) return
         writeAtomic(File(target), merged)
-        val shuming = analysisObj.optString("shumingPath")
-        if (shuming.isNotBlank() && shuming != target && shuming.startsWith(engineDir)) {
-            writeAtomic(File(shuming), merged)
-        }
     }
 
     private fun writeChapterPatches(patches: List<ChapterPatch>): Int {

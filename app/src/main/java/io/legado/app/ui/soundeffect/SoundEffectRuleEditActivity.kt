@@ -138,14 +138,17 @@ class SoundEffectRuleEditActivity :
             binding.etReplaceResult.setText("")
             return
         }
-        val rule = buildRule()
+        // 预览只读界面当前值，不调用 buildRule()，避免把界面默认值写回 viewModel.rule
+        val pattern = binding.etPattern.text.toString()
+        val replacement = binding.etReplacement.text.toString()
+        val isRegex = binding.cbUseRegex.isChecked
         binding.etReplaceResult.setText(
             try {
-                if (rule.isRegex) {
-                    SoundEffectRuleManager.compilePattern(rule.pattern)
-                        .replace(testText, rule.replacement)
+                if (isRegex) {
+                    SoundEffectRuleManager.compilePattern(pattern)
+                        .replace(testText, replacement)
                 } else {
-                    testText.replace(rule.pattern, rule.replacement)
+                    testText.replace(pattern, replacement)
                 }
             } catch (e: Exception) {
                 "正则无效：${e.localizedMessage}"
