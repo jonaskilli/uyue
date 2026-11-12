@@ -2420,6 +2420,13 @@ abstract class BaseReadAloudService : BaseService(),
     protected fun scheduleDanmaku() {
         // 弹幕与场景特效共用同一套区间调度：任一开启都要排区间
         if (!AppConfig.danmakuEnabled && !AppConfig.sceneEffectEnabled) return
+        // 可见性闸门：不在三个弹幕界面、关屏或锁屏时立即停止新增请求。
+        // 只做软暂停，队列 / 磁盘缓存 / 已发射锚点一律保留，回来接着用。
+        if (!DanmakuRuntime.isActive()) {
+            DanmakuRuntime.noteInactive()
+            return
+        }
+        DanmakuRuntime.noteActive()
         val book = ReadBook.book ?: return
         val title = textChapter?.title ?: ReadBook.curTextChapter?.title ?: return
         val chapterKey = "${book.bookUrl}/${ReadBook.durChapterIndex}"
@@ -2502,6 +2509,17 @@ abstract class BaseReadAloudService : BaseService(),
         if (danmakuWorker?.isActive == true) return
         danmakuWorker = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
+                // 失活立即软暂停：不取新区间、不发请求，队列原样保留；
+                // 连续失活满 60 秒才硬停止并取消在途请求，短期切界面回来直接续跑。
+                if (!DanmakuRuntime.isActive()) {
+                    if (DanmakuRuntime.noteInactive()) {
+                        DanmakuRuntime.hardStop()
+                        break
+                    }
+                    delay(500)
+                    continue
+                }
+                DanmakuRuntime.noteActive()
                 val range = synchronized(danmakuPending) {
                     danmakuPending.removeFirstOrNull()
                 } ?: break

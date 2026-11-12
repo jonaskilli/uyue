@@ -110,6 +110,7 @@ import io.legado.app.ui.book.read.config.AutoReadDialog
 import io.legado.app.ui.book.read.config.CharacterManagerDialog
 import io.legado.app.ui.book.read.config.CharacterProfileDialog
 import io.legado.app.ui.book.read.config.CharacterVoiceHelper
+import io.legado.app.ui.book.read.config.DanmakuHost
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.BG_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_ACCENT_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_COLOR
@@ -2555,7 +2556,15 @@ class ReadBookActivity : BaseReadBookActivity(),
         SourceCallBack.callBackBook(SourceCallBack.END_READ, ReadBook.bookSource, ReadBook.book, ReadBook.curTextChapter?.chapter)
     }
 
+    /** 朗读面板 / 视觉舞台 / 全屏大图共用一套弹幕浮层，随阅读页生命周期创建与销毁 */
+    private var danmakuHost: DanmakuHost? = null
+
+    fun danmakuHost(): DanmakuHost = danmakuHost ?: DanmakuHost(this).also { danmakuHost = it }
+
     override fun onDestroy() {
+        // 先移除共享弹幕浮层，避免窗口销毁后残留
+        danmakuHost?.destroy()
+        danmakuHost = null
         super.onDestroy()
         // 先停掉图片回位定时器，避免销毁后仍在 runOnUiThread 里触发 Glide 加载
         cancelReadAiImageReset()

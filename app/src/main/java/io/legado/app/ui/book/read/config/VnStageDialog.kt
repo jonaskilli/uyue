@@ -29,9 +29,7 @@ import io.legado.app.help.loadGif
 import io.legado.app.help.glide.VnCompositeTransform
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.AiProfileService
-import io.legado.app.model.DanmakuItem
-import io.legado.app.model.DanmakuReady
-import io.legado.app.model.DanmakuStore
+import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.model.SceneEffectCue
 import io.legado.app.model.SceneEffectReady
 import io.legado.app.model.SceneEffectStore
@@ -67,15 +65,6 @@ import java.io.File
 class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
 
     private val binding by viewBinding(DialogVnStageBinding::bind)
-
-    /** 当前章节的 AI 弹幕（与朗读弹窗同一事件源，舞台打开时接管显示） */
-    private var currentDanmaku: List<DanmakuItem> = emptyList()
-
-    /** 弹幕章节 key（识别切章用） */
-    private var danmakuKey: String? = null
-
-    /** 已发射过的段落锚点：区间生成晚于朗读时，读到锚点段照样补发 */
-    private val firedAnchors = mutableSetOf<Int>()
 
     /** 当前章节场景特效（SCENE_EFFECT_READY 写入；VN_PARAGRAPH 按锚点播放） */
     private var currentSceneEffects: List<SceneEffectCue> = emptyList()
@@ -151,8 +140,15 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         setStyle(STYLE_NO_FRAME, R.style.dialog_style_material)
     }
 
+    override fun onStop() {
+        (activity as? ReadBookActivity)?.danmakuHost()?.exit("vnStage")
+        super.onStop()
+    }
+
     override fun onStart() {
         super.onStart()
+        (activity as? ReadBookActivity)?.danmakuHost()
+            ?.enter("vnStage", dialog?.window?.decorView as? ViewGroup)
         dialog?.window?.run {
             clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setBackgroundDrawableResource(android.R.color.black)
@@ -221,7 +217,6 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
         // 随后段落切换事件自然接管。否则要等下一段开始才有文字。
         renderCurrentParagraphOnEnter()
 
-        initDanmaku()
         initSceneEffect()
 
         // 手势（与大图界面一致）：单击左/右 1/3 上一段/下一段，
@@ -308,30 +303,6 @@ class VnStageDialog : BaseDialogFragment(R.layout.dialog_vn_stage) {
                     }
                 }
         }
-        observeEvent<DanmakuReady>(EventBus.DANMAKU_READY) { ready ->
-            if (ready.key != danmakuKey) {
-                danmakuKey = ready.key
-                firedAnchors.clear()
-                binding.danmakuView.clearDanmaku()
-            }
-            currentDanmaku = ready.items
-        }
-        observeEvent<VnParagraph>(EventBus.VN_PARAGRAPH) { p ->
-            if (!AppConfig.danmakuEnabled || currentDanmaku.isEmpty()) return@observeEvent
-            currentDanmaku.filter { it.para <= p.index && firedAnchors.add(it.para) }
-                .forEach { binding.danmakuView.show(it.text) }
-        }
-    }
-
-    /** 弹幕层初始化：按开关显示浮层；弹窗重建时从 DanmakuStore 恢复本章弹幕 */
-    private fun initDanmaku() {
-        binding.danmakuView.visibility =
-            if (AppConfig.danmakuEnabled) View.VISIBLE else View.GONE
-        if (!AppConfig.danmakuEnabled) return
-        val book = ReadBook.book ?: return
-        val title = ReadBook.curTextChapter?.title ?: return
-        danmakuKey = DanmakuStore.key
-        currentDanmaku = DanmakuStore.get("${book.name}|$title")
     }
 
     /** 场景特效层初始化：按开关显示；弹窗重建时从 Store 恢复本章结果 */
