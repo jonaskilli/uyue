@@ -23,6 +23,17 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
 import kotlin.concurrent.thread
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleNonStreamUpstream
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleStreamUpstream
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleDoubaoChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleZhipuChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleWenxinChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleLongCatChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleBailianChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleKimiChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleDeepSeekChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleHunyuanChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleQwenChat
 
 @Serializable
 data class ChatMessage(val role: String, val content: String)
@@ -2505,7 +2516,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isHunyuanModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleHunyuanChat(req, completionId, created)
+            handleHunyuanChat(req, completionId, created)
             return
         }
 
@@ -2513,7 +2524,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isKimiModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleKimiChat(req, completionId, created)
+            handleKimiChat(req, completionId, created)
             return
         }
 
@@ -2521,7 +2532,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isZhipuModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleZhipuChat(req, completionId, created, ProxyServer.isZhipuPlusModel(req.model))
+            handleZhipuChat(req, completionId, created, ProxyServer.isZhipuPlusModel(req.model))
             return
         }
 
@@ -2529,7 +2540,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isWenxinModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleWenxinChat(req, completionId, created)
+            handleWenxinChat(req, completionId, created)
             return
         }
 
@@ -2537,7 +2548,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isLongCatModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleLongCatChat(req, completionId, created)
+            handleLongCatChat(req, completionId, created)
             return
         }
 
@@ -2545,7 +2556,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isBailianModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleBailianChat(req, completionId, created)
+            handleBailianChat(req, completionId, created)
             return
         }
 
@@ -2553,7 +2564,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isQwenModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleQwenChat(req, completionId, created)
+            handleQwenChat(req, completionId, created)
             return
         }
 
@@ -2561,7 +2572,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isDeepSeekModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleDeepSeekChat(req, completionId, created)
+            handleDeepSeekChat(req, completionId, created)
             return
         }
 
@@ -2569,7 +2580,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         if (ProxyServer.isDoubaoModel(req.model)) {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
-            ProxyServer.handleDoubaoChat(req, completionId, created)
+            handleDoubaoChat(req, completionId, created)
             return
         }
 
@@ -2593,9 +2604,9 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         val created = (System.currentTimeMillis() / 1000).toInt()
 
         if (ProxyServer.streamMode) {
-            ProxyServer.handleStreamUpstream(req, model, bodyJson.toString(), completionId, created)
+            handleStreamUpstream(req, model, bodyJson.toString(), completionId, created)
         } else {
-            ProxyServer.handleNonStreamUpstream(req, model, bodyJson.toString(), completionId, created)
+            handleNonStreamUpstream(req, model, bodyJson.toString(), completionId, created)
         }
     } catch (e: Exception) {
         LogStore.e("Proxy", "请求处理失败: ${e.stackTraceToString()}")
