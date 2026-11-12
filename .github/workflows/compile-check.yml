@@ -6,6 +6,10 @@ name: 编译
 #
 # 与 build.yml 完全同一套环境（Java 21 / Android SDK 36 / local.properties），
 # 只是把 assembleAppRelease 换成「编译 Kotlin + 打包资源」。
+#
+# 运行记录标题：编译 <提交信息>，列表里一眼看出这次编译的是哪笔改动。
+# GitHub 表达式没有 split，无法只取首行；列表按单行截断，完整内容在运行详情页。
+run-name: 编译 · ${{ github.event.head_commit.message || github.sha }}
 on:
   push:
     branches:
