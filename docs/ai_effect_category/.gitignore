@@ -1,9 +1,0 @@
-# 体积大且可随时重新生成，不入库
-#   语料：python3 test/tools/fetch_corpus.py 10 3
-#   明细：python3 test/tools/run_match.py
-test/corpus/raw/
-test/corpus/chapters.jsonl
-test/results/*.jsonl
-
-# 但保留汇总统计（很小，记录测试结论）
-!test/results/*.summary.json
