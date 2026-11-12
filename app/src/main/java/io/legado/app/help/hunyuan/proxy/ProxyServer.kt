@@ -215,13 +215,13 @@ object ProxyServer {
     private var engine: EmbeddedServer<*, *>? = null
 
     /** 是否向上游（CNB）使用流式请求。由 UI 开关实时控制。 */
-    @Volatile var streamMode: Boolean = false
+    @Volatile internal var streamMode: Boolean = false
 
     /** 完成回复后是否删除会话（Kimi / DeepSeek 通用）。由 UI 开关实时控制，默认开启。 */
     @Volatile var deleteSessionAfterReply: Boolean = true
 
     /** 生图默认比例（豆包 ratio 串），由设置界面实时控制，默认 9:16 竖屏。 */
-    @Volatile var defaultImageSize: String = "9:16"
+    @Volatile internal var defaultImageSize: String = "9:16"
 
     // ── 豆包 Cookie 轮换（豆包接口使用 Cookie 鉴权）──
     private val doubaoLock = Any()
@@ -535,7 +535,7 @@ object ProxyServer {
         engine = null
     }
 
-    private fun mapModel(m: String): String {
+    internal fun mapModel(m: String): String {
         return when (m) {
             "hy3-preview", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash" -> m
             else -> CnbClient.DEFAULT_MODEL
@@ -544,7 +544,7 @@ object ProxyServer {
 
 
     /** 上游非流式：拿到完整内容后，按客户端要求返回 JSON 或单块 SSE。 */
-    private suspend fun RoutingContext.handleNonStreamUpstream(
+    internal suspend fun RoutingContext.handleNonStreamUpstream(
         req: ChatCompletionRequest, model: String, body: String,
         completionId: String, created: Int
     ) {
@@ -622,7 +622,7 @@ object ProxyServer {
     }
 
     /** 上游流式：直接透传 CNB 的 SSE；若客户端要非流式则累加后返回 JSON。 */
-    private suspend fun RoutingContext.handleStreamUpstream(
+    internal suspend fun RoutingContext.handleStreamUpstream(
         req: ChatCompletionRequest, model: String, body: String,
         completionId: String, created: Int
     ) {
@@ -712,28 +712,28 @@ object ProxyServer {
 
     // ── 豆包（Doubao）相关 ───────────────────────────────────
 
-    private fun isDoubaoModel(m: String): Boolean {
+    internal fun isDoubaoModel(m: String): Boolean {
         val lower = m.lowercase()
         return DOUBAO_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
-    private fun isKimiModel(m: String): Boolean {
+    internal fun isKimiModel(m: String): Boolean {
         val lower = m.lowercase()
         return KIMI_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
-    private fun isQwenModel(m: String): Boolean {
+    internal fun isQwenModel(m: String): Boolean {
         val lower = m.lowercase()
         return QWEN_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
-    private fun isDeepSeekModel(m: String): Boolean {
+    internal fun isDeepSeekModel(m: String): Boolean {
         val lower = m.lowercase()
         return DEEPSEEK_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否「混元」（aistudio 网页版）模型：hunyuan3 / hunyuan3-think / hunyuan4 / hunyuan4-think。 */
-    private fun isHunyuanModel(m: String): Boolean {
+    internal fun isHunyuanModel(m: String): Boolean {
         // 生图模型（hunyuan-image）名字里同样含 hunyuan，先排除，避免被聊天通道误吞
         if (isHunyuanImageModel(m)) return false
         val lower = m.lowercase()
@@ -741,25 +741,25 @@ object ProxyServer {
     }
 
     /** 是否混元生图模型（hunyuan-image / 混元生图）。 */
-    private fun isHunyuanImageModel(m: String): Boolean {
+    internal fun isHunyuanImageModel(m: String): Boolean {
         val lower = m.lowercase()
         return HUNYUAN_IMAGE_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否 LongCat（美团龙猫）模型。 */
-    private fun isLongCatModel(m: String): Boolean {
+    internal fun isLongCatModel(m: String): Boolean {
         val lower = m.lowercase()
         return LONGCAT_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否百炼（阿里云）模型。 */
-    private fun isBailianModel(m: String): Boolean {
+    internal fun isBailianModel(m: String): Boolean {
         val lower = m.lowercase()
         return BAILIAN_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否文心模型（免登录匿名会话，聊天与生图同一入口）。 */
-    private fun isWenxinModel(m: String): Boolean {
+    internal fun isWenxinModel(m: String): Boolean {
         val lower = m.lowercase()
         return WENXIN_MODELS.any { lower == it || lower.startsWith(it) || lower.contains(it) }
     }
@@ -769,7 +769,7 @@ object ProxyServer {
      *  - 本地接口：model 名以 gml/zhipu 开头或包含，或恰为 "glm"（不匹配 "glm-5.2" 等透传给 CNB 的名字）
      *  - UI 入口：恰为 "zhipu"（即界面「智谱」）
      */
-    private fun isZhipuModel(m: String): Boolean {
+    internal fun isZhipuModel(m: String): Boolean {
         val lower = m.lowercase()
         if (lower == "zhipu") return true
         if (lower == "glm") return true
@@ -779,27 +779,27 @@ object ProxyServer {
     }
 
     /** 是否智谱生图模型（免登录）。UI「智谱」(zhipu) 点生图同样命中。 */
-    private fun isZhipuImageModel(m: String): Boolean {
+    internal fun isZhipuImageModel(m: String): Boolean {
         val lower = m.lowercase()
         if (lower == "zhipu") return true
         return ZHIPU_IMAGE_MODELS.any { lower == it || lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否智谱电影级生图模型（glm-image-hd）：走 GLM Image 电影级模式。 */
-    private fun isZhipuCinematicImageModel(m: String): Boolean {
+    internal fun isZhipuCinematicImageModel(m: String): Boolean {
         val lower = m.lowercase()
         return lower.contains("glm-image-hd") || lower.contains("gml-image-hd")
     }
 
     /** 是否 StudioGlobal 生图模型（免登录）：model 名含 gpt-image（gpt-image-2 / gpt-image-1.5 / gpt-image-2.5）。 */
-    private fun isStudioGlobalImageModel(m: String): Boolean {
+    internal fun isStudioGlobalImageModel(m: String): Boolean {
         val lower = m.lowercase()
         return STUDIO_GLOBAL_IMAGE_MODELS.any { lower.contains(it) }
     }
 
     /** 是否智谱增强（plus/思考）模型：model 名含 plus/thinking/reason 即走增强模型。
      *  另：「智谱-电影级生图」(glm-image-hd) 选项发文本时也走思考模式。 */
-    private fun isZhipuPlusModel(m: String): Boolean {
+    internal fun isZhipuPlusModel(m: String): Boolean {
         val lower = m.lowercase()
         if (isZhipuCinematicImageModel(lower)) return true
         return lower.contains("plus") || lower.contains("thinking") || lower.contains("reason")
@@ -833,7 +833,7 @@ object ProxyServer {
      * 豆包 ratio（9:16 等）映射到混元生图的 scale（如 720x1280）。
      * 网页端生图只认常用比例，2:5 / 5:2 用最近的竖屏/横屏近似。
      */
-    private fun ratioToHunyuanScale(ratio: String): String = when (ratio) {
+    internal fun ratioToHunyuanScale(ratio: String): String = when (ratio) {
         "1:1" -> "1024x1024"
         "3:4" -> "768x1024"
         "4:3" -> "1024x768"
@@ -843,7 +843,7 @@ object ProxyServer {
     }
 
     /** 解析生图比例：原始 ratio（如 9:16）直接返回，否则按 OpenAI size 映射，兜底 9:16。 */
-    private fun resolveRatio(size: String): String {
+    internal fun resolveRatio(size: String): String {
         if (size.isBlank()) return "9:16"
         if (size.contains(":")) return size
         return sizeToRatio(size) ?: "9:16"
@@ -864,7 +864,7 @@ object ProxyServer {
         }
     }
 
-    private suspend fun RoutingContext.handleDoubaoChat(
+    internal suspend fun RoutingContext.handleDoubaoChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val cookies = DoubaoClient.parseCookie(nextDoubaoCookie())
@@ -953,7 +953,7 @@ object ProxyServer {
      * 智谱（GLM）聊天：游客模式（免登录）。上游恒为 SSE 流式，但智谱每次推送的是
      * 「累积完整文本」而非增量 delta，故本地计算增量后转发为 OpenAI 格式 chunk。
      */
-    private suspend fun RoutingContext.handleZhipuChat(
+    internal suspend fun RoutingContext.handleZhipuChat(
         req: ChatCompletionRequest, completionId: String, created: Int, plus: Boolean = false
     ) {
         // 与 DeepSeek 一致：把 system 人设 + 全部历史对话拼成一个完整 prompt 一并发送
@@ -1046,7 +1046,7 @@ object ProxyServer {
      * 合并成一段，再一次性取回完整正文。上游已在客户端聚合完成，客户端要求流式时
      * 按「整段一次性下发 + stop」返回，保证 OpenAI 格式兼容。
      */
-    private suspend fun RoutingContext.handleWenxinChat(
+    internal suspend fun RoutingContext.handleWenxinChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val text = extractDeepSeekPrompt(req.messages)
@@ -1128,7 +1128,7 @@ object ProxyServer {
      *  - 客户端要求流式 → 边解析边转发 OpenAI 格式 chunk
      *  - 客户端要求非流式 → 聚合完整文本后返回单个 JSON
      */
-    private suspend fun RoutingContext.handleLongCatChat(
+    internal suspend fun RoutingContext.handleLongCatChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         // 每次请求轮换到下一个龙猫配置（多账号），并应用到 LongCatClient
@@ -1258,7 +1258,7 @@ object ProxyServer {
      *  - 客户端要求流式 → 边解析边转发 OpenAI 格式 chunk
      *  - 客户端要求非流式 → 聚合完整文本后返回单个 JSON
      */
-    private suspend fun RoutingContext.handleBailianChat(
+    internal suspend fun RoutingContext.handleBailianChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         // 每次请求轮换到下一个百炼配置（多账号），并应用到 BailianClient
@@ -1470,7 +1470,7 @@ object ProxyServer {
      *  - 客户端要求流式 → 边解析帧边转发 OpenAI 格式 chunk
      *  - 客户端要求非流式 → 聚合完整文本后返回单个 JSON
      */
-    private suspend fun RoutingContext.handleKimiChat(
+    internal suspend fun RoutingContext.handleKimiChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val rawToken = KimiClient.extractToken(nextKimiCookie())
@@ -1609,7 +1609,7 @@ object ProxyServer {
      *  - 客户端要求流式 → 边解析边转发 OpenAI 格式 chunk
      *  - 客户端要求非流式 → 聚合完整文本后返回单个 JSON
      */
-    private suspend fun RoutingContext.handleDeepSeekChat(
+    internal suspend fun RoutingContext.handleDeepSeekChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val prompt = extractDeepSeekPrompt(req.messages)
@@ -1848,7 +1848,7 @@ object ProxyServer {
      * 会话路由挂在 URL 上，故每次请求先新建一个会话，回复完成后按开关删除（与千问一致，避免堆积历史）。
      * 思考链（type=thought）不混入正文，只取 type=text。
      */
-    private suspend fun RoutingContext.handleHunyuanChat(
+    internal suspend fun RoutingContext.handleHunyuanChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val cookie = nextHunyuanCookie()
@@ -1999,7 +1999,7 @@ object ProxyServer {
         )
     }
 
-    private suspend fun RoutingContext.handleQwenChat(
+    internal suspend fun RoutingContext.handleQwenChat(
         req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val cookie = nextQwenCookie()
