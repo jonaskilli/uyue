@@ -542,123 +542,6 @@ object ProxyServer {
         }
     }
 
-    internal suspend fun RoutingContext.handleChatCompletions() {
-        try {
-            val req = call.receive<ChatCompletionRequest>()
-            LogStore.i(
-                "Proxy",
-                "收到请求 | clientStream=${req.stream} upstreamStream=$streamMode model=${req.model} msgs=${req.messages.size}"
-            )
-
-            // 混元（aistudio 网页版）模型 → 走腾讯混元官方接口（混元3 / 混元4，含思考模式）
-            if (isHunyuanModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleHunyuanChat(req, completionId, created)
-                return
-            }
-
-            // Kimi 模型 → 走 Kimi 接口（聊天）
-            if (isKimiModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleKimiChat(req, completionId, created)
-                return
-            }
-
-            // 智谱（GLM）文本模型 → 走智谱游客接口（免登录）
-            if (isZhipuModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleZhipuChat(req, completionId, created, isZhipuPlusModel(req.model))
-                return
-            }
-
-            // 文心模型 → 走文心网页端匿名会话（免登录）
-            if (isWenxinModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleWenxinChat(req, completionId, created)
-                return
-            }
-
-            // LongCat（美团龙猫）模型 → 走 LongCat 接口
-            if (isLongCatModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleLongCatChat(req, completionId, created)
-                return
-            }
-
-            // 百炼（阿里云）模型 → 走百炼控制台接口
-            if (isBailianModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleBailianChat(req, completionId, created)
-                return
-            }
-
-            // 千问模型 → 走千问接口（普通 / 思考，由模型名决定）
-            if (isQwenModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleQwenChat(req, completionId, created)
-                return
-            }
-
-            // DeepSeek 模型 → 走 DeepSeek 接口（含 PoW）
-            if (isDeepSeekModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleDeepSeekChat(req, completionId, created)
-                return
-            }
-
-            // 豆包模型 → 走豆包接口（聊天）
-            if (isDoubaoModel(req.model)) {
-                val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-                val created = (System.currentTimeMillis() / 1000).toInt()
-                handleDoubaoChat(req, completionId, created)
-                return
-            }
-
-            val model = mapModel(req.model)
-            val bodyJson = org.json.JSONObject().apply {
-                put("model", model)
-                put("stream", streamMode)
-                put(
-                    "messages",
-                    org.json.JSONArray(
-                        req.messages.map {
-                            org.json.JSONObject().put("role", it.role).put("content", it.content)
-                        }
-                    )
-                )
-                req.temperature?.let { put("temperature", it) }
-                req.max_tokens?.let { put("max_tokens", it) }
-            }
-
-            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
-            val created = (System.currentTimeMillis() / 1000).toInt()
-
-            if (streamMode) {
-                handleStreamUpstream(req, model, bodyJson.toString(), completionId, created)
-            } else {
-                handleNonStreamUpstream(req, model, bodyJson.toString(), completionId, created)
-            }
-        } catch (e: Exception) {
-            LogStore.e("Proxy", "请求处理失败: ${e.stackTraceToString()}")
-            if (!call.response.isSent) {
-                try {
-                    call.respond(
-                        HttpStatusCode.InternalServerError,
-                        mapOf("error" to (e.localizedMessage ?: e.toString()))
-                    )
-                } catch (_: Exception) {
-                }
-            }
-        }
-    }
 
     /** 上游非流式：拿到完整内容后，按客户端要求返回 JSON 或单块 SSE。 */
     private suspend fun RoutingContext.handleNonStreamUpstream(
@@ -1580,191 +1463,7 @@ object ProxyServer {
 
 
     /** 生图接口：POST /v1/images/generations → 豆包生图 / 智谱生图 / 文心生图（按 model 区分）。 */
-    internal suspend fun RoutingContext.handleImageGen() {
-        try {
-            val raw = call.receiveText()
-            val o = org.json.JSONObject(raw)
-            val prompt = o.optString("prompt", "")
-            val size = o.optString("size", "")
-            val model = o.optString("model", "")
-            // 外部指定且可识别 → 用之；否则用设置界面尺寸；再不行兜底 9:16 竖版
-            val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
 
-            // 文心生图（免登录）：model 命中 wenxin → 走文心妙图，只返回第一张
-            if (isWenxinModel(model)) {
-                LogStore.i("Wenxin", "调用生图，prompt=${prompt.take(60)}")
-                val (urls, errMsg) = withContext(Dispatchers.IO) {
-                    try {
-                        WenxinClient.generateImage(prompt) to null
-                    } catch (e: Exception) {
-                        LogStore.e("Wenxin", "生图异常: ${e.stackTraceToString()}")
-                        emptyList<String>() to (e.localizedMessage ?: e.toString())
-                    }
-                }
-                if (errMsg != null) {
-                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
-                    return
-                }
-                if (urls.isEmpty()) {
-                    call.respond(
-                        HttpStatusCode.BadGateway,
-                        mapOf("error" to "文心生图未返回图片（可能触发限流，请稍后重试）")
-                    )
-                    return
-                }
-                // 服务端一次返回 4 张，只返回第一张
-                call.respond(
-                    ImageGenResponse(
-                        created = (System.currentTimeMillis() / 1000).toInt(),
-                        data = listOf(ImageDataItem(url = urls.first()))
-                    )
-                )
-                return
-            }
-
-            // 智谱生图（免登录）：model 命中智谱生图 / UI「智谱」(zhipu) → 走智谱，只返回第一张
-            if (isZhipuImageModel(model)) {
-                val cinematic = isZhipuCinematicImageModel(model)
-                LogStore.i("Zhipu", "调用生图，prompt=${prompt.take(60)} ratio=$ratio 电影级=$cinematic")
-                val (urls, errMsg) = withContext(Dispatchers.IO) {
-                    try {
-                        ZhipuClient.generateImage(prompt, ratio, cinematic) to null
-                    } catch (e: Exception) {
-                        LogStore.e("Zhipu", "生图异常: ${e.stackTraceToString()}")
-                        emptyList<String>() to (e.localizedMessage ?: e.toString())
-                    }
-                }
-                if (errMsg != null) {
-                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
-                    return
-                }
-                if (urls.isEmpty()) {
-                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to "智谱生图未返回图片"))
-                    return
-                }
-                // 仅返回第一张
-                call.respond(
-                    ImageGenResponse(
-                        created = (System.currentTimeMillis() / 1000).toInt(),
-                        data = listOf(ImageDataItem(url = urls.first()))
-                    )
-                )
-                return
-            }
-
-            // StudioGlobal 生图（免登录）：model 命中 gpt-image → 走 send-chat 通道，只返回第一张
-            if (isStudioGlobalImageModel(model)) {
-                LogStore.i("StudioGlobal", "调用生图，model=$model prompt=${prompt.take(60)}")
-                val (urls, errMsg) = withContext(Dispatchers.IO) {
-                    try {
-                        StudioGlobalClient.generateImage(prompt, model) to null
-                    } catch (e: Exception) {
-                        LogStore.e("StudioGlobal", "生图异常: ${e.stackTraceToString()}")
-                        emptyList<String>() to (e.localizedMessage ?: e.toString())
-                    }
-                }
-                if (errMsg != null) {
-                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
-                    return
-                }
-                if (urls.isEmpty()) {
-                    call.respond(
-                        HttpStatusCode.BadGateway,
-                        mapOf("error" to "StudioGlobal 生图未返回图片（匿名会话额度有限，可稍后重试）")
-                    )
-                    return
-                }
-                // 仅返回第一张
-                call.respond(
-                    ImageGenResponse(
-                        created = (System.currentTimeMillis() / 1000).toInt(),
-                        data = listOf(ImageDataItem(url = urls.first()))
-                    )
-                )
-                return
-            }
-
-            // 混元生图（aistudio 网页版混元图像3.0）：与混元文本共用 Cookie 轮换通道
-            if (isHunyuanImageModel(model)) {
-                val cookie = nextHunyuanCookie()
-                LogStore.i("Hunyuan", "调用生图，prompt=${prompt.take(60)} ratio=$ratio cookie空白=${cookie.isBlank()}")
-                if (cookie.isBlank()) {
-                    call.respond(
-                        HttpStatusCode.BadGateway,
-                        mapOf("error" to "混元未配置 Cookie：请在「浏览器」页登录 aistudio.tencent.com 后点「提取Cookie」")
-                    )
-                    return
-                }
-                val (urls, errMsg) = withContext(Dispatchers.IO) {
-                    try {
-                        HunyuanStudioClient.generateImage(prompt, ratioToHunyuanScale(ratio), cookie) to null
-                    } catch (e: Exception) {
-                        LogStore.e("Hunyuan", "生图异常: ${e.stackTraceToString()}")
-                        emptyList<String>() to (e.localizedMessage ?: e.toString())
-                    }
-                }
-                if (errMsg != null) {
-                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
-                    return
-                }
-                if (urls.isEmpty()) {
-                    call.respond(
-                        HttpStatusCode.BadGateway,
-                        mapOf("error" to "混元生图未返回图片（可能 Cookie 失效或触发限流）")
-                    )
-                    return
-                }
-                // 仅返回第一张
-                call.respond(
-                    ImageGenResponse(
-                        created = (System.currentTimeMillis() / 1000).toInt(),
-                        data = listOf(ImageDataItem(url = urls.first()))
-                    )
-                )
-                return
-            }
-
-            val cookies = DoubaoClient.parseCookie(nextDoubaoCookie())
-            LogStore.i("Doubao", "调用生图，prompt=${prompt.take(60)} ratio=$ratio")
-
-            val (result, errMsg) = withContext(Dispatchers.IO) {
-                try {
-                    DoubaoClient.generateImage(prompt, cookies, ratio) to null
-                } catch (e: Exception) {
-                    LogStore.e("Doubao", "生图异常: ${e.stackTraceToString()}")
-                    null to (e.localizedMessage ?: e.toString())
-                }
-            }
-            if (errMsg != null) {
-                call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
-                return
-            }
-            val data = (result?.images ?: emptyList()).map {
-                ImageDataItem(url = if (it.rawUrl.isNotBlank()) it.rawUrl else it.oriUrl)
-            }
-            if (data.isEmpty()) {
-                call.respond(HttpStatusCode.BadGateway, mapOf("error" to "豆包生图未返回图片"))
-                return
-            }
-            call.respond(
-                ImageGenResponse(
-                    created = (System.currentTimeMillis() / 1000).toInt(),
-                    data = data
-                )
-            )
-        } catch (e: Exception) {
-            LogStore.e("Doubao", "生图处理失败: ${e.stackTraceToString()}")
-            if (!call.response.isSent) {
-                try {
-                    call.respond(
-                        HttpStatusCode.InternalServerError,
-                        mapOf("error" to (e.localizedMessage ?: e.toString()))
-                    )
-                } catch (_: Exception) {
-                }
-            }
-        }
-    }
 
     /**
      * Kimi 聊天：上游恒为 Connect 二进制帧流（见 KimiClient）。
@@ -2791,5 +2490,309 @@ object ProxyServer {
         val sb = StringBuilder()
         parseCnbSse(okio.Buffer().apply { writeUtf8(text) }) { sb.append(it) }
         return sb.toString()
+    }
+}
+
+internal suspend fun RoutingContext.handleChatCompletions() {
+    try {
+        val req = call.receive<ChatCompletionRequest>()
+        LogStore.i(
+            "Proxy",
+            "收到请求 | clientStream=${req.stream} upstreamStream=$streamMode model=${req.model} msgs=${req.messages.size}"
+        )
+
+        // 混元（aistudio 网页版）模型 → 走腾讯混元官方接口（混元3 / 混元4，含思考模式）
+        if (ProxyServer.isHunyuanModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleHunyuanChat(req, completionId, created)
+            return
+        }
+
+        // Kimi 模型 → 走 Kimi 接口（聊天）
+        if (ProxyServer.isKimiModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleKimiChat(req, completionId, created)
+            return
+        }
+
+        // 智谱（GLM）文本模型 → 走智谱游客接口（免登录）
+        if (ProxyServer.isZhipuModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleZhipuChat(req, completionId, created, ProxyServer.isZhipuPlusModel(req.model))
+            return
+        }
+
+        // 文心模型 → 走文心网页端匿名会话（免登录）
+        if (ProxyServer.isWenxinModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleWenxinChat(req, completionId, created)
+            return
+        }
+
+        // LongCat（美团龙猫）模型 → 走 LongCat 接口
+        if (ProxyServer.isLongCatModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleLongCatChat(req, completionId, created)
+            return
+        }
+
+        // 百炼（阿里云）模型 → 走百炼控制台接口
+        if (ProxyServer.isBailianModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleBailianChat(req, completionId, created)
+            return
+        }
+
+        // 千问模型 → 走千问接口（普通 / 思考，由模型名决定）
+        if (ProxyServer.isQwenModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleQwenChat(req, completionId, created)
+            return
+        }
+
+        // DeepSeek 模型 → 走 DeepSeek 接口（含 PoW）
+        if (ProxyServer.isDeepSeekModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleDeepSeekChat(req, completionId, created)
+            return
+        }
+
+        // 豆包模型 → 走豆包接口（聊天）
+        if (ProxyServer.isDoubaoModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            ProxyServer.handleDoubaoChat(req, completionId, created)
+            return
+        }
+
+        val model = ProxyServer.mapModel(req.model)
+        val bodyJson = org.json.JSONObject().apply {
+            put("model", model)
+            put("stream", streamMode)
+            put(
+                "messages",
+                org.json.JSONArray(
+                    req.messages.map {
+                        org.json.JSONObject().put("role", it.role).put("content", it.content)
+                    }
+                )
+            )
+            req.temperature?.let { put("temperature", it) }
+            req.max_tokens?.let { put("max_tokens", it) }
+        }
+
+        val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+        val created = (System.currentTimeMillis() / 1000).toInt()
+
+        if (streamMode) {
+            ProxyServer.handleStreamUpstream(req, model, bodyJson.toString(), completionId, created)
+        } else {
+            ProxyServer.handleNonStreamUpstream(req, model, bodyJson.toString(), completionId, created)
+        }
+    } catch (e: Exception) {
+        LogStore.e("Proxy", "请求处理失败: ${e.stackTraceToString()}")
+        if (!call.response.isSent) {
+            try {
+                call.respond(
+                    HttpStatusCode.InternalServerError,
+                    mapOf("error" to (e.localizedMessage ?: e.toString()))
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+}
+
+internal suspend fun RoutingContext.handleImageGen() {
+    try {
+        val raw = call.receiveText()
+        val o = org.json.JSONObject(raw)
+        val prompt = o.optString("prompt", "")
+        val size = o.optString("size", "")
+        val model = o.optString("model", "")
+        // 外部指定且可识别 → 用之；否则用设置界面尺寸；再不行兜底 9:16 竖版
+        val ratio = ProxyServer.resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
+
+        // 文心生图（免登录）：model 命中 wenxin → 走文心妙图，只返回第一张
+        if (ProxyServer.isWenxinModel(model)) {
+            LogStore.i("Wenxin", "调用生图，prompt=${prompt.take(60)}")
+            val (urls, errMsg) = withContext(Dispatchers.IO) {
+                try {
+                    WenxinClient.generateImage(prompt) to null
+                } catch (e: Exception) {
+                    LogStore.e("Wenxin", "生图异常: ${e.stackTraceToString()}")
+                    emptyList<String>() to (e.localizedMessage ?: e.toString())
+                }
+            }
+            if (errMsg != null) {
+                call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+                return
+            }
+            if (urls.isEmpty()) {
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    mapOf("error" to "文心生图未返回图片（可能触发限流，请稍后重试）")
+                )
+                return
+            }
+            // 服务端一次返回 4 张，只返回第一张
+            call.respond(
+                ImageGenResponse(
+                    created = (System.currentTimeMillis() / 1000).toInt(),
+                    data = listOf(ImageDataItem(url = urls.first()))
+                )
+            )
+            return
+        }
+
+        // 智谱生图（免登录）：model 命中智谱生图 / UI「智谱」(zhipu) → 走智谱，只返回第一张
+        if (ProxyServer.isZhipuImageModel(model)) {
+            val cinematic = ProxyServer.isZhipuCinematicImageModel(model)
+            LogStore.i("Zhipu", "调用生图，prompt=${prompt.take(60)} ratio=$ratio 电影级=$cinematic")
+            val (urls, errMsg) = withContext(Dispatchers.IO) {
+                try {
+                    ZhipuClient.generateImage(prompt, ratio, cinematic) to null
+                } catch (e: Exception) {
+                    LogStore.e("Zhipu", "生图异常: ${e.stackTraceToString()}")
+                    emptyList<String>() to (e.localizedMessage ?: e.toString())
+                }
+            }
+            if (errMsg != null) {
+                call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+                return
+            }
+            if (urls.isEmpty()) {
+                call.respond(HttpStatusCode.BadGateway, mapOf("error" to "智谱生图未返回图片"))
+                return
+            }
+            // 仅返回第一张
+            call.respond(
+                ImageGenResponse(
+                    created = (System.currentTimeMillis() / 1000).toInt(),
+                    data = listOf(ImageDataItem(url = urls.first()))
+                )
+            )
+            return
+        }
+
+        // StudioGlobal 生图（免登录）：model 命中 gpt-image → 走 send-chat 通道，只返回第一张
+        if (ProxyServer.isStudioGlobalImageModel(model)) {
+            LogStore.i("StudioGlobal", "调用生图，model=$model prompt=${prompt.take(60)}")
+            val (urls, errMsg) = withContext(Dispatchers.IO) {
+                try {
+                    StudioGlobalClient.generateImage(prompt, model) to null
+                } catch (e: Exception) {
+                    LogStore.e("StudioGlobal", "生图异常: ${e.stackTraceToString()}")
+                    emptyList<String>() to (e.localizedMessage ?: e.toString())
+                }
+            }
+            if (errMsg != null) {
+                call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+                return
+            }
+            if (urls.isEmpty()) {
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    mapOf("error" to "StudioGlobal 生图未返回图片（匿名会话额度有限，可稍后重试）")
+                )
+                return
+            }
+            // 仅返回第一张
+            call.respond(
+                ImageGenResponse(
+                    created = (System.currentTimeMillis() / 1000).toInt(),
+                    data = listOf(ImageDataItem(url = urls.first()))
+                )
+            )
+            return
+        }
+
+        // 混元生图（aistudio 网页版混元图像3.0）：与混元文本共用 Cookie 轮换通道
+        if (ProxyServer.isHunyuanImageModel(model)) {
+            val cookie = ProxyServer.nextHunyuanCookie()
+            LogStore.i("Hunyuan", "调用生图，prompt=${prompt.take(60)} ratio=$ratio cookie空白=${cookie.isBlank()}")
+            if (cookie.isBlank()) {
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    mapOf("error" to "混元未配置 Cookie：请在「浏览器」页登录 aistudio.tencent.com 后点「提取Cookie」")
+                )
+                return
+            }
+            val (urls, errMsg) = withContext(Dispatchers.IO) {
+                try {
+                    HunyuanStudioClient.generateImage(prompt, ProxyServer.ratioToHunyuanScale(ratio), cookie) to null
+                } catch (e: Exception) {
+                    LogStore.e("Hunyuan", "生图异常: ${e.stackTraceToString()}")
+                    emptyList<String>() to (e.localizedMessage ?: e.toString())
+                }
+            }
+            if (errMsg != null) {
+                call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+                return
+            }
+            if (urls.isEmpty()) {
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    mapOf("error" to "混元生图未返回图片（可能 Cookie 失效或触发限流）")
+                )
+                return
+            }
+            // 仅返回第一张
+            call.respond(
+                ImageGenResponse(
+                    created = (System.currentTimeMillis() / 1000).toInt(),
+                    data = listOf(ImageDataItem(url = urls.first()))
+                )
+            )
+            return
+        }
+
+        val cookies = DoubaoClient.parseCookie(ProxyServer.nextDoubaoCookie())
+        LogStore.i("Doubao", "调用生图，prompt=${prompt.take(60)} ratio=$ratio")
+
+        val (result, errMsg) = withContext(Dispatchers.IO) {
+            try {
+                DoubaoClient.generateImage(prompt, cookies, ratio) to null
+            } catch (e: Exception) {
+                LogStore.e("Doubao", "生图异常: ${e.stackTraceToString()}")
+                null to (e.localizedMessage ?: e.toString())
+            }
+        }
+        if (errMsg != null) {
+            call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+            return
+        }
+        val data = (result?.images ?: emptyList()).map {
+            ImageDataItem(url = if (it.rawUrl.isNotBlank()) it.rawUrl else it.oriUrl)
+        }
+        if (data.isEmpty()) {
+            call.respond(HttpStatusCode.BadGateway, mapOf("error" to "豆包生图未返回图片"))
+            return
+        }
+        call.respond(
+            ImageGenResponse(
+                created = (System.currentTimeMillis() / 1000).toInt(),
+                data = data
+            )
+        )
+    } catch (e: Exception) {
+        LogStore.e("Doubao", "生图处理失败: ${e.stackTraceToString()}")
+        if (!call.response.isSent) {
+            try {
+                call.respond(
+                    HttpStatusCode.InternalServerError,
+                    mapOf("error" to (e.localizedMessage ?: e.toString()))
+                )
+            } catch (_: Exception) {
+            }
+        }
     }
 }
