@@ -178,3 +178,36 @@ git push --force origin <标签1> <标签2> ...
 ```
 
 处理完查 `repos/<owner>/<repo>/contributors` 确认只剩人类账号。
+
+## 签名与密钥（转公开前必读）
+
+本仓库的 APK 签名配置：
+
+```
+gradle.properties:
+  RELEASE_STORE_FILE=release-testkey.jks       ← 相对 app/ 目录
+  RELEASE_STORE_PASSWORD=<明文>
+  RELEASE_KEY_ALIAS=android
+  RELEASE_KEY_PASSWORD=<明文>
+
+app/build.gradle → storeFile file(RELEASE_STORE_FILE)
+                 → 实际使用 app/release-testkey.jks
+```
+
+**签名文件与口令均在仓库内，CI 无需配置任何 Secrets。**
+
+### 风险提示
+
+- **口令以明文提交在 `gradle.properties` 中**。仓库当前为私有，风险可控；
+  但**若转为公开仓库，等于同时公开签名密钥的口令**。
+- 该密钥库（`release-testkey.jks`）源自上游开源阅读项目的测试密钥，
+  并非本仓库维护者的个人密钥。风险是「他人可签出同签名的包」，
+  而非「个人身份泄露」。**因此本仓库产出的 APK 不应对外分发**。
+- `app/release.jks` 为上游遗留文件，当前**未被任何配置引用**。
+  保留作备用，勿随意删除——上游可能仍在使用。
+
+### 若要转公开仓库
+
+1. 生成自己的密钥库，替换 `RELEASE_STORE_FILE` 与口令
+2. 将口令移出仓库（用 CI Secrets 或本地 `~/.gradle/gradle.properties`）
+3. 确认 `release-testkey.jks` 是否仍需保留（涉及上游签名兼容性）
