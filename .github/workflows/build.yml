@@ -56,3 +56,18 @@ jobs:
           path: ${{ env.outputs_dir }}/apk/app/release/*.apk
           retention-days: 30
 
+      # 发布到 Releases：此前只上传 artifact（30 天过期且要登录才能下），
+      # Releases 页一直是空的。这里补上，每次打包都生成一个可直接下载的 Release。
+      # 版本号作标签名，与前几次打包的命名口径一致。
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.ver_name }}
+          tag_name: ${{ env.ver_name }}
+          target_commitish: ${{ github.sha }}
+          files: ${{ env.outputs_dir }}/apk/app/release/*.apk
+          draft: false
+          prerelease: false
+          # 不生成自动 changelog（Release 页只留 APK，说明看提交历史）
+          generate_release_notes: false
+
