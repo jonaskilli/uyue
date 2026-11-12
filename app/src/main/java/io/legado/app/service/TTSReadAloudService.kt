@@ -1117,7 +1117,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         .replace(Regex("[袮꧁]"), " ")
                         .split("\n")
                         .filter { it.isNotEmpty() }
-                    segmentTitle = chapter.title
+                    // 11-13 修缓存键分叉：标题必须走与主播放完全同一公式。
+                    // 主播放的 textChapter.title 来自 ChapterProvider 构造时的
+                    // getDisplayTitle(getTitleReplaceRules(), useReplaceRule)（ReadBook.kt:844），
+                    // 原始 chapter.title 未过标题替换规则/繁简转换——开了标题替换规则的书，
+                    // 两条路径 md5 不同 → 预加载白合成、主播放再付一次（真金白银的 API 浪费）。
+                    // contentProcessor 本分支已取得，直接同口径调用。
+                    segmentTitle = chapter.getDisplayTitle(
+                        contentProcessor.getTitleReplaceRules(),
+                        book.getUseReplaceRule()
+                    )
                 }
 
                 if (segments.isEmpty()) continue
