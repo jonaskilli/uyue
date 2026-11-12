@@ -38,3 +38,50 @@ build_ai_locate*.log
 
 # Linux 回收站目录（非项目文件）
 .Trash-*/
+
+# ── 上游（z阅读）根目录常见杂物，本仓库只要源码 ──────────────────────
+# 判据：下列路径都不参与构建，合并上游时会随提交带入，一律不入库。
+# 注意 .gitignore 只挡「新增跟踪」；上游若「修改」了已删文件，merge 仍会带回，
+# 故合并后仍需按流程复查一遍（见 CONTRIBUTING.md「合并上游」一节）。
+/docs/
+/scene-effects/
+/朗读脚本功能改造包/
+/猫箱WebSocket支持改造包/
+/视频源/
+/releases/
+/依赖/
+# 根目录散落的朗读脚本 / 插件配置 / 说明稿（随时可从上上游再取）
+/朗读脚本*.json
+/朗读脚本*.js
+/朗读脚本*.txt
+/朗读规则*.js
+/正常脚本.js
+/并发脚本.js
+/添加音效脚本.js
+/猫箱*.js
+/猫箱*.json
+/千问*.js
+/千问*.json
+/阅读AI*.json
+/阅读js脚本*.js
+/ttsrv*.json
+/ttsrv*.js
+/ttsrv_replaces*.js
+/bookSource_*.json
+/广播剧音效库_*.json
+/背景音乐*.json
+/背景音乐*.txt
+/系统tts*.txt
+/悦读书架云同步*.md
+/合成到播放音频*.md
+/特效触发测试*.txt
+/特效逐段预览*.txt
+/audios_1064_builtin_plugin.json
+/jread_voice_system_configs.json
+/vivi_voice_pool_v6_2398.json
+/fayinren.json
+/characterRecords.json
+/bili_jslib.js
+/build_bili_source.js
+/qwen_image_generator.html
+/speaker_icon_*.svg
