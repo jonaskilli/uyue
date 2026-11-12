@@ -1780,12 +1780,10 @@ abstract class BaseReadAloudService : BaseService(),
                 // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
                 paragraphStartPos = 0
             } else {
-                // 11-13 半截段修复：按页朗读模式下同样计算「页首在段内的偏移」。
-                // 此前该公式只对 !readAloudByPage 生效，按页模式下 pos 恒为 0，
-                // paragraphStartPos=0 → 从段首整段重读，页首半截段会被从上一页已读
-                // 的位置重复念一遍（用户实报「半截段处理不行」）。现在两种模式一致：
-                // 从本页可见的起始字符起读。
-                if (startPos == 0 && !toLast) {
+                // 11-13 用户口径（回退 070b2a4）：半截段要从「完整段落的开头」读——
+                // 开头在上一页。按页朗读模式下保持 paragraphStartPos=0（getRawText 不截断），
+                // 即整段合成、从段首起读。只有非按页模式才按页首字符偏移截断。
+                if (!readAloudByPage && startPos == 0 && !toLast) {
                     pos = page.chapterPosition -
                             textChapter.paragraphs[nowSpeak].chapterPosition
                 }
