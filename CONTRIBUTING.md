@@ -131,3 +131,50 @@ git merge cnbsrc/yuedutts
 | `merge-base` 返回空 | 同上 |
 | 合并后多了朗读脚本/md 文档 | 上游修改了已删文件，需手工清 |
 | 编译突然报找不到类 | 上游删了本仓库依赖的接口，看 CI 日志后补适配 |
+
+## 禁止 AI 工具署名
+
+提交信息中**禁止**出现指向 AI 工作平台的 `Co-Authored-By` 尾注：
+
+```
+Co-Authored-By: traeagent <traeagent@users.noreply.github.com>    ❌
+Co-Authored-By: Claude Code <noreply@anthropic.com>              ❌
+Co-Authored-By: Cursor Agent <...>                              ❌
+```
+
+**原因**：GitHub 会把 `Co-Authored-By` 中的账号计入仓库 Contributors。
+Trae、Claude Code、Cursor 这类 AI 工作平台生成的尾注，会让 AI 以「贡献者」身份
+出现在仓库首页——贡献者只应是人类维护者。
+
+### 已配置的防护
+
+仓库自带 `commit-msg` 钩子（`scripts/hooks/commit-msg`），提交时自动拦截
+含 `trae|cursor|claude|copilot|codeium|windsurf|aider|devin|openai|anthropic|gemini|glm|deepseek|chatgpt`
+等关键词的 `Co-Authored-By` 行，命中即拒绝提交。
+
+钩子随仓库分发、有提交记录可追溯。Git 出于安全不会在克隆后自动执行钩子，
+**换机器或重新克隆后需启用一次**：
+
+```bash
+bash scripts/install-hooks.sh
+```
+
+该脚本设置 `core.hooksPath=scripts/hooks`，之后该目录下所有钩子自动生效。
+验证：提交一条带 `Co-Authored-By: traeagent` 尾注的信息，应被拒绝。
+
+### 已经混入历史的尾注怎么处理
+
+```bash
+git branch backup-before-ai-trailer-removal    # 先备份
+git filter-branch -f --msg-filter '<删尾注的脚本>' <最早受影响提交>^..HEAD
+```
+
+⚠️ 改写会使之后所有提交的 hash 变化，**若有发布标签指向这些提交，必须一并重指**：
+
+```bash
+git tag -f <标签名> <新提交sha>
+git push --force origin <分支>
+git push --force origin <标签1> <标签2> ...
+```
+
+处理完查 `repos/<owner>/<repo>/contributors` 确认只剩人类账号。
