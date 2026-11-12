@@ -1,9 +1,9 @@
 name: 打包
 
-# 运行记录标题：带上触发原因与提交信息，避免列表里只看到「打包 #1 #2」。
-# - 手动触发：打包 · 手动 · <提交信息>
-# - 打标签触发：打包 · <标签名> · <提交信息>
-run-name: 打包 · ${{ github.event_name == 'workflow_dispatch' && format('手动 by {0}', github.actor) || github.ref_name }}
+# 运行记录标题：先占位，等 APK 产出后由最后一步改成实际版本号（如「打包 3.26.111218」）。
+# 版本号取自编译时刻（app/build.gradle 的 version = "3." + yy.MMddHH），
+# 只有构建完才能知道，所以不能在 run-name 里直接算。
+run-name: 打包 ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # 最后一步要用 API 改运行记录名，需要 actions: write
+      actions: write
     env:
       outputs_dir: "${{ github.workspace }}/app/build/outputs"
 
@@ -60,3 +62,16 @@ jobs:
           name: "Uyue_${{ env.ver_name }}"
           path: ${{ env.outputs_dir }}/apk/app/release/*.apk
           retention-days: 30
+
+      # 把运行记录标题改成实际版本号，列表里一眼认出是哪一版（打包 3.26.111218）。
+      # 这一步失败不影响产物，故 continue-on-error。
+      - name: Rename run to version
+        if: env.ver_name != ''
+        continue-on-error: true
+        run: |
+          curl -sS -X PATCH \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d "{\"name\": \"打包 ${{ env.ver_name }}\"}"
+          echo "run renamed to: 打包 ${{ env.ver_name }}"

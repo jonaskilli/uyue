@@ -1,10 +1,9 @@
 name: 编译
 
-# 运行记录标题：直接用触发这次编译的提交信息，列表里一眼看出改了哪块，
-# 不再是「编译 #1 #2 #3」这种看不出内容的编号。
-# 标题 = 编译 · 提交信息。GitHub 表达式无 split，无法只取首行，
-# 运行列表里会按单行截断显示，完整内容在运行详情页可见。
-run-name: 编译 · ${{ github.event.head_commit.message || github.sha }}
+# 标题 = 编译 · 版本号·提交号。
+# 版本号与打包同源（app/build.gradle：3.yy.MMddHH，取编译时刻），编译时同样要等
+# 构建完才知道，故先放提交号占位，编译结束后由最后一步改成 编译 3.26.111218·b173e7d。
+run-name: 编译 · ${{ github.sha }}
 
 # 只编译、不出包（10-12 加）：改完 Kotlin 先过这一步（约 3~6 分钟），
 # 绿了再手动触发「打包」（17~25 分钟）。
@@ -32,6 +31,10 @@ on:
 jobs:
   compile:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # 最后一步要用 API 改运行记录名，需要 actions: write
+      actions: write
 
     steps:
       - uses: actions/checkout@v4
@@ -60,3 +63,18 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:compileAppReleaseKotlin :app:processAppReleaseResources \
             --build-cache --parallel --daemon --warning-mode all
+
+      # 把标题换成「编译 3.26.111218·<短提交号>」，与打包的版本号口径一致。
+      # 版本号取 app/build.gradle 同一条生成规则（编译时刻 yy.MMddHH），此处直接复算。
+      - name: Rename run to version
+        if: success()
+        continue-on-error: true
+        run: |
+          VER="3.$(date +%y.%m%d%H)"
+          SHORT="$(echo '${{ github.sha }}' | cut -c1-7)"
+          curl -sS -X PATCH \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d "{\"name\": \"编译 $VER·$SHORT\"}"
+          echo "run renamed to: 编译 $VER·$SHORT"
