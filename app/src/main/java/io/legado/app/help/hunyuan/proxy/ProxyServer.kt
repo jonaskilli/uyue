@@ -110,7 +110,8 @@ data class ImageGenResponse(val created: Int, val data: List<ImageDataItem>)
  * executeModuleFunction 在 staticFunctions 分支（顶层函数=静态方法）直接命中调用，
  * 永不进入 declaredConstructors.single()，从原理上绕开崩溃。
  */
-internal fun io.ktor.server.application.Application.configureApplication() {
+internal fun configureApplication(application: io.ktor.server.application.Application) {
+    with(application) {
             install(ContentNegotiation) { json(ProxyServer.json) }
             install(CORS) {
                 anyHost()
@@ -205,11 +206,12 @@ internal fun io.ktor.server.application.Application.configureApplication() {
                 post("/v1/chat/completions") { ProxyServer.handleChatCompletions() }
                 post("/v1/images/generations") { ProxyServer.handleImageGen() }
             }
+    }
 }
 
 
 object ProxyServer {
-    private val json = Json { ignoreUnknownKeys = true }
+    internal val json = Json { ignoreUnknownKeys = true }
     private var engine: EmbeddedServer<*, *>? = null
 
     /** 是否向上游（CNB）使用流式请求。由 UI 开关实时控制。 */
@@ -540,7 +542,7 @@ object ProxyServer {
         }
     }
 
-    private suspend fun RoutingContext.handleChatCompletions() {
+    internal suspend fun RoutingContext.handleChatCompletions() {
         try {
             val req = call.receive<ChatCompletionRequest>()
             LogStore.i(
@@ -1578,7 +1580,7 @@ object ProxyServer {
 
 
     /** 生图接口：POST /v1/images/generations → 豆包生图 / 智谱生图 / 文心生图（按 model 区分）。 */
-    private suspend fun RoutingContext.handleImageGen() {
+    internal suspend fun RoutingContext.handleImageGen() {
         try {
             val raw = call.receiveText()
             val o = org.json.JSONObject(raw)
