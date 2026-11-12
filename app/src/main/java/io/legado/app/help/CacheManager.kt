@@ -82,6 +82,13 @@ object CacheManager {
         memoryLruCache.remove(key)
     }
 
+    /** 按前缀批量清内存缓存：内置朗读脚本的 ttsrv_* 规则缓存换 key 也不会漏掉 */
+    fun deleteMemoryByPrefix(prefix: String) {
+        memoryLruCache.snapshot().keys.forEach {
+            if (it.startsWith(prefix)) memoryLruCache.remove(it)
+        }
+    }
+
     fun get(key: String): String? {
         getFromMemory(key)?.let {
             if (it is String) return it

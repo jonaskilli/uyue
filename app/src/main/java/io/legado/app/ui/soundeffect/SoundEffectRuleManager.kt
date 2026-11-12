@@ -1,6 +1,7 @@
 package io.legado.app.ui.soundeffect
 
 import io.legado.app.constant.AppLog
+import io.legado.app.help.CacheManager
 import io.legado.app.help.EngineDataDir
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.service.AiEffectIndex
@@ -154,7 +155,9 @@ object SoundEffectRuleManager {
                 entries.add(AiEffectIndex.Entry(name, path, parts[0], parts[1], keywords))
             }
         }
-        return AiEffectIndex.replaceAll(entries)
+        val error = AiEffectIndex.replaceAll(entries)
+        if (error == null) invalidateRuleCaches()
+        return error
     }
 
     /** AI 音效索引文件的路径，供界面展示 */
@@ -331,6 +334,23 @@ object SoundEffectRuleManager {
     }
 
     /**
+     * 规则写盘成功后，让所有读取方的内存缓存立即失效，改动才实时生效。
+     *
+     * 有两处读取方各自缓存：
+     * - Kotlin 朗读服务 [BaseReadAloudService] 编译后的规则缓存（全部音效 / 普通音效）
+     * - 内置朗读脚本「音效(替换规则)背景+」用 cache.putMemory 存的内存缓存
+     *   （衔接音效 ttsrv-replaces4.json，key 形如 ttsrv_slim_json_v1）
+     *
+     * 按 ttsrv 前缀清，脚本以后换 CACHE_KEY 也不会漏；只删这类 key，
+     * 不碰角色、书源变量等其它内存缓存。四种模式保存后都会走到这里。
+     */
+    fun invalidateRuleCaches() {
+        BaseReadAloudService.invalidateSoundEffectRuleCache()
+        CacheManager.deleteMemoryByPrefix("ttsrv")
+        AppLog.put("[音效规则] 已清内存缓存，下次朗读重新读取规则文件")
+    }
+
+    /**
      * 保存规则到文件。
      * 先写临时文件，再把原文件备份为 .bak（只保留最近一份），最后替换。
      * 保存成功后立即让朗读服务的规则缓存失效，使改动马上生效。
@@ -353,7 +373,7 @@ object SoundEffectRuleManager {
                 tmp.copyTo(file, true)
                 tmp.delete()
             }
-            BaseReadAloudService.invalidateSoundEffectRuleCache()
+            invalidateRuleCaches()
             null
         } catch (e: Exception) {
             tmp.delete()

@@ -193,18 +193,9 @@ class SoundEffectRuleActivity :
             return
         }
         busy = true
-        showLoading("正在保存…")
-        viewModel.save { saveError ->
-            if (saveError != null) {
-                busy = false
-                hideLoading()
-                toastOnUi(saveError)
-                revertToggle()
-                return@save
-            }
+        val doSwitch = {
             viewModel.switchMode(newMode) { error ->
                 busy = false
-                hideLoading()
                 error?.let { toastOnUi(it) }
                 invalidateOptionsMenu()
                 adapter.clearSelection()
@@ -212,6 +203,23 @@ class SoundEffectRuleActivity :
                 upPathView()
                 refreshList(keepExpanded = false)
             }
+        }
+        // 改动已即时落盘；只是切换/浏览（没改过东西）时不要陪写一次文件
+        if (!viewModel.dirty) {
+            doSwitch()
+            return
+        }
+        showLoading("正在保存…")
+        viewModel.save { saveError ->
+            hideLoading()
+            if (saveError != null) {
+                busy = false
+                toastOnUi(saveError)
+                revertToggle()
+                return@save
+            }
+            viewModel.clearDirty()
+            doSwitch()
         }
     }
 
@@ -364,7 +372,14 @@ class SoundEffectRuleActivity :
 
             else -> {
                 val index = current.list.indexOfFirst { it.id == rule.id }
-                if (index >= 0) current.list[index] = rule
+                if (index >= 0) {
+                    // 编辑页什么都没改却点了保存：只刷新列表，不写文件
+                    if (current.list[index] == rule) {
+                        refreshList()
+                        return
+                    }
+                    current.list[index] = rule
+                }
             }
         }
         onDataChanged()
@@ -710,9 +725,12 @@ class SoundEffectRuleActivity :
         }
     }
 
-    /** 任何改动都走这里：即时写回文件并刷新列表 */
+    /** 真改动才走这里：标记未落盘 → 即时保存 → 刷新列表；浏览类操作不会调到这里 */
     override fun onDataChanged() {
-        viewModel.save { it?.let { msg -> toastOnUi(msg) } }
+        viewModel.markDirty()
+        viewModel.save { msg ->
+            if (msg == null) viewModel.clearDirty() else toastOnUi(msg)
+        }
         adapter.resyncSelection()
         refreshList()
     }
@@ -721,10 +739,14 @@ class SoundEffectRuleActivity :
 
     override fun onGroupEnableToggle(groupId: Long, enable: Boolean) {
         val gwr = findGroup(groupId) ?: return
+        var changed = false
         gwr.list.forEachIndexed { index, rule ->
-            if (rule.isEnabled != enable) gwr.list[index] = rule.copy(isEnabled = enable)
+            if (rule.isEnabled != enable) {
+                gwr.list[index] = rule.copy(isEnabled = enable)
+                changed = true
+            }
         }
-        onDataChanged()
+        if (changed) onDataChanged()
     }
 
     override fun onGroupToTop(groupId: Long) = moveGroup(groupId, 0)
@@ -754,6 +776,7 @@ class SoundEffectRuleActivity :
     override fun onGroupRename(groupId: Long) {
         val gwr = findGroup(groupId) ?: return
         showInputDialog("重命名分组", gwr.group.name) { text ->
+            if (text == gwr.group.name) return@showInputDialog
             gwr.group.name = text
             onDataChanged()
         }
