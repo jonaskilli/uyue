@@ -1826,8 +1826,19 @@ abstract class BaseReadAloudService : BaseService(),
                     val shouldSkipCurrentParagraph =
                         !AppConfig.readAloudStartFromFirst && !isScrollMode
 
+                    // 11-13：单段页豁免——落点页只有这一个可读段落时不跳。
+                    // 此前只判 nowSpeak!=0：任何单段页（除章首页）点朗读都会把
+                    // 唯一段落跳过 → 整页不读、直接翻下一页（真机实锤，用户场景：
+                    // 翻到单段页点朗读直接跳走）。跳过本意是「接着上次听的往下听」，
+                    // 但页里就一段时跳过等于整页放弃，违背直觉。覆盖所有入口。
+                    val pageHasSingleReadableParagraph = run {
+                        val pageNow = textChapter?.getPage(pageIndex)
+                        pageNow != null && pageNow.paragraphs.size == 1
+                    }
+
                     if (!gengxinResuming && !singleParagraphMode && !continueFromParagraph
-                        && shouldSkipCurrentParagraph && !toLast && nowSpeak < contentList.size
+                        && shouldSkipCurrentParagraph && !toLast && !pageHasSingleReadableParagraph
+                        && nowSpeak < contentList.size
                     ) {
                         if (nowSpeak != 0) {
                             LogUtils.d(TAG, "nowSpeak!=0，跳过当前段")
