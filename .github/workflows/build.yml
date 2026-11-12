@@ -3,7 +3,7 @@ name: 打包
 # 运行记录标题：带上触发原因与提交信息，避免列表里只看到「打包 #1 #2」。
 # - 手动触发：打包 · 手动 · <提交信息>
 # - 打标签触发：打包 · <标签名> · <提交信息>
-run-name: 打包 · ${{ github.event_name == 'workflow_dispatch' && '手动' || github.ref_name }} · ${{ github.event.head_commit.message || github.sha }}
+run-name: 打包 · ${{ github.event_name == 'workflow_dispatch' && format('手动 by {0}', github.actor) || github.ref_name }}
 
 on:
   workflow_dispatch:
