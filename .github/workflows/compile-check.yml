@@ -1,15 +1,12 @@
-name: 编译
+name: Build Test
 
 # 只编译、不出包（10-12 加）：改完 Kotlin 先过这一步（约 3~6 分钟），
-# 绿了再手动触发「打包」（17~25 分钟）。
+# 绿了再手动触发「Build Release」（17~25 分钟）。
 # 起因：10-12 两次「直接打包才发现编译错」，白烧两轮 17~25 分钟。
 #
 # 与 build.yml 完全同一套环境（Java 21 / Android SDK 36 / local.properties），
 # 只是把 assembleAppRelease 换成「编译 Kotlin + 打包资源」。
 #
-# 运行记录标题：编译 <提交信息>，列表里一眼看出这次编译的是哪笔改动。
-# GitHub 表达式没有 split，无法只取首行；列表按单行截断，完整内容在运行详情页。
-run-name: 编译 · ${{ github.event.head_commit.message || github.sha }}
 on:
   push:
     branches:
