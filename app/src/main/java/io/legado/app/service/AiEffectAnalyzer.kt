@@ -21,7 +21,8 @@ import org.json.JSONObject
  */
 object AiEffectAnalyzer {
 
-    private const val TAG = "AiEffectAnalyzer"
+    /** 日志统一用中文前缀，方便在阅读界面「日志」里按「AI音效」检索全链路 */
+    private const val TAG = "AI音效"
 
     /** 提示词在 bgmAIPrompt 表中的 name；表里没有时回退到内置默认 */
     const val PROMPT_KEYWORD = "音效关键字提取"

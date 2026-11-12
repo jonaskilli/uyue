@@ -41,7 +41,7 @@ import java.util.concurrent.TimeUnit
  */
 object AiEffectIndex {
 
-    private const val TAG = "AiEffectIndex"
+    private const val TAG = "AI音效"
     private const val ASSET_FILE = "ai_effect_index_kw.json"
 
     /**

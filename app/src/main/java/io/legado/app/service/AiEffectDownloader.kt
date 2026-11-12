@@ -18,7 +18,7 @@ import java.io.File
  */
 object AiEffectDownloader {
 
-    private const val TAG = "AiEffectDownloader"
+    private const val TAG = "AI音效"
 
     private const val REMOTE_PREFIX =
         "https://cnb.cool/mingwuyan/cnb-chat/-/git/raw/main/"
