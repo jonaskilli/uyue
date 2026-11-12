@@ -13,7 +13,7 @@
 
 > 在书源规则中使用`@js` `<js>` `{{}}`可使用JavaScript调用阅读部分内置的类和方法
 
-> 注意为了安全，阅读会屏蔽部分java类调用，见RhinoClassShutter
+> 注意为了安全，U阅会屏蔽部分java类调用，见RhinoClassShutter
 
 > 不同的书源规则中支持的调用的Java类和方法可能有所不同
 
