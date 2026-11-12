@@ -67,6 +67,16 @@ class SourceLoginDialog : BaseDialogFragment(R.layout.dialog_login, true) {
     private var oKToClose = false
     private var rowUis: List<RowUi>? = null
     private var rowUiName = arrayListOf<String>()
+    /**
+     * [Type.text] / [Type.password] 行的 binding 缓存，key = 该行在 [rowUiName] 里的下标。
+     *
+     * 旧实现在 getLoginData() 里用 binding.root.findViewById(index + 1000) 反查，
+     * 再 ItemSourceEditBinding.bind(rowView)：root.id 被 inflate 时改写过，
+     * 一旦反查命中到别的视图，bind() 会抛
+     *   NullPointerException: Missing required view with ID: ...id/editText
+     * （与 ServerConfigDialog 同一类崩溃）。这里直接存 binding，取值不再走 id 往返。
+     */
+    private val rowEditBindings = hashMapOf<Int, ItemSourceEditBinding>()
     private var hasChange = false
     private val sourceLoginJsExtensions by lazy {
         SourceLoginJsExtensions(activity as AppCompatActivity, viewModel.source,
@@ -236,6 +246,9 @@ class SourceLoginDialog : BaseDialogFragment(R.layout.dialog_login, true) {
     private fun rowUiBuilder(source: BaseSource, rowUis: List<RowUi>?) {
         val loginInfo = viewModel.loginInfo
         rowUiName.clear()
+        // 重建界面时同步清掉旧的输入行 binding，否则复用同一个 Dialog 重建 UI 后
+        // getLoginData() 会读到上一次已被移出视图树的那批 EditText
+        rowEditBindings.clear()
         rowUis?.forEachIndexed { index, rowUi ->
             val type = rowUi.type
             val name = rowUi.name
@@ -258,6 +271,7 @@ class SourceLoginDialog : BaseDialogFragment(R.layout.dialog_login, true) {
                         apply(it.root)
                     }
                     it.root.id = index + 1000
+                    rowEditBindings[index] = it
                     if (viewName == null) {
                         it.textInputLayout.hint = name
                     } else if (viewName.length in 3..19 && viewName.first() == '\'' && viewName.last() == '\'') {
@@ -328,6 +342,7 @@ class SourceLoginDialog : BaseDialogFragment(R.layout.dialog_login, true) {
                         apply(it.root)
                     }
                     it.root.id = index + 1000
+                    rowEditBindings[index] = it
                     if (viewName == null) {
                         it.textInputLayout.hint = name
                     } else if (viewName.length in 3..19 && viewName.first() == '\'' && viewName.last() == '\'') {
@@ -697,10 +712,10 @@ class SourceLoginDialog : BaseDialogFragment(R.layout.dialog_login, true) {
         rowUis?.forEachIndexed { index, rowUi ->
             when (rowUi.type) {
                 Type.text, Type.password -> {
-                    val rowView = binding.root.findViewById<View>(index + 1000)
-                    ItemSourceEditBinding.bind(rowView).editText.text.let {
-                        loginData[rowUi.name] = it?.toString() ?: rowUi.default ?: "" //没文本的时候存空字符串,而不是删除loginInfo
-                    }
+                    // 用 inflate 时缓存的 binding 取值，不再 findViewById 反查后 bind()：
+                    // 那条路在 root.id 被改写后会抛 Missing required view with ID editText
+                    val editText = rowEditBindings[index]?.editText
+                    loginData[rowUi.name] = editText?.text?.toString() ?: rowUi.default ?: "" //没文本的时候存空字符串,而不是删除loginInfo
                 }
             }
         }

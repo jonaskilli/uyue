@@ -38,6 +38,9 @@ class ServerConfigDialog() : BaseDialogFragment(R.layout.dialog_webdav_server, t
         RowUi("password", RowUi.Type.password)
     )
 
+    /** [upWebDavServerUi] 逐行 inflate 出来的输入行，保存时按下标取值（不再靠 view id 反查）。 */
+    private val rowBindings = mutableListOf<ItemSourceEditBinding>()
+
     override fun onStart() {
         super.onStart()
         setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -77,6 +80,15 @@ class ServerConfigDialog() : BaseDialogFragment(R.layout.dialog_webdav_server, t
     }
 
     private fun upWebDavServerUi(config: JSONObject?) {
+        // 逐行 inflate 后把 binding 存进列表，保存时按顺序取。
+        // 旧实现在这里给根布局改 id（it.root.id = index + 1000），保存时再用
+        // findViewById(index + 1000) 捞回来做 ItemSourceEditBinding.bind(rowView)。
+        // 这条链天然脆弱：root.id 被覆盖后 ViewBinding 的构造校验（按 id 查 editText）
+        // 一旦命中到别的视图就抛
+        //   NullPointerException: Missing required view with ID: ...id/editText
+        // （真机 3.26.111013 点「保存」必崩）。改为直接持有 binding 引用，不做 id 往返。
+        rowBindings.clear()
+        binding.flexbox.removeAllViews()
         webDavServerUi.forEachIndexed { index, rowUi ->
             when (rowUi.type) {
                 RowUi.Type.text -> ItemSourceEditBinding.inflate(
@@ -88,6 +100,7 @@ class ServerConfigDialog() : BaseDialogFragment(R.layout.dialog_webdav_server, t
                     it.root.id = index + 1000
                     it.textInputLayout.hint = rowUi.name
                     it.editText.setText(config?.getString(rowUi.name))
+                    rowBindings.add(it)
                 }
                 RowUi.Type.password -> ItemSourceEditBinding.inflate(
                     layoutInflater,
@@ -100,6 +113,7 @@ class ServerConfigDialog() : BaseDialogFragment(R.layout.dialog_webdav_server, t
                     it.editText.inputType =
                         InputType.TYPE_TEXT_VARIATION_PASSWORD or InputType.TYPE_CLASS_TEXT
                     it.editText.setText(config?.getString(rowUi.name))
+                    rowBindings.add(it)
                 }
             }
         }
@@ -119,10 +133,12 @@ class ServerConfigDialog() : BaseDialogFragment(R.layout.dialog_webdav_server, t
 
     private fun getWebDavConfig(): HashMap<String, String> {
         val data = hashMapOf<String, String>()
+        // 按 upWebDavServerUi 里的同序绑定取文本，不再 findViewById 反查（见该函数注释）
         webDavServerUi.forEachIndexed { index, rowUi ->
-            val rowView = binding.root.findViewById<View>(index + 1000)
-            ItemSourceEditBinding.bind(rowView).editText.text?.let {
-                data[rowUi.name] = it.toString()
+            rowBindings.getOrNull(index)?.editText?.text?.toString()?.let {
+                data[rowUi.name] = it
+            } ?: run {
+                data[rowUi.name] = ""
             }
         }
         return data

@@ -192,3 +192,25 @@ cn.hutool.core.util.**{*;}
 -dontwarn com.sun.nio.file.SensitivityWatchEventModifier
 -dontwarn org.slf4j.**
 
+
+# ── Ktor 3.x 模块 lambda 反射启动修复（混元太极启动崩溃）────────────────────
+# 症状：ProxyService.onStartCommand → ProxyServer.start → EmbeddedServer.start
+#       抛 java.lang.IllegalArgumentException: Array has more than one element.
+# 成因（ktor 3.0.3 源码）：
+#   EmbeddedServerJvm.kt 对 rootConfig.modules 里每个 lambda 调 module.methodName()，
+#   普通 lambda 不是 KFunction，methodName() 直接返回 "${javaClass.name}.invoke"；
+#   随后 executeModuleFunction() 用这个混淆名反射加载，走到
+#       val constructor = clazz.declaredConstructors.single()
+#   R8 优化后该 lambda 类带有多个构造函数（合成的 + 原 Kotlin 生成的），single() 抛
+#   IllegalArgumentException。ktor 只用 catch (ReloadingException) 兜底回退直接调用，
+#   接不住 IllegalArgumentException，于是整个服务启动失败。
+# 修法：把 ProxyServer 及其所有内部/lambda 类整体 keep 住。
+#   R8 的 lambda group 优化会把多个同签名 lambda 合并成一个类、每个对应一个构造函数；
+#   被 keep 的类不参与该合并，ProxyServer$start$1 这类模块 lambda 因此保持「只有自己那一个
+#   构造函数」，clazz.declaredConstructors.single() 不再抛异常。
+-keep class io.legado.app.help.hunyuan.proxy.ProxyServer { *; }
+-keep class io.legado.app.help.hunyuan.proxy.ProxyServer$* { *; }
+# ktor 用 kotlin-reflect 按名字反查模块函数，反射元数据与构造器不能被裁掉
+-keepattributes RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations, InnerClasses, Signature, Exceptions
+-keep class io.ktor.server.engine.** { *; }
+-keep class io.ktor.server.application.** { *; }

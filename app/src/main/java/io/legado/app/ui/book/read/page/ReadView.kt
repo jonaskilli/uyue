@@ -124,6 +124,22 @@ class ReadView(context: Context, attrs: AttributeSet) :
 
     private val slopSquare by lazy { ViewConfiguration.get(context).scaledTouchSlop }
     private var pageSlopSquare: Int = slopSquare
+
+    /**
+     * 纵向手势（上滑进朗读面板 / 下滑停朗读 / 面板内上下滑）是否成立。
+     *
+     * 旧写法在各调用点内联 `absY >= absX * 0.9f`，纵向只要略微占优就算「上下滑」。
+     * 实际左右滑动翻页时，手指几乎不可能走出严格水平线：起手几像素的纵向抖动
+     * 就能让 absY >= absX*0.9 成立，于是被误判成上滑 → 抬手弹出朗读面板。
+     * 真机（vivo V2301A，左右滑翻页）高频复现。
+     *
+     * 这里要求「纵向明显主导」：纵向位移至少是横向的 [VERTICAL_DOMINANCE] 倍。
+     * 正常上下滑时横向位移接近 0，任何倍率都能通过，不影响原手势；
+     * 横向滑则以 absX 为大数，倍率越大越难误触。
+     */
+    private fun isVerticalGesture(absX: Float, absY: Float): Boolean =
+        absY >= absX * VERTICAL_DOMINANCE
+
     var pageSlopSquare2: Int = pageSlopSquare * pageSlopSquare
     private var pageTouchClick: Int = 0
     private val tlRect = RectF()
@@ -258,7 +274,7 @@ class ReadView(context: Context, attrs: AttributeSet) :
                     if (!isScroll && !isTextSelected && readAloudPanelShowing) {
                         if (!readAloudPanelSwipeUp && !readAloudPanelSwipeDown
                             && event.y < startY - bottomSwipeSlop
-                            && absY >= absX * 0.9f
+                            && isVerticalGesture(absX, absY)
                         ) {
                             readAloudPanelSwipeUp = true
                             pageDelegate?.abortAnim()
@@ -267,7 +283,7 @@ class ReadView(context: Context, attrs: AttributeSet) :
                         if (!readAloudPanelSwipeUp && !readAloudPanelSwipeDown
                             && startY > height * 0.1f
                             && event.y > startY + bottomSwipeSlop
-                            && absY >= absX * 0.9f
+                            && isVerticalGesture(absX, absY)
                         ) {
                             readAloudPanelSwipeDown = true
                             pageDelegate?.abortAnim()
@@ -281,7 +297,7 @@ class ReadView(context: Context, attrs: AttributeSet) :
                         && !bottomSwipeUp
                         && startY > height * 0.333f
                         && event.y < startY - bottomSwipeSlop
-                        && absY >= absX * 0.9f
+                        && isVerticalGesture(absX, absY)
                     ) {
                         bottomSwipeUp = true
                         pageDelegate?.abortAnim()
@@ -298,7 +314,7 @@ class ReadView(context: Context, attrs: AttributeSet) :
                         && startY > height * 0.1f
                         && startY < height * 0.667f
                         && event.y > startY + bottomSwipeSlop
-                        && absY >= absX * 0.9f
+                        && isVerticalGesture(absX, absY)
                     ) {
                         topSwipeDown = true
                         pageDelegate?.abortAnim()
@@ -895,4 +911,14 @@ class ReadView(context: Context, attrs: AttributeSet) :
         fun upSystemUiVisibility()
         fun sureNewProgress(progress: BookProgress)
     }
+    private companion object {
+        /**
+         * 纵向手势需要的「纵向/横向位移比」。取值依据：
+         * - 1.0f = 纵向只要不比横向差就算（旧 0.9f 更宽松，横滑必误触）；
+         * - 1.5f = 纵向明显主导，手指斜着上下滑仍能触发，左右滑则需 45° 以上倾斜才误触；
+         * - 再高（≥2.0）会让「稍斜的上下滑」失效，用户需刻意竖直滑，手感变差。
+         */
+        const val VERTICAL_DOMINANCE = 1.5f
+    }
+
 }

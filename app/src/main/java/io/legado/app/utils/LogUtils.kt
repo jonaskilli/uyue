@@ -5,6 +5,7 @@ package io.legado.app.utils
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
+import android.os.Environment
 import android.webkit.WebSettings
 import io.legado.app.BuildConfig
 import io.legado.app.constant.AppConst
@@ -12,6 +13,7 @@ import io.legado.app.constant.AppLog
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.globalExecutor
 import splitties.init.appCtx
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.logging.FileHandler
@@ -56,8 +58,15 @@ object LogUtils {
 
     private fun createFileHandler(context: Context): FileHandler? {
         try {
-            val root = context.externalCacheDir ?: return null
-            val logFolder = FileUtils.createFolderIfNotExist(root, "logs")
+            // 日志目录改到共享存储 Download/uyue/logs：
+            // 原先写在 externalCacheDir（Android/data/<包名>/cache/logs），Android 11+ 分区存储下
+            // 其他进程/文件管理器读不到，排查问题时只能靠 App 内的日志对话框。
+            // Download 是一级共享目录，PC 数据线与手机文件管理器都能直接看到。
+            // 没有「所有文件访问」权限时退回原来的私有缓存目录，保证日志永远写得进去。
+            val logFolder = sharedLogFolder() ?: run {
+                val root = context.externalCacheDir ?: return null
+                FileUtils.createFolderIfNotExist(root, "logs")
+            }
             globalExecutor.execute {
                 val expiredTime = System.currentTimeMillis() - 7.days.inWholeMilliseconds
                 logFolder.listFiles()?.forEach {
@@ -106,6 +115,29 @@ object LogUtils {
         val sdf = SimpleDateFormat(pattern)
         return sdf.format(date)
     }
+
+    /**
+     * 共享存储里的日志目录 `Download/uyue/logs`。
+     *
+     * 返回 null 表示当前没有写入权限（或外部存储未挂载），调用方退回私有缓存目录。
+     * 判据用「真实写一次探测」而不是只看 canWrite：分区存储下有的机型 canWrite 报 true
+     * 但实际写入抛异常，只有写成功才算数。探测文件用完立刻删掉，不留垃圾。
+     */
+    private fun sharedLogFolder(): File? = kotlin.runCatching {
+        val base = Environment.getExternalStoragePublicDirectory(
+            Environment.DIRECTORY_DOWNLOADS
+        )
+        if (base == null || !base.isDirectory) return@runCatching null
+        val folder = File(base, "uyue/logs")
+        if (!folder.isDirectory && !folder.mkdirs()) return@runCatching null
+        val probe = File(folder, ".write_probe")
+        try {
+            probe.writeText("")
+            folder
+        } finally {
+            kotlin.runCatching { probe.delete() }
+        }
+    }.getOrNull()
 
     fun logDeviceInfo() {
         d("DeviceInfo") {
