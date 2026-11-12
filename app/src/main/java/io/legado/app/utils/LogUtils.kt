@@ -51,7 +51,7 @@ object LogUtils {
     }
 
     val logger: Logger by lazy {
-        Logger.getLogger("U阅")
+        Logger.getLogger("Legado")
     }
 
     private var fileHandler: FileHandler? = null

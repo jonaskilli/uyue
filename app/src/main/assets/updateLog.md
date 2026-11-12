@@ -34,7 +34,7 @@
 * 正文出现缺字漏字、内容缺失、排版错乱等情况，有可能是净化规则或简繁转换出现问题。
 ----
 
-* [2025年日志]()
-* [2023年日志]()
-* [2022年日志]()
-* [2021年日志]()
+* [2025年日志](https://github.com/LegadoTeam/legado/blob/record2025/app/src/main/assets/updateLog.md)
+* [2023年日志](https://github.com/LegadoTeam/legado/blob/record2023/app/src/main/assets/updateLog.md)
+* [2022年日志](https://github.com/LegadoTeam/legado/blob/record2022/app/src/main/assets/updateLog.md)
+* [2021年日志](https://github.com/LegadoTeam/legado/blob/record2021/app/src/main/assets/updateLog.md)

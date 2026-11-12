@@ -59,7 +59,7 @@
       </div>
       <div class="bottom-icons">
         <a
-          href="#"
+          href="https://github.com/gedoor/legado_web_bookshelf"
           target="_blank"
         >
           <div class="bottom-icon">

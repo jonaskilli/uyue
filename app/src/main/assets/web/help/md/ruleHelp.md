@@ -1,8 +1,8 @@
 # 源规则帮助
 
-* 规则说明
-* 书源帮助文档
-* 订阅源帮助文档
+* [阅读3.0(Legado)规则说明](https://mgz0227.github.io/The-tutorial-of-Legado/)
+* [书源帮助文档](https://mgz0227.github.io/The-tutorial-of-Legado/Rule/source.html)
+* [订阅源帮助文档](https://mgz0227.github.io/The-tutorial-of-Legado/Rule/rss.html)
 * 辅助键盘❓中可插入URL参数模板,打开帮助,js教程,正则教程,选择文件
 * 规则标志, {{......}}内使用规则必须有明显的规则标志,没有规则标志当作js执行
 ```
@@ -12,7 +12,7 @@
 : regex规则,不可省略,只可以用在书籍列表和目录列表
 ```
 * jsLib
-> 注入JavaScript到RhinoJs引擎中，支持两种格式，可实现函数共用
+> 注入JavaScript到RhinoJs引擎中，支持两种格式，可实现[函数共用](https://github.com/LegadoTeam/legado/wiki/JavaScript%E5%87%BD%E6%95%B0%E5%85%B1%E7%94%A8)
 
 > `JavaScript Code` 直接填写JavaScript片段  
 > `{"example":"https://www.example.com/js/example.js", ...}` 自动复用已经下载的js文件
@@ -290,7 +290,7 @@ let options = {
 
 * 图片解密
 > 适用于图片需要二次解密的情况，直接填写JavaScript，返回解密后的`ByteArray`  
-> 部分变量说明：java（仅支持js扩展类），result为待解密图片的`ByteArray`，src为图片链接
+> 部分变量说明：java（仅支持[js扩展类](https://github.com/LegadoTeam/legado/blob/master/app/src/main/java/io/legado/app/help/JsExtensions.kt)），result为待解密图片的`ByteArray`，src为图片链接
 
 ```js
 java.createSymmetricCrypto("AES/CBC/PKCS5Padding", key, iv).decrypt(result)

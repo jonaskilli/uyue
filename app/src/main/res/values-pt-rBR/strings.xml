@@ -1,20 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--App-->
-    <string name="app_name">U阅</string>
-    <string name="app_name_a">U阅·A</string>
-    <string name="receiving_shared_label">U阅·pesquisa</string>
-    <string name="tip_perm_request_storage">U阅 precisa de acesso ao armazenamento para encontrar e ler livros. Por favor, vá às "Configurações do App" para conceder "Permissão de armazenamento".</string>
+    <string name="app_name">Legado</string>
+    <string name="app_name_a">Legado·A</string>
+    <string name="receiving_shared_label">Legado·pesquisa</string>
+    <string name="tip_perm_request_storage">Legado precisa de acesso ao armazenamento para encontrar e ler livros. Por favor, vá às "Configurações do App" para conceder "Permissão de armazenamento".</string>
 
     <!--Other-->
     <string name="menu_backup">Início</string>
     <string name="menu_restore">Restaurar</string>
-    <string name="menu_import_old">Importar dados ao U阅</string>
+    <string name="menu_import_old">Importar dados ao Legado</string>
     <string name="webdav_cache_backup">Backup do cache dos livros para leitura off-line</string>
     <string name="webdav_cache_backup_s">Exportar localmente e fazer Backup à pasta de exportação</string>
     <string name="backup_path">Backup para</string>
     <string name="select_backup_path">Por favor, selecione uma pasta de Backup.</string>
-    <string name="menu_import_old_version">Importar dados de U阅</string>
+    <string name="menu_import_old_version">Importar dados de Legado</string>
     <string name="menu_import_github">Importar dados de Github</string>
     <string name="menu_replace_rule">Substituição</string>
     <string name="menu_send">Enviar</string>
@@ -101,7 +101,7 @@
         \u3000\u3000 Este é um App de leitura de software livre, desenvolvido em Kotlin, você é bem-vindo a participar em projeto.
     </string>
     <string name="app_share_description">
-
+        Legado (YueDu 3.0) link de download：\n https://github.com/LegadoTeam/legado/releases
     </string>
     <string name="version_name">Versão %s</string>
     <string name="pt_background_verification">Verificação em segundo plano</string>
@@ -112,7 +112,7 @@
     <string name="ps_auto_download">Baixar automaticamente os últimos capítulos ao atualizar os livros</string>
     <string name="backup_restore">Backup e restauração</string>
     <string name="web_dav_set">Configurações de WebDav</string>
-    <string name="web_dav_set_import_old">Configurações/importação WebDav de dados U阅 </string>
+    <string name="web_dav_set_import_old">Configurações/importação WebDav de dados Legado </string>
     <string name="backup">Fazer Backup</string>
     <string name="restore">Restaurar</string>
     <string name="backup_permission">O Backup precisa de permissão de armazenamento</string>
@@ -647,7 +647,7 @@
     <string name="app_folder_picker">Seletor de pastas do App</string>
     <string name="app_file_picker">Seletor de arquivos do App</string>
     <string name="a10_permission_toast">Android 10+ não é capaz de ler e salvar arquivos devido a restrições de permissão</string>
-    <string name="add_to_text_context_menu_s">Clique longo para exibir o U阅·Pesquisa no menu de operação</string>
+    <string name="add_to_text_context_menu_s">Clique longo para exibir o Legado·Pesquisa no menu de operação</string>
     <string name="add_to_text_context_menu_t">Visualização da operação de texto na Pesquisa</string>
     <string name="record_log">Record log</string>
     <string name="log">Log</string>
@@ -689,7 +689,7 @@
     <string name="btn_default_s">Padrão</string>
     <string name="main_menu">Menu principal</string>
     <string name="request_permission">Toque para conceder permissão</string>
-    <string name="tip_local_perm_request_storage">U阅 precisa de permissão de armazenamento, por favor toque abaixo no botão "Conceder Permissão", ou vá às "Configurações"-"Permissões do Apps"-para abrir a permissão necessária. Se a permissão não funcionar, por favor, toque no "Selecionar Pasta" no canto superior direito para usar o seletor de pastas do sistema.</string>
+    <string name="tip_local_perm_request_storage">Legado precisa de permissão de armazenamento, por favor toque abaixo no botão "Conceder Permissão", ou vá às "Configurações"-"Permissões do Apps"-para abrir a permissão necessária. Se a permissão não funcionar, por favor, toque no "Selecionar Pasta" no canto superior direito para usar o seletor de pastas do sistema.</string>
     <string name="alouding_disable">O texto selecionado não pode ser falado como texto completo</string>
     <string name="read_body_to_lh">Ampliar para recortar</string>
     <string name="toc_updateing">Atualização de capítulos</string>
@@ -699,11 +699,11 @@
     <string name="contact">Contato</string>
     <string name="license">Licença</string>
     <string name="other">Outros</string>
-    <string name="official_account">U阅</string>
+    <string name="official_account">开源阅读</string>
     <string name="follow_official_account">Siga a conta oficial de WeChat</string>
     <string name="wechat">WeChat</string>
     <string name="thanks">Apoio ao meu trabalho é bem-vindo</string>
-    <string name="about_official_account">Conta oficial[U阅]</string>
+    <string name="about_official_account">Conta oficial[开源阅读]</string>
     <string name="source_auto_changing">Alteração de fonte</string>
     <string name="click_to_apply">Toque para participar</string>
     <string name="middle">Médio</string>
@@ -735,7 +735,7 @@
     <string name="sort_by_url">Ordenar por URL</string>
     <string name="backup_summary">Faça backup local e de WebDav simultaneamente</string>
     <string name="restore_summary">Primeiro restaurar de WebDAV, ao clicar longo restaurar do local backup</string>
-    <string name="import_old_summary">Selecione uma pasta U阅 de Backup</string>
+    <string name="import_old_summary">Selecione uma pasta Legado de Backup</string>
     <string name="enabled">Ativado</string>
     <string name="disabled">Desativado</string>
     <string name="enabled_explore">Discovery Enabled</string>
@@ -743,7 +743,7 @@
     <string name="starting_download">Iniciando o download</string>
     <string name="already_in_download">Este livro já está na lista de download</string>
     <string name="click_to_open">Clique para abrir</string>
-    <string name="follow_public_account_summary">Siga [U阅] para ajudar, clicando nos anúncios</string>
+    <string name="follow_public_account_summary">Siga [开源阅读] para ajudar, clicando nos anúncios</string>
     <string name="weChat_appreciation_code">Código de gorjeta no WeChat</string>
     <string name="alipay">AliPay</string>
     <string name="alipay_red_envelope_search_code">Envelope vermelho de AliPay, código de busca</string>
@@ -751,7 +751,7 @@
     <string name="alipay_red_envelope_qr_code">Envelope vermelho de AliPay código QR</string>
     <string name="alipay_payment_qr_code">AliPay código QR</string>
     <string name="qq_collection_qr_code">Coleção QQ Código QR</string>
-    <string name="contributors_summary">U阅 Para mais detalhes vá ao Github</string>
+    <string name="contributors_summary">gedoor,Invinciblelee,Xwite etc. Para mais detalhes vá ao Github</string>
     <string name="clear_cache_summary">Limpar o cache dos livros e fontes baixados</string>
     <string name="default_cover">Capa padrão</string>
     <string name="restore_ignore">Lista de ignorados</string>
@@ -774,7 +774,7 @@
     <string name="language">Idioma</string>
     <string name="import_rss_source">Importar fonte de RSS</string>
     <string name="donate_summary">Sua doação tornará este App ainda melhor</string>
-    <string name="about_summary">Conta oficial de Wechat [U阅软件]</string>
+    <string name="about_summary">Conta oficial de Wechat [开源阅读软件]</string>
     <string name="read_record">Histórico de leitura</string>
     <string name="del_read_record">Excluir histórico de leitura</string>
     <string name="read_record_summary">Leia o resumo do histórico</string>

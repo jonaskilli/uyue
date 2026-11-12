@@ -5,9 +5,9 @@
     "enabled": true,
     "singleUrl": true,
     "sourceGroup": "legado",
-    "sourceIcon": "",
+    "sourceIcon": "https://cdn.jsdelivr.net/gh/gedoor/legado@master/app/src/main/res/mipmap-hdpi/ic_launcher.png",
     "sourceName": "使用说明",
-    "sourceUrl": ""
+    "sourceUrl": "https://www.yuque.com/legado"
   },
   {
     "customOrder": 3,
@@ -35,7 +35,7 @@
     "enabled": true,
     "singleUrl": true,
     "sourceGroup": "legado",
-    "sourceIcon": "",
+    "sourceIcon": "https://cdn.jsdelivr.net/gh/gedoor/legado@master/app/src/main/res/mipmap-hdpi/ic_launcher.png",
     "sourceName": "烏雲净化",
     "sourceUrl": "https://www.lanzout.com/b0bw8jwoh"
   }

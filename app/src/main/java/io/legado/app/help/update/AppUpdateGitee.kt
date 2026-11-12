@@ -5,6 +5,12 @@ import io.legado.app.constant.AppConst
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.coroutine.Coroutine
+import io.legado.app.help.http.newCallResponse
+import io.legado.app.help.http.okHttpClient
+import io.legado.app.help.http.text
+import io.legado.app.utils.GSON
+import io.legado.app.utils.fromJsonArray
+import io.legado.app.utils.fromJsonObject
 import kotlinx.coroutines.CoroutineScope
 
 @Keep
@@ -19,9 +25,38 @@ object AppUpdateGitee : AppUpdate.AppUpdateInterface {
             else -> AppConst.appInfo.appVariant
         }
 
-    // 自用版：同上，不访问任何上游发布源
-    private suspend fun getLatestRelease(): List<AppReleaseInfo> =
-        throw NoStackTraceException("自用版本不提供在线更新")
+    private suspend fun getLatestRelease(): List<AppReleaseInfo> {
+        val lastReleaseUrl = if (checkVariant.isBeta()) {
+            "https://gitee.com/api/v5/repos/lyc486/legado/releases/tags/beta"
+        } else {
+            "https://gitee.com/api/v5/repos/lyc486/legado/releases?page=1&per_page=3&direction=desc"
+        }
+        val res = okHttpClient.newCallResponse {
+            url(lastReleaseUrl)
+        }
+        if (!res.isSuccessful) {
+            throw NoStackTraceException("获取新版本出错(${res.code})")
+        }
+        val body = res.body?.text()
+        if (body.isNullOrBlank()) {
+            throw NoStackTraceException("获取新版本出错")
+        }
+        if (!checkVariant.isBeta()) {
+            return GSON.fromJsonArray<GiteeRelease>(body)
+                .getOrElse {
+                    throw NoStackTraceException("获取新版本出错 " + it.localizedMessage)
+                }
+                .first { !it.prerelease }
+                .gitReleaseToAppReleaseInfo()
+                .sortedByDescending { it.createdAt }
+        }
+        return GSON.fromJsonObject<GiteeRelease>(body)
+            .getOrElse {
+                throw NoStackTraceException("获取新版本出错 " + it.localizedMessage)
+            }
+            .gitReleaseToAppReleaseInfo()
+            .sortedByDescending { it.createdAt }
+    }
 
     override fun check(
         scope: CoroutineScope,
