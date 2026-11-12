@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 混元太极：阴阳鱼。用 evenOdd 挖空而非白色填充，避免 Preference 的 setColorFilter 把整块染成实心圆 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillType="evenOdd"
+        android:fillColor="#FF000000"
+        android:pathData="M12,2 A10,10 0 1,0 12,22 A10,10 0 1,0 12,2 Z M12,2 A10,10 0 0,1 12,22 A5,5 0 0,1 12,12 A5,5 0 0,0 12,2 Z M12,5.4 A1.6,1.6 0 1,1 12,8.6 A1.6,1.6 0 1,1 12,5.4 Z M12,15.4 A1.6,1.6 0 1,1 12,18.6 A1.6,1.6 0 1,1 12,15.4 Z" />
+    <!-- 外圆轮廓：让留白的阴鱼也有完整边界 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.3"
+        android:pathData="M12,2 A10,10 0 1,0 12,22 A10,10 0 1,0 12,2 Z" />
+</vector>

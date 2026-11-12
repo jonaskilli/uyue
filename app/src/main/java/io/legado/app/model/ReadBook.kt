@@ -25,6 +25,7 @@ import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.globalExecutor
 import io.legado.app.model.localBook.TextFile
 import io.legado.app.model.webBook.WebBook
+import io.legado.app.service.AiChapterFixService
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.service.CacheBookService
 import io.legado.app.ui.book.read.page.AudioCacheIndicatorManager
@@ -107,6 +108,10 @@ object ReadBook : CoroutineScope by MainScope() {
     val executor = globalExecutor
 
     fun resetData(book: Book) {
+        // 换书：旧书没跑完的自动分析立即作废，避免切章后还往旧书正文里写回
+        ReadBook.book?.bookUrl
+            ?.takeIf { it.isNotBlank() && it != book.bookUrl }
+            ?.let { AiChapterFixService.cancelForBook(it) }
         ReadBook.book = book
         readRecord.bookName = book.name
         readRecord.readTime = appDb.readRecordDao.getReadTime(book.name) ?: 0
@@ -210,6 +215,7 @@ object ReadBook : CoroutineScope by MainScope() {
         ) {
             durChapterIndex = progress.durChapterIndex
             durChapterPos = progress.durChapterPos
+            rescheduleAiChapterFix()
             saveRead()
             clearTextChapter()
             callBack?.upContent()
@@ -429,21 +435,19 @@ object ReadBook : CoroutineScope by MainScope() {
     }
 
     /**
-     * 章节切换的统一钩子：停掉还在跑的「下一章自动 AI 分析」。
-     * 手动翻页、进度条/目录跳章、朗读自动切章都会经过这里；不取消的话，
-     * 分析结果会在切章后才写回，把正在朗读的章节正文改掉并从章首重读。
+     * 章节切换的统一钩子：先停掉上一章预热出来、还没跑完的自动分析（不写回、不落盘），
+     * 再按新章号重新排一轮。手动翻页、进度条/目录跳章、朗读自动切章都会经过这里。
+     * 调度在单例服务里完成，锁屏、关屏、阅读界面销毁都不受影响。
      */
-    private fun cancelPendingAutoFix() {
-        book?.bookUrl?.takeIf { it.isNotBlank() }?.let {
-            io.legado.app.service.AiChapterFixService.cancelAutoJob(it)
-        }
+    private fun rescheduleAiChapterFix() {
+        AiChapterFixService.onChapterChanged()
     }
 
     fun moveToNextChapter(upContent: Boolean, upContentInPlace: Boolean = true): Boolean {
         if (durChapterIndex < simulatedChapterSize - 1) {
             durChapterPos = 0
             durChapterIndex++
-            cancelPendingAutoFix()
+            rescheduleAiChapterFix()
             clearExpiredChapterLoadingJob()
             prevTextChapter = curTextChapter
             curTextChapter = nextTextChapter
@@ -479,7 +483,7 @@ object ReadBook : CoroutineScope by MainScope() {
         if (durChapterIndex < simulatedChapterSize - 1) {
             durChapterPos = 0
             durChapterIndex++
-            cancelPendingAutoFix()
+            rescheduleAiChapterFix()
             clearExpiredChapterLoadingJob()
             prevTextChapter = curTextChapter
             curTextChapter = nextTextChapter
@@ -516,7 +520,7 @@ object ReadBook : CoroutineScope by MainScope() {
         if (durChapterIndex > 0) {
             durChapterPos = if (toLast) prevTextChapter?.lastReadLength ?: Int.MAX_VALUE else 0
             durChapterIndex--
-            cancelPendingAutoFix()
+            rescheduleAiChapterFix()
             clearExpiredChapterLoadingJob()
             nextTextChapter = curTextChapter
             curTextChapter = prevTextChapter
@@ -591,7 +595,7 @@ object ReadBook : CoroutineScope by MainScope() {
             clearTextChapter()
             if (upContent) callBack?.upContent()
             durChapterIndex = index
-            cancelPendingAutoFix()
+            rescheduleAiChapterFix()
             ReadBook.durChapterPos = durChapterPos
             saveRead()
             loadContent(resetPageOffset = true) {

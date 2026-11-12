@@ -88,7 +88,7 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
             }
 
             bindSummaryToValue("audioPreDownloadNum", "1")
-            bindSummaryToValue("audioCacheCleanTime", "10")
+            bindSummaryToValue("audioCacheCleanTime", "2000")
             bindSummaryToValue(PreferKey.sysTtsSynthesizeTimeout, "120")
             bindSummaryToValue(PreferKey.ttsRetryCount, "3")
 

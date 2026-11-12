@@ -1023,7 +1023,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
     val audioCacheCleanTime: Long
         get() {
             val str = appCtx.getPrefString("audioCacheCleanTime")
-            val minutes = str?.toLongOrNull() ?: 10L
+            val minutes = str?.toLongOrNull() ?: 2000L
             return minutes * 60 * 1000L
         }
 

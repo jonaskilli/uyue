@@ -148,6 +148,21 @@ abstract class BaseReadAloudService : BaseService(),
         /** 0.05 秒静音 WAV 文件大小（8000Hz 单声道 16bit） */
         const val SILENT_SOUND_SIZE = 844L
 
+        /** 保留水位：音频文件不超过这么多就完全不清，超出也只删多出来的那部分 */
+        const val AUDIO_CACHE_KEEP_FLOOR = 2000
+
+        /** 单次最多删多少个：历史缓存堆积过多时不做一次性全删 */
+        const val AUDIO_CACHE_MAX_PER_RUN = 2000
+
+        /** 每删多少个让出一次，给朗读 / AI 章节分析留出磁盘 IO 空隙 */
+        const val AUDIO_CACHE_BATCH_SIZE = 50
+
+        /** 批间间歇（毫秒），摊薄删除时的磁盘 IO */
+        const val AUDIO_CACHE_BATCH_DELAY_MS = 1000L
+
+        /** 单次清理的时间预算（毫秒），到点收工，剩下的下次继续 */
+        const val AUDIO_CACHE_MAX_DURATION_MS = 60_000L
+
         /**
          * 生成指定时长的静音 WAV 文件字节数组
          * 默认 50ms，8000Hz 单声道 16bit PCM
