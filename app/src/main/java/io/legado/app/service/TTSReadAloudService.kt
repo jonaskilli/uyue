@@ -363,11 +363,22 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // 必须**无条件** complete：doSynthesizeText 若抛异常（而非返回 null），
                 // 一旦跳过 complete，持有者与所有等待方就会永久挂在 mine.await() 上；
                 // 且裸 SupervisorJob 子协程的未捕获异常会走默认 handler 直接崩应用。
-                val result = runCatching {
+                //
+                // 11-13 关键修正：`runCatching` 会把 CancellationException 一并吞成 null，
+                // 调用方拿到 null 就判「合成失败」并写静音占位——于是「用户点停止 /
+                // 翻页 / 切章」这类正常的主动取消，会把在途那几段永久静音
+                // （真机日志：stop → onDestroy → 「TTS合成异常 Job was cancelled」→ 静音占位）。
+                // 取消必须原样抛出，让调用方走取消分支而不是失败分支。
+                val result = try {
                     doSynthesizeText(text, utteranceId, index, chapterTitle, rawText)
-                }.onFailure {
-                    AppLog.put("TTS合成异常\n${it.localizedMessage}", it)
-                }.getOrNull()
+                } catch (e: CancellationException) {
+                    inFlightSyntheses.remove(cacheKey)
+                    mine.completeExceptionally(e)
+                    throw e
+                } catch (e: Exception) {
+                    AppLog.put("TTS合成异常\n${e.localizedMessage}", e)
+                    null
+                }
                 inFlightSyntheses.remove(cacheKey)
                 mine.complete(result)
             }
@@ -528,8 +539,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     "TTS合成失败，超过最大重试次数${AppConfig.ttsRetryCount}次，文本：$text"
                 )
             }
-            val fileName = getFileNameHelper(chapterTitle, rawText, index)
-            if (!hasSpeakFile(fileName)) createSilentSound(fileName)
+            val fileName = silentPlaceholderName(rawText, chapterTitle, index)
             getSpeakFileAsMd5(fileName)
         }
     }
@@ -605,20 +615,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         try {
                             synthesizeSingle(i) ?: run {
                                 AppLog.put("TTS合成失败，使用静音文件占位: index=$i")
-                                val fileName = getFileNameHelper(chapterTitle, rawText, i)
-                                if (!hasSpeakFile(fileName)) createSilentSound(fileName)
-                                getSpeakFileAsMd5(fileName)
+                                // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
+                                getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
                             }
                         } catch (e: Exception) {
-                            when (e) {
-                                is CancellationException -> throw e
-                                else -> {
-                                    AppLog.put("TTS合成异常，使用静音文件占位: index=$i, ${e.message}")
-                                    val fileName = getFileNameHelper(chapterTitle, rawText, i)
-                                    if (!hasSpeakFile(fileName)) createSilentSound(fileName)
-                                    getSpeakFileAsMd5(fileName)
-                                }
-                            }
+                            // 11-13：主动停止/翻页/切章导致的协程取消**不是合成失败**，
+                            // 绝不能写静音占位——此前统一走 withDefault 的静音兜底，
+                            // 真机日志实测「用户点停止 → onDestroy 取消 → 写静音占位」，
+                            // 那几段就永久哑了（占位文件写进正式缓存路径，重读也命中静音）。
+                            if (e is CancellationException) throw e
+                            AppLog.put("TTS合成异常，使用静音文件占位: index=$i, ${e.message}")
+                            // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
+                            getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
                         }
                     }
                 }
@@ -1327,6 +1335,23 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private fun createSilentSound(fileName: String) {
         val file = createSpeakFile(fileName)
         file.writeBytes(BaseReadAloudService.generateSilentWavBytes(50))
+    }
+
+    /**
+     * 合成失败时的静音占位文件名。
+     *
+     * 必须与正式缓存**文件名不同**：正式缓存键由 [getCacheFileForText] 生成，
+     * 一旦把静音写进同一个名字，这段文字以后每次播放都会「缓存命中」到静音——
+     * 重读、重进章节、清了重下都救不回来（11-13 真机实锤：index=1/29 已写坏）。
+     *
+     * 这里加 `_silent` 后缀，与正式文件的纯 MD5 名字不冲突：
+     * 播放队列照常用它占位（不会卡进度），但下一轮合成仍判定「无正式缓存」并重新请求引擎。
+     */
+    private fun silentPlaceholderName(rawText: String, chapterTitle: String, index: Int): String {
+        val name = getFileNameHelper(chapterTitle, rawText, index) + "_silent"
+        val file = File("${ttsFolderPath}$name.wav")
+        if (!file.exists()) createSilentSound(name)
+        return name
     }
 
     private fun purifySpeakText(text: String): String {

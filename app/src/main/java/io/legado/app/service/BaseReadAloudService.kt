@@ -1723,7 +1723,8 @@ abstract class BaseReadAloudService : BaseService(),
                 newReadAloud(
                     intent.getBooleanExtra("play", true),
                     intent.getIntExtra("pageIndex", ReadBook.durPageIndex),
-                    intent.getIntExtra("startPos", 0)
+                    intent.getIntExtra("startPos", 0),
+                    intent.getBooleanExtra("fromPageTurn", false)
                 )
             }
 
@@ -1741,7 +1742,7 @@ abstract class BaseReadAloudService : BaseService(),
         return super.onStartCommand(intent, flags, startId)
     }
 
-    private fun newReadAloud(play: Boolean, pageIndex: Int, startPos: Int) {
+    private fun newReadAloud(play: Boolean, pageIndex: Int, startPos: Int, fromPageTurn: Boolean = false) {
         execute(executeContext = Dispatchers.IO) {
             val textChapter = ReadBook.curTextChapter ?: return@execute
             if (!textChapter.isCompleted) {
@@ -1841,6 +1842,7 @@ abstract class BaseReadAloudService : BaseService(),
 
                     if (!gengxinResuming && !singleParagraphMode && !continueFromParagraph
                         && shouldSkipCurrentParagraph && !toLast && !pageHasSingleReadableParagraph
+                        && !fromPageTurn
                         && nowSpeak < contentList.size
                     ) {
                         if (nowSpeak != 0) {

@@ -611,7 +611,8 @@ object ReadBook : CoroutineScope by MainScope() {
                 if (scrollPageAnim && pageChanged) {
                     ReadAloud.pause(appCtx)
                 } else {
-                    readAloud(!BaseReadAloudService.pause)
+                    // 翻页跟随：落点段还没读过，必须从段首照读（不再跳过当前段）
+                    readAloud(!BaseReadAloudService.pause, fromPageTurn = true)
                 }
             }
         }
@@ -621,12 +622,15 @@ object ReadBook : CoroutineScope by MainScope() {
 
     /**
      * 朗读
+     *
+     * @param fromPageTurn 是否由「翻页跟随」触发（curPageChanged）。
+     *   翻页时落点段尚未朗读，服务端不应按「接着上次听」的语义跳过它。
      */
-    fun readAloud(play: Boolean = true, startPos: Int = 0) {
+    fun readAloud(play: Boolean = true, startPos: Int = 0, fromPageTurn: Boolean = false) {
         book ?: return
         val textChapter = curTextChapter ?: return
         if (textChapter.isCompleted) {
-            ReadAloud.play(appCtx, play, startPos = startPos)
+            ReadAloud.play(appCtx, play, startPos = startPos, fromPageTurn = fromPageTurn)
         }
     }
 

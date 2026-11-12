@@ -59,7 +59,16 @@ object ReadAloud {
          * 从当前段落开头开始连续朗读：播完当前段不停止，继续朗读后续段落（可跨章节）。
          * 与 [singleParagraph] 互斥，两者同时为 true 时以单段模式为准。
          */
-        continueFromParagraph: Boolean = false
+        continueFromParagraph: Boolean = false,
+        /**
+         * 本次播放是「翻页跟随」触发的（ReadBook.curPageChanged → readAloud）。
+         *
+         * 与用户主动点朗读/长按小喇叭不同：翻页是朗读自己在往前走，落点段
+         * **还没有被读过**，必须从段首照读。此前没有这个区分，跳段判断只看
+         * `nowSpeak != 0`，于是每翻一页都把该页首段整段跳过（11-13 真机日志：
+         * 5 次翻页 5 次「nowSpeak!=0，跳过当前段」，用户实报「每页缺一段」）。
+         */
+        fromPageTurn: Boolean = false
     ) {
         postEvent(EventBus.READ_ALOUD_STARTING, true)
         val intent = Intent(context, aloudClass)
@@ -69,6 +78,7 @@ object ReadAloud {
         intent.putExtra("startPos", startPos)
         intent.putExtra("singleParagraph", singleParagraph)
         intent.putExtra("continueFromParagraph", continueFromParagraph)
+        intent.putExtra("fromPageTurn", fromPageTurn)
         LogUtils.d("ReadAloud", intent.toString())
         try {
             context.startForegroundServiceCompat(intent)
