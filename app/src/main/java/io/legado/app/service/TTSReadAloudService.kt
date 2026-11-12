@@ -569,6 +569,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 已提交到TTS引擎的请求继续完成并写入缓存，
         // 新章节合成时检查缓存命中则直接复用。
         preloadJob?.cancel()
+        // 11-13：翻页/重新定位时同步掐掉引擎在途请求。
+        // 此前只 cancel 协程，撤不掉已提交给 TTS 引擎的那笔——UTTS 的
+        // onSynthesizeText 是 runBlocking 串行队列，旧段网络耗时（2~8s）期间
+        // 新段只能干等（真机日志：翻页后新段 onStart 迟 4s+）。
+        // textToSpeech.stop() 让引擎侧 onCancel 掐掉在途合成，新段立即上队。
+        // 注意只在此处 stop：onDestroy/pauseReadAloud 各有自己的 stop 时机。
+        textToSpeech?.runCatching { stop() }
         playErrorNo = 0
         itemRetryPending = false
 
