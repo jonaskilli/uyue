@@ -166,6 +166,7 @@ object AiChapterFixService {
         ui: FixUi? = null
     ): Job? {
         if (startIndex >= ReadBook.chapterSize) {
+            AppLog.put("AI处理章节: 后面没有章节了")
             if (!silent) ui?.onFinish("后面没有章节了")
             return null
         }
@@ -178,6 +179,7 @@ object AiChapterFixService {
         val job: Job
         synchronized(jobLock) {
             if (runningJob?.isActive == true) {
+                AppLog.put("AI处理章节: 上一个处理任务还没结束，本次跳过")
                 if (!silent) ui?.onFinish("上一个AI处理任务还没结束")
                 return null
             }
@@ -194,15 +196,10 @@ object AiChapterFixService {
                 // 完成日志写清「哪本书 / 从第几章起 / 结果」，便于在应用日志里核对是否被处理
                 val logMessage =
                     "AI处理章节: 《${book.name}》从第 ${startIndex + 1} 章起 → ${result.message}"
-                if (silent) {
-                    // 自动任务没有界面回调：日志与全局提示一起出，
-                    // 锁屏、关屏、阅读界面销毁时也能看到处理结果
-                    AppLog.put(logMessage, toast = true)
-                } else {
-                    // 手动任务的提示由界面等待框回调给出，避免弹两次
-                    AppLog.put(logMessage)
-                    uiRef?.get()?.onFinish(result.message)
-                }
+                // 只写日志，不弹任何提示：想看结果自己去应用日志里查
+                AppLog.put(logMessage)
+                // 手动任务的界面回调只负责收起等待框，不再 toast
+                if (!silent) uiRef?.get()?.onFinish(result.message)
             }
             runningJob = job
             if (silent) registerAutoJob(url, job)

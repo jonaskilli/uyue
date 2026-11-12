@@ -785,7 +785,7 @@ class ReadBookActivity : BaseReadBookActivity(),
         silent: Boolean
     ) {
         val startTitle = appDb.bookChapterDao.getChapter(book.bookUrl, startIndex)?.title.orEmpty()
-        // 界面只负责等待框与提示；任务在单例服务的进程级作用域里跑，
+        // 界面只负责等待框；任务在单例服务的进程级作用域里跑，
         // 锁屏、关屏、阅读界面销毁都不会中断它
         val waitDialog = if (silent) null else {
             WaitDialog(this).setText("AI处理《$startTitle》…").apply {
@@ -800,10 +800,8 @@ class ReadBookActivity : BaseReadBookActivity(),
                 }
 
                 override fun onFinish(message: String) {
-                    runOnUiThread {
-                        runCatching { dialog.dismiss() }
-                        toastOnUi(message)
-                    }
+                    // 不弹提示，只收起等待框；结果统一写进应用日志
+                    runOnUiThread { runCatching { dialog.dismiss() } }
                 }
             }
         }
@@ -811,7 +809,7 @@ class ReadBookActivity : BaseReadBookActivity(),
             book, template, startIndex, force, silent, ui
         )
         if (job == null) {
-            // 被守卫挡住或后面没有章节：提示已由 FixUi.onFinish 给出
+            // 被守卫挡住或后面没有章节：服务已写日志，这里只收起等待框
             runCatching { waitDialog?.dismiss() }
         } else {
             // 返回键可中断这一次任务，但不影响其它切章调度
