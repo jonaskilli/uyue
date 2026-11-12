@@ -115,11 +115,11 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     /**
-     * 禁止书源弹出任何验证：图片验证码对话框（`java.getVerificationCode`）与验证网页
-     * （`java.startBrowserAwait`、带验证标记的 startBrowser）一律不弹。
+     * 禁止弹出内置浏览器（书源管理菜单「禁止弹出验证/内置浏览器」）。
      *
-     * 开了之后需要验证码才能过的源会直接失败（规则里抛异常），不会再打断操作。
-     * 注意：视频播放走的是 `startBrowser(videoMode=true)`，**不属于验证**，不受这个开关影响。
+     * 勾选后：图片验证码对话框、验证网页、书源规则里的 java.startBrowser，
+     * 以及视频播放兜底拉起的 videoMode 浏览器，一律不弹（规则里抛异常，不再打断操作）；
+     * 不勾选则全部照旧。需要验证码才能过的源在勾选后会直接失败。
      */
     var disableSourceVerification: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.disableSourceVerification, false)

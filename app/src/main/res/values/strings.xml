@@ -1547,7 +1547,7 @@
     <string name="ai_set_api">设置 AI 接口</string>
     <string name="ai_set_api_hint">接口@@模型@@密钥（3 段一组，可多组追加轮换）</string>
     <string name="ai_verify_source">AI 校验并修正</string>
-    <string name="disable_source_verification">禁止弹出验证</string>
+    <string name="disable_source_verification">禁止弹出验证/内置浏览器</string>
     <string name="exclude_video_source">不搜索视频源</string>
     <string name="replace_domain">替换域名</string>
     <string name="replace_domain_old">原域名（如 https://old.com）</string>

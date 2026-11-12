@@ -428,22 +428,26 @@ object HttpTtsAudioCache {
             val filePrefix = "${String.format("%04d", chapterIndex + 1)}_$chapterTitle"
             val wavFile = File(outputFolder, "${filePrefix}.wav")
 
-            // 混音分支：开启音效混音或背景音乐混音时，先混音再决定输出格式
+            // 两类音效各管各的：正则音效看「音效模式」，AI 音效只看「启用AI音效」开关
             val effectMode = if (book.bookUrl.isNotBlank())
                 AppConfig.getEffectiveSoundEffectMode(book.bookUrl) else AppConfig.soundEffectMode
-            val wantEffect = AppConfig.mixSoundEffectOnMerge && service != null && effectMode != "off"
+            val wantRuleEffect = AppConfig.mixSoundEffectOnMerge && service != null && effectMode != "off"
+            val wantAiEffect = AppConfig.mixSoundEffectOnMerge && AppConfig.aiEffectEnabled
             val wantBgm = AppConfig.mixBgmOnMerge
-            if ((wantEffect || wantBgm) && tryMixChapter(
+            if ((wantRuleEffect || wantAiEffect || wantBgm) && tryMixChapter(
                     book = book,
                     chapter = chapter,
                     chapterIndex = chapterIndex,
                     audioFiles = audioFiles,
                     outputFolder = outputFolder,
                     filePrefix = filePrefix,
-                    withEffects = wantEffect
+                    withRuleEffects = wantRuleEffect,
+                    withAiEffects = wantAiEffect
                 )
             ) {
-                AppLog.put("混音合并完成(音效=$wantEffect, 背景音乐=$wantBgm): ${wavFile.name}")
+                AppLog.put(
+                    "混音合并完成(正则音效=$wantRuleEffect, AI音效=$wantAiEffect, 背景音乐=$wantBgm): ${wavFile.name}"
+                )
                 // 开启「保存为 M4A」：把混音完成的 WAV 转成 M4A，否则保留 WAV
                 if (AppConfig.convertToMp3AfterMerge) {
                     val m4aFile = File(outputFolder, "${filePrefix}.m4a")
@@ -529,7 +533,11 @@ object HttpTtsAudioCache {
      * 背景音乐轨道由 [BgmExportPlanner] 离线规划，音量取 [AppConfig.bgmVolume]，
      * 与朗读播放时听到的音量一致。
      *
-     * @param withEffects 是否叠加音效；false 时只混背景音乐（避免无谓下载音效文件）
+     * 两类音效各管各的：正则音效只受「音效模式」约束，AI 音效只看「启用AI音效」，
+     * 与播放时的 checkRuleEffects / checkAiEffects 保持同一套语义。
+     *
+     * @param withRuleEffects 是否叠加正则替换规则音效
+     * @param withAiEffects 是否叠加 AI 识别音效（读已落盘的 AiEffectStore 记录）
      * @return true 表示混音成功并写出文件
      */
     private suspend fun tryMixChapter(
@@ -539,7 +547,8 @@ object HttpTtsAudioCache {
         audioFiles: List<File>,
         outputFolder: File,
         filePrefix: String,
-        withEffects: Boolean
+        withRuleEffects: Boolean,
+        withAiEffects: Boolean
     ): Boolean {
         return withContext(Dispatchers.IO) {
             val bgmWorkDir = File(outputFolder, ".bgm_tmp_${System.currentTimeMillis()}")
@@ -549,8 +558,8 @@ object HttpTtsAudioCache {
                     AppLog.put("混音: 段落数(${segments.size})与音频数(${audioFiles.size})不一致，跳过混音")
                     return@withContext false
                 }
-                // AI 音效识别记录：paraIndex -> 该段落选中的音效
-                val aiEffectRecords = if (withEffects && AppConfig.aiEffectMixOnMerge) {
+                // AI 音效识别记录：paraIndex -> 该段落选中的音效（只由「启用AI音效」决定）
+                val aiEffectRecords = if (withAiEffects) {
                     AiEffectStore.load(book.bookUrl, chapterIndex)
                         .associateBy { it.paraIndex }
                 } else {
@@ -559,30 +568,38 @@ object HttpTtsAudioCache {
                 val aiEffectPaths = mutableSetOf<String>()
                 val segInfos = mutableListOf<AudioConcatUtil.SegmentInfo>()
                 segments.forEachIndexed { index, text ->
-                    if (!withEffects) {
-                        // 不叠音效时无需解析/下载音效，字符数仅用于占位
+                    // 两类音效都不混时无需解析文本，字符数仅用于占位
+                    if (!withRuleEffects && !withAiEffects) {
                         segInfos.add(AudioConcatUtil.SegmentInfo(text.length, emptyList()))
                         return@forEachIndexed
                     }
-                    // 短段落同样用上一段衔接后再匹配，与朗读时保持一致
-                    val (clean, effects) = BaseReadAloudService.extractSoundEffectsForMerge(
-                        text,
-                        segments.getOrNull(index - 1).orEmpty()
-                    )
-                    val segEffects = effects.map {
-                        AudioConcatUtil.SegmentEffect(it.fileName, it.charOffset)
-                    }.toMutableList()
-                    // AI 音效按净字数的比例换算偏移，与朗读时的位置序号/at 一致
-                    aiEffectRecords[index]?.effects?.forEach { pick ->
-                        if (pick.path.isBlank()) return@forEach
-                        val ratio = AiEffectAnalyzer.ratioOfPos(text, pick.pos, pick.at)
-                        segEffects.add(
-                            AudioConcatUtil.SegmentEffect(
-                                pick.path,
-                                (clean.length * ratio).toInt().coerceIn(0, clean.length)
-                            )
+                    // 正则音效：短段落带上一段衔接后再匹配，与朗读时保持一致。
+                    // 音效模式关闭时用原文当净文本，AI 音效的偏移换算仍然准确。
+                    var clean = text
+                    val segEffects = mutableListOf<AudioConcatUtil.SegmentEffect>()
+                    if (withRuleEffects) {
+                        val parsed = BaseReadAloudService.extractSoundEffectsForMerge(
+                            text,
+                            segments.getOrNull(index - 1).orEmpty()
                         )
-                        aiEffectPaths.add(pick.path)
+                        clean = parsed.first
+                        parsed.second.forEach {
+                            segEffects.add(AudioConcatUtil.SegmentEffect(it.fileName, it.charOffset))
+                        }
+                    }
+                    // AI 音效：按净字数比例换算偏移，与朗读时的位置序号/at 一致
+                    if (withAiEffects) {
+                        aiEffectRecords[index]?.effects?.forEach { pick ->
+                            if (pick.path.isBlank()) return@forEach
+                            val ratio = AiEffectAnalyzer.ratioOfPos(text, pick.pos, pick.at)
+                            segEffects.add(
+                                AudioConcatUtil.SegmentEffect(
+                                    pick.path,
+                                    (clean.length * ratio).toInt().coerceIn(0, clean.length)
+                                )
+                            )
+                            aiEffectPaths.add(pick.path)
+                        }
                     }
                     segInfos.add(
                         AudioConcatUtil.SegmentInfo(
@@ -641,7 +658,8 @@ object HttpTtsAudioCache {
         audioFiles: List<File>,
         outputFolder: File,
         filePrefix: String,
-        withEffects: Boolean = true
+        withRuleEffects: Boolean = true,
+        withAiEffects: Boolean = false
     ): Boolean {
         return tryMixChapter(
             book = book,
@@ -650,7 +668,8 @@ object HttpTtsAudioCache {
             audioFiles = audioFiles,
             outputFolder = outputFolder,
             filePrefix = filePrefix,
-            withEffects = withEffects
+            withRuleEffects = withRuleEffects,
+            withAiEffects = withAiEffects
         )
     }
 
