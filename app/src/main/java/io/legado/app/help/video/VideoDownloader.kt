@@ -222,6 +222,14 @@ object VideoDownloader {
     // 而磁盘上的 .mp4 / .part 还躺在那里没人认领。这里落一份索引，
     // 下次启动按索引 + 磁盘实际文件恢复，中断的还能接着下。
     private val indexFile: File by lazy { File(appCtx.filesDir, "video_download/tasks.json") }
+
+    /**
+     * 外部备份：跟视频文件一起放在 Download/保存视频/ 下。
+     * 内部那份在 appCtx.filesDir，清数据、卸载重装或系统清理就没了；这份随文件走，
+     * 用户也能在文件管理器里直接看到。两份由 [saveNow] 同步写、由 [restore] 合并恢复。
+     */
+    private val backupFile: File by lazy { File(rootDir(), "下载记录.json") }
+
     private val saveLock = Any()
     private var saveScheduled = false
 
@@ -229,6 +237,18 @@ object VideoDownloader {
     private var restored = false
 
     private val restoreLock = Any()
+
+    /** 读一份记录文件；文件不存在、为空或损坏时返回空列表，绝不让备份问题影响主流程 */
+    private fun readRecords(file: File): List<org.json.JSONObject> {
+        val text = runCatching { file.readText() }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: return emptyList()
+        val arr = runCatching { org.json.JSONArray(text) }.getOrNull() ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+    }
+
+    /** 一条记录的去重键：书 + 章节地址 + 集号（与 [watchKey] 的语义一致） */
+    private fun recordKey(o: org.json.JSONObject): String =
+        o.optString("bookUrl") + "|" + o.optString("chapterUrl") + "|" + o.optInt("index", 0)
 
     /** 恢复上次的下载记录（幂等，只跑一次）。App 启动与进入播放页都会调用。 */
     fun restoreIfNeeded() {
@@ -240,11 +260,18 @@ object VideoDownloader {
     }
 
     private fun restore() {
-        val text = runCatching { indexFile.readText() }.getOrNull()?.takeIf { it.isNotBlank() }
-            ?: return
-        val arr = runCatching { org.json.JSONArray(text) }.getOrNull() ?: return
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
+        // 两份记录对比合并去重：内部优先，外部备份独有的补进来。
+        // 内部那份被清掉或损坏时，外部备份就是恢复来源。
+        val inner = readRecords(indexFile)
+        val outer = readRecords(backupFile)
+        val merged = LinkedHashMap<String, org.json.JSONObject>()
+        inner.forEach { merged[recordKey(it)] = it }
+        outer.forEach { merged.putIfAbsent(recordKey(it), it) }
+        if (merged.isEmpty()) return
+        AppLog.put(
+            "下载记录: 内部 ${inner.size} 条、外部备份 ${outer.size} 条，合并去重后 ${merged.size} 条"
+        )
+        for (o in merged.values) {
             val book = appDb.bookDao.getBook(o.optString("bookUrl")) ?: continue
             val source = appDb.bookSourceDao.getBookSource(o.optString("sourceUrl")) ?: continue
             val chapterUrl = o.optString("chapterUrl")
@@ -304,6 +331,9 @@ object VideoDownloader {
             saveCoverAsync(task)
         }
         publishStates()
+        // 合并结果立即回写两份：内部那份被清掉时，这一次就把记录补回来，
+        // 也让外部备份与内部保持同一份快照
+        runCatching { saveNow() }
     }
 
     /** 状态变化后延迟落盘（进度更新很频繁，节流一下） */
@@ -335,9 +365,24 @@ object VideoDownloader {
                 }
             )
         }
-        indexFile.parentFile?.mkdirs()
-        indexFile.writeText(arr.toString())
+        val text = arr.toString()
+        writeRecord(indexFile, text)
+        // 外部备份写失败（没拿到外部存储权限、目录被手动删掉等）不能影响内部记录
+        runCatching { writeRecord(backupFile, text) }
+            .onFailure { AppLog.putDebug("下载记录: 外部备份写入失败 ${it.localizedMessage}") }
     }
+
+    /** 先写 .tmp 再改名：避免写到一半被杀进程，留下半截 JSON 导致整份记录读不出来 */
+    private fun writeRecord(file: File, text: String) {
+        file.parentFile?.mkdirs()
+        val tmp = File(file.path + ".tmp")
+        tmp.writeText(text)
+        if (!tmp.renameTo(file)) {
+            file.writeText(text)
+            tmp.delete()
+        }
+    }
+
     /** 同一来源的请求头，避免每次分段请求都重新构建 */
     private var cachedHeaders: Pair<String, Map<String, String>>? = null
     /** 正在写入的临时文件路径（下载队列与边看边存互斥同一选集） */
@@ -607,6 +652,8 @@ object VideoDownloader {
     fun deleteMp4(state: TaskState) {
         File(dirOf(state.task), "${state.title}.mp4").delete()
         removeState(state.key)
+        // 不等 800ms 节流：删除立即同步到内部记录和外部备份，两边一起删
+        scope.launch { runCatching { saveNow() } }
     }
 
     // ---------- 已缓存视频（按视频分组管理） ----------
@@ -847,6 +894,8 @@ object VideoDownloader {
             }
             // 文件真的删完了再刷新一次统计，避免把"还没删完"的目录算进已缓存大小
             refreshVideoGroups()
+            // 删除立即同步到内部记录和外部备份，不等 800ms 节流窗口
+            runCatching { saveNow() }
         }
         return targets.size
     }
@@ -878,6 +927,9 @@ object VideoDownloader {
                     .onFailure { AppLog.put("删除视频缓存失败：$dirName", it) }
             }
             refreshVideoGroups()
+            // 外部备份在保存目录根部、不在被删的子目录里；这里立即回写两份，
+            // 让删除后的记录两边一致（备份不会把已删条目留在里面）
+            runCatching { saveNow() }
         }
         return keys.size
     }
