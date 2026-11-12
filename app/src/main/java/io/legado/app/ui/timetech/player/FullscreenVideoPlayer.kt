@@ -1850,7 +1850,7 @@ internal fun VideoPlayerPage(
                             val total = saved.sumOf { it.second }
                             context.toastOnUi(
                                 "已标记 ${saved.size} 个广告分片（${formatFileSize(total)}）\n" +
-                                    "已存进 保存视频/AI识别广告/，以后自动跳过"
+                                    "已存进 A保存视频/AI识别广告/，以后自动跳过"
                             )
                         } else {
                             context.toastOnUi("标记失败：未能读取分片，请稍候重试")

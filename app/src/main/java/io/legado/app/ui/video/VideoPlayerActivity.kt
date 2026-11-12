@@ -162,7 +162,7 @@ class VideoPlayerActivity : VMBaseActivity<ActivityVideoPlayerBinding, VideoPlay
             startActivity(SourceVideoPlayerActivity.createIntent(this, book.bookUrl, rawIndex))
             finish()
         }
-        // 下载选集：多选后拼成完整视频保存到 Download/保存视频/<视频名>/
+        // 下载选集：多选后拼成完整视频保存到 Download/A保存视频/<视频名>/
         binding.ivDownload.setOnClickListener { showDownloadDialog() }
         if (VideoPlay.book != null) {
             showBook(VideoPlay.book!!)
@@ -227,7 +227,7 @@ class VideoPlayerActivity : VMBaseActivity<ActivityVideoPlayerBinding, VideoPlay
                     toastOnUi("未选择任何选集")
                 } else {
                     VideoDownloader.enqueue(tasks)
-                    toastOnUi("已加入下载队列 ${tasks.size} 集\n保存到 Download/保存视频/${book.name}")
+                    toastOnUi("已加入下载队列 ${tasks.size} 集\n保存到 Download/A保存视频/${book.name}")
                 }
             }
             .setNegativeButton(R.string.cancel, null)

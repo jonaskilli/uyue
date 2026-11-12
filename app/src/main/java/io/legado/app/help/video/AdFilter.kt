@@ -1,7 +1,6 @@
 package io.legado.app.help.video
 
 import android.os.Build
-import android.os.Environment
 import android.os.FileObserver
 import android.os.Handler
 import android.os.Looper
@@ -36,7 +35,7 @@ import kotlin.math.min
  * 只认 size 会误杀——固定码率源里大量正片分片字节数接近，所以**必须**走到哈希确认才判广告。
  *
  * ## 样本 folder
- * `Download/保存视频/AI识别广告/`，每个广告分片存成一个独立文件，**原始字节不做任何加工**，
+ * `Download/A保存视频/AI识别广告/`，每个广告分片存成一个独立文件，**原始字节不做任何加工**，
  * 后缀统一改成 `.mp4`（仅改名，方便在文件管理器里按视频缩略图查看/整理）。
  *
  * **删除 folder 里的文件即撤销对应规则**——这是刻意设计的可纠误方式，
@@ -70,7 +69,8 @@ object AdFilter {
         SIZE_ONLY,
     }
 
-    const val ROOT_NAME = "保存视频"
+    /** 与 VideoDownloader 共用同一个保存根目录，改名时只改一处 */
+    const val ROOT_NAME = VideoDownloader.SAVE_ROOT_NAME
     const val DIR_NAME = "AI识别广告"
     private const val INDEX_FILE = ".ad-index.json"
 
@@ -123,11 +123,8 @@ object AdFilter {
 
     // ---------------------------------------------------------------- 目录
 
-    /** `Download/保存视频/AI识别广告`。与 [VideoDownloader] 共用一个根，权限机制一致 */
-    fun dir(): File = File(
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-        "$ROOT_NAME/$DIR_NAME"
-    )
+    /** `Download/A保存视频/AI识别广告`。与 [VideoDownloader] 共用一个根，权限机制一致 */
+    fun dir(): File = File(VideoDownloader.saveRoot(), DIR_NAME)
 
     /** 索引侧车文件 */
     private fun indexFile(): File = File(dir(), INDEX_FILE)
