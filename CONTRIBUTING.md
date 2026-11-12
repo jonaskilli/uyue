@@ -211,3 +211,33 @@ app/build.gradle → storeFile file(RELEASE_STORE_FILE)
 1. 生成自己的密钥库，替换 `RELEASE_STORE_FILE` 与口令
 2. 将口令移出仓库（用 CI Secrets 或本地 `~/.gradle/gradle.properties`）
 3. 确认 `release-testkey.jks` 是否仍需保留（涉及上游签名兼容性）
+
+## 本仓库相对上游的改动范围
+
+U阅 自 2026-10-09 从上游 `5aa885e` 起步，**改动刻意保持最小**，便于随上游更新时低成本合并。
+
+### 代码改动（共 5 处）
+
+| 文件 | 改动 |
+|---|---|
+| `ServerConfigDialog.kt` | 修输入行 `Missing required view with ID: editText` 崩溃（改为直接持有 binding，不走 root.id 反查） |
+| `SourceLoginDialog.kt` | 同上，同类崩溃 |
+| `ReadView.kt` | 修左右滑翻页误触朗读面板：纵向手势判定由 `absY >= absX * 0.9f` 收紧为 1.5 倍 |
+| `LogUtils.kt` | 日志目录改存 `Download/uyue/logs`，无权限时回退私有缓存目录 |
+| `values/strings.xml`、`values-zh/strings.xml` | 应用名 `Z·阅读` → `U阅`，另补若干字符串资源 |
+
+### 非代码改动
+
+- 删除上游根目录的非源码文件（文档、脚本、朗读脚本、书源、音效库等，共 420 项）
+- 新增 CI 工作流、`CONTRIBUTING.md`、`scripts/`（钩子）
+
+### 明确没改的部分
+
+**UI 布局、图标、主题均未改动**，与上游一致。
+
+> 注意：用 `git diff` 对比上游时，`res/drawable/*.xml`、`res/layout/*.xml` 等大量文件会显示「有差异」，
+> 那**只是 CRLF/LF 换行符差异**，内容完全相同。判断真实改动时须加 `--ignore-cr-at-eol`：
+>
+> ```bash
+> git diff --ignore-cr-at-eol <上游提交>:<路径> <路径>
+> ```
