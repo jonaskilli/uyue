@@ -25,6 +25,7 @@ import kotlin.time.Duration.Companion.days
 @SuppressLint("SimpleDateFormat")
 @Suppress("unused")
 object LogUtils {
+    // 触发一次编译工作流，用于验证运行记录名称（验证后即可删除本行）。
     const val TIME_PATTERN = "yy-MM-dd HH:mm:ss.SSS"
     val logTimeFormat by lazy { SimpleDateFormat(TIME_PATTERN) }
 
