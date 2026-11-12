@@ -1785,7 +1785,12 @@ abstract class BaseReadAloudService : BaseService(),
                             textChapter.paragraphs[nowSpeak].chapterPosition
                 }
                 if (toLast) {
-                    toLast = false
+                    // 11-13：不再就地复位 toLast——下方主线程的跳段判断
+                    // （shouldSkipCurrentParagraph && !toLast）依赖此标志保护
+                    // 「回退到上一章末段」不被 moveToNextParagraph 跳过。
+                    // 此前过早复位：往回翻到末页只有一段时（nowSpeak=末段≠0），
+                    // 保护已失效，唯一段落被跳过 → 整页不读直接切下一章（真机实锤）。
+                    // 改为落点计算后由跳段判断处统一消费并复位（见 1825 行附近）。
                     readAloudNumber = textChapter.getLastParagraphPosition()
                     nowSpeak = (contentList.lastIndex - 1).coerceAtLeast(0)
                     if (page.paragraphs.size == 1) {
@@ -1831,7 +1836,11 @@ abstract class BaseReadAloudService : BaseService(),
                             LogUtils.d(TAG, "nowSpeak==0，直接朗读")
                         }
                     }
+                    // 11-13：toLast 的消费点在这里——跳段判断已带着 toLast=false 的
+                    // 语义完成（回退末段不跳），此刻才能安全复位。
+                    // 若此后仍为 true（理论上不会），保持让下次定位继续受保护。
                     gengxinResuming = false   // 重置标志
+                    if (toLast) toLast = false
                     // 开启状态：直接朗读，不做位置调整
                     isAutoSwitchingChapter = false
                     upTtsProgress(readAloudNumber + 1)
