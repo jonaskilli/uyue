@@ -160,6 +160,12 @@ android {
         androidTest.assets.srcDirs += files("$projectDir/schemas".toString())
     }
     lint {
+        // Release 构建不再跑 lintVital：AGP 默认在 assembleRelease 时强制 lint，
+        // 加上下面的 checkDependencies=true 会把 book/rhino 与全部 aar 依赖一起分析。
+        // 实测（run 43319578737，23m05s）lintVitalAnalyze 12m15s + lintVital 3m32s，
+        // 占掉整个打包 2/3 时间，而本项目自 10-09 起从未被它拦下过。
+        // 需要 lint 时手动跑 `./gradlew :app:lintAppRelease`。
+        checkReleaseBuilds false
         checkDependencies = true
     }
     tasks.withType(JavaCompile).tap {
