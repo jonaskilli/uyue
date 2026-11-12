@@ -1,15 +1,11 @@
 package io.legado.app.ui.about
 
 import android.os.Bundle
-import android.text.Spannable
-import android.text.SpannableString
-import android.text.style.ForegroundColorSpan
 import android.view.Menu
 import android.view.MenuItem
 import io.legado.app.R
 import io.legado.app.base.BaseActivity
 import io.legado.app.databinding.ActivityAboutBinding
-import io.legado.app.lib.theme.accentColor
 import io.legado.app.lib.theme.filletBackground
 import io.legado.app.utils.openUrl
 import io.legado.app.utils.share
@@ -28,19 +24,8 @@ class AboutActivity : BaseActivity<ActivityAboutBinding>() {
         supportFragmentManager.beginTransaction()
             .replace(R.id.fl_fragment, aboutFragment, fTag)
             .commit()
-        binding.tvAppSummary.post {
-            kotlin.runCatching {
-                val span = ForegroundColorSpan(accentColor)
-                val spannableString = SpannableString(binding.tvAppSummary.text)
-                val gzh = getString(R.string.legado_gzh)
-                val start = spannableString.indexOf(gzh)
-                spannableString.setSpan(
-                    span, start, start + gzh.length,
-                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-                )
-                binding.tvAppSummary.text = spannableString
-            }
-        }
+        // 自用版：简介里不再嵌「公众号」一类的品牌词，故不再给指定词染色。
+        // （原先靠 indexOf(legado_gzh) 定位，词一旦不存在会返回 -1 并把染色落到下标 0。）
     }
 
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {

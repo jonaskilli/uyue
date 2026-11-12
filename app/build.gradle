@@ -21,7 +21,7 @@ static def releaseTime() {
     return new Date().format("yy.MMddHH", TimeZone.getTimeZone("GMT+8"))
 }
 
-def name = "legado"
+def name = "U阅"
 def version = "3." + releaseTime()
 def gitCommitsText = 'git rev-list HEAD --count'.execute().text.trim()
 def gitCommits = gitCommitsText.isEmpty() ? 0 : Integer.parseInt(gitCommitsText)

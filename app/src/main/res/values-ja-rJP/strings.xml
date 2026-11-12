@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--App-->
-    <string name="app_name">Legado</string>
-    <string name="app_name_a">Legado·A</string>
-    <string name="receiving_shared_label">Legado·search</string>
-    <string name="tip_perm_request_storage">Legado needs storage access to find and read books. please go "App Settings" to allow "Storage permission".</string>
+    <string name="app_name">U阅</string>
+    <string name="app_name_a">U阅·A</string>
+    <string name="receiving_shared_label">U阅·search</string>
+    <string name="tip_perm_request_storage">U阅 needs storage access to find and read books. please go "App Settings" to allow "Storage permission".</string>
 
     <!--Other-->
     <string name="menu_backup">Home</string>
     <string name="menu_restore">Restore</string>
-    <string name="menu_import_old">Import Legado data</string>
+    <string name="menu_import_old">Import U阅 data</string>
     <string name="webdav_cache_backup">Offline cache book backup</string>
-    <string name="webdav_cache_backup_s">Export to local and back up to the exports directory under the legado folder</string>
+    <string name="webdav_cache_backup_s">Export to local and back up to the exports directory under the U阅 folder</string>
     <string name="backup_path">Backup to</string>
     <string name="select_backup_path">Please select a backup path.</string>
     <string name="menu_import_old_version">Import legacy data</string>
@@ -54,7 +54,7 @@
     <string name="custom_export_section">カスタムEPUBエクスポートの章</string>
     <string name="last_read">Last reading</string>
     <string name="update_log">What\'s new</string>
-    <string name="bookshelf_empty">The bookshelf is still empty. Search for books or add them from discovery! \n if you use it for the first time, please open legado.top get help!</string>
+    <string name="bookshelf_empty">The bookshelf is still empty. Search for books or add them from discovery! \n if you use it for the first time, please open U阅.top get help!</string>
     <string name="action_search">Search</string>
     <string name="action_download">Download</string>
     <string name="layout_list">List</string>
@@ -101,7 +101,7 @@
         \u3000\u3000 This is an open source reading software newly developed by Kotlin, welcome to join us.
     </string>
     <string name="app_share_description">
-        Legado (YueDu 3.0) download link：\n https://github.com/LegadoTeam/legado/releases
+
     </string>
     <string name="version_name">Version %s</string>
     <string name="pt_background_verification">Background-verification</string>
@@ -649,7 +649,7 @@
     <string name="app_folder_picker">App folder picker</string>
     <string name="app_file_picker">App file picker</string>
     <string name="a10_permission_toast">Android 10+ unable to read and write file due to permission restrictions</string>
-    <string name="add_to_text_context_menu_s">Long tap to display Legado·Search in the operation menu</string>
+    <string name="add_to_text_context_menu_s">Long tap to display U阅·Search in the operation menu</string>
     <string name="add_to_text_context_menu_t">Text operation display Search</string>
     <string name="record_log">Record log</string>
     <string name="log">Log</string>
@@ -691,7 +691,7 @@
     <string name="btn_default_s">Default</string>
     <string name="main_menu">Main menu</string>
     <string name="request_permission">Tap to grant permission</string>
-    <string name="tip_local_perm_request_storage">Legado needs Storage permission, please tap the "Grant Permission" button below, or go to "Settings"-"Application Permissions"-to open the required permission. If the permission is still not work, please tap "Select Folder" in the upper right corner to use the system folder picker.</string>
+    <string name="tip_local_perm_request_storage">U阅 needs Storage permission, please tap the "Grant Permission" button below, or go to "Settings"-"Application Permissions"-to open the required permission. If the permission is still not work, please tap "Select Folder" in the upper right corner to use the system folder picker.</string>
     <string name="alouding_disable">The selected text cannot be spoken in full text speech</string>
     <string name="read_body_to_lh">Extend to cutout</string>
     <string name="toc_updateing">Updating Chapters</string>
@@ -701,11 +701,11 @@
     <string name="contact">Contact</string>
     <string name="license">License</string>
     <string name="other">Other</string>
-    <string name="official_account">开源阅读</string>
+    <string name="official_account">U阅</string>
     <string name="follow_official_account">Follow WeChat Official Accounts</string>
     <string name="wechat">WeChat</string>
     <string name="thanks">Supporting me will be appreciated</string>
-    <string name="about_official_account">Official Accounts[开源阅读]</string>
+    <string name="about_official_account">Official Accounts[U阅]</string>
     <string name="source_auto_changing">Changing source</string>
     <string name="click_to_apply">Tap to join</string>
     <string name="middle">Middle</string>
@@ -745,7 +745,7 @@
     <string name="starting_download">Starting download</string>
     <string name="already_in_download">This book is already in Download list</string>
     <string name="click_to_open">Click to open</string>
-    <string name="follow_public_account_summary">Follow [开源阅读] to support me by clicking on ads</string>
+    <string name="follow_public_account_summary">Follow [U阅] to support me by clicking on ads</string>
     <string name="weChat_appreciation_code">WeChat Tipping Code</string>
     <string name="alipay">AliPay</string>
     <string name="alipay_red_envelope_search_code">AliPay red envelope search code</string>
@@ -753,7 +753,7 @@
     <string name="alipay_red_envelope_qr_code">AliPay red envelope QR code</string>
     <string name="alipay_payment_qr_code">AliPay QR code</string>
     <string name="qq_collection_qr_code">QQ Collection QR code</string>
-    <string name="contributors_summary">gedoor,Invinciblelee,Xwite etc. Checking in github for details</string>
+    <string name="contributors_summary">U阅 Checking in github for details</string>
     <string name="clear_cache_summary">Clear the cache of the downloaded books and fonts</string>
     <string name="default_cover">Default cover</string>
     <string name="restore_ignore">Bypass list</string>
@@ -776,7 +776,7 @@
     <string name="language">Language</string>
     <string name="import_rss_source">Import rss source</string>
     <string name="donate_summary">Your donation makes this app better</string>
-    <string name="about_summary">Wechat official account [开源阅读软件]</string>
+    <string name="about_summary">Wechat official account [U阅软件]</string>
     <string name="read_record">Read record</string>
     <string name="del_read_record">Delete Read record</string>
     <string name="read_record_summary">Read record summary</string>

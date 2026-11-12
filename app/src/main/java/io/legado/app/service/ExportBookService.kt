@@ -641,7 +641,7 @@ class ExportBookService : BaseService() {
         metadata.authors.add(Author(book.getRealAuthor()))//书籍的作者
         metadata.language = "zh"//数据的语言
         metadata.dates.add(Date())//数据的创建日期
-        metadata.publishers.add("Legado")//数据的创建者
+        metadata.publishers.add("U阅")//数据的创建者
         metadata.descriptions.add(book.getDisplayIntro())//书籍的简介
         //metadata.subjects.add("")//书籍的主题，在静读天下里面有使用这个分类书籍
         epubBook.metadata = metadata

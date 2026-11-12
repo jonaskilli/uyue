@@ -16,13 +16,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gedoor/legado.git"
+    "url": ""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/gedoor/legado/issues"
+    "url": ""
   },
-  "homepage": "https://github.com/gedoor/legado#readme"
+  "homepage": ""
 }

@@ -5,11 +5,6 @@ import io.legado.app.constant.AppConst
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.coroutine.Coroutine
-import io.legado.app.help.http.newCallResponse
-import io.legado.app.help.http.okHttpClient
-import io.legado.app.help.http.text
-import io.legado.app.utils.GSON
-import io.legado.app.utils.fromJsonObject
 import kotlinx.coroutines.CoroutineScope
 
 @Keep
@@ -24,29 +19,10 @@ object AppUpdateGitHub : AppUpdate.AppUpdateInterface {
             else -> AppConst.appInfo.appVariant
         }
 
-    private suspend fun getLatestRelease(): List<AppReleaseInfo> {
-        val lastReleaseUrl = if (checkVariant.isBeta()) {
-            "https://api.github.com/repos/LegadoTeam/legado/releases/tags/beta"
-        } else {
-            "https://api.github.com/repos/LegadoTeam/legado/releases/latest"
-        }
-        val res = okHttpClient.newCallResponse {
-            url(lastReleaseUrl)
-        }
-        if (!res.isSuccessful) {
-            throw NoStackTraceException("获取新版本出错(${res.code})")
-        }
-        val body = res.body.text()
-        if (body.isBlank()) {
-            throw NoStackTraceException("获取新版本出错")
-        }
-        return GSON.fromJsonObject<GithubRelease>(body)
-            .getOrElse {
-                throw NoStackTraceException("获取新版本出错 " + it.localizedMessage)
-            }
-            .gitReleaseToAppReleaseInfo()
-            .sortedByDescending { it.createdAt }
-    }
+    // 自用版：不再访问原版发布源（U阅 无对外发布渠道，也不该把用户引回上游）。
+    // 保留函数签名只为不牵动 AppUpdateInterface 与调用方。
+    private suspend fun getLatestRelease(): List<AppReleaseInfo> =
+        throw NoStackTraceException("自用版本不提供在线更新")
 
     override fun check(
         scope: CoroutineScope,
