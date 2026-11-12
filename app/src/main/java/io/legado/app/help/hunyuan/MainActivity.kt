@@ -622,7 +622,13 @@ fun ProxyScreen(
                 ) != PackageManager.PERMISSION_GRANTED
             ) {
                 notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                // 11-13：已授予时给反馈——此前静默返回，按钮点了像「没反应」
+                Toast.makeText(context, "通知权限已授予", Toast.LENGTH_SHORT).show()
             }
+        } else {
+            // Android 12- 及以下无需运行时通知权限
+            Toast.makeText(context, "此系统版本无需授权", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -638,6 +644,9 @@ fun ProxyScreen(
                 )
             } catch (_: Exception) {
             }
+        } else {
+            // 11-13：已在电池优化白名单时给反馈——此前静默返回，按钮点了像「没反应」
+            Toast.makeText(context, "已忽略电池优化，无需设置", Toast.LENGTH_SHORT).show()
         }
     }
 
