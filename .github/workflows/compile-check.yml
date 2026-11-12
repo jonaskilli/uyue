@@ -25,7 +25,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  compile:
+  # job id 必须与 build.yml 的 build 一致：gradle/actions/setup-gradle 的缓存键是
+  #   ${os}|${job-id}[${hash(工作流名+矩阵)}]-${sha}
+  # 恢复时第一层要求工作流名也一致，但第三层兜底只看「OS + job id」。
+  # 两边都叫 build，编译检查刚跑出的增量成果，打包时就能按第三层直接复用；
+  # 叫 compile 时两棵缓存树互不相认，打包只能恢复到旧提交，KSP+Kotlin 白跑约 4 分钟。
+  build:
     runs-on: ubuntu-latest
 
     steps:

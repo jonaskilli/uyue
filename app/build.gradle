@@ -17,13 +17,27 @@ plugins {
 }
 apply from: 'download.gradle'
 
-static def releaseTime() {
-    return new Date().format("yy.MMddHH", TimeZone.getTimeZone("GMT+8"))
+// 版本名取「本次提交时间」而非当前时间（11-13 改）。
+// 原实现用 new Date()，每小时都变；同一提交重跑打包会得到不同版本名，
+// 而版本名会进合并后的 AndroidManifest，进而成为 R8 的输入之一，
+// 导致 R8 永远无法命中 build cache（改前实测 R8 单步 433s，占整轮一半）。
+// 改成提交时间后，同一提交的产物可复现，重跑打包能命中缓存。
+// 精度到分钟（用户 11-13 指定），格式仍为 3.yy.MMddHHmm。
+// 取不到 git 时（如无 .git 的源码包）退回当前时间，保证仍能构建。
+static def releaseTime(File dir) {
+    try {
+        def raw = 'git log -1 --format=%ct'.execute(null, dir).text.trim()
+        if (!raw.isEmpty()) {
+            return new Date(Long.parseLong(raw) * 1000L).format("yy.MMddHHmm", TimeZone.getTimeZone("GMT+8"))
+        }
+    } catch (Exception ignored) {
+    }
+    return new Date().format("yy.MMddHHmm", TimeZone.getTimeZone("GMT+8"))
 }
 
 def name = "legado"
-def version = "3." + releaseTime()
-def gitCommitsText = 'git rev-list HEAD --count'.execute().text.trim()
+def version = "3." + releaseTime(rootDir)
+def gitCommitsText = 'git rev-list HEAD --count'.execute(null, rootDir).text.trim()
 def gitCommits = gitCommitsText.isEmpty() ? 0 : Integer.parseInt(gitCommitsText)
 
 android {
