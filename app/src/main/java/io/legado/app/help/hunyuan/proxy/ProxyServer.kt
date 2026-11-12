@@ -96,6 +96,118 @@ data class ImageGenResponse(val created: Int, val data: List<ImageDataItem>)
  *   - 豆包（Doubao）模型  → 豆包接口（聊天 / 生图）
  *   - 其他（含混元 hy3）  → CNB 混元3
  */
+
+/**
+ * 混元太极网关的 ktor 应用配置（11-13 从 ProxyServer.start 的尾 lambda 提取为顶层具名函数）。
+ *
+ * 为什么必须提取：R8 会把 object 方法内的无捕获 lambda 迁到合成类并混淆（如 nx.o），
+ * ktor 3.0.3 启动时对该 lambda 反射调用走 CallableUtils.executeModuleFunction 的
+ * declaredConstructors.single()——合成类被横向合并出多个构造器即抛
+ * "Array has more than one element"，服务启动失败（11-12 的 keep 修复按类名
+ * ProxyServer$* 匹配，但合成类名已变，keep 落空）。
+ * 提取为顶层函数后传 ::configureApplication 函数引用：ktor 的 methodString 对
+ * KFunction 引用返回真实类名+函数名（ProxyServerKt.configureApplication），
+ * executeModuleFunction 在 staticFunctions 分支（顶层函数=静态方法）直接命中调用，
+ * 永不进入 declaredConstructors.single()，从原理上绕开崩溃。
+ */
+internal fun io.ktor.server.application.Application.configureApplication() {
+            install(ContentNegotiation) { json(ProxyServer.json) }
+            install(CORS) {
+                anyHost()
+                allowMethod(HttpMethod.Options)
+                allowMethod(HttpMethod.Post)
+                allowMethod(HttpMethod.Get)
+                allowHeader(HttpHeaders.Authorization)
+                allowHeader(HttpHeaders.ContentType)
+            }
+            routing {
+                get("/") {
+                    call.respond(
+                        mapOf(
+                            "service" to "Hunyuan/Doubao Proxy (OpenAI-compatible)",
+                            "endpoint" to "POST /v1/chat/completions",
+                            "image_endpoint" to "POST /v1/images/generations"
+                        )
+                    )
+                }
+                get("/v1/models") {
+                    // 兜底列表：任何异常时仍返回合法 200 JSON，避免客户端报 500。
+                    // gpt-image-2 / gpt-image-1.5 / gpt-image-2.5 不进列表：免密钥通道使用者太多会明显变慢，
+                    // 隐藏后仍可在客户端手动填模型名调用（识别靠 isStudioGlobalImageModel）。
+                    val fallbackJson = """{"object":"list","data":[
+                        {"id":"hy3-preview","object":"model","owned_by":"cnb"},
+                        {"id":"hunyuan3","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan3-think","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan4","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan4-think","object":"model","owned_by":"hunyuan"},
+                        {"id":"hunyuan-image","object":"model","owned_by":"hunyuan"},
+                        {"id":"longcat","object":"model","owned_by":"longcat"},
+                        {"id":"longcat-search","object":"model","owned_by":"longcat"},
+                        {"id":"bailian","object":"model","owned_by":"bailian"},
+                        {"id":"doubao","object":"model","owned_by":"doubao"},
+                        {"id":"doubao-think","object":"model","owned_by":"doubao"},
+                        {"id":"doubao-image","object":"model","owned_by":"doubao"},
+                        {"id":"Kimi","object":"model","owned_by":"kimi"},
+                        {"id":"deepseek","object":"model","owned_by":"deepseek"},
+                        {"id":"deepseek-pro","object":"model","owned_by":"deepseek"},
+                        {"id":"gml","object":"model","owned_by":"zhipu"},
+                        {"id":"gml-plus","object":"model","owned_by":"zhipu"},
+                        {"id":"glm-image","object":"model","owned_by":"zhipu"},
+                        {"id":"glm-image-hd","object":"model","owned_by":"zhipu"},
+                        {"id":"qwen","object":"model","owned_by":"qwen"},
+                        {"id":"qwen-think","object":"model","owned_by":"qwen"},
+                        {"id":"wenxin","object":"model","owned_by":"wenxin"}
+                    ]}"""
+                    try {
+                        val data = org.json.JSONArray()
+                        val entries = listOf(
+                            CnbClient.DEFAULT_MODEL to "cnb",          // hy3-preview
+                            "hunyuan3" to "hunyuan",
+                            "hunyuan3-think" to "hunyuan",
+                            "hunyuan4" to "hunyuan",
+                            "hunyuan4-think" to "hunyuan",
+                            "hunyuan-image" to "hunyuan",
+                            "longcat" to "longcat",
+                            "longcat-search" to "longcat",
+                            "bailian" to "bailian",
+                            "doubao" to "doubao",
+                            "doubao-think" to "doubao",
+                            "doubao-image" to "doubao",
+                            "Kimi" to "kimi",
+                            "deepseek" to "deepseek",
+                            "deepseek-pro" to "deepseek",
+                            "gml" to "zhipu",
+                            "gml-plus" to "zhipu",
+                            "glm-image" to "zhipu",
+                            "glm-image-hd" to "zhipu",
+                            "qwen" to "qwen",
+                            "qwen-think" to "qwen",
+                            "wenxin" to "wenxin"
+                        )
+                        for ((id, owner) in entries) {
+                            data.put(
+                                org.json.JSONObject()
+                                    .put("id", id)
+                                    .put("object", "model")
+                                    .put("owned_by", owner)
+                            )
+                        }
+                        val json = org.json.JSONObject()
+                            .put("object", "list")
+                            .put("data", data)
+                            .toString()
+                        call.respondText(json, ContentType.Application.Json)
+                    } catch (e: Exception) {
+                        LogStore.e("Proxy", "构建 /v1/models 失败，返回兜底列表: ${e.stackTraceToString()}")
+                        call.respondText(fallbackJson, ContentType.Application.Json)
+                    }
+                }
+                post("/v1/chat/completions") { ProxyServer.handleChatCompletions() }
+                post("/v1/images/generations") { ProxyServer.handleImageGen() }
+            }
+}
+
+
 object ProxyServer {
     private val json = Json { ignoreUnknownKeys = true }
     private var engine: EmbeddedServer<*, *>? = null
@@ -411,102 +523,9 @@ object ProxyServer {
         thread(name = "cnb-auth-init") {
             runCatching { CnbClient.ensureAuth(force = true) }
         }
-        engine = embeddedServer(CIO, port = port, host = "0.0.0.0") {
-            install(ContentNegotiation) { json(json) }
-            install(CORS) {
-                anyHost()
-                allowMethod(HttpMethod.Options)
-                allowMethod(HttpMethod.Post)
-                allowMethod(HttpMethod.Get)
-                allowHeader(HttpHeaders.Authorization)
-                allowHeader(HttpHeaders.ContentType)
-            }
-            routing {
-                get("/") {
-                    call.respond(
-                        mapOf(
-                            "service" to "Hunyuan/Doubao Proxy (OpenAI-compatible)",
-                            "endpoint" to "POST /v1/chat/completions",
-                            "image_endpoint" to "POST /v1/images/generations"
-                        )
-                    )
-                }
-                get("/v1/models") {
-                    // 兜底列表：任何异常时仍返回合法 200 JSON，避免客户端报 500。
-                    // gpt-image-2 / gpt-image-1.5 / gpt-image-2.5 不进列表：免密钥通道使用者太多会明显变慢，
-                    // 隐藏后仍可在客户端手动填模型名调用（识别靠 isStudioGlobalImageModel）。
-                    val fallbackJson = """{"object":"list","data":[
-                        {"id":"hy3-preview","object":"model","owned_by":"cnb"},
-                        {"id":"hunyuan3","object":"model","owned_by":"hunyuan"},
-                        {"id":"hunyuan3-think","object":"model","owned_by":"hunyuan"},
-                        {"id":"hunyuan4","object":"model","owned_by":"hunyuan"},
-                        {"id":"hunyuan4-think","object":"model","owned_by":"hunyuan"},
-                        {"id":"hunyuan-image","object":"model","owned_by":"hunyuan"},
-                        {"id":"longcat","object":"model","owned_by":"longcat"},
-                        {"id":"longcat-search","object":"model","owned_by":"longcat"},
-                        {"id":"bailian","object":"model","owned_by":"bailian"},
-                        {"id":"doubao","object":"model","owned_by":"doubao"},
-                        {"id":"doubao-think","object":"model","owned_by":"doubao"},
-                        {"id":"doubao-image","object":"model","owned_by":"doubao"},
-                        {"id":"Kimi","object":"model","owned_by":"kimi"},
-                        {"id":"deepseek","object":"model","owned_by":"deepseek"},
-                        {"id":"deepseek-pro","object":"model","owned_by":"deepseek"},
-                        {"id":"gml","object":"model","owned_by":"zhipu"},
-                        {"id":"gml-plus","object":"model","owned_by":"zhipu"},
-                        {"id":"glm-image","object":"model","owned_by":"zhipu"},
-                        {"id":"glm-image-hd","object":"model","owned_by":"zhipu"},
-                        {"id":"qwen","object":"model","owned_by":"qwen"},
-                        {"id":"qwen-think","object":"model","owned_by":"qwen"},
-                        {"id":"wenxin","object":"model","owned_by":"wenxin"}
-                    ]}"""
-                    try {
-                        val data = org.json.JSONArray()
-                        val entries = listOf(
-                            CnbClient.DEFAULT_MODEL to "cnb",          // hy3-preview
-                            "hunyuan3" to "hunyuan",
-                            "hunyuan3-think" to "hunyuan",
-                            "hunyuan4" to "hunyuan",
-                            "hunyuan4-think" to "hunyuan",
-                            "hunyuan-image" to "hunyuan",
-                            "longcat" to "longcat",
-                            "longcat-search" to "longcat",
-                            "bailian" to "bailian",
-                            "doubao" to "doubao",
-                            "doubao-think" to "doubao",
-                            "doubao-image" to "doubao",
-                            "Kimi" to "kimi",
-                            "deepseek" to "deepseek",
-                            "deepseek-pro" to "deepseek",
-                            "gml" to "zhipu",
-                            "gml-plus" to "zhipu",
-                            "glm-image" to "zhipu",
-                            "glm-image-hd" to "zhipu",
-                            "qwen" to "qwen",
-                            "qwen-think" to "qwen",
-                            "wenxin" to "wenxin"
-                        )
-                        for ((id, owner) in entries) {
-                            data.put(
-                                org.json.JSONObject()
-                                    .put("id", id)
-                                    .put("object", "model")
-                                    .put("owned_by", owner)
-                            )
-                        }
-                        val json = org.json.JSONObject()
-                            .put("object", "list")
-                            .put("data", data)
-                            .toString()
-                        call.respondText(json, ContentType.Application.Json)
-                    } catch (e: Exception) {
-                        LogStore.e("Proxy", "构建 /v1/models 失败，返回兜底列表: ${e.stackTraceToString()}")
-                        call.respondText(fallbackJson, ContentType.Application.Json)
-                    }
-                }
-                post("/v1/chat/completions") { handleChatCompletions() }
-                post("/v1/images/generations") { handleImageGen() }
-            }
-        }.start(wait = false)
+        // 11-13：传具名函数引用而非尾 lambda——绕开 R8 合成类反射（详见 configureApplication 注释）
+        engine = embeddedServer(CIO, port = port, host = "0.0.0.0", module = ::configureApplication)
+            .start(wait = false)
     }
 
     fun stop() {
