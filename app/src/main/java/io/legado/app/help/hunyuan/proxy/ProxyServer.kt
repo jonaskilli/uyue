@@ -203,8 +203,8 @@ internal fun configureApplication(application: io.ktor.server.application.Applic
                         call.respondText(fallbackJson, ContentType.Application.Json)
                     }
                 }
-                post("/v1/chat/completions") { ProxyServer.handleChatCompletions() }
-                post("/v1/images/generations") { ProxyServer.handleImageGen() }
+                post("/v1/chat/completions") { handleChatCompletions() }
+                post("/v1/images/generations") { handleImageGen() }
             }
     }
 }
@@ -2498,7 +2498,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         val req = call.receive<ChatCompletionRequest>()
         LogStore.i(
             "Proxy",
-            "收到请求 | clientStream=${req.stream} upstreamStream=$streamMode model=${req.model} msgs=${req.messages.size}"
+            "收到请求 | clientStream=${req.stream} upstreamStream=$ProxyServer.streamMode model=${req.model} msgs=${req.messages.size}"
         )
 
         // 混元（aistudio 网页版）模型 → 走腾讯混元官方接口（混元3 / 混元4，含思考模式）
@@ -2576,7 +2576,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         val model = ProxyServer.mapModel(req.model)
         val bodyJson = org.json.JSONObject().apply {
             put("model", model)
-            put("stream", streamMode)
+            put("stream", ProxyServer.streamMode)
             put(
                 "messages",
                 org.json.JSONArray(
@@ -2592,7 +2592,7 @@ internal suspend fun RoutingContext.handleChatCompletions() {
         val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
         val created = (System.currentTimeMillis() / 1000).toInt()
 
-        if (streamMode) {
+        if (ProxyServer.streamMode) {
             ProxyServer.handleStreamUpstream(req, model, bodyJson.toString(), completionId, created)
         } else {
             ProxyServer.handleNonStreamUpstream(req, model, bodyJson.toString(), completionId, created)
@@ -2619,7 +2619,7 @@ internal suspend fun RoutingContext.handleImageGen() {
         val size = o.optString("size", "")
         val model = o.optString("model", "")
         // 外部指定且可识别 → 用之；否则用设置界面尺寸；再不行兜底 9:16 竖版
-        val ratio = ProxyServer.resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
+        val ratio = ProxyServer.resolveRatio(if (size.isNotBlank()) size else ProxyServer.defaultImageSize)
 
         // 文心生图（免登录）：model 命中 wenxin → 走文心妙图，只返回第一张
         if (ProxyServer.isWenxinModel(model)) {
