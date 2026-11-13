@@ -702,6 +702,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         preloadJob?.cancel()
         silentPlayCheckJob?.cancel()
         stopSubtitleSync()
+        // 11-13 S1/S2 实锤：nextP() 先走 playStop() 再进 play()，代次自增却只挂在
+        // play() 里——stop() 掐出的 -3 回调抢先到达，合成协程查代次未变，
+        // 把「自己掐的」误判成真失败 → 原段 _retry 重合成（白付一次 API），
+        // 且同插件串行门让下一段排在重试后面干等（日志实测乱序+卡 15 秒）。
+        // 所以代次必须先于 stop() 自增，覆盖 nextP/nextChapter/停止等一切走本函数的入口。
+        abortGeneration++
         textToSpeech?.runCatching { stop() }
         if (affectBgm) {
             BgmManager.pause()
