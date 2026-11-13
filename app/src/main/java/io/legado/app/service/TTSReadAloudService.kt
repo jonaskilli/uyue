@@ -657,7 +657,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 } else {
                     val cacheFile = getCacheFileForText(rawText, i, chapterTitle)
                     if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
-                        AppLog.putDebug("TTS缓存命中: ${cacheFile.name}")
+                        // 11-13 用户令：缓存命中要能看见（原来只打 debug，日志页看不到，
+                        // 分不清这段是「秒出」还是「等了合成」）。升级为正式行，
+                        // 带大小便于核对；合成路径的日志后面会跟「开始合成→完成」成对出现。
+                        AppLog.put("TTS缓存命中（免合成）: index=$i ${cacheFile.length() / 1024} KB")
                         cacheFile
                     } else {
                         try {
