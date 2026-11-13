@@ -92,7 +92,7 @@ object ReadProgressFile {
      * @param segIndex     前沿段在该章 contentList 的下标
      * @param chapterTitle 前沿章名（预取跨章时与播放章不同，渲染层据此分显）
      */
-    fun reportSynthFront(chapterIndex: Int, segIndex: Int, chapterTitle: String) {
+    fun reportSynthFront(chapterIndex: Int, segIndex: Int, chapterTitle: String, totalSegs: Int) {
         runCatching {
             val dir = File(EngineDataDir.baseDir())
             if (!dir.exists()) dir.mkdirs()
@@ -101,6 +101,8 @@ object ReadProgressFile {
             json.put("synthChapterIndex", chapterIndex)
             json.put("synthSegIndex", segIndex)
             json.put("synthChapterTitle", chapterTitle)
+            // 前沿章总段数：UTTS 进度行「第x章 3/25」的分母（该章已完成段数的上限）
+            json.put("synthTotalSegs", totalSegs)
             f.writeText(json.toString())
         }.onFailure {
             AppLog.putDebug("合成前沿写入失败: ${it.localizedMessage}")

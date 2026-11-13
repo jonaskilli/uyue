@@ -403,7 +403,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         utteranceId: String,
         index: Int = -1,
         chapterTitle: String = "",
-        rawText: String = text
+        rawText: String = text,
+        // 11-14 合成前沿上报用：该笔所属章的 index 与总段数。null=调用方没报，
+        // 上报时退回 ReadBook.durChapterIndex/contentList.size（主播放路径恒正确；
+        // 跨章预加载路径必须显式传自己的章序与段数，否则前沿章/段全是播放章的值）。
+        synthChapterIdx: Int? = null,
+        synthTotalSegs: Int? = null,
     ): File? {
         val cacheFile = getCacheFileForText(rawText, index, chapterTitle)
         if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
@@ -454,7 +459,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 11-14：合成前沿上报（UTTS 进度行「多合几段/正在合第几段」的数据源）。
         // 每提交一笔就刷新前沿；幂等由 ReadProgressFile 内部处理。失败静默。
         io.legado.app.help.ReadProgressFile.reportSynthFront(
-            ReadBook.durChapterIndex, index, chapterTitle
+            synthChapterIdx ?: ReadBook.durChapterIndex,
+            index,
+            chapterTitle,
+            synthTotalSegs ?: contentList.size,
         )
 
         // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
@@ -1417,7 +1425,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) continue
 
                     val utteranceId = "PRELOAD_${AppConst.APP_TAG}_${System.currentTimeMillis()}_${offset}_$i"
-                    synthesizeText(text, utteranceId, i, segmentTitle, rawText)
+                    // 11-14：预加载跨章，显式报自己的章序/总段数——不传的话
+                    // 上报会退回播放章的值，进度行「第六章 3/25」会张冠李戴。
+                    synthesizeText(
+                        text, utteranceId, i, segmentTitle, rawText,
+                        synthChapterIdx = currentIdx + offset,
+                        synthTotalSegs = segments.size,
+                    )
                 }
             }
         }
