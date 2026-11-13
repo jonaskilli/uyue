@@ -1776,9 +1776,24 @@ abstract class BaseReadAloudService : BaseService(),
             var pos = startPos
             val page = textChapter.getPage(pageIndex)!!
             if (pos > 0) {
+                // 11-13 深夜（用户令「改吧」）：把「页内偏移 startPos」换算成「目标段内偏移 pos」。
+                //
+                // ⚠️ 旧写法 `val tmp = pos - paragraph.length - 1; if (tmp < 0) break; pos = tmp`
+                // 在 `tmp < 0` 时直接 break、**pos 保留原值**。当落点正好在某段开头
+                // （startPos 恰好等于它前面那些段的长度之和）时，tmp 变成负数 →
+                // pos 仍是那个「页内绝对偏移」（如 80）→ 被当作段内偏移写进
+                // paragraphStartPos → getRawText() 里 text.substring(80) 从目标段
+                // 第 80 字起念。
+                // 症状：点某段的小喇叭，有时从该段中间开始念（目标段短于该偏移时
+                // 恰好不截断，侥幸正确，所以偶发）。
+                //
+                // 修法：落点在本段内部或正好卡在段首时，本段就该从段首读，偏移归零。
                 for (paragraph in page.paragraphs) {
                     val tmp = pos - paragraph.length - 1
-                    if (tmp < 0) break
+                    if (tmp < 0) {
+                        pos = 0
+                        break
+                    }
                     pos = tmp
                 }
             }

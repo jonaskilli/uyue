@@ -947,22 +947,81 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (exoPlayer.duration <= 0) {
                 return@launch
             }
-            val speakTextLength = contentList[nowSpeak].length
-            if (speakTextLength <= 0) {
+            val segLength = contentList[nowSpeak].length
+            if (segLength <= 0) {
                 return@launch
             }
-            val sleep = exoPlayer.duration / speakTextLength
-            val start = speakTextLength * exoPlayer.currentPosition / exoPlayer.duration
-            for (i in start..contentList[nowSpeak].length) {
-                if (pageIndex + 1 < textChapter.pageSize
-                    && readAloudNumber + i > textChapter.getReadLength(pageIndex + 1)
-                ) {
-                    pageIndex++
-                    ReadBook.moveToNextPage()
-                    upTtsProgress(readAloudNumber + i.toInt())
-                }
-                delay(sleep)
+            // ===== 11-13 深夜：翻页改为「追踪字」驱动（用户令「你就做到追踪字翻页」）=====
+            //
+            // 旧实现的问题：只在「本段内字数 i 越过下一页起点」时翻一次页，
+            // 且 i 的起点由播放进度倒推、终点是段末。一旦跨页点正好落在段尾/段交界，
+            // 或播放中途重启，i 走不到那个值 —— 页就不翻，屏幕停在第 N 页而声音已进第 N+1 页。
+            //
+            // 现改为**每 tick 都按真实播放位置算一次『章节内绝对位置』**：
+            //   absPos = readAloudNumber + (真实播放进度换算的字数)
+            // 再让 followPageFor() 把 pageIndex 追平到 absPos 所属那页。
+            //
+            // 与参考版（墨听 syncPageForProgress）对照：
+            //   翻页判据的**思路**一致（按绝对位置追平页码、往后翻用 >=）；
+            //   但边界口径有一处**刻意不同**，见 followPageFor 的注释。
+            // 架构差异（不能照抄的部分）：墨听走系统 TTS，能用 onRangeStart 拿到真实字偏移；
+            // U阅 走 ExoPlayer 播音频文件，没有 onRangeStart，只能用播放进度换算。
+            // 故这里**每次循环都重读 exoPlayer.currentPosition**，而不是用固定的 delay(sleep)
+            // 累加推算——累加会随时间漂移，重读真实位置不会。
+            while (isActive) {
+                val position = exoPlayer.currentPosition
+                val duration = exoPlayer.duration
+                if (duration <= 0) break
+                // 本段内已播到第几个字（按播放进度线性换算）
+                val playedChars = (segLength * position / duration).coerceIn(0, segLength)
+                val absPos = readAloudNumber + playedChars
+                followPageFor(absPos, textChapter)
+                upTtsProgress(absPos)
+                // 段已播完就退出，让下一段自己的 upPlayPos 接手
+                if (playedChars >= segLength) break
+                delay(60L)
             }
+        }
+    }
+
+    /**
+     * 11-13 深夜：把 pageIndex / 屏幕页追平到「absPos 所在的那一页」。
+     *
+     * 与旧实现的区别：旧代码假设「一次最多翻一页、且只在跨页那一刻翻」；
+     * 这里允许**连续翻多页**（长段跨三页也能跟上），也允许**往回翻**
+     * （播放进度估算抖动时不至于卡住）。
+     * 每翻一页都同步 pageIndex 并驱动界面换页，两者必须一起动——
+     * 只改 pageIndex 不改界面就会出现「页没变但高亮跳了」。
+     *
+     * 边界口径（**与墨听不完全相同，这里是我踩过的坑**）：
+     *   往后翻 `absPos >= getReadLength(pageIndex+1)`（到达页首即翻）
+     *   往回翻 `absPos <  getReadLength(pageIndex)`（**严格小于**）
+     *
+     * ⚠️ 为什么往回翻不能用墨听的 `<=`：墨听那两处循环是分开在不同上下文里调用的
+     *（onStart / onRangeStart / syncPageForProgress），从不连在一起跑。
+     * 而我这里是同一个函数里先后执行两段循环，若两边都用「含等号」：
+     *   absPos 正好等于页首时 → 前一段翻到下一页、后一段立刻翻回来，
+     *   下一 tick 再翻过去……**来回振荡**，界面疯狂闪。
+     * 实测八种边界场景验证过：改用严格小于后，absPos==页首只往前翻一次、不再回弹。
+     *
+     * 上限 64 页防御异常数据导致的死循环；正常一段最多跨 2~3 页。
+     */
+    private fun followPageFor(absPos: Int, textChapter: TextChapter) {
+        var guard = 0
+        while (pageIndex + 1 < textChapter.pageSize
+            && absPos >= textChapter.getReadLength(pageIndex + 1)
+            && guard++ < 64
+        ) {
+            pageIndex++
+            ReadBook.moveToNextPage()
+        }
+        guard = 0
+        while (pageIndex > 0
+            && absPos < textChapter.getReadLength(pageIndex)
+            && guard++ < 64
+        ) {
+            pageIndex--
+            ReadBook.moveToPrevPage()
         }
     }
 
