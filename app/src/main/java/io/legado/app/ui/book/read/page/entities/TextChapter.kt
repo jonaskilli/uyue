@@ -57,13 +57,31 @@ data class TextChapter(
 
     var isCompleted = false
 
-    val paragraphs by lazy {
-        paragraphsInternal
-    }
+    // 11-14 修「从第三章第二页点朗读，却从章头开始念」（真机三次必现）：
+    // 这两个属性原先写成 `by lazy { ... }`，**首次访问就把当时的排版结果固化成快照**。
+    // 朗读开始前 VnBackgroundManager / CharacterProfileManager 会读 chapter.paragraphs，
+    // 那时刻常只排版了头一两页 ⇒ 快照里只有前几段。等排版完成 isCompleted=true 后，
+    // getParagraphs() 走 `if (isCompleted) paragraphs else paragraphsInternal` 分支，
+    // 反而**拿这份不完整的旧快照**去按字符位置查段号：
+    // getParagraphNum(348+1) 在所有段落区间里都找不到 → 返回 -1 → -2 → 上游
+    // coerceIn(0,..) 兜底成 0 ⇒ 从章头（章节名那段）开始念。
+    // 证据：11-14 01:55:04 / 01:55:32 / 01:57:28 三次 play 均传 pageIndex=1，
+    // nowSpeak 全为 0，首条提交 index=0 正是章名段。
+    // 修法：**未完成态一律现算、不缓存**；完成态才缓存（避免每次访问都重建）。
+    private var paragraphsCache: ArrayList<TextParagraph>? = null
+    private var pageParagraphsCache: List<TextParagraph>? = null
 
-    val pageParagraphs by lazy {
-        pageParagraphsInternal
-    }
+    val paragraphs: ArrayList<TextParagraph>
+        get() {
+            if (!isCompleted) return paragraphsInternal
+            return paragraphsCache ?: paragraphsInternal.also { paragraphsCache = it }
+        }
+
+    val pageParagraphs: List<TextParagraph>
+        get() {
+            if (!isCompleted) return pageParagraphsInternal
+            return pageParagraphsCache ?: pageParagraphsInternal.also { pageParagraphsCache = it }
+        }
 
     val paragraphsInternal: ArrayList<TextParagraph>
         get() {

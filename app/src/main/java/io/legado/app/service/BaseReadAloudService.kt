@@ -1805,6 +1805,17 @@ abstract class BaseReadAloudService : BaseService(),
             // 此前有「跳段判断」把负值顺手挡掉一部分，11-13 晚移除跳段后这里必须
             // 自己钳住：下限 0、上限取最后一段（contentList 末尾那个 " " 是章末标记）。
             val locatedPara = textChapter.getParagraphNum(readAloudNumber + 1, false) - 1
+            // 11-14 诊断：-1 被钳成 0 时表面看是"正常从第 0 段开始"，实际是定位失败。
+            // 真机三次实报「第二页点朗读却从章头念」全是这条路径，故把入口参数与
+            // 判定结果一起打出来，下次复现一眼能认出是"定位没找到"还是"找到但算错"。
+            if (locatedPara < 0) {
+                AppLog.putDebug(
+                    "newReadAloud定位失败: pageIndex=$pageIndex startPos=$startPos " +
+                        "readAloudNumber=$readAloudNumber locatedPara=$locatedPara " +
+                        "pages=${textChapter.pageSize} isCompleted=${textChapter.isCompleted} " +
+                        "paragraphs=${textChapter.getParagraphs(false).size}"
+                )
+            }
             nowSpeak = locatedPara.coerceIn(0, (contentList.lastIndex - 1).coerceAtLeast(0))
             if (singleParagraphMode || continueFromParagraph) {
                 // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
