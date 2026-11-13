@@ -304,9 +304,23 @@
             android:id="@+id/tv_sound_effect_vol_label"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="音效音量"
+            android:text="音量"
             android:textColor="@color/primaryText"
             android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/tv_sound_effect_vol_reduce"
+            android:layout_width="24dp"
+            android:layout_height="28dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="音效音量减 5%"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:padding="0dp"
+            android:text="−"
+            android:textColor="@color/primaryText"
+            android:textSize="18sp" />
 
         <io.legado.app.lib.theme.view.ThemeSeekBar
             android:id="@+id/seek_sound_effect_volume"
@@ -316,11 +330,25 @@
             android:max="300" />
 
         <TextView
+            android:id="@+id/tv_sound_effect_vol_add"
+            android:layout_width="24dp"
+            android:layout_height="28dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="音效音量加 5%"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:padding="0dp"
+            android:text="+"
+            android:textColor="@color/primaryText"
+            android:textSize="18sp" />
+
+        <TextView
             android:id="@+id/tv_sound_effect_volume_value"
-            android:layout_width="48dp"
+            android:layout_width="40dp"
             android:layout_height="wrap_content"
             android:gravity="end"
-            android:text="80%"
+            android:text="100%"
             android:textColor="@color/primaryText"
             android:textSize="14sp" />
     </LinearLayout>
@@ -423,6 +451,20 @@
             android:textColor="@color/primaryText"
             android:textSize="14sp" />
 
+        <TextView
+            android:id="@+id/tv_bgm_vol_reduce"
+            android:layout_width="24dp"
+            android:layout_height="28dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="背景音乐音量减 5%"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:padding="0dp"
+            android:text="−"
+            android:textColor="@color/primaryText"
+            android:textSize="18sp" />
+
         <io.legado.app.lib.theme.view.ThemeSeekBar
             android:id="@+id/seek_volume"
             android:layout_width="0dp"
@@ -431,8 +473,22 @@
             android:max="100" />
 
         <TextView
+            android:id="@+id/tv_bgm_vol_add"
+            android:layout_width="24dp"
+            android:layout_height="28dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="背景音乐音量加 5%"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:padding="0dp"
+            android:text="+"
+            android:textColor="@color/primaryText"
+            android:textSize="18sp" />
+
+        <TextView
             android:id="@+id/tv_volume_value"
-            android:layout_width="40dp"
+            android:layout_width="36dp"
             android:layout_height="wrap_content"
             android:gravity="end"
             android:text="30%"

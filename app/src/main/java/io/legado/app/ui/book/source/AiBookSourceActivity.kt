@@ -52,7 +52,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
     /** 导入书籍：用户选中的书源地址 */
     private var selectedSourceUrl: String? = null
 
-    /** 校验模式：由书源管理条目菜单进入，载入该书源后自动校验并修正 */
+    /** 校验模式：由书源管理条目菜单进入，载入书源后等用户补充参考网址并点按钮 */
     private var checkMode = false
     private var checkSource: BookSource? = null
 
@@ -68,7 +68,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         binding.btnSave.setOnClickListener { saveSource() }
         binding.btnLogin.setOnClickListener { gotoLogin() }
         if (checkMode && checkUrl != null) {
-            binding.btnGenerate.text = "重新校验并修正"
+            binding.btnGenerate.text = "校验并修正"
             binding.btnGenerateOne.visibility = View.GONE
             binding.btnImport.visibility = View.GONE
             loadCheckSource(checkUrl)
@@ -77,7 +77,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
 
     /**
      * 载入书源管理里选中的书源：按书源自身的设定自动勾选校验方式，
-     * 载入完成就直接开跑，不让用户再填一遍网址和类型。
+     * 并把网址、关键词、类型回填到界面；不自动开跑，用户可补充参考页面后再点按钮。
      */
     private fun loadCheckSource(url: String) {
         binding.tvProgress.text = "正在读取书源…"
@@ -103,9 +103,11 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
             binding.cbExplore.isChecked = !source.exploreUrl.isNullOrBlank()
             binding.cbCodeAssist.isChecked = true
             binding.etResult.setText(runCatching { GSON.toJson(source) }.getOrDefault(""))
-            binding.tvProgress.text =
-                "已载入书源「${source.bookSourceName}」（${if (video) "视频源" else "文本小说"}），正在自动校验…"
-            startVerifyFix()
+            binding.tvProgress.text = buildString {
+                append("已载入书源「${source.bookSourceName}」（${if (video) "视频源" else "文本小说"}）。\n")
+                append("可按需填写关键词 / 书籍信息页 / 目录页 / 章节正文页网址作为参考，")
+                append("然后点「校验并修正」。")
+            }
         }
     }
 
@@ -117,6 +119,13 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         }
         val keyword = binding.etKeyword.text?.toString()?.trim()
             .takeIf { !it.isNullOrBlank() }
+        // 与生成模式一致：界面上填的页面网址抓下来作为参考源码交给 AI
+        val bookInfoUrl = binding.etBookInfoUrl.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
+        val tocUrl = binding.etTocUrl.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
+        val contentUrl = binding.etContentUrl.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
         val fixRounds = binding.etFixRounds.text?.toString()?.trim()
             ?.toIntOrNull()?.coerceIn(0, 8) ?: 2
         generated = null
@@ -131,7 +140,10 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                 fixRounds = fixRounds,
                 includeExplore = binding.cbExplore.isChecked,
                 codeAssist = binding.cbCodeAssist.isChecked,
-                videoMode = binding.cbVideo.isChecked
+                videoMode = binding.cbVideo.isChecked,
+                manualBookInfo = bookInfoUrl,
+                manualTocUrl = tocUrl,
+                manualContentUrl = contentUrl
             ) { message ->
                 runOnUiThread { binding.tvProgress.text = message }
             }
@@ -144,6 +156,10 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                     if (res.fixRounds > 0) {
                         append("（修复 ").append(res.fixRounds).append(" 轮）")
                     }
+                    if (res.patchedSteps.isNotEmpty()) {
+                        append("\n（已用该网址的历史成功规则补齐：")
+                            .append(res.patchedSteps.joinToString("、")).append("）")
+                    }
                     append('\n')
                     append("验证结果（含封面）：\n")
                     res.verify.forEach { v ->
@@ -151,7 +167,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                             .append(v.step).append("：").append(v.message).append('\n')
                     }
                     if (res.verify.any { !it.ok && it.blocking }) {
-                        append("（仍有失败环节，可再点一次「重新校验并修正」重试）")
+                        append("（仍有失败环节，可补充参考网址后再点一次「校验并修正」重试）")
                     } else if (res.verify.any { !it.ok }) {
                         append("（仅封面未通过，其余链路可用）")
                     } else {
@@ -403,14 +419,15 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
 
     /** 打开 WebView 登录，登录后 cookie 按域名存入 CookieStore，生成与阅读都会自动带上 */
     private fun gotoLogin() {
+        val siteUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
+        // 登录地址留空时，直接用最上面填的小说网站地址；两个都空才提示
         val loginUrl = binding.etLoginUrl.text?.toString()?.trim().orEmpty()
+            .ifBlank { siteUrl }
         if (loginUrl.isBlank()) {
-            toastOnUi("请先填写登录地址")
+            toastOnUi("请先填写小说网站地址或登录地址")
             return
         }
-        val siteUrl = binding.etUrl.text?.toString()?.trim().orEmpty()
-            .ifBlank { loginUrl }
-        WebViewLoginActivity.start(this, loginUrl, siteUrl)
+        WebViewLoginActivity.start(this, loginUrl, siteUrl.ifBlank { loginUrl })
     }
 
     override fun onDestroy() {
@@ -419,10 +436,12 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
     }
 
     private fun startGenerate(singleBook: Boolean = false) {
-        // 手动指定：填了就直接用这两个页面，跳过「程序猜详情页 / 猜目录页」
+        // 手动指定：填了就直接用这些页面，跳过「猜详情页 / 猜目录页 / 猜正文页」
         val bookInfoUrl = binding.etBookInfoUrl.text?.toString()?.trim()
             ?.takeIf { it.isNotBlank() }
         val tocUrl = binding.etTocUrl.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
+        val contentUrl = binding.etContentUrl.text?.toString()?.trim()
             ?.takeIf { it.isNotBlank() }
         // 单本模式下可以只填书籍信息页，站点地址不是必需的
         val url = binding.etUrl.text?.toString()?.trim().orEmpty()
@@ -458,7 +477,7 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         generateJob = lifecycleScope.launch {
             val result = AiBookSourceGenerator.generate(
                 url, keyword, loginUrl, includeExplore, fixRounds,
-                bookInfoUrl, tocUrl, singleBook,
+                bookInfoUrl, tocUrl, contentUrl, singleBook,
                 codeAssist = codeAssist, videoMode = videoMode
             ) { message ->
                 // 回调在 IO 线程，进度必须切回主线程更新 UI

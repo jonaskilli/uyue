@@ -1348,7 +1348,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.putPrefInt(PreferKey.soundEffectOffsetChars, value)
 
     var soundEffectVolume: Int
-        get() = appCtx.getPrefInt(PreferKey.soundEffectVolume, 80)
+        get() = appCtx.getPrefInt(PreferKey.soundEffectVolume, 100)
         set(value) = appCtx.putPrefInt(PreferKey.soundEffectVolume, value)
 
     /** 合并章节音频时是否将音效混音进完整 WAV */

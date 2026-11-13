@@ -124,8 +124,12 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         btnSelectFolder.setTextColor(textColor)
         tvVolLabel.setTextColor(textColor)
         tvVolumeValue.setTextColor(textColor)
+        tvBgmVolReduce.setTextColor(textColor)
+        tvBgmVolAdd.setTextColor(textColor)
         tvSoundEffectVolLabel.setTextColor(textColor)
         tvSoundEffectVolumeValue.setTextColor(textColor)
+        tvSoundEffectVolReduce.setTextColor(textColor)
+        tvSoundEffectVolAdd.setTextColor(textColor)
         tvMixBgmOnMerge.setTextColor(textColor)
         tvBgmMinSegmentLabel.setTextColor(textColor)
         tvMixBgmOnMerge.setTextColor(textColor)
@@ -204,6 +208,23 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
         switchSceneEffectEnable.isChecked = AppConfig.sceneEffectEnabled
     }
 
+    /**
+     * 点加减调音量：当前值不是整五时，第一次只吸附到 5 的倍数
+     * （减向下取整、加向上取整），之后再按 5% 步进；与朗读界面语速加减的吸附规则一致。
+     */
+    private fun stepVolume(seekBar: SeekBar, delta: Int): Int {
+        val cur = seekBar.progress
+        val v = if (cur % 5 == 0) {
+            (cur + delta).coerceIn(0, seekBar.max)
+        } else if (delta > 0) {
+            ((cur + 4) / 5 * 5).coerceIn(0, seekBar.max)
+        } else {
+            (cur / 5 * 5).coerceIn(0, seekBar.max)
+        }
+        seekBar.progress = v
+        return v
+    }
+
     private fun initEvent() = binding.run {
         switchBgm.setOnCheckedChangeListener { _, isChecked ->
             AppConfig.isBgmEnabled = isChecked
@@ -276,6 +297,19 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             }
         })
 
+        // 回设 progress 触发的是 fromUser=false，上面的监听不会生效，
+        // 所以加减按钮里要显式写配置并刷新百分比
+        tvSoundEffectVolReduce.setOnClickListener {
+            val v = stepVolume(seekSoundEffectVolume, -5)
+            AppConfig.soundEffectVolume = v
+            tvSoundEffectVolumeValue.text = "$v%"
+        }
+        tvSoundEffectVolAdd.setOnClickListener {
+            val v = stepVolume(seekSoundEffectVolume, 5)
+            AppConfig.soundEffectVolume = v
+            tvSoundEffectVolumeValue.text = "$v%"
+        }
+
         // 导出（合并音频 / 合成视频）时混入背景音乐
         switchMixBgmOnMerge.setOnCheckedChangeListener { _, isChecked ->
             AppConfig.mixBgmOnMerge = isChecked
@@ -338,6 +372,17 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
                 }
             }
         })
+
+        tvBgmVolReduce.setOnClickListener {
+            val v = stepVolume(seekVolume, -5)
+            BgmManager.setVolume(v)
+            tvVolumeValue.text = "$v%"
+        }
+        tvBgmVolAdd.setOnClickListener {
+            val v = stepVolume(seekVolume, 5)
+            BgmManager.setVolume(v)
+            tvVolumeValue.text = "$v%"
+        }
 
         binding.rootView.findViewById<View>(R.id.btn_ai_image)?.setOnClickListener {
             AiImageSettingsDialog().show(parentFragmentManager, "aiImageSettingsDialog")
