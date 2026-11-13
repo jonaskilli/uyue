@@ -451,6 +451,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
         // 【诊断日志】真正提交引擎的一笔（10-12 加，只记录不改逻辑）
         AppLog.putDebug("TTS提交引擎 index=$index id=$utteranceId text=${text.take(20)}")
+        // 11-14：合成前沿上报（UTTS 进度行「多合几段/正在合第几段」的数据源）。
+        // 每提交一笔就刷新前沿；幂等由 ReadProgressFile 内部处理。失败静默。
+        io.legado.app.help.ReadProgressFile.reportSynthFront(
+            ReadBook.durChapterIndex, index, chapterTitle
+        )
 
         // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
         // 这样某一方被 cancel 不会掐断这一笔——否则 mine 永不 complete，等它的人会永久挂住。

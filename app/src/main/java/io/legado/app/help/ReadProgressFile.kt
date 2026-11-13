@@ -81,6 +81,32 @@ object ReadProgressFile {
         }
     }
 
+    /**
+     * 11-14 追加：合成前沿上报（UTTS 进度行「多合几段/正在合第几段」的数据源）。
+     *
+     * 为什么由 U阅 报：UTTS 的日志只有请求顺序，不知道每笔请求对应第几段；
+     * 而 U阅 的合成循环（for i in nowSpeak until endIndex）天然知道正在合的是
+     * 第几段、哪一章。合成循环每提交一笔就调一次本函数（幂等：同段跳过）。
+     *
+     * @param chapterIndex 前沿所在章（合成循环的章节上下文）
+     * @param segIndex     前沿段在该章 contentList 的下标
+     * @param chapterTitle 前沿章名（预取跨章时与播放章不同，渲染层据此分显）
+     */
+    fun reportSynthFront(chapterIndex: Int, segIndex: Int, chapterTitle: String) {
+        runCatching {
+            val dir = File(EngineDataDir.baseDir())
+            if (!dir.exists()) dir.mkdirs()
+            val f = File(dir, FILE_NAME)
+            val json = if (f.exists()) JSONObject(f.readText()) else JSONObject()
+            json.put("synthChapterIndex", chapterIndex)
+            json.put("synthSegIndex", segIndex)
+            json.put("synthChapterTitle", chapterTitle)
+            f.writeText(json.toString())
+        }.onFailure {
+            AppLog.putDebug("合成前沿写入失败: ${it.localizedMessage}")
+        }
+    }
+
     /** 停止/暂停朗读时调用：让读的人立刻知道「不在播了」，不必等 STALE_MS 超时 */
     fun clear() {
         lastBook = ""
