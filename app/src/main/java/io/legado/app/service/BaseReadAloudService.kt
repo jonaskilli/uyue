@@ -1947,11 +1947,29 @@ abstract class BaseReadAloudService : BaseService(),
         if (nowSpeak > 0) {
             // 手动切换上一段时，不影响背景音乐
             stopReadAloudInternal(false)
+            // 11-13 晚诊断（用户实报「点上一段，念的是上一段（声音对），但红字停在半截段开头」）：
+            // prevP 只改 nowSpeak / readAloudNumber / paragraphStartPos，而**高亮位置**由
+            // upTtsProgress(readAloudNumber+1) 推给界面。三者任一与真实落点不一致，
+            // 就会出现「声音对、红字错」。以下三行把入口/出口状态全打出来，
+            // 复现一次即可判：是 ra 算错、ps 没清、还是页没跟着翻。
+            val _prevNow = nowSpeak
+            val _prevRa = readAloudNumber
+            val _prevPs = paragraphStartPos
+            val _prevPage = pageIndex
             do {
                 nowSpeak--
                 readAloudNumber -= contentList[nowSpeak].length + 1 + paragraphStartPos
                 paragraphStartPos = 0
             } while (nowSpeak > 0 && contentList[nowSpeak].matches(AppPattern.notReadAloudRegex))
+            LogUtils.d(
+                TAG,
+                "prevP(diag): nowSpeak $_prevNow→$nowSpeak, " +
+                    "readAloudNumber $_prevRa→$readAloudNumber, " +
+                    "paragraphStartPos $_prevPs→$paragraphStartPos, " +
+                    "pageIndex $_prevPage→$pageIndex, " +
+                    "段长=${contentList.getOrNull(nowSpeak)?.length}, " +
+                    "落在段内偏移=${_prevRa - _prevPs - (contentList.getOrNull(nowSpeak)?.length ?: 0) - 1}"
+            )
             textChapter?.let {
                 // 11-13：contentList 恒按整章段落切后，此处的页切碎片修正分支
                 //（!isParagraphEnd 时 ±1 补偿页界换行）整体删除——碎片不存在了，
