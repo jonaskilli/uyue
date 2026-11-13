@@ -193,6 +193,26 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 预加载走自己的 utteranceId 也会撞上同一段，按「缓存文件」而非 utteranceId 做键才能一起盖住。
      */
     private val inFlightSyntheses = ConcurrentHashMap<String, CompletableDeferred<File?>>()
+
+    /**
+     * 11-14 修「连点跳段时同一段被反复重提」（方案 A：取消后短期保留登记 + 冷却）。
+     *
+     * 现场（真机 01:08:34~50，用户连点下一段 16 次）：i17 被提交 6 次、取消 5 次。
+     * 原因不是去重失效，而是**去重表被自己的 stop() 绕过**：
+     *   play() → stop() → 在途那笔收到 -3 → 走取消分支 → inFlightSyntheses.remove()
+     *   → 下一次 play() 进来查表为空 → 判「这段没在合」→ 又提交一遍 → 再被 stop 掐…
+     * 于是每点一次就多一笔完整请求（UTTS 侧同一句「已取消」后重来）。
+     *
+     * 修法：取消时**不立即销账**，改为留一个冷却记录（cacheKey → 取消时刻）。
+     * 之后同 key 的调用方先短路等待一小会儿、再看一眼缓存：
+     *   · 上一笔其实已经合成完（只是没走到 renameTo 就被掐）→ 命中缓存/tmp 直接复用；
+     *   · 仍在冷却窗口内 → 不重复提交，等窗口过去再定；
+     *   · 冷却过期 → 正常重新提交（保证不会永久卡住）。
+     * 判据只用「时间」，不猜内容，失败时最坏退化成现状（多等 ~200ms），不会更糟。
+     */
+    private val canceledAt = ConcurrentHashMap<String, Long>()
+    /** 取消后的冷却窗口：短到用户感觉不到，长到足以覆盖连续点击的间隔 */
+    private val canceledCooldownMs = 1200L
     /** 主合成协程 */
     private var synthesisTask: Job? = null
     /** 跨章预加载协程 */
@@ -398,6 +418,30 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return withContext(NonCancellable) { pending.await() }
         }
 
+        // ①-b 11-14（方案 A）：刚被取消过的那一笔不立刻重提。
+        // 连点跳段时上一笔往往**已经合成完**、只差交付就被 stop() 掐掉，若直接重提
+        // 等于把成品扔掉再花 2~3 秒重来（真机：i17 一次连点被提交 6 次）。
+        // 这里先等一小会儿（给上一笔留出落盘时间），再复查缓存：
+        //   · 命中 → 直接复用，省掉整次请求；
+        //   · 没命中 → 清掉记录、正常走下面的提交（不能无限等，否则真失败就卡死）。
+        // 只用时间判据，不赌内容；最坏情况退化成现状（多等最多 0.6 秒），不会更糟。
+        canceledAt[cacheKey]?.let { at ->
+            val waited = System.currentTimeMillis() - at
+            if (waited < canceledCooldownMs) {
+                delay((canceledCooldownMs - waited).coerceAtMost(canceledCooldownMs / 2))
+                val recheck = getCacheFileForText(rawText, index, chapterTitle)
+                if (recheck.exists() && recheck.length() > 0 && isValidAudioFile(recheck)) {
+                    AppLog.putDebug("TTS冷却期内缓存已就绪，直接复用: ${recheck.name}")
+                    canceledAt.remove(cacheKey)
+                    return recheck
+                }
+                // 缓存仍没出来（或窗口已过）→ 放行，交给下面的正常提交
+                canceledAt.remove(cacheKey)
+            } else {
+                canceledAt.remove(cacheKey)
+            }
+        }
+
         // ② 自己成为这一笔的持有者
         val mine = CompletableDeferred<File?>()
         val winner = inFlightSyntheses.putIfAbsent(cacheKey, mine)
@@ -426,6 +470,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 val result = try {
                     doSynthesizeText(text, utteranceId, index, chapterTitle, rawText)
                 } catch (e: CancellationException) {
+                    // 11-14（方案 A）：取消不立即销账——留一个冷却记录，让紧接着的
+                    // 同 key 调用方先复查缓存再决定，避免「掐掉→重提→再掐」空转。
+                    // 只登记时间，不保留 CompletableDeferred（那个已完成，留着会误导等待方）。
+                    canceledAt[cacheKey] = System.currentTimeMillis()
                     inFlightSyntheses.remove(cacheKey)
                     mine.completeExceptionally(e)
                     throw e
@@ -434,6 +482,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     null
                 }
                 inFlightSyntheses.remove(cacheKey)
+                // 正常出结果（成功或失败）就清掉冷却，免得 1.2 秒内重播被误挡
+                canceledAt.remove(cacheKey)
                 mine.complete(result)
             }
         }
