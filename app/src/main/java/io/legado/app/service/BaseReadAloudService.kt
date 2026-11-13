@@ -1971,12 +1971,36 @@ abstract class BaseReadAloudService : BaseService(),
                     "落在段内偏移=${_prevRa - _prevPs - (contentList.getOrNull(nowSpeak)?.length ?: 0) - 1}"
             )
             textChapter?.let {
-                // 11-13：contentList 恒按整章段落切后，此处的页切碎片修正分支
-                //（!isParagraphEnd 时 ±1 补偿页界换行）整体删除——碎片不存在了，
-                // 且 nowSpeak 已是整章段号，不能再去索引页切段列表（会错位）。
-                if (readAloudNumber < it.getReadLength(pageIndex)) {
+                // 11-13 晚修（用户实报「点上一段，声音是上一段完整内容（对），
+                // 但红字停在半截段开头（第2页末）」）：
+                //
+                // 界面渲染高亮的算法在 ReadBookActivity：TTS_PROGRESS 收到 chapterStart 后
+                //   val aloudSpanStart = chapterStart - textChapter.getReadLength(pageIndex)
+                // 也就是**用当前 pageIndex 把整章位置换算成页内偏移**。所以 pageIndex 必须
+                // 与 chapterStart 真的落在同一页，否则 aloudSpanStart 算出来是负数或过大，
+                // 高亮就会卡在页首/页尾——用户看到的就是「停在半截段开头」。
+                //
+                // ⚠️ 旧写法 `if (readAloudNumber < getReadLength(pageIndex)) { pageIndex--; ... }`
+                // 只退**一页**、退完不再校验。点「上一段」时目标段可能距当前页不止一页
+                // （上一段很长、或跨页段导致页起点与段起点不对齐），退一页后
+                // readAloudNumber 仍小于新页起点 ⇒ pageIndex 停在错的页 ⇒ 高亮越界。
+                // 声音不受影响（play() 直接按 nowSpeak 取段，getRawText 用 ps 截断），
+                // 所以表现为「声音对、红字错」，与用户描述完全一致。
+                //
+                // 改成循环退到真正包含 readAloudNumber 的那一页；同时补上「往前退到更后面的页」
+                // 的反向修正（同一段可能跨页使 readAloudNumber 越过当前页尾）。
+                var guard = 0
+                while (pageIndex > 0 && readAloudNumber < it.getReadLength(pageIndex) && guard++ < 64) {
                     pageIndex--
                     ReadBook.moveToPrevPage()
+                }
+                guard = 0
+                while (pageIndex + 1 < it.pageSize
+                    && readAloudNumber >= it.getReadLength(pageIndex + 1)
+                    && guard++ < 64
+                ) {
+                    pageIndex++
+                    ReadBook.moveToNextPage()
                 }
             }
             upTtsProgress(readAloudNumber + 1)
