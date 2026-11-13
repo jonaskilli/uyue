@@ -482,6 +482,24 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (cacheFile.exists() && !isValidAudioFile(cacheFile)) {
                 cacheFile.delete()
             }
+            // 11-14 修「跳段白花 API」（用户实测：跳段 1:1 掐在途合成，UTTS 侧
+            // 同一句请求两次、第一次「已取消」）：
+            // 被 stop() 掐掉的那笔，音频常常**已经写完**，只是没走到下面的
+            // renameTo 就被取消。旧写法在这里无条件删除所有 .tmp，
+            // 等于把刚合成好的音频扔掉再花 2~3 秒重新请求一遍。
+            // 真机实证（01:08:32.994 请求 → 33.7s 已成 → 34.111「已取消」→
+            // 45.444 重新请求同一句）：那次「已取消」的体积已接近正常音频。
+            // 改法：删之前先认领——同 cacheFile 名下若有**有效音频**的 .tmp，
+            // 直接收编成正式缓存，省掉一次完整 API 请求；
+            // 无效/半截的照旧删掉重来（不赌，只认 isValidAudioFile 的判定）。
+            val reusableTmp = FileUtils.listDirsAndFiles(ttsFolderPath)?.firstOrNull {
+                it.isFile && it.name.startsWith(cacheFile.name) && it.name.endsWith(".tmp") &&
+                    isValidAudioFile(it)
+            }
+            if (reusableTmp != null && reusableTmp.renameTo(cacheFile)) {
+                AppLog.putDebug("TTS收编上次中断的临时音频: ${cacheFile.name}")
+                return cacheFile
+            }
             FileUtils.listDirsAndFiles(ttsFolderPath)?.filter {
                 it.isFile && it.name.startsWith(cacheFile.name) && it.name.endsWith(".tmp")
             }?.forEach { it.delete() }
