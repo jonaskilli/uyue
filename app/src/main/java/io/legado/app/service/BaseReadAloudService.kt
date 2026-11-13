@@ -1799,9 +1799,10 @@ abstract class BaseReadAloudService : BaseService(),
                 //（翻页跟随=0 → 段首；startPos>0=点行朗读/滚动定位，用户明确
                 // 指定起点，尊重不截断）。toLast 分支不受影响。
                 if (toLast) {
-                    // 11-13：不再就地复位 toLast——下方主线程的跳段判断
-                    // （shouldSkipCurrentParagraph && !toLast）依赖此标志保护
-                    // 「回退到上一章末段」不被 moveToNextParagraph 跳过。
+                    // 11-13：不再就地复位 toLast——它由下方主线程统一消费并复位。
+                    //（当日跳段判断依赖此标志保护「回退到上一章末段」不被跳过；
+                    //  11-13 晚移除跳段判断后，保护对象消失，但复位时机保持一致，
+                    //  避免影响其他依赖 toLast 的路径。）
                     // 此前过早复位：往回翻到末页只有一段时（nowSpeak=末段≠0），
                     // 保护已失效，唯一段落被跳过 → 整页不读直接切下一章（真机实锤）。
                     // 改为落点计算后由跳段判断处统一消费并复位（见 1825 行附近）。
@@ -1830,45 +1831,22 @@ abstract class BaseReadAloudService : BaseService(),
                     // continueFromParagraph 同样不跳过：长按小喇叭要求从当前段落开头开始连续朗读，
                     // 若在此跳过，实际会从下一段开始，与预期不符。
                     //
-                    // 11-13 用户令：删除「禁止跳下一段」开关（readAloudStartFromFirst）。
-                    // 旧口径下该开关负责「首段断字读 vs 跳下一段」——现在段首口径已统一
-                    //（翻页/续读/推进一律从完整段首读，69ed1ff），断字读不存在了，
-                    // 开关失去存在意义。新行为：点「朗读」跳至下一段开头（原默认值）。
-                    // 翻页跟随/单段页豁免/gengxin/continueFromParagraph 的既有豁免全部保留。
+                    // 11-13 晚 用户纠正：**不做任何跳段**，点「朗读」恒从当前落点段读。
                     //
-                    // 11-13 下午用户复令「滚动模式要保留」：滚动（翻页动画=滚动）没有
-                    // 「页」的概念，起点由屏幕可见首行精确定位（ReadBookActivity 用
-                    // getReadAloudPos 取 pagePosition / paragraphStartPos）——此刻用户
-                    // 正看着的就是那一段，再跳到下一段等于把他正在读的内容跳过。
-                    // 所以滚动模式恢复“强制不跳”，与开关时代的行为一致；翻页模式仍跳。
-                    val isScrollMode = ReadBook.pageAnim() == PageAnim.scrollPageAnim
-                    val shouldSkipCurrentParagraph = !isScrollMode
-
-                    // 11-13：单段页豁免——落点页只有这一个可读段落时不跳。
-                    // 此前只判 nowSpeak!=0：任何单段页（除章首页）点朗读都会把
-                    // 唯一段落跳过 → 整页不读、直接翻下一页（真机实锤，用户场景：
-                    // 翻到单段页点朗读直接跳走）。跳过本意是「接着上次听的往下听」，
-                    // 但页里就一段时跳过等于整页放弃，违背直觉。覆盖所有入口。
-                    val pageHasSingleReadableParagraph = run {
-                        val pageNow = textChapter?.getPage(pageIndex)
-                        pageNow != null && pageNow.paragraphs.size == 1
-                    }
-
-                    if (!gengxinResuming && !singleParagraphMode && !continueFromParagraph
-                        && shouldSkipCurrentParagraph && !toLast && !pageHasSingleReadableParagraph
-                        && !fromPageTurn
-                        && nowSpeak < contentList.size
-                    ) {
-                        if (nowSpeak != 0) {
-                            LogUtils.d(TAG, "nowSpeak!=0，跳过当前段")
-                            moveToNextParagraph()
-                        } else {
-                            LogUtils.d(TAG, "nowSpeak==0，直接朗读")
-                        }
-                    }
-                    // 11-13：toLast 的消费点在这里——跳段判断已带着 toLast=false 的
-                    // 语义完成（回退末段不跳），此刻才能安全复位。
-                    // 若此后仍为 true（理论上不会），保持让下次定位继续受保护。
+                    // 历史：这个「nowSpeak != 0 就跳下一段」的分支是当年为绕开
+                    // 「页首半截段从断字处起读」而设的权宜之计——跳过当前段就等于
+                    // 绕开那个半截段。现在段首口径已统一（ba25f25 整章切 + 69ed1ff
+                    // 翻页跟随从完整段首读），从本段开头读不再有任何副作用，
+                    // 这个绕法反而变成了 bug：翻页到某页点朗读，会把你正看着的
+                    // 那一段直接跳过（用户 11-13 指出「翻页模式点朗读这个情境不对」）。
+                    //
+                    // 所以连同「禁止跳下一段」开关一起废掉的分支，在此彻底移除：
+                    // - 翻页模式：从当前页首段（完整段首）读
+                    // - 滚动模式：从屏幕可见首行所在段读（起点由 getReadAloudPos 定位）
+                    // 两种模式语义一致——「你看到哪，就从哪开始读」。
+                    //
+                    // toLast / gengxinResuming 的既有语义不受影响：它们本来只在
+                    // 跳段判断里被消费，分支没了，toLast 复位仍照旧（见下）。
                     gengxinResuming = false   // 重置标志
                     if (toLast) toLast = false
                     // 开启状态：直接朗读，不做位置调整
