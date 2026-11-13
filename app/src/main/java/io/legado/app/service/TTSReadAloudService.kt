@@ -1160,6 +1160,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 if (!pause && exoPlayer.isPlaying) {
                     if (nowSpeak != lastNowSpeak) {
                         prepareSubtitles()
+                        // 11-14：段落切换即上报播放进度（供 UTTS 日志页定位「正在朗读」
+                        // 与算合成进度）。只在段切换时写一次，不是定时写；失败静默。
+                        // segText=本段正文前 60 字，UTTS 靠它匹配日志卡片（日志无段号字段）。
+                        io.legado.app.help.ReadProgressFile.report(
+                            ReadBook.durChapterIndex, nowSpeak, contentList.size,
+                            contentList.getOrNull(nowSpeak).orEmpty()
+                        )
                         lastNowSpeak = nowSpeak
                     }
                     updateSubtitle()
@@ -1180,6 +1187,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         currentSubtitles = emptyList()
         currentSubtitleCharRanges = emptyList()
         currentParagraphTotalChars = 0
+        // 11-14：停止/暂停时立刻清掉播放进度文件——否则 UTTS 要等 15 秒超时
+        // 才知道「不在播了」，日志页那条「正在朗读」会挂着旧内容不动。
+        io.legado.app.help.ReadProgressFile.clear()
     }
 
     private fun prepareSubtitles() {
