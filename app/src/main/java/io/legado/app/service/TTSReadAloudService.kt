@@ -110,6 +110,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private var playErrorNo = 0
     private var itemRetryPending = false
 
+    /**
+     * 11-13：主动中断代次。
+     *
+     * play()（翻页/跳段/重放）每次 +1 并 stop() 引擎，在途那笔随即收到 -3。
+     * 但它的重试循环跑在 synthScope（与播放任务刻意解耦，见 inFlightSyntheses 注释），
+     * 不看这个代次就会把"我们自己掐的"当成失败继续重试：
+     * 真机日志 08:06 段实测——8 个 -3 全部紧跟在跳段后 0.01~1.2 秒内，
+     * 用户越点下一段越卡，三次耗尽后写静音占位（那段就哑了）。
+     *
+     * 判据：进入 doSynthesizeText 时记下代次，等待回调为空时若代次已变
+     * → 抛 CancellationException 走取消分支（不重试、不占位、不重建引擎）。
+     */
+    @Volatile
+    private var abortGeneration = 0
+
     // ====== 缓存目录 ======
     private val ttsFolderPath: String by lazy {
         val baseDir = externalCacheDir ?: cacheDir
@@ -409,6 +424,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return cacheFile
         }
 
+        // 11-13：进入时的主动中断代次（见 abortGeneration 注释）。
+        // 之后任何返回点只要发现代次已变，一律抛 CancellationException——
+        // 这次失败是我们自己 stop() 掐的，不重试、不写占位、不重建引擎。
+        val genAtEntry = abortGeneration
+
+        suspend fun ensureNotAborted() {
+            if (abortGeneration != genAtEntry) {
+                throw CancellationException("synthesis aborted by play() reset: $utteranceId")
+            }
+        }
+
         suspend fun tryOnce(attempt: Int): File? {
             val tts = textToSpeech ?: return null
             val currentUtteranceId = if (attempt == 0) utteranceId else "${utteranceId}_retry$attempt"
@@ -477,6 +503,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 null
             }
 
+            // 11-13：等回的是 null（-3 / 超时），先确认不是被自己 stop 掐的。
+            // 引擎日志实测：一次失败常是 play() 里 stop() 引发的回调丢失，不是合成真的挂了；
+            // 直接抛取消走上级分支，避免"重试→再被掐→耗尽→静音占位"的死循环。
+            if (synthesizedFile == null) ensureNotAborted()
+
             return if (synthesizedFile != null && isValidAudioFile(synthesizedFile)) {
                 if (synthesizedFile.renameTo(cacheFile)) {
                     cacheFile
@@ -491,6 +522,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
 
         repeat(AppConfig.ttsRetryCount) { attempt ->
+            // 11-13：代次已变 = 中途被 play() 重置过，本段放弃（不重试、不写占位）
+            ensureNotAborted()
             // 如果引擎实例已丢失或未就绪，在主线程重新初始化并等待完成
             if (textToSpeech == null || !ttsInitFinish) {
                 withContext(Dispatchers.Main) {
@@ -585,6 +618,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 新段只能干等（真机日志：翻页后新段 onStart 迟 4s+）。
         // textToSpeech.stop() 让引擎侧 onCancel 掐掉在途合成，新段立即上队。
         // 注意只在此处 stop：onDestroy/pauseReadAloud 各有自己的 stop 时机。
+        //
+        // 11-13 补：先把「中断代次」+1，让在途那笔知道这次 -3 是"我们自己掐的"，
+        // 走取消而不是失败重试（否则翻页/跳段 → -3 → 重试 → 再被掐，用户越点越卡）。
+        abortGeneration++
         textToSpeech?.runCatching { stop() }
         playErrorNo = 0
         itemRetryPending = false

@@ -24,6 +24,37 @@ object TtsEngineActivator {
     private const val TAG = "TtsEngineActivator"
 
     /**
+     * 11-13：最近一次「已确认激活」的引擎与时间。
+     *
+     * 【为什么必须有】此前 play() 每次都无条件调 activateTtsEngine，而它内部会
+     * new 两个 TextToSpeech 再 shutdown（一次问默认引擎、一次试初始化）。
+     * 真机日志实测：90 秒内 13 次「尝试激活」+ 13 次「初始化成功」，
+     * 相当于每段朗读都在拆装引擎连接——在途合成随之中断，-3 成串。
+     * 同引擎 5 分钟内复用结论，不再重建连接。
+     */
+    @Volatile
+    private var activatedPackage: String? = null
+
+    @Volatile
+    private var activatedAtMs: Long = 0L
+
+    private const val ACTIVATE_TTL_MS = 5 * 60_000L
+
+    /**
+     * 11-13：系统默认引擎名缓存。
+     *
+     * getDefaultTtsEnginePackageName 内部要 new 一个 TextToSpeech 才能读到 defaultEngine，
+     * 每次都现问等于每次多一次引擎连接。默认引擎极少变，缓存 60 秒足够。
+     */
+    @Volatile
+    private var cachedDefaultEngine: String? = null
+
+    @Volatile
+    private var cachedDefaultEngineAtMs: Long = 0L
+
+    private const val DEFAULT_ENGINE_TTL_MS = 60_000L
+
+    /**
      * TTS 引擎信息，包含包名和显示名称
      */
     data class TtsEngineInfo(
@@ -170,10 +201,18 @@ object TtsEngineActivator {
      * 获取当前系统默认 TTS 引擎的包名
      */
     fun getDefaultTtsEnginePackageName(context: Context): String? {
+        // 11-13：默认引擎极少变，60 秒内复用缓存——否则每次 play() 都要
+        // new 一个 TextToSpeech 只为读 defaultEngine（真机日志 13 次/90 秒）。
+        val now = System.currentTimeMillis()
+        cachedDefaultEngine?.let {
+            if (now - cachedDefaultEngineAtMs < DEFAULT_ENGINE_TTL_MS) return it
+        }
         return try {
             val tts = TextToSpeech(context, null)
             val engine = tts.defaultEngine
             tts.shutdown()
+            cachedDefaultEngine = engine
+            cachedDefaultEngineAtMs = now
             engine
         } catch (e: Exception) {
             LogUtils.d(TAG, "获取默认 TTS 引擎失败: ${e.message}")
@@ -194,7 +233,14 @@ object TtsEngineActivator {
     @Suppress("unused")
     fun activateTtsEngine(context: Context, packageName: String): Boolean {
         if (packageName.isBlank()) return false
-        
+
+        // 11-13：同引擎 5 分钟内不重复激活（见 activatedPackage 注释）。
+        // 命中缓存时连「尝试激活」日志都不打——那条日志本身就是刷屏来源之一。
+        val now = System.currentTimeMillis()
+        if (activatedPackage == packageName && now - activatedAtMs < ACTIVATE_TTL_MS) {
+            return true
+        }
+
         LogUtils.d(TAG, "尝试激活 TTS 引擎: $packageName")
         
         // 检查是否已安装
@@ -207,12 +253,19 @@ object TtsEngineActivator {
         val currentDefault = getDefaultTtsEnginePackageName(context)
         if (currentDefault == packageName) {
             LogUtils.d(TAG, "TTS 引擎已是默认: $packageName")
+            activatedPackage = packageName
+            activatedAtMs = now
             return true
         }
         
         // 通过初始化TextToSpeech来"激活"引擎
         // 这会让系统知道这个TTS引擎正在被使用
-        return tryInitializeTtsEngine(context, packageName)
+        val ok = tryInitializeTtsEngine(context, packageName)
+        if (ok) {
+            activatedPackage = packageName
+            activatedAtMs = now
+        }
+        return ok
     }
 
     /**
