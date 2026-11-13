@@ -127,6 +127,34 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     @Volatile
     private var abortGeneration = 0
 
+    /**
+     * 11-13 深夜：上一动作刚调过 playStop()（已 abortGeneration++ 并 textToSpeech.stop()）。
+     *
+     * 背景（真机日志实锤「每次跳段必然多一次重复提交」）：
+     *   nextP(): stopReadAloudInternal() → playStop()
+     *                ↑ abortGeneration++、textToSpeech.stop()
+     *            nowSpeak++
+     *            playReadAloudInternal() → play()
+     *                ↑ **又** abortGeneration++、**又** textToSpeech.stop()
+     *
+     * play() 里那次 stop() 本意是掐掉「正在朗读的那一笔」，但紧接着的上一步
+     * playStop() 已经掐过并自增过代次了，这次是重复动作。而 stop() 是异步的：
+     * 引擎收到 stop 会把队列里的 utterance 全部回 -3——此时新段的请求可能已经
+     * 提交进去了，于是新段刚提交就被自己这记 stop 打断，回一个 -3，
+     * 再被重试链重新提交一次。
+     *
+     * 真机日志（23:27:34）：
+     *   .095 nextP: 9→10        .099 play: nowSpeak=10
+     *   .109 onError Legado10 -3     ← 10ms 后新段被自己掐掉
+     *   .429 提交引擎 index=10   ← 0.3s 后重新提交
+     * 一轮操作 15 次提交只覆盖 9 个段落，5 个段落被取消后重提。
+     *
+     * 修法：playStop() 置位，play() 消费一次后复位并跳过那两行。
+     * 不影响「play() 单独被调用」（如首次播放、resume）的路径——那时标志是 false，
+     * 照旧执行 stop + 代次自增。
+     */
+    private var lastActionWasStop = false
+
     // ====== 缓存目录 ======
     private val ttsFolderPath: String by lazy {
         val baseDir = externalCacheDir ?: cacheDir
@@ -601,15 +629,23 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         )
         if (!ttsInitFinish) {
             pendingPlay = true
+            // ⚠️ 早退也要消费掉「刚停过」标记：否则它会泄漏到下一次 play()，
+            // 让那次本该执行的 stop()+代次自增被跳过（在途合成没被掐、代次没变，
+            // 旧段 -3 会被误判成新段的真失败）。见 lastActionWasStop 注释。
+            lastActionWasStop = false
             return
         }
         pendingPlay = false
         pageChanged = false
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
-        if (!requestFocus()) return
+        if (!requestFocus()) {
+            lastActionWasStop = false
+            return
+        }
         if (contentList.isEmpty()) {
             AppLog.putDebug("朗读列表为空")
+            lastActionWasStop = false
             ReadBook.readAloud()
             return
         }
@@ -639,8 +675,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         //
         // 11-13 补：先把「中断代次」+1，让在途那笔知道这次 -3 是"我们自己掐的"，
         // 走取消而不是失败重试（否则翻页/跳段 → -3 → 重试 → 再被掐，用户越点越卡）。
-        abortGeneration++
-        textToSpeech?.runCatching { stop() }
+        //
+        // 11-13 深夜修（真机日志 23:27:34 实锤「每次跳段必然多一次重复提交」）：
+        // 如果紧接着上一步是 playStop()（prevP/nextP 都是这个模式），它已经
+        // abortGeneration++ 且 textToSpeech.stop() 过了，这里再停一次是**重复动作**。
+        // 而 stop() 是异步的 —— 引擎收到 stop 会把队列里所有 utterance 回 -3，
+        // 此时下面刚提交的新段请求可能已在队列里，于是新段刚提交就被自己掐掉、
+        // 回 -3、再被重试链重新提交（日志：15 次提交只覆盖 9 个段落）。
+        // 故：上一个动作是 stop 就跳过这两行（代次已加过、stop 已发过），
+        // 否则（首次播放/resume 等直接调 play 的路径）照旧执行。
+        val skipRedundantStop = lastActionWasStop
+        lastActionWasStop = false
+        if (!skipRedundantStop) {
+            abortGeneration++
+            textToSpeech?.runCatching { stop() }
+        }
         playErrorNo = 0
         itemRetryPending = false
 
@@ -727,6 +776,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 所以代次必须先于 stop() 自增，覆盖 nextP/nextChapter/停止等一切走本函数的入口。
         abortGeneration++
         textToSpeech?.runCatching { stop() }
+        // 11-13 深夜：标记「刚停过」。紧随其后的 play() 会消费它、跳过重复的
+        // stop()+代次自增，避免新段刚提交就被这记 stop 打断（真机每次跳段都中招）。
+        // 见 lastActionWasStop 字段注释与 play() 里的消费点。
+        lastActionWasStop = true
         if (affectBgm) {
             BgmManager.pause()
         }
