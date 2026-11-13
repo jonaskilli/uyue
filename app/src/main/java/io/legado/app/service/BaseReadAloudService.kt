@@ -1786,7 +1786,12 @@ abstract class BaseReadAloudService : BaseService(),
             // 11-13：contentList 已恒按整章段落切，定位必须同粒度（pageSplit=false
             // 返回整章 paragraphs 的连续编号）；继续传 readAloudByPage 会拿到
             // 页切编号，与整章 contentList 错位。
-            nowSpeak = textChapter.getParagraphNum(readAloudNumber + 1, false) - 1
+            // ⚠️ getParagraphNum 在位置落在所有段落区间之外（章末或 readAloudNumber
+            // 越过最后一段）时返回 -1，减一后就是 -2，直接 contentList[-2] 越界崩溃。
+            // 此前有「跳段判断」把负值顺手挡掉一部分，11-13 晚移除跳段后这里必须
+            // 自己钳住：下限 0、上限取最后一段（contentList 末尾那个 " " 是章末标记）。
+            val locatedPara = textChapter.getParagraphNum(readAloudNumber + 1, false) - 1
+            nowSpeak = locatedPara.coerceIn(0, (contentList.lastIndex - 1).coerceAtLeast(0))
             if (singleParagraphMode || continueFromParagraph) {
                 // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
                 paragraphStartPos = 0
@@ -1826,11 +1831,6 @@ abstract class BaseReadAloudService : BaseService(),
             launch(Dispatchers.Main) {
                 if (play) {
                     LogUtils.d(TAG, "nowSpeak=$nowSpeak")
-                    // 简化逻辑：nowSpeak==0直接朗读，nowSpeak!=0跳过当前段
-                    // gengxin 恢复时不跳过（要从恢复段重新朗读）
-                    // continueFromParagraph 同样不跳过：长按小喇叭要求从当前段落开头开始连续朗读，
-                    // 若在此跳过，实际会从下一段开始，与预期不符。
-                    //
                     // 11-13 晚 用户纠正：**不做任何跳段**，点「朗读」恒从当前落点段读。
                     //
                     // 历史：这个「nowSpeak != 0 就跳下一段」的分支是当年为绕开
@@ -1954,7 +1954,7 @@ abstract class BaseReadAloudService : BaseService(),
                 nowSpeak--
                 readAloudNumber -= contentList[nowSpeak].length + 1 + paragraphStartPos
                 paragraphStartPos = 0
-            } while (contentList[nowSpeak].matches(AppPattern.notReadAloudRegex))
+            } while (nowSpeak > 0 && contentList[nowSpeak].matches(AppPattern.notReadAloudRegex))
             textChapter?.let {
                 // 11-13：contentList 恒按整章段落切后，此处的页切碎片修正分支
                 //（!isParagraphEnd 时 ±1 补偿页界换行）整体删除——碎片不存在了，
@@ -2006,7 +2006,9 @@ abstract class BaseReadAloudService : BaseService(),
     }
 
     /**
-     * 下一段（不播放，用于朗读开始前的位置调整）
+     * 下一段（不播放，用于朗读开始前的位置调整）。
+     * 11-13 晚起**无调用方**：唯一调用者是已移除的「点朗读跳下一段」分支。
+     * 保留以备将来复用；复用前注意 nowSpeak 越界与整章切口径。
      */
     private fun moveToNextParagraph() {
         if (nowSpeak < contentList.size - 1) {
@@ -2025,7 +2027,8 @@ abstract class BaseReadAloudService : BaseService(),
     }
 
     /**
-     * 上一段（不播放，用于朗读开始前的位置调整）
+     * 上一段（不播放，用于朗读开始前的位置调整）。
+     * 11-13 晚起**无调用方**（同上）。
      */
     private fun moveToPrevParagraph() {
         if (nowSpeak > 0) {
@@ -2033,7 +2036,7 @@ abstract class BaseReadAloudService : BaseService(),
                 nowSpeak--
                 readAloudNumber -= contentList[nowSpeak].length + 1 + paragraphStartPos
                 paragraphStartPos = 0
-            } while (contentList[nowSpeak].matches(AppPattern.notReadAloudRegex))
+            } while (nowSpeak > 0 && contentList[nowSpeak].matches(AppPattern.notReadAloudRegex))
             textChapter?.let {
                 // 11-13：整章切后无页切碎片，页界换行补偿分支删除（索引错位风险）
                 if (readAloudNumber < it.getReadLength(pageIndex)) {
