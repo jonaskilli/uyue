@@ -1791,13 +1791,13 @@ abstract class BaseReadAloudService : BaseService(),
                 // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
                 paragraphStartPos = 0
             } else {
-                // 11-13 用户口径（回退 070b2a4）：半截段要从「完整段落的开头」读——
-                // 开头在上一页。按页朗读模式下保持 paragraphStartPos=0（getRawText 不截断），
-                // 即整段合成、从段首起读。只有非按页模式才按页首字符偏移截断。
-                if (!readAloudByPage && startPos == 0 && !toLast) {
-                    pos = page.chapterPosition -
-                            textChapter.paragraphs[nowSpeak].chapterPosition
-                }
+                // 11-13 下午口径统一（用户拍板「第三条要从段首读」）：翻页跟随
+                //（startPos==0）无论按页与否都从完整段首读。此前非按页模式算
+                // 段内偏移（pos=页首−段头），导致翻页后从页首半句起读
+                // （实测 14:56:39《泥珠》「来。人瘦得很」半句开头）——与按页
+                // 模式的段首口径打架。现删除该偏移计算：pos 保持 startPos 原值
+                //（翻页跟随=0 → 段首；startPos>0=点行朗读/滚动定位，用户明确
+                // 指定起点，尊重不截断）。toLast 分支不受影响。
                 if (toLast) {
                     // 11-13：不再就地复位 toLast——下方主线程的跳段判断
                     // （shouldSkipCurrentParagraph && !toLast）依赖此标志保护
