@@ -733,8 +733,7 @@ abstract class BaseReadAloudService : BaseService(),
     private var gengxinLastBookName: String? = null
     /** 标记是否正在执行触发处理（防止重启过程中重复触发） */
     private var gengxinHandling: Boolean = false
-    /** 标记本次朗读是 gengxin 恢复，跳过 newReadAloud 里的"跳过当前段"逻辑 */
-    private var gengxinResuming: Boolean = false
+    /** 标记本次朗读是 gengxin 恢复（该标记已无消费方，见 11-13 移除跳段） */
 
     /**
      * 启动后台定时轮询：每秒检测 cunfang.txt → 提取书名 → 查 shuming.{书名}.json 的修改时间。
@@ -1826,7 +1825,6 @@ abstract class BaseReadAloudService : BaseService(),
                 nowSpeak = pendingGengxinResumeIndex
                 paragraphStartPos = 0
                 pendingGengxinResumeIndex = -1
-                gengxinResuming = true   // 标记恢复，避免下方跳过当前段
             }
             launch(Dispatchers.Main) {
                 if (play) {
@@ -1845,9 +1843,8 @@ abstract class BaseReadAloudService : BaseService(),
                     // - 滚动模式：从屏幕可见首行所在段读（起点由 getReadAloudPos 定位）
                     // 两种模式语义一致——「你看到哪，就从哪开始读」。
                     //
-                    // toLast / gengxinResuming 的既有语义不受影响：它们本来只在
-                    // 跳段判断里被消费，分支没了，toLast 复位仍照旧（见下）。
-                    gengxinResuming = false   // 重置标志
+                    // toLast 的复位时机保持不变（它控制的是落点是否算到上一章末段，
+                    // 与跳段无关）。
                     if (toLast) toLast = false
                     // 开启状态：直接朗读，不做位置调整
                     isAutoSwitchingChapter = false
