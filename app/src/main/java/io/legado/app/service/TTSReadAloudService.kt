@@ -1102,6 +1102,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // U阅 走 ExoPlayer 播音频文件，没有 onRangeStart，只能用播放进度换算。
             // 故这里**每次循环都重读 exoPlayer.currentPosition**，而不是用固定的 delay(sleep)
             // 累加推算——累加会随时间漂移，重读真实位置不会。
+            //
+            // ===== 11-14（用户令「给口令」）：高亮与翻页拆开喂 =====
+            //
+            // 真机症状（用户实报）：「高亮不对准，错位一两段，然后又校准恢复」。
+            // 根因：本循环的 absPos 是**线性估算**（段长×播放进度比例）——声音和字数
+            // 不是均匀对应（标点停顿、数字念得慢、段尾静音），估算在段内漂，漂过段
+            // 边界时 upTtsProgress(absPos) 把**别的段的位置**推给了高亮，红字就画到
+            // 隔壁段；下一段切换时 upPlayPos 开头那笔精确值（readAloudNumber+1，
+            // 段表累加，必然对）接管，又弹回来。时序迟滞治不了「指错」。
+            //
+            // 修法（用户拍板「整段常亮」）：**高亮只吃精确口径**——tick 里不再调
+            // upTtsProgress（TTS_PROGRESS 全仓唯一消费方就是界面高亮），段切换时
+            // 开头那笔精确值照推，红字整段常亮、绝不指错段。
+            // 线性估算**只留给 followPageFor 翻页**：页跟随本来就该平滑，且页翻错
+            // 会被下一 tick 立即拉回，用户不盯页看红字，漂移无感。
             while (isActive) {
                 val position = exoPlayer.currentPosition
                 val duration = exoPlayer.duration
@@ -1115,7 +1130,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     .coerceIn(0, segLength)
                 val absPos = readAloudNumber + playedChars
                 followPageFor(absPos, textChapter)
-                upTtsProgress(absPos)
                 // 段已播完就退出，让下一段自己的 upPlayPos 接手
                 if (playedChars >= segLength) break
                 delay(60L)
