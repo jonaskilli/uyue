@@ -1759,7 +1759,14 @@ abstract class BaseReadAloudService : BaseService(),
             // 若沿用节流则开始朗读时拿不到完整的预加载章节
             ReadBook.saveTtsTextJson(force = true)
             readAloudByPage = getPrefBoolean(PreferKey.readAloudByPage)
-            contentList = textChapter.getNeedReadAloud(0, readAloudByPage, 0)
+            // 11-13 S3 实锤（用户截图）：按页朗读时 contentList 本身就是被页边界
+            // 切出来的碎片（跨页段两半都是半句），页首半截段必然从半句起读，
+            // 47f0f44 的 paragraphStartPos=0 救不了——碎片里根本没有完整段。
+            // 修法（11-13 定案）：contentList 恒按整章段落切。页文本拼接时跨页段
+            // 两半之间无换行符（页尾段不加 \n），拼接后直接复原完整段；
+            // readAloudByPage 从此只影响页定位/页联动，不再影响朗读切分粒度。
+            // 滚动模式用户走的就是这一路径（同参数），非新路径。
+            contentList = textChapter.getNeedReadAloud(0, false, 0)
                 .split("\n")
                 .filter { it.isNotEmpty() }
                 .toMutableList()
@@ -1776,7 +1783,10 @@ abstract class BaseReadAloudService : BaseService(),
                     pos = tmp
                 }
             }
-            nowSpeak = textChapter.getParagraphNum(readAloudNumber + 1, readAloudByPage) - 1
+            // 11-13：contentList 已恒按整章段落切，定位必须同粒度（pageSplit=false
+            // 返回整章 paragraphs 的连续编号）；继续传 readAloudByPage 会拿到
+            // 页切编号，与整章 contentList 错位。
+            nowSpeak = textChapter.getParagraphNum(readAloudNumber + 1, false) - 1
             if (singleParagraphMode || continueFromParagraph) {
                 // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
                 paragraphStartPos = 0
@@ -1964,10 +1974,9 @@ abstract class BaseReadAloudService : BaseService(),
                 paragraphStartPos = 0
             } while (contentList[nowSpeak].matches(AppPattern.notReadAloudRegex))
             textChapter?.let {
-                if (readAloudByPage) {
-                    val paragraphs = it.getParagraphs(true)
-                    if (!paragraphs[nowSpeak].isParagraphEnd) readAloudNumber++
-                }
+                // 11-13：contentList 恒按整章段落切后，此处的页切碎片修正分支
+                //（!isParagraphEnd 时 ±1 补偿页界换行）整体删除——碎片不存在了，
+                // 且 nowSpeak 已是整章段号，不能再去索引页切段列表（会错位）。
                 if (readAloudNumber < it.getReadLength(pageIndex)) {
                     pageIndex--
                     ReadBook.moveToPrevPage()
@@ -1989,10 +1998,7 @@ abstract class BaseReadAloudService : BaseService(),
             paragraphStartPos = 0
             nowSpeak++
             textChapter?.let {
-                if (readAloudByPage && nowSpeak < it.getParagraphs(true).size) {
-                    val paragraphs = it.getParagraphs(true)
-                    if (!paragraphs[nowSpeak].isParagraphEnd) readAloudNumber--
-                }
+                // 11-13：整章切后无页切碎片，页界换行补偿分支删除（索引错位风险）
                 if (pageIndex + 1 < it.pageSize
                     && readAloudNumber >= it.getReadLength(pageIndex + 1)
                 ) {
@@ -2016,10 +2022,7 @@ abstract class BaseReadAloudService : BaseService(),
             paragraphStartPos = 0
             nowSpeak++
             textChapter?.let {
-                if (readAloudByPage && nowSpeak < it.getParagraphs(true).size) {
-                    val paragraphs = it.getParagraphs(true)
-                    if (!paragraphs[nowSpeak].isParagraphEnd) readAloudNumber--
-                }
+                // 11-13：整章切后无页切碎片，页界换行补偿分支删除（索引错位风险）
                 if (pageIndex + 1 < it.pageSize
                     && readAloudNumber >= it.getReadLength(pageIndex + 1)
                 ) {
@@ -2040,10 +2043,7 @@ abstract class BaseReadAloudService : BaseService(),
                 paragraphStartPos = 0
             } while (contentList[nowSpeak].matches(AppPattern.notReadAloudRegex))
             textChapter?.let {
-                if (readAloudByPage) {
-                    val paragraphs = it.getParagraphs(true)
-                    if (!paragraphs[nowSpeak].isParagraphEnd) readAloudNumber++
-                }
+                // 11-13：整章切后无页切碎片，页界换行补偿分支删除（索引错位风险）
                 if (readAloudNumber < it.getReadLength(pageIndex)) {
                     pageIndex--
                 }
@@ -3007,7 +3007,9 @@ abstract class BaseReadAloudService : BaseService(),
         val nextChapter = ReadBook.textChapter(1)
         if (nextChapter != null) {
             val nextChapterIndex = chapterIndex + 1
-            val nextParaList = nextChapter.getNeedReadAloud(0, readAloudByPage, 0)
+            // 11-13：AI 生图段落语义与主播放 contentList 对齐（恒整章切），
+            // 避免按页模式下生图按页碎片取文、与朗读进度对不上
+            val nextParaList = nextChapter.getNeedReadAloud(0, false, 0)
                 .split("\n").filter { it.isNotEmpty() }.toMutableList()
             if (nextParaList.isNotEmpty()) {
                 val nextCharCount = AppConfig.aiImageCharCount.coerceIn(50, 5000)

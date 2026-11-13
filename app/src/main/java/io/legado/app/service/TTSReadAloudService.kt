@@ -1143,7 +1143,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 val segments: List<String>
                 val segmentTitle: String
                 if (textChapter != null && textChapter.pages.isNotEmpty()) {
-                    segments = textChapter.getNeedReadAloud(0, readAloudByPage, 0)
+                    // 11-13：主播放 contentList 已恒按整章段落切（BaseReadAloudService），
+                    // 预加载必须同口径——否则缓存键 index 分叉，预加载白合成
+                    segments = textChapter.getNeedReadAloud(0, false, 0)
                         .split("\n")
                         .filter { it.isNotEmpty() }
                     segmentTitle = textChapter.title
