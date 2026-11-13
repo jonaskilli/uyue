@@ -592,6 +592,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
     @Synchronized
     override fun play(affectBgm: Boolean) {
+        // 11-13 诊断（配 nextP 那行一起看，定位「连点同段重复提交」）：
+        // 这行能回答「play 进来时 nowSpeak 是多少、引擎是否就绪、是否走了早退」。
+        LogUtils.d(
+            TAG,
+            "play: nowSpeak=$nowSpeak ttsInitFinish=$ttsInitFinish pendingPlay=$pendingPlay " +
+                "contentSize=${contentList.size}"
+        )
         if (!ttsInitFinish) {
             pendingPlay = true
             return

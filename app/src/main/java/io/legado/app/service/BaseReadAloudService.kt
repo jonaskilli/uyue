@@ -1997,6 +1997,16 @@ abstract class BaseReadAloudService : BaseService(),
     private fun nextP() {
         if (nowSpeak < contentList.size - 1) {
             // 手动切换下一段时，不影响背景音乐
+            // 11-13 诊断（用户实报「连点下一段，同一段被重复提交 3 次」）：
+            // 实测 14:50:19~23 连点三次，三次都提交 index=34（nowSpeak 未前进）。
+            // 代码路径上 nextP 的 nowSpeak++ 明确在前、play() 的新 synthesisTask
+            // 在 launch 时才读 nowSpeak，理论应提交 35/36/37；现场却始终是 34。
+            // 疑点落在引擎初始化窗口：该时段日志显示 TtsEngineActivator 正在
+            // "尝试激活/初始化成功"，若 play() 因 !ttsInitFinish 早退（只置
+            // pendingPlay），则 nowSpeak++ 后的那次推进可能被 pendingPlay 消费时
+            // 的旧值覆盖。**未验证，故此处不盲改**——先打一行诊断，下次连点时
+            // 用真实数据定位（见下方 LogUtils.d）。
+            LogUtils.d(TAG, "nextP: nowSpeak=${nowSpeak} -> ${nowSpeak + 1}, readAloudNumber=$readAloudNumber, pageIndex=$pageIndex")
             stopReadAloudInternal(false)
             readAloudNumber += contentList[nowSpeak].length.plus(1) - paragraphStartPos
             paragraphStartPos = 0
