@@ -108,6 +108,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     }
     private var playIndexJob: Job? = null
     private var playErrorNo = 0
+    // 11-13：framework 双 onError 重载去重（见 onError 内注释）
+    private val handledErrorCallbacks = java.util.Collections.synchronizedSet(HashSet<String>())
     private var itemRetryPending = false
 
     /**
@@ -316,6 +318,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             LogUtils.d(TAG, "onError utteranceId:$utteranceId errorCode:$errorCode")
             // 【诊断日志】回调到达（10-12 加，只记录不改逻辑）
             AppLog.putDebug("TTS回调 onError id=$utteranceId code=$errorCode")
+            // 11-13 巡检实锤：framework 会先回调新签名 onError(utteranceId, errorCode)
+            // 再回调旧签名 onError(s)（同一事件两次），日志每条 -3 出现两行。
+            // 这里登记已处理 id，旧重载据此幂等跳过（completer 只 complete 一次）。
+            if (utteranceId != null) handledErrorCallbacks.add(utteranceId)
             synthesisTargetFiles.remove(utteranceId)
             val completer = synthesisCompleters.remove(utteranceId)
             completer?.complete(null)
@@ -324,6 +330,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         @Deprecated("Deprecated in Java")
         override fun onError(s: String?) {
             LogUtils.d(TAG, "onError utteranceId:$s")
+            // 新签名已处理过同一事件则跳过（防双 complete/双日志，见上方注释）
+            if (s != null && s in handledErrorCallbacks) {
+                handledErrorCallbacks.remove(s)
+                return
+            }
             synthesisTargetFiles.remove(s)
             val completer = synthesisCompleters.remove(s)
             completer?.complete(null)
