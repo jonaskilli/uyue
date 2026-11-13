@@ -1837,7 +1837,48 @@ abstract class BaseReadAloudService : BaseService(),
                         "paragraphs=${textChapter.getParagraphs(false).size}"
                 )
             }
-            nowSpeak = locatedPara.coerceIn(0, (contentList.lastIndex - 1).coerceAtLeast(0))
+            // 11-14 防线（用户令「给口令」）：页定位与段落定位互相矛盾时，以页自身首段为准。
+            //
+            // 真机实锤（05:49/06:05/06:06 三次「第三章第二页点朗读却从章头念」）：
+            // locatedPara 合法地等于 0——不是「定位没找到」（locatedPara<0 诊断不触发），
+            // 也不是「页越界」（86835c6 诊断不触发），而是 readAloudNumber+1 落进了
+            // 章名段的定位区间，字符位置换算把「第 2 页」算回了「第 0 段」。
+            // 该章正文文件当时与屏幕显示一致（不存在新旧排版两套文件），
+            // 是这套特定文本的页表/段落表换算特例；同章刷新正文后消失。
+            //
+            // 修法：点朗读的语义是「从这一页的第一段读」（11-13 定案「你看到哪就从哪读」），
+            // 页对象首行的 paragraphNum 就是章内连续段号（排版器 calcTextLinePosition
+            // 跨页累加，见 TextChapterLayout 969-974；TextPage.paragraphs 的 num 字段
+            // 是页内重编号不能用，取 realNum 才是章内号），比「页起点字符位置→反查段号」
+            // 的两级换算直接且不可能指向本页之前的段。故当段落定位结果落在页首段
+            // 之前（含落回段 0）时，直接采用页首段，并打诊断留证据。
+            // 只纠 startPos==0（点朗读/翻页跟随）：startPos>0 是用户点行指定起点，不走这。
+            // toLast（回退上一章落末段）在下方有自己的落点重算，这里必须让路。
+            var nowSpeakLoc = locatedPara
+            if (pageIndex > 0 && startPos == 0 && !toLast && locatedPara >= 0) {
+                val pageFirstParaIdx =
+                    (page.lines.firstOrNull { it.paragraphNum > 0 }?.paragraphNum ?: 0) - 1
+                if (pageFirstParaIdx > 0 && locatedPara < pageFirstParaIdx) {
+                    AppLog.putDebug(
+                        "newReadAloud页定位纠偏: pageIndex=$pageIndex locatedPara=$locatedPara " +
+                            "→页首段=$pageFirstParaIdx readAloudNumber=$readAloudNumber " +
+                            "pages=${textChapter.pageSize} " +
+                            "段落表=${textChapter.getParagraphs(false).size} " +
+                            "contentList=${contentList.size} " +
+                            "页首段文本=${contentList.getOrNull(pageFirstParaIdx)?.take(12)}"
+                    )
+                    nowSpeakLoc = pageFirstParaIdx
+                    // 纠偏后 readAloudNumber 同步对齐页首段起点：它驱动高亮
+                    //（upTtsProgress→TTS_PROGRESS→页内偏移换算）与段推进
+                    //（updateNextPos += 段长），不重算会把高亮留在章头、段推进算错。
+                    // 用页首行的 chapterPosition（章内绝对位置）直接对齐，
+                    // 与 getReadLength(pageIndex) 在页首=段首时天然一致。
+                    readAloudNumber = page.lines.firstOrNull { it.paragraphNum > 0 }
+                        ?.chapterPosition ?: readAloudNumber
+                    paragraphStartPos = 0
+                }
+            }
+            nowSpeak = nowSpeakLoc.coerceIn(0, (contentList.lastIndex - 1).coerceAtLeast(0))
             if (singleParagraphMode || continueFromParagraph) {
                 // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
                 paragraphStartPos = 0
