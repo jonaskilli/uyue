@@ -1025,8 +1025,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 val position = exoPlayer.currentPosition
                 val duration = exoPlayer.duration
                 if (duration <= 0) break
-                // 本段内已播到第几个字（按播放进度线性换算）
-                val playedChars = (segLength * position / duration).coerceIn(0, segLength)
+                // 本段内已播到第几个字（按播放进度线性换算）。
+                // ⚠️ position/duration 都是 Long，整式结果是 Long——必须显式 toInt()，
+                // 否则 absPos 被推断成 Long，传给 followPageFor/upTtsProgress（均收 Int）
+                // 直接编译错（CI 实锤 1029:81 / 1031:31 / 1032:31）。
+                val playedChars = (segLength * position / duration)
+                    .toInt()
+                    .coerceIn(0, segLength)
                 val absPos = readAloudNumber + playedChars
                 followPageFor(absPos, textChapter)
                 upTtsProgress(absPos)
