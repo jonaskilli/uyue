@@ -1753,6 +1753,27 @@ abstract class BaseReadAloudService : BaseService(),
             }
             this@BaseReadAloudService.pageIndex = pageIndex
             this@BaseReadAloudService.textChapter = textChapter
+            // 11-14 修「从第五章第 7 页点朗读，却从第 5 页开头念」（真机 01:41:03 实锤）：
+            // 用户看到的页数是 UI 的 durPageIndex，而换算段落用的是 textChapter.pages，
+            // 两者可能不同步——排版还没排到第 7 页时 pages 只有 5 页，而
+            //   getReadLength(pageIndex) = pages[min(pageIndex, lastIndex)].chapterPosition
+            // 会**静默取最后一页（第 5 页）的起点**当第 7 页起点 ⇒ readAloudNumber 偏小
+            // ⇒ 从第 5 页开头念。日志证据：pageIndex=7 却 nowSpeak=37，而第 5 页开头
+            // 正是第 37 段；同一形态在 pageIndex=1 时退化到更极端的"从章头念"（pages 只剩第 0 页）。
+            // 故越界时先等排版补齐（最多 1 秒），不让一次静默钳位决定落点。
+            var pageWait = 0
+            while (pageIndex > textChapter.lastIndex && !textChapter.isCompleted && pageWait < 20) {
+                delay(50)
+                pageWait++
+            }
+            if (pageIndex > textChapter.lastIndex) {
+                // 等过了还不齐（或已 completed 仍对不上）：留证据，不再默默取错页
+                AppLog.putDebug(
+                    "newReadAloud页越界: pageIndex=$pageIndex lastIndex=${textChapter.lastIndex} " +
+                        "pages=${textChapter.pageSize} isCompleted=${textChapter.isCompleted} " +
+                        "已等${pageWait * 50}ms，按最后一页起点换算（可能落点偏前）"
+                )
+            }
             readAloudNumber = textChapter.getReadLength(pageIndex) + startPos
             // 强制刷新：章节刚加载时后续章节常未下载，写入内容不完整，
             // 若沿用节流则开始朗读时拿不到完整的预加载章节
