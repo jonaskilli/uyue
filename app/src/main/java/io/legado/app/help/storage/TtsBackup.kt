@@ -261,7 +261,7 @@ object TtsBackup {
         PreferKey.roleChatApiConfig, PreferKey.roleChatVoiceEnabled,
         PreferKey.roleChatContextLimit, PreferKey.aiPortraitTemplateId,
         PreferKey.aiSourceRuleHistory,
-        PreferKey.readAloudTitle, PreferKey.readAloudStartFromFirst,
+        PreferKey.readAloudTitle,
         PreferKey.autoMergeAudioOnChapterEnd, PreferKey.convertToMp3AfterMerge,
         PreferKey.saveTextWithMerge, PreferKey.saveVideoWithMerge,
         PreferKey.shortAudioMinDuration, PreferKey.srtSubtitleMaxChars,

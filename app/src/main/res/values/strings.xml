@@ -620,8 +620,6 @@
     <string name="brightness_auto">Auto-Brightness %s</string>
     <string name="read_aloud_by_page">Speak by pages</string>
     <string name="read_aloud_by_page_summary">Turning pages in time, with a pause when the page is turned</string>
-    <string name="read_aloud_start_from_first">禁止跳下一段</string>
-    <string name="read_aloud_start_from_first_summary">开启后直接从当前段落开始朗读，关闭则跳至下一段开头</string>
     <string name="speak_engine">Speak Engine</string>
     <string name="bg_image">Background images</string>
     <string name="bg_color">Background color</string>

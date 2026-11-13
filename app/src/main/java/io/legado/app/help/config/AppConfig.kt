@@ -1570,13 +1570,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.putPrefInt(PreferKey.bgmAICharInterval, value)
 
     /**
-     * 下一段上一段朗读：开启后开始朗读时从第一段开始
-     */
-    var readAloudStartFromFirst: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.readAloudStartFromFirst, false)
-        set(value) = appCtx.putPrefBoolean(PreferKey.readAloudStartFromFirst, value)
-
-    /**
      * 系统TTS当前使用的voice名称
      * 用于生成/匹配系统TTS缓存文件名
      */

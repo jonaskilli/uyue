@@ -1830,15 +1830,13 @@ abstract class BaseReadAloudService : BaseService(),
                     // continueFromParagraph 同样不跳过：长按小喇叭要求从当前段落开头开始连续朗读，
                     // 若在此跳过，实际会从下一段开始，与预期不符。
                     //
-                    // 「禁止跳下一段」开关（readAloudStartFromFirst）：
-                    // - 翻页模式：跟随开关，关闭时跳至下一段开头
-                    // - 滚动模式：强制等同于开关开启，即始终从当前段落开始
-                    //   因为该模式下起点由屏幕可见首行精确定位（见 ReadBookActivity 的
-                    //   scrollPageAnim 分支用 getReadAloudPos 取 pagePosition），
-                    //   再跳到下一段会漏读用户正在看的那一段。
-                    val isScrollMode = ReadBook.pageAnim() == PageAnim.scrollPageAnim
-                    val shouldSkipCurrentParagraph =
-                        !AppConfig.readAloudStartFromFirst && !isScrollMode
+                    // 11-13 用户令：删除「禁止跳下一段」开关（readAloudStartFromFirst）。
+                    // 旧口径下该开关负责「首段断字读 vs 跳下一段」——现在段首口径已统一
+                    //（翻页/续读/推进一律从完整段首读，69ed1ff），断字读不存在了，
+                    // 开关失去存在意义。新行为：点「朗读」恒跳至下一段开头（原默认）；
+                    // 翻页跟随/单段页豁免/gengxin/continueFromParagraph 的既有豁免全部保留。
+                    // 滚动模式原「强制不跳」也随之取消——滚动模式点朗读同样跳下一段。
+                    val shouldSkipCurrentParagraph = true
 
                     // 11-13：单段页豁免——落点页只有这一个可读段落时不跳。
                     // 此前只判 nowSpeak!=0：任何单段页（除章首页）点朗读都会把
