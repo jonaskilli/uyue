@@ -601,15 +601,39 @@ object ReadBook : CoroutineScope by MainScope() {
     }
 
     /**
+     * 一次性标记：**抑制下一次「翻页跟随」重定位**。
+     *
+     * 场景（11-14 晚，方案B 的自我触发）：点朗读时服务端已经把落点定在「该页第一段的
+     * 段首」；若这个段首在**上一页**（半截段），syncPageToReadAloudNumber 会把页面翻过去，
+     * 而翻页本身会触发 curPageChanged → readAloud(fromPageTurn=true)，反过来按
+     * 「新页的页首」重新定位——落点从「段25 段首」被改回「段24 的后半截」，
+     * 方案B 白翻一趟还念错了段。
+     *
+     * 故方案B 翻页前把它置 true，curPageChanged 消费一次即清（**无论走哪条分支都清**，
+     * 避免残留成「某次手动翻页不重新定位」）。
+     *
+     * 手动翻页、自动朗读翻页从不设置它，行为完全不变——连续翻页照样一页页往下走。
+     */
+    var suppressNextPageTurnReadAloud = false
+
+    /**
      * 当前页面变化
      */
     private fun curPageChanged(pageChanged: Boolean = false) {
+        // 先消费一次性标记：下面无论走哪个分支都必须清掉，否则残留会让
+        // 之后某次真正的翻页跟随被误跳过（例如滚动模式走的是 pause 分支）。
+        val suppressReadAloud = suppressNextPageTurnReadAloud
+        suppressNextPageTurnReadAloud = false
         callBack?.pageChanged()
         curTextChapter?.let {
             if (BaseReadAloudService.isRun && it.isCompleted) {
                 val scrollPageAnim = pageAnim() == 3
                 if (scrollPageAnim && pageChanged) {
                     ReadAloud.pause(appCtx)
+                } else if (suppressReadAloud) {
+                    // 这次翻页是「点朗读后为对齐段首」自己翻的：落点已由服务端定在
+                    // 段首，不能再按新页页首重新定位（那样会从上一段的尾巴念起）。
+                    AppLog.putDebug("翻页跟随抑制: 方案B对齐段首页的这次翻页，跳过重定位")
                 } else {
                     // 翻页跟随：落点段还没读过，必须从段首照读（不再跳过当前段）
                     readAloud(!BaseReadAloudService.pause, fromPageTurn = true)

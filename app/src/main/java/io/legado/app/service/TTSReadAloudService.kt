@@ -1169,6 +1169,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 上限 64 页防御异常数据导致的死循环；正常一段最多跨 2~3 页。
      */
     private fun followPageFor(absPos: Int, textChapter: TextChapter) {
+        var flipped = false
         var guard = 0
         while (pageIndex + 1 < textChapter.pageSize
             && absPos >= textChapter.getReadLength(pageIndex + 1)
@@ -1176,6 +1177,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         ) {
             pageIndex++
             ReadBook.moveToNextPage()
+            flipped = true
         }
         guard = 0
         while (pageIndex > 0
@@ -1184,6 +1186,46 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         ) {
             pageIndex--
             ReadBook.moveToPrevPage()
+            flipped = true
+        }
+        // 11-14 晚（用户实报「第 2 页末尾的半截段自然朗读到翻页后，后半截没有红字」）：
+        // 翻页后**必须补推一次高亮**，否则翻过去那半截永远不亮。
+        //
+        // 为什么：高亮（TTS_PROGRESS）只吃两笔精确值——upPlayPos 开头的
+        // readAloudNumber+1，和段切换。ba5df9f 把 tick 里的估算推送删掉后，
+        // **段内跨页就没有任何高亮事件了**：
+        //   · 覆盖了本页的旧高亮被 moveToNextPage → removePageAloudSpan() 清掉
+        //     （它假设翻页后马上会重新推，见 TextPageFactory.nextPage 的注释）；
+        //   · 而本段是跨页段，段还没结束 ⇒ upPlayPos 不会重进 ⇒ 不会重推；
+        //   · 于是新页上一个 isReadAloud 都没有 ⇒ 整段后半截无红字。
+        // 自然朗读只有「段切换」时才会补齐，所以症状恰好是「翻页那一下之后到本段
+        // 结束前都不亮，下一段开始又正常」。
+        //
+        // 推的值必须是**当前页内**的位置——这里传 absPos（估算的本章绝对位置），
+        // 它由上面两段循环的不变式保证落在当前页区间内
+        //（往后翻：页起点 ≤ absPos < 下一页起点；往回翻：同理）。
+        // ⚠️ 绝不能传 `readAloudNumber + 1`（段真实起点）：跨页段的段起点在**上一页**，
+        // 而消费端 ReadBookActivity 收到 TTS_PROGRESS 第一句就是
+        // `ReadBook.durChapterPos = chapterStart`，再用 durPageIndex 反查页——
+        // 传段起点会把页面翻回上一页，触发 curPageChanged → fromPageTurn
+        // → 在跨页段两侧来回翻，死循环（newReadAloud 注释里记过同一个坑）。
+        // absPos 落在当前页内 ⇒ 反查页仍是本页 ⇒ 不翻页；
+        // 高亮落点 = absPos − 页起点，而 upPageAloudSpan 会从落点行向回扩到段首、
+        // 向后扩到段末，故本页这半截整段点亮。
+        if (flipped) {
+            // +1 与段开头那一笔 `upTtsProgress(readAloudNumber + 1)` 保持同一口径。
+            // 但要再夹一道「别等于下一页起点」：消费端会把这个值直接写进
+            // ReadBook.durChapterPos 并按它反查页，等于下一页起点就会让界面提前
+            // 翻过一页（声音还没到），所以钳到下一页起点 −1。
+            val nextStart = if (pageIndex + 1 < textChapter.pageSize) {
+                textChapter.getReadLength(pageIndex + 1)
+            } else {
+                Int.MAX_VALUE
+            }
+            // 下限也夹一次：页表异常时 nextStart−1 可能小于本页起点，不能让 anchor
+            // 掉到上一页去（否则又变成"翻回上页"）。
+            val anchor = maxOf((absPos + 1).coerceAtMost(nextStart - 1), textChapter.getReadLength(pageIndex))
+            upTtsProgress(anchor)
         }
     }
 

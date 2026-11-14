@@ -117,16 +117,6 @@ abstract class BaseReadAloudService : BaseService(),
         @JvmStatic
         var instance: BaseReadAloudService? = null
 
-        /**
-         * 朗读运行中，阅读页被手动翻页后调用：将朗读进度对齐到当前阅读页起点并继续朗读，
-         * 不重读已读过的内容，从翻到的新页开始继续播报。
-         */
-        @JvmStatic
-        fun syncToCurrentPage() {
-            if (!isRun) return
-            instance?.newReadAloud(true, ReadBook.durPageIndex, 0)
-        }
-
         @JvmStatic
         var timeMinute: Int = 0
             private set
@@ -1810,16 +1800,26 @@ abstract class BaseReadAloudService : BaseService(),
             // 段表起点用 contentList 累加（与 syncToParagraph/prevP/nextP 完全一致），
             // 不再依赖"本页段落列表"，跨页半截段自然正确。
             // 仍保留原语义：落在段首/段内偏移<=0 时归零（从段首读）。
-            run {
+            //
+            // ⚠️ 11-14 晚（用户实报 + 日志实锤，136 笔提交里 11 笔是半句开头）：
+            // 本换算**只对 startPos>0 做**——那是用户明确指定的段内起点（点行朗读）。
+            // startPos==0 的全部入口（点朗读、续读、翻页跟随）一律从段首读：
+            //   · 点朗读/续读：语义就是"从头念这段"；
+            //   · 翻页跟随（fromPageTurn）：11-14 晚用户定稿"翻到哪页就从这页读"，
+            //     页首那条半截段直接被跳过，落点恒在本页内，**不会**再出现
+            //     「对齐段起点 → 方案B 翻回上页 → 再触发翻页 → 来回弹」的隐患
+            //     （那个隐患的前提是翻页跟随仍要对齐到段起点，现已不成立）。
+            // 此前这里无条件换算，导致点朗读时页起点落在半截段内部就把 pos 当成
+            // 段内偏移（如 56），getRawText 便 substring(56) 从段中间念起。
+            //
+            // 保留原覆盖：startPos>0（点行朗读、点小喇叭）是用户明确指定的起点，照算。
+            if (startPos > 0) {
                 val pageStart = textChapter.getReadLength(pageIndex)
                 val targetAbs = pageStart + startPos
                 // 目标落在哪一段：用【整章】段表反查（pageSplit=false），与 contentList 同粒度
                 val targetPara = textChapter.getParagraphNum(targetAbs + 1, false) - 1
                 if (targetPara >= 0) {
-                    var paraStart = 0
-                    for (i in 0 until targetPara.coerceIn(0, contentList.size)) {
-                        paraStart += contentList[i].length + 1
-                    }
+                    val paraStart = paragraphStartPosOf(targetPara)
                     val offsetInPara = targetAbs - paraStart
                     pos = if (offsetInPara <= 0) 0 else offsetInPara
                 } else {
@@ -1896,17 +1896,69 @@ abstract class BaseReadAloudService : BaseService(),
                     // 从 0 累加 contentList 到目标段，得到**段的章内真实起点**。
                     // 这样 nowSpeak 与 readAloudNumber 永远互相对得上（两者都由段表推导），
                     // 跨页段也不会再把页起点误当段起点。
-                    run {
-                        var acc = 0
-                        for (i in 0 until nowSpeakLoc.coerceIn(0, contentList.size)) {
-                            acc += contentList[i].length + 1
-                        }
-                        readAloudNumber = acc
-                    }
+                    readAloudNumber = paragraphStartPosOf(nowSpeakLoc)
                     paragraphStartPos = 0
                 }
             }
             nowSpeak = nowSpeakLoc.coerceIn(0, (contentList.lastIndex - 1).coerceAtLeast(0))
+            // ===== 11-14 晚定稿（用户拍板「不管怎么样都直接从第二段开始读」）=====
+            // **本页顶部那段只要是从上一页跨过来的（半截段），就一律跳过它**，
+            // 从本页的下一段开始念。不再判断字数、占比——那些阈值反复调不出共识，
+            // 用户的结论是：与其纠结值不值得翻回去，不如直接读眼前这一页的内容。
+            //
+            // 好处：页面不用回翻，落点恒在本页；「我翻到这页，就从这页读」最直觉。
+            // 代价：那半截段的前半截（在上一页）不会念——用户明确接受。
+            //
+            // 与 11-13 删掉的旧「跳过下一段」开关的区别：那套是**无条件**跳，
+            // 连"整段都从本页开始"的正常段也跳（导致「每页缺一段」）。
+            // 这里只在「页首那一行的段落是从上一页延续过来的」时才跳，正常页零改动。
+            //
+            // 作用范围（用户 11-14 明确）：「除非是自然读到这个半截段，或者手动点
+            // 上一段/下一段点到了，他才会自然读完；其他啥时候都应该跳到第二段」。
+            //   · 自然读到：走 updateNextPos/onDone 推进，**不经过本函数** → 不受影响；
+            //   · 手动上一段/下一段：走 prevP/nextP，也不经过本函数 → 不受影响；
+            //   · 点朗读、续读、**翻页跟随（fromPageTurn）**：全部经过本函数 → 一律跳过。
+            // 翻页跟随也要跳，是因为它就是"你翻到哪页"的入口：翻到这页就从这页读，
+            // 页首那条半截段的尾巴不再回翻去补。
+            // 排除项只有：单段模式/长按小喇叭（用户明确点选那一段）、toLast（回退末段）。
+            if (startPos == 0 && !toLast
+                && !singleParagraphMode && !continueFromParagraph
+            ) {
+                val paraStartAbs = paragraphStartPosOf(nowSpeak)
+                val pageStartAbs = textChapter.getReadLength(pageIndex)
+                // 页首落在该段内部（页起点 > 段起点）= 半截段
+                val isHalfCut = pageStartAbs > paraStartAbs
+                val canAdvance = nowSpeak + 1 <= contentList.lastIndex - 1
+                if (isHalfCut && canAdvance) {
+                    AppLog.putDebug(
+                        "半截段跳过: nowSpeak=$nowSpeak→${nowSpeak + 1} " +
+                            "段长=${contentList.getOrNull(nowSpeak)?.length ?: 0} " +
+                            "段起点=$paraStartAbs 页起点=$pageStartAbs 页=$pageIndex " +
+                            "（页首段从上一页延续，跳过它、从本页下一段念）"
+                    )
+                    nowSpeak++
+                }
+            }
+            // 11-14 晚：点朗读/续读（startPos==0 且非翻页跟随）落点是半截段时，
+            // 上面的纠偏块**不会触发**——它只在 locatedPara < 页首段时生效；
+            // 而半截段的页首段号恰好就等于 locatedPara（页起点落在该段中部）。
+            // 于是 readAloudNumber 仍是页起点（如 929），而 nowSpeak 已经是段 22。
+            // 它驱动高亮（aloudSpanStart = 929 − 本页起点 929 = 0 ⇒ 从页首亮）与
+            // 方案B（getPageIndexByCharIndex(929) 仍指本页 ⇒ 不翻页），两条都和
+            // 「从段首读」打架。故这里统一对齐到**段表真实起点**（与纠偏块、
+            // syncToParagraph 同一口径）。唯一的例外是 toLast——回退上一章末段，
+            // 下面分支自己会重算落点。
+            if (startPos == 0 && !toLast) {
+                val acc = paragraphStartPosOf(nowSpeak)
+                if (acc != readAloudNumber) {
+                    AppLog.putDebug(
+                        "newReadAloud段首对齐: pageIndex=$pageIndex nowSpeak=$nowSpeak " +
+                            "readAloudNumber=$readAloudNumber→$acc " +
+                            "页起点=${textChapter.getReadLength(pageIndex)}"
+                    )
+                    readAloudNumber = acc
+                }
+            }
             if (singleParagraphMode || continueFromParagraph) {
                 // 两者都要求从段落开头朗读，而非从页面/章节的中间位置切入
                 paragraphStartPos = 0
@@ -2095,7 +2147,28 @@ abstract class BaseReadAloudService : BaseService(),
                 "当前页=$curPage → 段首页=$targetPage " +
                 "（跨页段导致声音/页面错位时自动对齐）"
         )
+        // 11-14 晚：这次翻页是给「从段首读」配的对齐，**必须抑制它自带的翻页跟随重定位**。
+        // 否则 setPageIndex → curPageChanged → readAloud(fromPageTurn=true) 会按
+        // 「新页页首」重算落点，把刚落定的段首又改回上一段尾巴（半截段场景必然中招）。
+        // 标记由 ReadBook.curPageChanged 消费一次即清，手动翻页不受影响。
+        // 只在这里设：其余翻页（手动、自然朗读推进、切章）都不经过本方法。
+        ReadBook.suppressNextPageTurnReadAloud = true
         ReadBook.setPageIndex(targetPage)
+    }
+
+    /**
+     * 段落在章内的真实起点（字符位置），由 contentList 段表累加得出。
+     *
+     * 与 syncToParagraph / prevP / nextP / 高亮纠偏**同一口径**——这些地方都必须用
+     * 它，不能改用「页起点」或「页首行 chapterPosition」：跨页段（半截段）的页起点
+     * 落在段内部，会把段起点算偏（11-14 实锤：段 22 真实起点 873 vs 第 5 页起点 929）。
+     */
+    private fun paragraphStartPosOf(index: Int): Int {
+        var acc = 0
+        for (i in 0 until index.coerceIn(0, contentList.size)) {
+            acc += contentList[i].length + 1
+        }
+        return acc
     }
 
     /**
@@ -2107,10 +2180,7 @@ abstract class BaseReadAloudService : BaseService(),
         if (targetIndex < 0 || targetIndex >= contentList.size) return
         nowSpeak = targetIndex
         paragraphStartPos = 0
-        readAloudNumber = 0
-        for (i in 0 until targetIndex) {
-            readAloudNumber += contentList[i].length + 1
-        }
+        readAloudNumber = paragraphStartPosOf(targetIndex)
         // 跳转到新段落：回跳则记落点、前进则作废跨过的记录
         onBgmParagraphJumped(targetIndex)
     }
