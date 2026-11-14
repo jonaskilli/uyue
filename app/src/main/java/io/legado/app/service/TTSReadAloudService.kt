@@ -685,9 +685,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         return text
     }
 
-    private suspend fun synthesizeSingle(index: Int): File? {
+    /**
+     * @param precomputedText 调用方已跑过规则脚本的结果（省一次 Rhino 执行）。
+     *   传 null 则本函数自己跑。11-14 晚：合成主循环改为「命中缓存不跑脚本」后，
+     *   未命中的段由调用方算好再传进来，避免同一段脚本跑两遍。
+     */
+    private suspend fun synthesizeSingle(index: Int, precomputedText: String? = null): File? {
         val rawText = getRawText(index)
-        val text = applyTtsScripts(rawText, paragraphIndex = index)
+        val text = precomputedText ?: applyTtsScripts(rawText, paragraphIndex = index)
         if (text.matches(AppPattern.notReadAloudRegex)) {
             val fileName = getFileNameHelper(textChapter?.chapter?.title ?: "", rawText, index)
             if (!hasSpeakFile(fileName)) createSilentSound(fileName)
@@ -791,36 +796,58 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 ensureActive()
 
                 val rawText = getRawText(i)
-                val speakText = applyTtsScripts(rawText, paragraphIndex = i)
                 val isEndMarker = i == contentList.lastIndex
-                val file = if (isEndMarker || speakText.matches(AppPattern.notReadAloudRegex)) {
-                    if (isEndMarker) {
-                        AppLog.putDebug("章节末尾静音占位符，使用静音文件")
-                    }
+                // 11-14 晚（修「连点下一段顿一下才出声」，原因经日志量化）：
+                // **缓存命中时直接排队播放，不再跑规则脚本、不再走静音判定**。
+                //
+                // 依据：规则脚本结果只服务两件事——判断这段该不该念、以及送引擎的
+                // 文本。两者在「命中缓存」时都不需要：该不该念在当初合成时已判过，
+                // 送引擎则根本不发生。而 applyTtsScripts 是 Rhino **同步**执行
+                // （脚本里还可能触发 AI 姓名分析），在 IO 线程里每次几十~几百 ms。
+                // 真机日志（44 次跳段）实测 `play→提交引擎` 中位 327ms、最大 3.2s，
+                // 连点时这段空窗就是「顿一下」的来源。
+                //
+                // 安全性：缓存键由 getCacheFileForText(rawText, i, chapterTitle) 决定，
+                // **不含规则脚本结果**，故跳过脚本不会影响命中/漏判。
+                val file = if (isEndMarker) {
+                    // 章末占位段**优先于缓存判定**（与改造前顺序一致）：它永远走静音文件，
+                    // 不能因为磁盘上恰好有同名缓存就去播它。
+                    AppLog.putDebug("章节末尾静音占位符，使用静音文件")
                     val fileName = getFileNameHelper(chapterTitle, rawText, i)
                     if (!hasSpeakFile(fileName)) createSilentSound(fileName)
                     getSpeakFileAsMd5(fileName)
                 } else {
-                    val cacheFile = getCacheFileForText(rawText, i, chapterTitle)
-                    if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
-                        AppLog.putDebug("TTS缓存命中: ${cacheFile.name}")
-                        cacheFile
+                    val cachedFile = getCacheFileForText(rawText, i, chapterTitle)
+                    val cacheHit = cachedFile.exists() &&
+                        cachedFile.length() > 0 && isValidAudioFile(cachedFile)
+                    if (cacheHit) {
+                        AppLog.putDebug("TTS缓存命中: ${cachedFile.name}")
+                        cachedFile
                     } else {
-                        try {
-                            synthesizeSingle(i) ?: run {
-                                AppLog.put("TTS合成失败，使用静音文件占位: index=$i")
+                        // 未命中缓存才跑规则脚本：它决定「这段该不该念」和送引擎的文本
+                        val speakText = applyTtsScripts(rawText, paragraphIndex = i)
+                        if (speakText.matches(AppPattern.notReadAloudRegex)) {
+                            val fileName = getFileNameHelper(chapterTitle, rawText, i)
+                            if (!hasSpeakFile(fileName)) createSilentSound(fileName)
+                            getSpeakFileAsMd5(fileName)
+                        } else {
+                            try {
+                                // 传已算好的 speakText：上面刚跑过一次脚本，别跑第二遍
+                                synthesizeSingle(i, speakText) ?: run {
+                                    AppLog.put("TTS合成失败，使用静音文件占位: index=$i")
+                                    // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
+                                    getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
+                                }
+                            } catch (e: Exception) {
+                                // 11-13：主动停止/翻页/切章导致的协程取消**不是合成失败**，
+                                // 绝不能写静音占位——此前统一走 withDefault 的静音兜底，
+                                // 真机日志实测「用户点停止 → onDestroy 取消 → 写静音占位」，
+                                // 那几段就永久哑了（占位文件写进正式缓存路径，重读也命中静音）。
+                                if (e is CancellationException) throw e
+                                AppLog.put("TTS合成异常，使用静音文件占位: index=$i, ${e.message}")
                                 // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
                                 getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
                             }
-                        } catch (e: Exception) {
-                            // 11-13：主动停止/翻页/切章导致的协程取消**不是合成失败**，
-                            // 绝不能写静音占位——此前统一走 withDefault 的静音兜底，
-                            // 真机日志实测「用户点停止 → onDestroy 取消 → 写静音占位」，
-                            // 那几段就永久哑了（占位文件写进正式缓存路径，重读也命中静音）。
-                            if (e is CancellationException) throw e
-                            AppLog.put("TTS合成异常，使用静音文件占位: index=$i, ${e.message}")
-                            // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
-                            getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
                         }
                     }
                 }
