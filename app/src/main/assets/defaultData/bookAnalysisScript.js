@@ -518,9 +518,14 @@ function _findMergeableRecord(records, aliasName, strict) {
     return count === 1 ? pure : null;
 }
 
-function _mergeIntoMainRecord(records, aliasName, mainName) {
+// mainInfo = 本批姓名 AI 返回的 {name, gender, age}：
+// 性别年龄一律以最终主名这次返回的值为准，voice 保持已分配的不动。
+function _mergeIntoMainRecord(records, aliasName, mainInfo) {
     var alias = String(aliasName || "").trim();
-    var main = String(mainName || "").trim();
+    var info = mainInfo || {};
+    var main = String(info.name || "").trim();
+    var mainGender = String(info.gender || "").trim();
+    var mainAge = String(info.age || "").trim();
     if (!alias || !main || alias === main) return records;
     // 真名已在原名单 → 严谨；真名是全新的 → 宽松，允许旧称呼带着它的别名一起改名
     var mainRec = _findMainRecord(records, main);
@@ -537,6 +542,8 @@ function _mergeIntoMainRecord(records, aliasName, mainName) {
             if (extra[i] && merged.indexOf(extra[i]) === -1) merged.push(extra[i]);
         }
         mainRec.aliases = merged.join("|");
+        if (mainGender) mainRec.gender = mainGender;
+        if (mainAge) mainRec.age = mainAge;
         var out = [];
         for (var j = 0; j < records.length; j++) {
             var r = records[j];
@@ -552,25 +559,9 @@ function _mergeIntoMainRecord(records, aliasName, mainName) {
     if (names.indexOf(main) === -1) names.push(main);
     pure.aliases = names.join("|");
     pure.name = main;
+    if (mainGender) pure.gender = mainGender;
+    if (mainAge) pure.age = mainAge;
     return records.slice();
-}
-
-function _dedupeByMainName(records) {
-    var seen = {}, out = [];
-    for (var i = 0; i < records.length; i++) {
-        var r = records[i];
-        if (!r) continue;
-        var n = String(r.name || "").trim();
-        if (!n) continue;
-        if (!seen[n]) { seen[n] = r; out.push(r); continue; }
-        var merged = _namesOfRecord(seen[n]);
-        var extra = _namesOfRecord(r);
-        for (var j = 0; j < extra.length; j++) {
-            if (merged.indexOf(extra[j]) === -1) merged.push(extra[j]);
-        }
-        seen[n].aliases = merged.join("|");
-    }
-    return out;
 }
 
 function _applyAliasFromNameResult(records, nameResultJson) {
@@ -582,14 +573,18 @@ function _applyAliasFromNameResult(records, nameResultJson) {
         if (!it || !it.alias || !it.name) continue;
         var a = String(it.alias).trim(), n = String(it.name).trim();
         if (!a || !n || a === n || skipped[a]) continue;
-        if (corrections[a] && corrections[a] !== n) { delete corrections[a]; skipped[a] = true; continue; }
-        corrections[a] = n;
+        if (corrections[a] && corrections[a].name !== n) { delete corrections[a]; skipped[a] = true; continue; }
+        corrections[a] = {
+            name: n,
+            gender: String(it.gender || "").trim(),
+            age: String(it.age || "").trim()
+        };
     }
     for (var a in corrections) {
         if (!corrections.hasOwnProperty(a)) continue;
         records = _mergeIntoMainRecord(records, a, corrections[a]);
     }
-    return _dedupeByMainName(records);
+    return records;
 }
 
 function parseAliasResponse(taskJson, body, recordsJson, nameResultJson, aliasMetaJson) {

@@ -6,9 +6,7 @@ var DATA_FILE = EXT_DIR + "data.json";
 var BOOK_LIST_FILE = EXT_DIR + "liebiao.json";
 var PROGRESS_FILE = CACHE_ROOT + "reading_progress.json";
 // 历史段落文件：联合定位的锚点来源。上文展示已改为从 data.json 实时截取
-// （见 getAboveContext），但「上一段 + 当前段」定位仍需要它，故恢复保存；
-// 切书时随进度指针一起清空（见 handleBookSwitch），不会串书。
-var HISTORY_FILE = EXT_DIR + "paragraphHistory.json";
+// （见 getAboveContext），但「上一段 + 当前段」定位仍需要它，故恢复保存；var HISTORY_FILE = EXT_DIR + "paragraphHistory.json";
 var MAX_HISTORY = 20;
 
 var NAME_ANALYZE_TIMEOUT = 25000;
@@ -590,7 +588,12 @@ function annotateAboveContext(aboveText, startPos, located) {
             if (item.dialogText && cleanDialogText(item.dialogText) !== cleanDialogText(d.text)) continue;
             inserts.push({ pos: d.sourceOffset, text: "[" + String(item.name) + "]" });
         }
-        if (inserts.length === 0) return aboveText;
+        if (inserts.length === 0) {
+            log("【上文标注】上文 1000 字内没有可标注的已识别说话人");
+            return aboveText;
+        }
+        log("【上文标注】已标注 " + inserts.length + " 句：" +
+            inserts.slice(0, 8).map(function (x) { return x.text; }).join(" "));
         inserts.sort(function (a, b) { return b.pos - a.pos; });
         var out = aboveText;
         for (var k = 0; k < inserts.length; k++) {
@@ -1427,14 +1430,17 @@ function pickFieldLoose(block, key) {
     return (last == null) ? null : String(last).trim();
 }
 
-// 由一段文本块构建 {name, gender, age}；任一字段缺失/非法则返回 null
+// 由一段文本块构建 {name, gender, age[, alias]}；任一必要字段缺失/非法则返回 null
 function buildNameItem(block) {
     if (!block) return null;
     var name = pickFieldLoose(block, "name");
     var gender = normGenderValue(pickFieldLoose(block, "gender"));
     var age = normAgeValue(pickFieldLoose(block, "age"));
     if (!name || !gender || !age) return null;
-    return { name: name, gender: gender, age: age };
+    var out = { name: name, gender: gender, age: age };
+    var alias = pickFieldLoose(block, "alias");
+    if (alias) out.alias = alias;
+    return out;
 }
 
 // 逐条抽取所有序号条目
@@ -1607,10 +1613,43 @@ function findMergeableRecord(records, aliasName, strict) {
     return count === 1 ? pure : null;
 }
 
+// 从音色标签反推它属于男/女。少年、少女这类标签本身不带「男/女」字，
+// 不能简单看标签里有没有性别字；优先复用 genderAgeFromVoiceTag 的映射。
+function voiceGenderOf(tag) {
+    var s = String(tag || "").trim();
+    if (!s) return "";
+    var ga = genderAgeFromVoiceTag(s);
+    if (ga.charAt(0) === "男" || ga.charAt(0) === "女") return ga.charAt(0);
+    if (s.indexOf("少女") >= 0 || s.indexOf("女童") >= 0 || s.indexOf("女青年") >= 0 ||
+        s.indexOf("女中年") >= 0 || s.indexOf("女老年") >= 0) return "女";
+    if (s.indexOf("少年") >= 0 || s.indexOf("男童") >= 0 || s.indexOf("男青年") >= 0 ||
+        s.indexOf("男中年") >= 0 || s.indexOf("男老年") >= 0) return "男";
+    return "";
+}
+
+// 每次合并都无条件检查：只看音色标签本身属于男/女，与新主名的性别比。
+// 记录里原有的 gender/age 一律不参与判断（它可能在手动换过发音人后与事实不符）。
+// 年龄档不比：小说里年龄跨度大、判断不准，差一档也不违和。
+// 性别不符则清空 voice/fixedVoice，合成时按新主名的性别年龄重新分配。
+function syncVoiceAfterGenderChange(rec, newGender) {
+    if (!rec || !newGender) return;
+    var v = String(rec.voice || "").trim();
+    if (!v) return;
+    var vg = voiceGenderOf(v);
+    if (!vg || vg === newGender) return;
+    rec.voice = "";
+    rec.fixedVoice = false;
+}
+
 // 把旧称呼合并进真名对应的原主记录；门槛不满足时一条记录都不改动。
-function mergeIntoMainRecord(records, aliasName, mainName) {
+// mainInfo = 本批姓名 AI 返回的 {name, gender, age}：
+// 性别年龄一律以最终主名这次返回的值为准；音色只在与新性别冲突时才清空。
+function mergeIntoMainRecord(records, aliasName, mainInfo) {
     var alias = String(aliasName || "").trim();
-    var main = String(mainName || "").trim();
+    var info = mainInfo || {};
+    var main = String(info.name || "").trim();
+    var mainGender = String(info.gender || "").trim();
+    var mainAge = String(info.age || "").trim();
     if (!alias || !main || alias === main) return records;
     // 真名已在原名单 → 严谨；真名是全新的 → 宽松，允许旧称呼带着它的别名一起改名
     var mainRec = findMainRecord(records, main);
@@ -1618,7 +1657,7 @@ function mergeIntoMainRecord(records, aliasName, mainName) {
     var pure = findMergeableRecord(records, alias, strict);
     if (!pure) return records;
     if (mainRec) {
-        // 主名已存在：一直以原先的主名为准，voice/gender/age 等一律不动
+        // 主名已存在：一直以原先的主名为准，只更新别名与性别年龄
         var finalMain = String(mainRec.name || "").trim() || main;
         var merged = namesOfRecord(mainRec);
         if (merged.indexOf(finalMain) === -1) merged.unshift(finalMain);
@@ -1628,6 +1667,9 @@ function mergeIntoMainRecord(records, aliasName, mainName) {
             if (extra[i] && merged.indexOf(extra[i]) === -1) merged.push(extra[i]);
         }
         mainRec.aliases = merged.join("|");
+        if (mainGender) mainRec.gender = mainGender;
+        if (mainAge) mainRec.age = mainAge;
+        syncVoiceAfterGenderChange(mainRec, mainGender);
         var out = [];
         for (var j = 0; j < records.length; j++) {
             var r = records[j];
@@ -1637,33 +1679,17 @@ function mergeIntoMainRecord(records, aliasName, mainName) {
         }
         return out;
     }
-    // 主名不存在：沿用旧逻辑，改名并保留这条记录自己的 voice
+    // 主名不存在：改名，性别年龄改为本批主名的值，音色只在新性别冲突时清空
     var oldName = String(pure.name || "").trim() || alias;
     var names = namesOfRecord(pure);
     if (names.indexOf(oldName) === -1) names.unshift(oldName);
     if (names.indexOf(main) === -1) names.push(main);
     pure.aliases = names.join("|");
     pure.name = main;
+    if (mainGender) pure.gender = mainGender;
+    if (mainAge) pure.age = mainAge;
+    syncVoiceAfterGenderChange(pure, mainGender);
     return records.slice();
-}
-
-// 按主名去重兜底：同主名只留第一条，其余称呼并入，voice 保留第一条的。
-function dedupeByMainName(records) {
-    var seen = {}, out = [];
-    for (var i = 0; i < records.length; i++) {
-        var r = records[i];
-        if (!r) continue;
-        var n = String(r.name || "").trim();
-        if (!n) continue;
-        if (!seen[n]) { seen[n] = r; out.push(r); continue; }
-        var merged = namesOfRecord(seen[n]);
-        var extra = namesOfRecord(r);
-        for (var j = 0; j < extra.length; j++) {
-            if (merged.indexOf(extra[j]) === -1) merged.push(extra[j]);
-        }
-        seen[n].aliases = merged.join("|");
-    }
-    return out;
 }
 
 function applyAliasFromNameResult(analyzeResult) {
@@ -1676,24 +1702,32 @@ function applyAliasFromNameResult(analyzeResult) {
             var alias = String(item.alias).trim();
             var name = String(item.name).trim();
             if (!alias || !name || alias === name || skipped[alias]) continue;
-            if (corrections[alias] && corrections[alias] !== name) {
+            if (corrections[alias] && corrections[alias].name !== name) {
                 delete corrections[alias];
                 skipped[alias] = true;
                 continue;
             }
-            corrections[alias] = name;
+            corrections[alias] = {
+                name: name,
+                gender: String(item.gender || "").trim(),
+                age: String(item.age || "").trim()
+            };
         }
+        var aliasCount = Object.keys(corrections).length;
+        if (aliasCount === 0) log("【真名扶正】本批姓名结果没有 alias（上文未标注或 AI 未返回）");
         var changed = false;
         var records = getLatestCharacterRecords();
         for (var aliasKey in corrections) {
             if (!corrections.hasOwnProperty(aliasKey)) continue;
             var before = records;
             records = mergeIntoMainRecord(records, aliasKey, corrections[aliasKey]);
-            if (records !== before) changed = true;
+            if (records !== before) {
+                changed = true;
+                log("【真名扶正】" + aliasKey + " → " + corrections[aliasKey].name + "：合并成功");
+            } else {
+                log("【真名扶正】" + aliasKey + " → " + corrections[aliasKey].name + "：未合并（名单里没有该独立主名记录，或它已被别人收作别名）");
+            }
         }
-        var deduped = dedupeByMainName(records);
-        if (deduped.length !== records.length) changed = true;
-        records = deduped;
         if (changed) {
             java.writeExternalFile(EXT_DIR + "characterRecords.json", JSON.stringify(records, null, 2));
             log("【真名扶正】已处理 " + Object.keys(corrections).length + " 个旧称呼");
