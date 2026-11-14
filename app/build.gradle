@@ -35,7 +35,10 @@ static def releaseTime(File dir) {
     return new Date().format("yy.MMddHHmm", TimeZone.getTimeZone("GMT+8"))
 }
 
-def name = "legado"
+// 11-15 用户令：APK 文件名用「应用名_版本号」（对齐 UTTS 的 U-TTS-v<版本> 风格）。
+// 应用名取 strings.xml 的 app_name（U阅），改应用名时包名跟着变，不用再改这里。
+// 版本号仍 3.yy.MMddHHmm（提交时间，11-13 定）。
+def name = "U阅"
 def version = "3." + releaseTime(rootDir)
 def gitCommitsText = 'git rev-list HEAD --count'.execute(null, rootDir).text.trim()
 def gitCommits = gitCommitsText.isEmpty() ? 0 : Integer.parseInt(gitCommitsText)
@@ -136,8 +139,10 @@ android {
 
     android.applicationVariants.configureEach { variant ->
         variant.outputs.configureEach {
-            def flavor = variant.productFlavors[0].name
-            outputFileName = "${name}_${flavor}_${defaultConfig.versionName}.apk"
+            // 11-15 用户令：命名格式 = 应用名_版本号.apk（U阅_3.26.11150449.apk）。
+            // 原 ${name}_${flavor}_... 里的 flavor 段（恒为 "app"）与格式冲突，去掉；
+            // 只有一个 flavor，去掉后文件名反而干净。
+            outputFileName = "${name}_${defaultConfig.versionName}.apk"
         }
     }
 
