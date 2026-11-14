@@ -91,9 +91,6 @@ object ReadBook : CoroutineScope by MainScope() {
     private var lastSavedChapterIndex: Int = -1
     private var lastSavedFixQuote: Boolean? = null
     private var lastSavedReSegment: Boolean? = null
-    // 11-14 补：档2 开关也必须进节流比对。否则"只开关档2"不会触发重写，
-    // 用户点了开关、界面显示已开，但脚本读到的还是旧分段（静默失效）。
-    private var lastSavedSplitNarration: Boolean? = null
 
     /* 跳转进度前进度记录 */
     var lastBookProgress: BookProgress? = null
@@ -1103,13 +1100,11 @@ object ReadBook : CoroutineScope by MainScope() {
         val chapterIndex = durChapterIndex
         val fixQuote = book.getFixQuote()
         val reSegment = book.getReSegment()
-        val splitNarration = book.getSplitNarration()
         if (!force &&
             lastSavedBookName == bookName &&
             lastSavedChapterIndex == chapterIndex &&
             lastSavedFixQuote == fixQuote &&
-            lastSavedReSegment == reSegment &&
-            lastSavedSplitNarration == splitNarration
+            lastSavedReSegment == reSegment
         ) {
             return
         }
@@ -1153,7 +1148,6 @@ object ReadBook : CoroutineScope by MainScope() {
                 lastSavedChapterIndex = chapterIndex
                 lastSavedFixQuote = fixQuote
                 lastSavedReSegment = reSegment
-                lastSavedSplitNarration = splitNarration
                 AppLog.putDebug(
                     "保存 TTS JSON 成功: $bookName 第${chapterIndex}章起, 实收${chapterCount}/${limit}章"
                 )
@@ -1216,9 +1210,7 @@ object ReadBook : CoroutineScope by MainScope() {
         val processed = ContentProcessor.get(book).getContent(
             book, ch, raw,
             fixQuote = book.getFixQuote(),
-            reSegment = book.getReSegment(),
-            // 档2：只做旁白/对话分离；主开关关着时 getSplitNarration() 恒 false
-            splitNarration = book.getSplitNarration()
+            reSegment = book.getReSegment()
         ).toString()
         // 再清理残留的 HTML 标签、图片链接、段评占位符
         return processed

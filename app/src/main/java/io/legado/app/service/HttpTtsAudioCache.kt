@@ -235,8 +235,7 @@ object HttpTtsAudioCache {
             useReplace = AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
             chineseConvert = AppConfig.chineseConverterType != 0,
             fixQuote = book.getFixQuote(),
-            reSegment = book.getReSegment(),
-            splitNarration = book.getSplitNarration()
+            reSegment = book.getReSegment()
         )
 
         // 如果需要朗读标题，添加标题（与预下载逻辑一致）

@@ -235,18 +235,6 @@ data class Book(
         return config.reSegment
     }
 
-    fun setSplitNarration(splitNarration: Boolean) {
-        config.splitNarration = splitNarration
-    }
-
-    /**
-     * 档2 是否生效。主开关（长段拆分）关着时恒为 false——
-     * 即使用户之前勾过档2，主开关一关就不再有任何效果，避免"以为关了其实还在切"。
-     */
-    fun getSplitNarration(): Boolean {
-        return config.reSegment && config.splitNarration
-    }
-
     fun setPageAnim(pageAnim: Int?) {
         config.pageAnim = pageAnim
     }
@@ -462,17 +450,6 @@ data class Book(
         var pageAnim: Int? = null,
         var fixQuote: Boolean = true,//双引号修复（默认开启）
         var reSegment: Boolean = false,
-        /**
-         * 档2：旁白／对话分离（只在 [reSegment] 开启时生效）。
-         *
-         * 默认 **false**——用户 11-14 明说：「对话的上下文不清楚，会让 AI 分析不准，
-         * 不知道这句话谁说的」。所以它必须是用户自己主动勾的第二道开关，
-         * 不能跟着主开关一起默认打开。主开关关掉时会连带清成 false，不留悬空态。
-         *
-         * 放在 ReadConfig 里（跟 reSegment 同级）而不是全局 AppConfig：
-         * 这是**按书**的排版差异——出版书常有「旁白+对话」混排，网文几乎没有。
-         */
-        var splitNarration: Boolean = false,
         var imageStyle: String? = null,
         var useReplaceRule: Boolean? = null,// 正文使用净化替换规则
         var delTag: Long = 0L,//去除标签

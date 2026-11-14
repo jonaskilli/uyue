@@ -113,24 +113,6 @@
         android:title="@string/re_segment"
         app:showAsAction="never" />
 
-    <!--
-        11-14 用户定稿（方案乙：平铺两行 + 子项灰显）。
-
-        为什么不用传统二级子菜单：Android 的规则是「挂了 <menu> 的 item，
-        点它就是展开子菜单」，主开关那一下勾选会被吃掉。要保住"一个主开关"，
-        就得把主开关也沉进二级，等于两次点击才够得着。
-        平铺成相邻两行，勾选行为、可点性、灰显全都在同一个 Menu 层解决。
-
-        「长段拆分」主开关关闭时，本项由 ReadBookActivity.upMenu() 置为
-        不可点 + 灰色标题（见那里的注释）。
-    -->
-    <item
-        android:id="@+id/menu_split_narration"
-        android:checkable="true"
-        android:checked="false"
-        android:title="@string/split_narration"
-        app:showAsAction="never" />
-
     <item
         android:id="@+id/menu_enable_review"
         android:checkable="true"

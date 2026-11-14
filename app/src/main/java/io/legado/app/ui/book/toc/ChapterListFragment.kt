@@ -403,8 +403,7 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
                     useReplace = io.legado.app.help.config.AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
                     chineseConvert = io.legado.app.help.config.AppConfig.chineseConverterType != 0,
                     fixQuote = book.getFixQuote(),
-                    reSegment = book.getReSegment(),
-                    splitNarration = book.getSplitNarration()
+                    reSegment = book.getReSegment()
                 )
                 val paragraphCount = bookContent.textList.size
                 AudioLogCollector.log("步骤2: 共解析出 $paragraphCount 段内容")
@@ -711,8 +710,7 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
             useReplace = AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
             chineseConvert = AppConfig.chineseConverterType != 0,
             fixQuote = book.getFixQuote(),
-            reSegment = book.getReSegment(),
-            splitNarration = book.getSplitNarration()
+            reSegment = book.getReSegment()
         ).toString()
 
         // 如果需要朗读标题，添加标题

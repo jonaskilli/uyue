@@ -97,12 +97,7 @@ class ContentProcessor private constructor(
         useReplace: Boolean = true,
         chineseConvert: Boolean = true,
         fixQuote: Boolean = true,
-        reSegment: Boolean = true,
-        /**
-         * 档2：旁白／对话分离。只在 [reSegment] 也为 true 时被读取——
-         * "长段拆分"主开关关掉时，这个参数传什么都不生效（见 ContentHelp.reSegment）。
-         */
-        splitNarration: Boolean = false
+        reSegment: Boolean = true
     ): BookContent {
         var mContent = content
         var sameTitleRemoved = false
@@ -139,29 +134,22 @@ class ContentProcessor private constructor(
                 //双引号修复（必须先于重新分段，修复错乱/缺失的引号）
                 mContent = QuoteFix.fix(mContent)
             }
-            if (reSegment && book.getReSegment()) {
-                //长段拆分（档2 旁白/对话分离由 splitNarration 决定，默认关）
-                mContent = ContentHelp.reSegment(mContent, chapter.title, splitNarration)
-            }
-            if (chineseConvert) {
-                //简繁转换
-                try {
-                    when (AppConfig.chineseConverterType) {
-                        1 -> mContent = ChineseUtils.t2s(mContent)
-                        2 -> mContent = ChineseUtils.s2t(mContent)
-                    }
-                } catch (_: Exception) {
-                    appCtx.toastOnUi("简繁转换出错")
-                }
-            }
-            val useHtmlMap = mutableMapOf<String, String>()
-            if (AppConfig.adaptSpecialStyle) { //html处理
-                mContent = AppPattern.useHtmlRegex.replace(mContent) { matchResult ->
-                    val placeholder = "特殊格式的占位不应该被看见${useHtmlMap.size}。"
-                    useHtmlMap[placeholder] = "\n${matchResult.value.replace("\n","")}\n"
-                    placeholder
-                }
-            }
+            // ⚠️ 11-14 结构性调整（用户令）：替换净化必须跑在「长段拆分」**之前**。
+            //
+            // 原因（实测）：档2（旁白/对话分离）以「双引号边界」判断哪里是对话。
+            // 但出版书里大量双引号是用来**强调/术语**的（“宣统”“皇帝陛下”“无用”
+            // “保全面子”……），不是对话。用户为此配了一条替换规则把这些转成单引号
+            // （正是他贴的那条“非对话改引号为单引号”）。
+            // 旧顺序是「先拆分、后替换」：拆分时双引号还没被规范化，档2 把“宣统”
+            // 当成对话切了出来，替换规则再来改已经来不及 —— 规则对档2 完全无效。
+            //
+            // 实测《我在溥仪身边十三年》前 5 章（28 段）：
+            //   先拆分后替换：8 段被误拆、产生 11 个短碎片（“宣统”“皇上”各成一段）
+            //   先替换后拆分：3 段被拆、产生 0 个短碎片
+            //
+            // ⚠️ 只影响档2（引号判据）；档1 只看句末标点，顺序对结果无影响。
+            // ⚠️ 替换块内含 `lines().joinToString { it.trim() }`（按行去首尾空白），
+            //    挪动后对空白行的影响与原先一致，因为它仍在「分段成 contents」之前。
             if (useReplace && book.getUseReplaceRule()) {
                 val replaceBook = book.toSearchBook()
                 //替换
@@ -196,6 +184,30 @@ class ContentProcessor private constructor(
                         AppLog.put("替换净化: 规则 ${item.name}替换出错.\n${mContent}", e)
                         appCtx.toastOnUi("替换净化: 规则 ${item.name}替换出错")
                     }
+                }
+            }
+
+            if (reSegment && book.getReSegment()) {
+                //长段拆分（只按句末标点切超长段；档2 旁白/对话分离已按用户令删除）
+                mContent = ContentHelp.reSegment(mContent, chapter.title)
+            }
+            if (chineseConvert) {
+                //简繁转换
+                try {
+                    when (AppConfig.chineseConverterType) {
+                        1 -> mContent = ChineseUtils.t2s(mContent)
+                        2 -> mContent = ChineseUtils.s2t(mContent)
+                    }
+                } catch (_: Exception) {
+                    appCtx.toastOnUi("简繁转换出错")
+                }
+            }
+            val useHtmlMap = mutableMapOf<String, String>()
+            if (AppConfig.adaptSpecialStyle) { //html处理
+                mContent = AppPattern.useHtmlRegex.replace(mContent) { matchResult ->
+                    val placeholder = "特殊格式的占位不应该被看见${useHtmlMap.size}。"
+                    useHtmlMap[placeholder] = "\n${matchResult.value.replace("\n","")}\n"
+                    placeholder
                 }
             }
             useHtmlMap.forEach { (placeholder, originalContent) ->

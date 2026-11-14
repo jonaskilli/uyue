@@ -42,24 +42,32 @@ object ContentHelp {
      * 丢弃：引号规范化、去空格、段落黏合、`。”` 断句、词典重排——
      * 这些属于"排版纠正"，不该藏在一个叫"长段拆分"的开关后面。
      *
+     * ## 11-14 定稿：不做「旁白／对话分离」（档2 已删除）
+     *
+     * 曾有一版档2，按引号边界把「旁白+对话」切开。删除依据是真实正文实测：
+     *
+     *  · 《呼啸山庄》236 段里，它把 537 段切出来（原本 412），<15 字碎片从 86
+     *    涨到 220 —— `[3字] 我说，` 这种旁白单独成段，每段单独发一次合成请求，
+     *    语调断裂、总请求数暴增，与用户「每段短一点、点下一段反应快」的目的相反；
+     *  · 出版书里大量双引号是**术语/强调**（“宣统”“保全面子”），档2 当对话切，
+     *    8 段全误拆、产生 11 个碎片；
+     *  · 用户最担心的「旁白 + 一长段对话」场景，实测档1 并不吃亏：
+     *    《呼啸山庄》363 字的整段长对话（引号内含十余个句子），档1 切成 11 段、
+     *    每段 22~50 字，全部断在句末。只要对话本身是多句，档1 就够。
+     *
+     * 档2 唯一能补的是「旁白 + 一整句没有句末标点的长话」，而那种切完仍是长段
+     * （实测 83 字切成 6+77），收益有限。用户已确认可接受该情况原样保留。
+     *
+     * 因此这里只保留一刀：按句末标点切超长段（档1）。
+     *
      * @param content 章节正文（原文，含它自己的分段与缩进）
      * @param chapterName 章名（本实现不再用它，保留参数是为了调用方签名稳定）
-     * @param splitNarration 档2：是否再做「旁白／对话分离」（默认关，见下）
      */
-    fun reSegment(
-        content: String,
-        chapterName: String,
-        splitNarration: Boolean = false
-    ): String {
+    fun reSegment(content: String, chapterName: String): String {
         // 空正文直接返回，避免 StringBuilder 空跑
         if (content.isBlank()) return content
-        // 第一道：只切超长段；splitLongParagraph 自己会跳过短行
-        val cut = splitLongParagraph(StringBuilder(content)).toString()
-        // 第二道（档2，默认关）：把「旁白+对话」混在一段的拆开。
-        // 顺序不能反：先进引号分离、再按长度切，会把已经够短的对话又切碎；
-        // 先按长度切出符合目标段长的段，再分离旁白/对话，两边都干净。
-        if (!splitNarration) return cut
-        return splitNarrationDialogue(cut)
+        // 只切超长段；splitLongParagraph 自己会跳过短行
+        return splitLongParagraph(StringBuilder(content)).toString()
     }
 
     /**
@@ -342,86 +350,6 @@ object ContentHelp {
             }
         }
         return str
-    }
-
-    /**
-     * 档2：把「旁白 + 对话」混在同一段里的句子拆开（11-14 用户令做二档）。
-     *
-     * ## 为什么不直接复用 splitQuote
-     *
-     * [splitQuote] 有两个限制，拿它当档2 会漏：
-     *  1. **一次只切一刀**：`她说：“A”然后他说：“B”` 只在第一个引号处切开，
-     *     后半段仍是旁白对话混着；用户要的是"分两段"，得切到没有混合为止；
-     *  2. **只认"段首/段尾是引号"两种情况**：段中间的对话
-     *     （`他抬头说：“走。”然后转身。`）它根本不处理。
-     *
-     * 本函数判据（比 splitQuote 宽，但仍保守）：
-     *  - 引号深度 0→1 处（起引号）切成两段：前面旁白、后面对话；
-     *  - 引号深度 1→0 处之后切片：对话结束，后面回到旁白；
-     *  - 只对**同一行**操作，不跨行；
-     *  - 不含字母/数字的碎片（如只剩 `：“`）并回前段——否则 UTTS 会为
-     *    空串发一次请求（用户为此报过"零词请求"）。
-     *
-     * ⚠️ 用户已明说这条的代价：「对话的上下文不清楚，会让 AI 分析不准，
-     * 不知道这句话谁说的」。所以**默认关闭**，只在用户主动开档2时生效。
-     */
-    private fun splitNarrationDialogue(content: String): String {
-        if (content.isBlank()) return content
-        val lines = content.split("\n")
-        val pieces = ArrayList<String>()
-        for (line in lines) {
-            // 空行原样保留：正文的段落/空行结构由上游决定，档2 不该顺手吃掉它
-            if (line.isBlank()) {
-                if (pieces.isNotEmpty()) pieces.add("")
-                continue
-            }
-            // 逐行按引号深度找下刀位置
-            val cuts = ArrayList<Int>()
-            var depth = 0
-            for (i in line.indices) {
-                val nd = nextQuoteDepth(line, i, depth)
-                if (nd != depth) {
-                    // 0→1（起引号）：在引号前切，旁白独立成段
-                    // 1→0（收引号）：在引号后切，对话独立成段
-                    val pos = if (nd > depth) i else i + 1
-                    if (pos in 1 until line.length && !cuts.contains(pos)) cuts.add(pos)
-                    depth = nd
-                }
-            }
-            if (cuts.isEmpty()) {
-                pieces.add(line)
-                continue
-            }
-            var from = 0
-            for (cut in cuts) {
-                if (cut <= from) continue
-                val piece = line.substring(from, cut)
-                if (piece.isNotBlank()) pieces.add(piece)
-                from = cut
-            }
-            if (from < line.length) {
-                val tail = line.substring(from)
-                if (tail.isNotBlank()) pieces.add(tail)
-            }
-        }
-        // 缺口4：合并「纯标点/空白」碎片并回前段（判据同 UTTS splitSentences）
-        val merged = ArrayList<String>()
-        for (piece in pieces) {
-            // 空行（段落分隔）原样进结果，不参与并段
-            if (piece.isEmpty()) {
-                merged.add(piece)
-                continue
-            }
-            val noContent = piece.none { it.isLetterOrDigit() }
-            // 只并进**非空的前一段**：前一段是空行时并过去，会把标点并到空行上
-            val prev = merged.lastOrNull()
-            if (prev != null && prev.isNotEmpty() && noContent) {
-                merged[merged.size - 1] = prev + piece
-            } else {
-                merged.add(piece)
-            }
-        }
-        return merged.joinToString("\n")
     }
 
     /**
