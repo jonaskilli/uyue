@@ -1364,6 +1364,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                             contentList.getOrNull(nowSpeak).orEmpty()
                         )
                         lastNowSpeak = nowSpeak
+                        lastProgressHeartbeatMs = System.currentTimeMillis()
+                    } else if (isPlay()) {
+                        // 11-15 心跳：长段播超过 STALE_MS(15s) 时，[report] 不会再写
+                        //（它只在段切换时写），读的人（UTTS 日志页）就会判定过期——
+                        // 「正在朗读」行与「合成进度」行整块消失，要等下一段切换才回来
+                        //（用户实报「有时候正在朗读日志不显示，有时候合成进度也不显示」）。
+                        // 这里每 loop（200ms）检查一次，节流到 10 秒刷新一回 `at`
+                        //（留 5 秒余量）。暂停/停止不刷：读的人本就该判过期。
+                        val now = System.currentTimeMillis()
+                        if (now - lastProgressHeartbeatMs >= PROGRESS_HEARTBEAT_MS) {
+                            io.legado.app.help.ReadProgressFile.touch()
+                            lastProgressHeartbeatMs = now
+                        }
                     }
                     updateSubtitle()
                     // 检查并触发音效

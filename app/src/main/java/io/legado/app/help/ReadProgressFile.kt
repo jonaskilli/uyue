@@ -72,28 +72,70 @@ object ReadProgressFile {
         lastChapterIdx = chapterIndex
         lastSeg = segIndex
         runCatching {
-            val json = JSONObject().apply {
-                put("book", book)
-                put("chapterTitle", ReadBook.curTextChapter?.title.orEmpty())
-                // 播放组：UTTS 用它定位「正在朗读」那条卡
-                put("playing", true)
-                put("chapterIndex", chapterIndex)
-                put("segIndex", segIndex)
-                put("totalSegs", totalSegs)
-                // 正文前缀（截 60 字）：日志行没有段号字段，「哪张卡是正在朗读」
-                // 靠章名+正文前缀匹配——正文是两边唯一的公共键（请求音频行 <b>正文</b>=原文）
-                put("segText", segText.take(60))
-                put("at", System.currentTimeMillis())
-            }
             val dir = File(EngineDataDir.baseDir())
             if (!dir.exists()) dir.mkdirs()
             synchronized(ioLock) {
-                File(dir, FILE_NAME).writeText(json.toString())
+                val f = File(dir, FILE_NAME)
+                // 11-15 修：**读改写**，不再新建空对象覆盖。
+                //
+                // 旧写法 `JSONObject().apply{...}` 只写播放组字段，等于把合成前沿
+                // （synthChapterIndex/synthSegIndex/synthChapterTitle/synthTotalSegs）
+                // 整片抹掉——段一切换，UTTS 日志页的「合成进度」行就变空，要等下一笔
+                // 合成上报才回来。真机表现＝进度行时有时无（用户 11-15 截图实报）。
+                // 现沿用文件里已有的合成字段，只覆盖播放组。
+                val json = if (f.exists()) {
+                    runCatching { JSONObject(f.readText()) }.getOrElse { JSONObject() }
+                } else JSONObject()
+                json.put("book", book)
+                json.put("chapterTitle", ReadBook.curTextChapter?.title.orEmpty())
+                // 播放组：UTTS 用它定位「正在朗读」那条卡
+                json.put("playing", true)
+                json.put("chapterIndex", chapterIndex)
+                json.put("segIndex", segIndex)
+                json.put("totalSegs", totalSegs)
+                // 正文前缀（截 60 字）：日志行没有段号字段，「哪张卡是正在朗读」
+                // 靠章名+正文前缀匹配——正文是两边唯一的公共键（请求音频行 <b>正文</b>=原文）
+                json.put("segText", segText.take(60))
+                json.put("at", System.currentTimeMillis())
+                f.writeText(json.toString())
             }
         }.onFailure {
             // 辅助信息，失败不打扰用户，只在 AppLog 留痕
             AppLog.putDebug("朗读进度写入失败: ${it.localizedMessage}")
         }
+    }
+
+    /**
+     * 心跳：只刷新时间戳 `at`，不动段号/正文/合成字段。
+     *
+     * 为什么需要它（11-15 用户实报「有时候正在朗读日志不显示」）：
+     * [report] 只在**段切换**时写一次；读的人（UTTS 日志页）判新鲜度用的是
+     * `now - at <= STALE_MS`（15 秒）。于是两种情况必然断档：
+     *   ① **长段**：某段播放超过 15 秒（很正常），`at` 不再更新 → 读的人判定过期
+     *      → 「正在朗读」行与「合成进度」行**整块消失**，要等下一段开始才回来；
+     *   ② **暂停后继续**：同一段恢复播放时 `nowSpeak == lastNowSpeak`，[report]
+     *      因幂等直接 return，`at` 一直停在暂停前那一刻 → 恢复后依然被判过期。
+     * 由字幕同步循环（200ms 一跳）节流调用本函数即可同时解决两者。
+     *
+     * @return true=真的写了盘（调用方节流用）
+     */
+    fun touch(): Boolean {
+        // 有在播的段才刷：从没 report 过（lastSeg<0）就不该写出 playing=true
+        if (lastSeg < 0) return false
+        val dir = File(EngineDataDir.baseDir())
+        if (!dir.exists()) return false
+        return runCatching {
+            synchronized(ioLock) {
+                val f = File(dir, FILE_NAME)
+                if (!f.exists()) return false
+                val json = runCatching { JSONObject(f.readText()) }.getOrElse { return false }
+                // 已停（clear 写过 playing=false）就别把它救活
+                if (!json.optBoolean("playing", false)) return false
+                json.put("at", System.currentTimeMillis())
+                f.writeText(json.toString())
+            }
+            true
+        }.getOrElse { false }
     }
 
     /**

@@ -126,6 +126,23 @@ abstract class BaseReadAloudService : BaseService(),
         }
 
         /**
+         * 11-15：朗读进度心跳间隔。
+         *
+         * 背景：U阅 侧的 readProgress.json 只在**段切换**时由 [ReadProgressFile.report]
+         * 写入，而读的人（UTTS 日志页）用 `now - at <= STALE_MS(15s)` 判新鲜度。
+         * 于是长段（>15 秒，很常见）播到一半就没有新写入 → 被判定过期 →
+         * 「正在朗读」行和「合成进度」行整块消失，要等下一段才开始显示
+         *（用户 11-15 实报「有时候正在朗读日志不显示，有时候合成进度也不显示」）。
+         * 由字幕同步循环（200ms 一跳）节流调用 [ReadProgressFile.touch] 刷 `at` 即可，
+         * 这里取 10 秒——比 STALE_MS 留 5 秒余量，又不会增加无谓写盘。
+         */
+        const val PROGRESS_HEARTBEAT_MS = 10_000L
+
+        /** 上次刷新进度心跳的时刻（毫秒）；字幕循环里节流用 */
+        @JvmStatic
+        protected var lastProgressHeartbeatMs: Long = 0L
+
+        /**
          * gengxin 触发重启后要恢复到的段落索引。
          * 服务重启后 newReadAloud 会重置 nowSpeak，在 play() 前用此值覆盖。
          * -1 表示无待恢复。
@@ -1555,6 +1572,7 @@ abstract class BaseReadAloudService : BaseService(),
         aiEffectStarted = false
         // 见 [lastNowSpeak] 的注释：不复位会导致重读同一段时不再调度 AI 音效
         lastNowSpeak = -1
+        lastProgressHeartbeatMs = 0L
         // 记录文件可能已被外部改动（如设置里清除本章记录），下次重新载入
         aiEffectCacheKey = ""
         // AI 弹幕：同步清空调度状态（记录保留在缓存文件，重读复用）
