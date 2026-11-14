@@ -375,7 +375,8 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud),
                 // 全屏延伸模式
                 decorView.setPadding(0, 0, 0, 0)
                 // 共用弹幕浮层：全屏模式恢复显示（半屏时隐藏，不清在屏状态）
-                (activity as? ReadBookActivity)?.danmakuHost()?.setVisible(true)                binding.sceneEffectView.visibility =
+                (activity as? ReadBookActivity)?.danmakuHost()?.setVisible(true)
+                binding.sceneEffectView.visibility =
                     if (AppConfig.sceneEffectEnabled) View.VISIBLE else View.GONE
                 // 清掉半屏模式加的穿透标记：全屏时窗口铺满整屏，触摸应只由本窗口处理，
                 // 否则运行时由半屏切回全屏会残留该标记

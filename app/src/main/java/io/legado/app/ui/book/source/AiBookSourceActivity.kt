@@ -67,7 +67,8 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         binding.btnSave.setOnClickListener { saveSource() }
         binding.btnLogin.setOnClickListener { gotoLogin() }
         if (checkMode && checkUrl != null) {
-            binding.btnGenerate.text = "校验并修正"            binding.btnGenerateOne.visibility = View.GONE
+            binding.btnGenerate.text = "校验并修正"
+            binding.btnGenerateOne.visibility = View.GONE
             binding.btnImport.visibility = View.GONE
             loadCheckSource(checkUrl)
         }
@@ -121,7 +122,8 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
         val tocUrl = binding.etTocUrl.text?.toString()?.trim()
             ?.takeIf { it.isNotBlank() }
         val contentUrl = binding.etContentUrl.text?.toString()?.trim()
-            ?.takeIf { it.isNotBlank() }        val fixRounds = binding.etFixRounds.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
+        val fixRounds = binding.etFixRounds.text?.toString()?.trim()
             ?.toIntOrNull()?.coerceIn(0, 8) ?: 2
         generated = null
         binding.btnSave.alpha = 0.4f
@@ -153,7 +155,8 @@ class AiBookSourceActivity : BaseActivity<ActivityAiBookSourceBinding>() {
                     if (res.patchedSteps.isNotEmpty()) {
                         append("\n（已用该网址的历史成功规则补齐：")
                             .append(res.patchedSteps.joinToString("、")).append("）")
-                    }                    append('\n')
+                    }
+                    append('\n')
                     append("验证结果（含封面）：\n")
                     res.verify.forEach { v ->
                         append('[').append(if (v.ok) "通过" else "失败").append("] ")
