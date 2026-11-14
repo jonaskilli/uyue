@@ -555,9 +555,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 改法：删之前先认领——同 cacheFile 名下若有**有效音频**的 .tmp，
             // 直接收编成正式缓存，省掉一次完整 API 请求；
             // 无效/半截的照旧删掉重来（不赌，只认 isValidAudioFile 的判定）。
+            // 收编用**严格**校验（isVerifiedAudioFile）：半截 .tmp 若被宽松放过，
+            // 会变成"看起来有效的正式缓存"，之后每次命中都让 ExoPlayer 报
+            // UnrecognizedInputFormatException（真机 11-14 20:55:20 实证）。
             val reusableTmp = FileUtils.listDirsAndFiles(ttsFolderPath)?.firstOrNull {
                 it.isFile && it.name.startsWith(cacheFile.name) && it.name.endsWith(".tmp") &&
-                    isValidAudioFile(it)
+                    isVerifiedAudioFile(it)
             }
             if (reusableTmp != null && reusableTmp.renameTo(cacheFile)) {
                 AppLog.putDebug("TTS收编上次中断的临时音频: ${cacheFile.name}")
@@ -1034,6 +1037,24 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             val errorPosition = exoPlayer.currentPosition
             val index = exoPlayer.currentMediaItemIndex
             AppLog.putDebug("TTS朗读出错，从实际报错位置(${errorPosition}ms)重建续播当前段")
+            // 11-14 晚：解析失败（UnrecognizedInputFormatException）说明**文件本身坏了**，
+            // 重建同一样东西必然再报一次（真机 20:55:20.834 与 20:55:20.908 连报两次
+            // 就是这个原因）。这种坏缓存要删掉，否则每次重读都命中它、每次都报错，
+            // 只能靠用户手动清缓存恢复。
+            // 判定：Source error + UnrecognizedInputFormatException ⇒ 删文件 + 判下一段。
+            if (isCorruptAudioError(error)) {
+                deleteCorruptCacheFor(currentItem)
+                exoPlayer.removeMediaItem(index)
+                itemRetryPending = false
+                if (exoPlayer.hasNextMediaItem()) {
+                    exoPlayer.seekToNextMediaItem()
+                    exoPlayer.prepare()
+                } else {
+                    exoPlayer.clearMediaItems()
+                    updateNextPos()
+                }
+                return
+            }
             exoPlayer.removeMediaItem(index)
             exoPlayer.addMediaItem(index, currentItem)
             exoPlayer.seekTo(index, errorPosition)
@@ -1051,6 +1072,47 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 exoPlayer.clearMediaItems()
                 updateNextPos()
             }
+        }
+    }
+
+    /**
+     * 播放错误是否属于「音频文件本身损坏/不可解析」。
+     *
+     * 这类错误重建同一个 mediaItem 没有意义（文件没变，必然再报），
+     * 与「读取超时/解码抖动」那种重试一下能过去的错误要分开处理。
+     */
+    private fun isCorruptAudioError(error: PlaybackException): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is androidx.media3.exoplayer.source.UnrecognizedInputFormatException) return true
+            // 类名匹配兜底：混淆构建下类型判断可能失效（R8 keep 未覆盖时）
+            if (cause.javaClass.simpleName.contains("UnrecognizedInputFormat")) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    /**
+     * 删除播放失败的坏缓存。只删 `.wav` 正式缓存，且必须能在缓存目录里对上
+     * mediaItem 的 uri——防止误删用户其它文件。
+     */
+    private fun deleteCorruptCacheFor(mediaItem: MediaItem) {
+        val uri = mediaItem.localConfiguration?.uri ?: return
+        val path = uri.path ?: return
+        if (!path.startsWith(ttsFolderPath)) return
+        runCatching {
+            val f = File(path)
+            if (f.exists()) {
+                val size = f.length()
+                if (f.delete()) {
+                    AppLog.put("已删除损坏的音频缓存（下次重读会重新合成）: ${f.name} ${size}B")
+                }
+            }
+            // in-flight 登记的键是 cacheFile.absolutePath（见 cacheKey），
+            // 用 File.absolutePath 清才命中，直接拿 uri.path 可能差一层前缀
+            inFlightSyntheses.remove(f.absolutePath)
+        }.onFailure {
+            AppLog.put("删除损坏音频缓存失败: ${it.localizedMessage}")
         }
     }
 
@@ -1749,6 +1811,38 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         } catch (e: Exception) {
             // Retriever 抛异常也不直接判无效，只要文件大小合理就放行
             true
+        }
+    }
+
+    /**
+     * 严格校验：用于「把上次中断的 .tmp 收编成正式缓存」这种**不可逆**的决定。
+     *
+     * 与 [isValidAudioFile] 的区别：后者是**宽松**的（Retriever 抛异常也放行），
+     * 因为对「已存在的正式缓存」宁可放行也别白花一次 API。但把它用在收编半截
+     * 临时文件上就出事了——真机 11-14 实锤（20:55:20.154 → 20:55:20.834）：
+     *   20:55:20.154 TTS收编上次中断的临时音频: f8837cf519e16e0c_c9f9f119b9ea38fe.wav
+     *   20:55:20.781 TTS缓存命中: 同一文件
+     *   20:55:20.834 TTS播放错误 UnrecognizedInputFormatException:
+     *                None of the available extractors ... could be found
+     * 即：**半截的 .tmp 被宽松校验放过 → 扶正成正式缓存 → ExoPlayer 解析不了**。
+     * 更麻烦的是它现在成了「有效缓存」，后续每次都命中、每次都报错，
+     * 只能靠用户清缓存恢复。
+     *
+     * 故收编前要求：Retriever 能读出**正时长**。读不出就是半截/无头文件，宁可删掉
+     * 重新合成（多花一次 API），也不能污染缓存。
+     */
+    private fun isVerifiedAudioFile(file: File): Boolean {
+        if (!file.exists() || file.length() <= 44) return false
+        return try {
+            val retriever = android.media.MediaMetadataRetriever()
+            retriever.setDataSource(file.absolutePath)
+            val duration = retriever.extractMetadata(
+                android.media.MediaMetadataRetriever.METADATA_KEY_DURATION
+            )?.toLongOrNull()
+            retriever.release()
+            duration != null && duration > 0
+        } catch (e: Exception) {
+            false
         }
     }
 
