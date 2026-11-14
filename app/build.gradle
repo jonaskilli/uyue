@@ -38,7 +38,10 @@ static def releaseTime(File dir) {
 // 11-15 用户令：APK 文件名用「应用名_版本号」（对齐 UTTS 的 U-TTS-v<版本> 风格）。
 // 应用名取 strings.xml 的 app_name（U阅），改应用名时包名跟着变，不用再改这里。
 // 版本号仍 3.yy.MMddHHmm（提交时间，11-13 定）。
-def name = "U阅"
+// 11-15 用户令：APK 文件名用「应用名_版本号」（对齐 UTTS 的 U-TTS-v<版本> 风格）。
+// 首版用中文「U阅」，真机下载后文件名被浏览器/下载器把非 ASCII 字符洗成「U.」
+//（截图实锤）→ 改纯 ASCII「Uyue」。版本号仍 3.yy.MMddHHmm（提交时间，11-13 定）。
+def name = "Uyue"
 def version = "3." + releaseTime(rootDir)
 def gitCommitsText = 'git rev-list HEAD --count'.execute(null, rootDir).text.trim()
 def gitCommits = gitCommitsText.isEmpty() ? 0 : Integer.parseInt(gitCommitsText)
