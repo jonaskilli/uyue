@@ -141,25 +141,34 @@ object ContentHelp {
                 result.append("\n")
                 continue
             }
+            // 11-14 晚（用户实报「长段切分时段评被弄到单独一行」）：
+            // 先把**行尾的 HTML 标签**摘下来（段评 `<img style="TEXT">`、配图等），
+            // 只对纯文字部分做切分，切完再把标签挂回**最后一段**末尾。
+            //
+            // 为什么必须这样：切点只认句末标点，而标签紧跟在句号后面——
+            // `…日记里。<img style=TEXT>` 在「。」后切开，标签就整个落到新切出那段的
+            // **段首**，排版时被渲染成独占一行的段评气泡（用户截图实锤）。
+            // 标签在语义上属于它前面那句话，天然应该跟着上一段走，不该单独成段。
+            val (bodyText, tailTags) = splitTrailingTags(line)
             val cuts = ArrayList<Int>()
-            if (line.length > MAX_PARAGRAPH_LENGTH) {
+            if (bodyText.length > MAX_PARAGRAPH_LENGTH) {
                 // 1. 计算每个位置的引号深度：depths[i] 为第 i 个字符之前的深度
-                val depths = IntArray(line.length + 1)
+                val depths = IntArray(bodyText.length + 1)
                 var d = depth
-                for (i in line.indices) {
+                for (i in bodyText.indices) {
                     depths[i] = d
-                    d = nextQuoteDepth(line, i, d)
+                    d = nextQuoteDepth(bodyText, i, d)
                 }
-                depths[line.length] = d
+                depths[bodyText.length] = d
                 depth = d
                 // 2. 一级切分点：引号外的句末（中文标点扫描 + ICU 句子边界）
                 val primary = ArrayList<Int>()
-                collectSentenceEnds(line, depths, primary)
-                sentenceIterator.setText(line)
+                collectSentenceEnds(bodyText, depths, primary)
+                sentenceIterator.setText(bodyText)
                 sentenceIterator.first()
                 var next = sentenceIterator.next()
                 while (next != BreakIterator.DONE) {
-                    addCut(primary, line, depths, next)
+                    addCut(primary, bodyText, depths, next)
                     next = sentenceIterator.next()
                 }
                 // 3. 切点计算：只认句末标点（含一层引号内，省略号在内）。
@@ -170,12 +179,12 @@ object ContentHelp {
                 //   · 按字数硬切——把 201 字无标点段切成 [50,50,50,51]，每 50 字生切一刀。
                 // 用户原话：「最主要还是得保持他那个合成语义的流畅性，如果这个
                 // 保证不了的话，你切的乱七八糟的，不觉得有什么好」。
-                cuts.addAll(computeCuts(primary, line.length, MAX_PARAGRAPH_LENGTH))
+                cuts.addAll(computeCuts(primary, bodyText.length, MAX_PARAGRAPH_LENGTH))
             } else {
                 // 短行无需切分，但仍要延续引号深度
                 var d = depth
-                for (i in line.indices) {
-                    d = nextQuoteDepth(line, i, d)
+                for (i in bodyText.indices) {
+                    d = nextQuoteDepth(bodyText, i, d)
                 }
                 depth = d
             }
@@ -184,10 +193,12 @@ object ContentHelp {
             } else {
                 var start = 0
                 for (cut in cuts) {
-                    result.append(line, start, cut).append("\n")
+                    result.append(bodyText, start, cut).append("\n")
                     start = cut
                 }
-                result.append(line, start, line.length).append("\n")
+                // 最后一段带上被摘下的行尾标签（段评/配图跟着它前面那句话走）
+                result.append(bodyText, start, bodyText.length)
+                result.append(tailTags).append("\n")
             }
         }
         // 去掉末尾多出的一个换行，保持与入参一致的行结构
@@ -195,6 +206,42 @@ object ContentHelp {
             result.setLength(result.length - 1)
         }
         return result
+    }
+
+    /**
+     * 把「行尾连续的一段 HTML 标签」从正文里摘出来。
+     *
+     * 场景（11-14 用户实报）：段评以 `<img ... style="TEXT">` 的形式抓进正文，
+     * 位置紧跟在**最后一个句号之后**。长段拆分按句末标点切分、且只对纯文本
+     * 长度计数，于是切完标签会落到新段**段首**，排版渲染成独占一行的段评气泡。
+     *
+     * 语义上标签属于它前面那句话（段评是对整段的评论、配图是对段落配图），
+     * 所以正确做法是：切分时不参与、切完挂到**最后一段**末尾。
+     *
+     * 实现：从行尾向前，连续剥掉以 `>` 结尾、且能找到配对的 `<` 的标签块
+     * （含标签之间的空白）。遇到非标签内容立刻停——正文里句中的 `<`（例如
+     * 数学表达式）不会在行尾连续成块，故不会误伤。
+     *
+     * @return Pair(纯文字部分, 被摘下的标签串)
+     */
+    private fun splitTrailingTags(line: String): Pair<String, String> {
+        var end = line.length
+        while (end > 0) {
+            // 跳过行尾空白（标签之间、标签之后的空白都属于标签块）
+            var e = end
+            while (e > 0 && line[e - 1].isWhitespace()) e--
+            if (e == 0 || line[e - 1] != '>') break
+            val open = line.lastIndexOf('<', e - 1)
+            if (open < 0) break
+            // `<` 与 `>` 之间不能跨行/过长，且必须以字母或 '/' 开头（真标签）
+            val inner = line.substring(open + 1, e - 1)
+            if (inner.length > 512) break
+            val first = inner.firstOrNull() ?: break
+            if (!(first.isLetter() || first == '/')) break
+            end = open
+        }
+        if (end >= line.length) return line to ""
+        return line.substring(0, end) to line.substring(end)
     }
 
     /**
