@@ -1970,6 +1970,25 @@ abstract class BaseReadAloudService : BaseService(),
                     if (toLast) toLast = false
                     // 开启状态：直接朗读，不做位置调整
                     isAutoSwitchingChapter = false
+                    // 11-14 方案 B（用户拍板「按你推荐的走」）：
+                    // 点朗读/跳段后，**把页面翻到「正在读的段」起点所在的那一页**。
+                    //
+                    // 为什么需要：朗读的单位是「段」，阅读的单位是「页」，跨页段
+                    //（半截段）会让两者错位。真机实报：「我在第三页，顶部是一个
+                    // 半截段的后半段，点击第三页朗读，它直接从第二页那个段首读，
+                    // 但页面还在第三页」——声音退到上一页、页面没动，用户看着第 3 页
+                    // 却在听第 2 页的内容，且点「上一段」会翻到第 2 页出现"同一段
+                    // 在两页都有红字"的错觉。
+                    //
+                    // 选 B（页面跟段走）而不是 C（从可见处读），因为：
+                    //   · 保住「从段首读」的语义（不念半句），这是 11-13 定案；
+                    //   · 消除错位——你看到的高亮页就是正在念的页；
+                    //   · 「点上一段」也顺理成章：目标段在哪页，页面就翻到哪页。
+                    // 代价只是点一下会翻页，但翻到的正是它要念的地方，不是乱跳。
+                    //
+                    // 实现：段起点 readAloudNumber 换算成「应该在的页」，与当前页不同才翻。
+                    // 用 setPageIndex 而非 moveToNext/Prev——一次到位，不逐页动画。
+                    syncPageToReadAloudNumber(textChapter)
                     upTtsProgress(readAloudNumber + 1)
                     play()
                     // 仅用于启动定位，播完当前段要继续后续段落，故在此复位，
@@ -2046,6 +2065,37 @@ abstract class BaseReadAloudService : BaseService(),
 
     fun upTtsProgress(progress: Int) {
         postEvent(EventBus.TTS_PROGRESS, progress)
+    }
+
+    /**
+     * 11-14 方案 B（用户拍板）：把**页面**翻到「正在读的段起点」所在的那一页。
+     *
+     * 背景：朗读单位=段，阅读单位=页，跨页段（半截段）让两者错位。真机实报
+     * 「我在第三页，顶部是半截段的后半段，点朗读却从第二页那个段首读，
+     * 页面还在第三页」——声音退到上页、页面没动。点「上一段」时还会出现
+     * 「跳到第 2 页、红字和第 3 页那段是同一段」的错觉。
+     *
+     * 本方法在每个「落点确定」的时机调用（点朗读、跳段后），把页面拉到段起点页，
+     * 让**看到的高亮页 == 正在念的页**。用 setPageIndex 一次到位（不逐页动画）。
+     *
+     * 只在页真的不一致时才动，避免同一页内反复 setPageIndex 触发多余重绘。
+     * 滚动模式（isScroll）不翻页——那是连续滚动，没有"页"的概念。
+     */
+    protected fun syncPageToReadAloudNumber(textChapter: TextChapter?) {
+        textChapter ?: return
+        if (ReadBook.isScroll) return
+        if (readAloudNumber < 0) return
+        // 段起点 → 应该在的页（getPageIndexByCharIndex 与 durPageIndex 同源）
+        val targetPage = textChapter.getPageIndexByCharIndex(readAloudNumber)
+        if (targetPage < 0 || targetPage >= textChapter.pageSize) return
+        val curPage = ReadBook.durPageIndex
+        if (targetPage == curPage) return
+        AppLog.putDebug(
+            "朗读翻页对齐(方案B): readAloudNumber=$readAloudNumber " +
+                "当前页=$curPage → 段首页=$targetPage " +
+                "（跨页段导致声音/页面错位时自动对齐）"
+        )
+        ReadBook.setPageIndex(targetPage)
     }
 
     /**
@@ -2152,11 +2202,24 @@ abstract class BaseReadAloudService : BaseService(),
             nowSpeak++
             textChapter?.let {
                 // 11-13：整章切后无页切碎片，页界换行补偿分支删除（索引错位风险）
-                if (pageIndex + 1 < it.pageSize
+                // 11-14 方案 B：原来只有「向前翻一页」单向修正，跨页段时可能翻不到位
+                //（段起点在上一页、或跨了两页以上），改用与 prevP 同款的**双向循环**修正，
+                // 保证 pageIndex 与 readAloudNumber 严格一致——声音在哪页，红字就在哪页。
+                var g = 0
+                while (pageIndex + 1 < it.pageSize
                     && readAloudNumber >= it.getReadLength(pageIndex + 1)
+                    && g++ < 64
                 ) {
                     pageIndex++
                     ReadBook.moveToNextPage()
+                }
+                g = 0
+                while (pageIndex > 0
+                    && readAloudNumber < it.getReadLength(pageIndex)
+                    && g++ < 64
+                ) {
+                    pageIndex--
+                    ReadBook.moveToPrevPage()
                 }
             }
             upTtsProgress(readAloudNumber + 1)
