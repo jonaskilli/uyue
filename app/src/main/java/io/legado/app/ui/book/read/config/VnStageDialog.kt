@@ -29,7 +29,8 @@ import io.legado.app.help.loadGif
 import io.legado.app.help.glide.VnCompositeTransform
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.AiProfileService
-import io.legado.app.ui.book.read.ReadBookActivityimport io.legado.app.model.SceneEffectCue
+import io.legado.app.ui.book.read.ReadBookActivity
+import io.legado.app.model.SceneEffectCue
 import io.legado.app.model.SceneEffectReady
 import io.legado.app.model.SceneEffectStore
 import io.legado.app.model.ReadBook

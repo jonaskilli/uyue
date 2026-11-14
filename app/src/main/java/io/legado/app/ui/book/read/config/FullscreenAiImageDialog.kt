@@ -27,7 +27,8 @@ import io.legado.app.constant.PreferKey
 import io.legado.app.databinding.DialogFullscreenImageBinding
 import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.BookCover
-import io.legado.app.ui.book.read.ReadBookActivityimport io.legado.app.model.SceneEffectCue
+import io.legado.app.ui.book.read.ReadBookActivity
+import io.legado.app.model.SceneEffectCue
 import io.legado.app.model.SceneEffectReady
 import io.legado.app.model.SceneEffectStore
 import io.legado.app.model.ReadBook

@@ -782,36 +782,7 @@ object VideoDownloader {
             )
         }
     }
-    /**
-     * 每部视频体积缓存：存到该视频目录下的 [SIZE_CACHE_FILE]（随缓存走，重装/换设备都在）。
-     * 这样打开下载管理时不必每次递归遍历整目录算体积（几千个切片文件能卡 1 秒），
-     * 直接读记录即可。记录目录 mtime：目录有变动（新增/删除/改名集）时判定过期，
-     * 重新算并把结果写回，下次再开又变"直接读"。
-     */
-    private const val SIZE_CACHE_FILE = ".size_cache.json"
-
-    private data class DirSizeMeta(val sizeBytes: Long, val mtime: Long)
-
-    private fun readDirSize(dirName: String): DirSizeMeta? {
-        val f = File(File(rootDir(), dirName), SIZE_CACHE_FILE)
-        return runCatching {
-            val text = f.readText().takeIf { it.isNotBlank() } ?: return null
-            val o = org.json.JSONObject(text)
-            DirSizeMeta(o.optLong("size", -1), o.optLong("mtime", -1))
-        }.getOrNull()
-    }
-
-    private fun writeDirSize(dirName: String, sizeBytes: Long, mtime: Long) {
-        runCatching {
-            File(File(rootDir(), dirName), SIZE_CACHE_FILE).writeText(
-                org.json.JSONObject().apply {
-                    put("size", sizeBytes)
-                    put("mtime", mtime)
-                }.toString()
-            )
-        }
-    }
-
+    
     /**
      * 已下载视频的 bookUrl 列表，顺序与"已缓存视频"列表一致。
      * 供播放器在这些已下载视频之间切换（右侧 30% 竖滑）时用；

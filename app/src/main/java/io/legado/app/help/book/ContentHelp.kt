@@ -317,7 +317,8 @@ object ContentHelp {
      */
     private fun addCut(out: MutableList<Int>, line: String, depths: IntArray, pos: Int) {
         if (pos <= 0 || pos >= line.length) return
-        if (depths[pos] > 1) return        if (match(MARK_SENTENCES_END, line[pos])) return
+        if (depths[pos] > 1) return
+        if (match(MARK_SENTENCES_END, line[pos])) return
         if (!out.contains(pos)) out.add(pos)
     }
 
@@ -900,7 +901,8 @@ object ContentHelp {
     //  长段拆分：超长段落兜底切分参数（11-14 由「重新分段」改名）
     //  依据主流网文（起点/番茄）实测：段落中位数约 30 字、平均约 42 字，
     //  超过 50 字的仅约 1/4，故目标段长取 50，与原生段落长度对齐
-    private const val MAX_PARAGRAPH_LENGTH = 50    // 目标段长（字）    private const val MIN_MERGE_LENGTH = 15       // 末段短于此值并入前段
+    private const val MAX_PARAGRAPH_LENGTH = 50    // 目标段长（字）
+    private const val MIN_MERGE_LENGTH = 15       // 末段短于此值并入前段
 
     //  其后的引号按反引号处理（用于判定只有一个引号时的引号方向）
     private const val MARK_QUOTE_AFTER_CLOSE = "。？！~…,，、;；:："

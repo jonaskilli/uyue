@@ -387,7 +387,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 11-13 巡检实锤：framework 会先回调新签名 onError(utteranceId, errorCode)
             // 再回调旧签名 onError(s)（同一事件两次），日志每条 -3 出现两行。
             // 这里登记已处理 id，旧重载据此幂等跳过（completer 只 complete 一次）。
-            if (utteranceId != null) handledErrorCallbacks.add(utteranceId)            synthesisTargetFiles.remove(utteranceId)
+            if (utteranceId != null) handledErrorCallbacks.add(utteranceId)
+            synthesisTargetFiles.remove(utteranceId)
             val completer = synthesisCompleters.remove(utteranceId)
             completer?.complete(null)
         }
@@ -510,7 +511,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 }
                 inFlightSyntheses.remove(cacheKey)
                 // 正常出结果（成功或失败）就清掉冷却，免得 1.2 秒内重播被误挡
-                canceledAt.remove(cacheKey)                mine.complete(result)
+                canceledAt.remove(cacheKey)
+                mine.complete(result)
             }
         }
         // 持有者（即提交这一笔的人）可被取消，发给引擎的那笔请求照旧跑完并落缓存
@@ -708,7 +710,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      */
     private suspend fun synthesizeSingle(index: Int, precomputedText: String? = null): File? {
         val rawText = getRawText(index)
-        val text = precomputedText ?: applyTtsScripts(rawText, paragraphIndex = index)        if (text.matches(AppPattern.notReadAloudRegex)) {
+        val text = precomputedText ?: applyTtsScripts(rawText, paragraphIndex = index)
+        if (text.matches(AppPattern.notReadAloudRegex)) {
             val fileName = getFileNameHelper(textChapter?.chapter?.title ?: "", rawText, index)
             if (!hasSpeakFile(fileName)) createSilentSound(fileName)
             return getSpeakFileAsMd5(fileName)
@@ -740,7 +743,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 delay(3000)
                 removeCacheFile()
             }
-        }        if (!ttsInitFinish) {
+        }
+        if (!ttsInitFinish) {
             pendingPlay = true
             // ⚠️ 早退也要消费掉「刚停过」标记：否则它会泄漏到下一次 play()，
             // 让那次本该执行的 stop()+代次自增被跳过（在途合成没被掐、代次没变，

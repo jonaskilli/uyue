@@ -446,7 +446,8 @@ object ReadBook : CoroutineScope by MainScope() {
         if (durChapterIndex < simulatedChapterSize - 1) {
             durChapterPos = 0
             durChapterIndex++
-            rescheduleAiChapterFix()            clearExpiredChapterLoadingJob()
+            rescheduleAiChapterFix()
+            clearExpiredChapterLoadingJob()
             prevTextChapter = curTextChapter
             curTextChapter = nextTextChapter
             nextTextChapter = null
@@ -481,7 +482,8 @@ object ReadBook : CoroutineScope by MainScope() {
         if (durChapterIndex < simulatedChapterSize - 1) {
             durChapterPos = 0
             durChapterIndex++
-            rescheduleAiChapterFix()            clearExpiredChapterLoadingJob()
+            rescheduleAiChapterFix()
+            clearExpiredChapterLoadingJob()
             prevTextChapter = curTextChapter
             curTextChapter = nextTextChapter
             nextTextChapter = null
@@ -517,7 +519,8 @@ object ReadBook : CoroutineScope by MainScope() {
         if (durChapterIndex > 0) {
             durChapterPos = if (toLast) prevTextChapter?.lastReadLength ?: Int.MAX_VALUE else 0
             durChapterIndex--
-            rescheduleAiChapterFix()            clearExpiredChapterLoadingJob()
+            rescheduleAiChapterFix()
+            clearExpiredChapterLoadingJob()
             nextTextChapter = curTextChapter
             curTextChapter = prevTextChapter
             prevTextChapter = null
@@ -591,7 +594,8 @@ object ReadBook : CoroutineScope by MainScope() {
             clearTextChapter()
             if (upContent) callBack?.upContent()
             durChapterIndex = index
-            rescheduleAiChapterFix()            ReadBook.durChapterPos = durChapterPos
+            rescheduleAiChapterFix()
+            ReadBook.durChapterPos = durChapterPos
             saveRead()
             loadContent(resetPageOffset = true) {
                 success?.invoke()
@@ -1202,7 +1206,8 @@ object ReadBook : CoroutineScope by MainScope() {
             val sb = StringBuilder()
             for (i in 0 until limit) {
                 val idx = startIndex + i
-                if (idx >= chapterSize) break                val ch = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: break
+                if (idx >= chapterSize) break
+                val ch = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: break
                 val raw = BookHelp.getContent(book, ch)
                 if (!raw.isNullOrBlank()) {
                     val clean = cleanContentForTts(book, ch, raw)

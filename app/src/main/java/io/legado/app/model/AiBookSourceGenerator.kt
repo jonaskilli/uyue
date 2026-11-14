@@ -1226,7 +1226,8 @@ object AiBookSourceGenerator {
         if (tocUrl == null) {
             tocUrl = infoBook?.tocUrl?.takeIf { it.isNotBlank() }
                 ?.let { absUrl(it, detailUrl ?: seed) } ?: detailUrl
-        }        val tocHtml = tocUrl?.let { fetch(it) }.orEmpty()
+        }
+        val tocHtml = tocUrl?.let { fetch(it) }.orEmpty()
         if (tocUrl != null && tocHtml.isNotBlank()) {
             pages.add(Page("目录页", tocUrl, tocHtml))
         }

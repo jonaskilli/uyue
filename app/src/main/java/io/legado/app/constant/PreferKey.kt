@@ -287,6 +287,7 @@ object PreferKey {
     // 混入背景音乐时单首最少持续时长(毫秒)，超过后才允许切换到下一首
     const val bgmMinSegmentMs = "bgmMinSegmentMs"
     const val readAloudTitle = "readAloudTitle"
+    const val readAloudStartFromFirst = "readAloudStartFromFirst"
     const val autoMergeAudioOnChapterEnd = "autoMergeAudioOnChapterEnd"
     const val convertToMp3AfterMerge = "convertToMp3AfterMerge"
     const val saveTextWithMerge = "saveTextWithMerge"

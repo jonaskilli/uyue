@@ -620,7 +620,8 @@ class BookScriptAnalysisService : BaseService() {
             val paraPosFull = currentSpan.start + paraPosInChapter
             val aboveStart = (paraPosFull - EXTRACT_LENGTH).coerceAtLeast(0)
             val aboveRaw = if (paraPosFull > 0) fullText.substring(aboveStart, paraPosFull) else ""
-            val above = annotateAboveContext(aboveRaw, aboveStart, window.spans)            val belowStart = (paraPosFull + para.length).coerceAtMost(fullText.length)
+            val above = annotateAboveContext(aboveRaw, aboveStart, window.spans)
+            val belowStart = (paraPosFull + para.length).coerceAtMost(fullText.length)
             val belowEnd = (belowStart + EXTRACT_LENGTH).coerceAtMost(fullText.length)
             val below = if (belowStart < fullText.length) {
                 fullText.substring(belowStart, belowEnd)
