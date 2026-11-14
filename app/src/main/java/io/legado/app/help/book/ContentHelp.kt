@@ -17,7 +17,7 @@ object ContentHelp {
      * @return
      */
     /**
-     * 长句分割（11-14 用户令改名改功能）。
+     * 长段拆分（11-14 用户令改名改功能）。
      *
      * ## 改名前它是什么
      *
@@ -31,14 +31,16 @@ object ContentHelp {
      * 我那个 TTS 里面长句分割也不是一直开呀，基本上都没开过，只有遇到出版书的时候，
      * 容易遇到一段特别长我才开」。
      *
-     * 所以语义对齐 UTTS 的「长句分割」（isSplitEnabled，默认关）：
+     * 所以语义对齐 UTTS 的「分割长句」（isSplitEnabled，默认关）：
      * **只在段落超过阈值时才切开，短段一个字都不动**（含空格、引号、换行）。
      * 实现直接复用原有的 [splitLongParagraph]，它本来就是自包含的：
      * 逐行判断 `line.length > MAX_PARAGRAPH_LENGTH` 才切，否则原样输出。
      *
-     * 保留：引号深度跟踪（跨页/跨段延续），保证不会把引号内的话从中间切断。
+     * 保留：引号深度跟踪（跨页/跨段延续）。11-14 用户拍板后，**一层引号内的
+     * 句末标点也算切点**（否则对话多的书里长段永远切不动），但仍保证不会把一句话
+     * 从中间切断——引号内的逗号不切，深度 ≥2 的嵌套引号不切。
      * 丢弃：引号规范化、去空格、段落黏合、`。”` 断句、词典重排——
-     * 这些属于"排版纠正"，不该藏在一个叫"长句分割"的开关后面。
+     * 这些属于"排版纠正"，不该藏在一个叫"长段拆分"的开关后面。
      *
      * @param content 章节正文（原文，含它自己的分段与缩进）
      * @param chapterName 章名（本实现不再用它，保留参数是为了调用方签名稳定）
@@ -111,9 +113,12 @@ object ContentHelp {
      *  2. **双引号内绝不下刀**：全程跟踪引号深度，只有一个引号时按上下文判定它是
      *     起引号还是反引号——判定为起引号则其括起的内容（可跨段落，直到出现反引号）
      *     全部视为引号内，任何情况下都不切；
-     *  3. 引号外的句末按 [MAX_PARAGRAPH_LENGTH] 目标长度贪心分组；
-     *  4. 单段仍超 [HARD_MAX_LENGTH] 时降级到逗号/分号，再无引号外的位置才按字数硬切；
-     *  5. 末段短于 [MIN_MERGE_LENGTH] 并入前段，避免碎片。
+     *  3. 句末标点（引号外与一层引号内都算）按 [MAX_PARAGRAPH_LENGTH] 贪心分组；
+     *  4. 末段短于 [MIN_MERGE_LENGTH] 并入前段，避免碎片。
+     *
+     * ⚠️ 11-14 用户定稿：切点**只认句末标点**，不做任何字数硬切/逗号降级。
+     * 原先的「超长区间降级到逗号、再无位置才按字数硬切」已删除，
+     * 因为它会把句子从中间切断，破坏合成语义的连贯。
      *
      * @param str 待分段内容，行间以 \n 分隔
      */
@@ -149,21 +154,23 @@ object ContentHelp {
                     addCut(primary, line, depths, next)
                     next = sentenceIterator.next()
                 }
-                // 3. 二级切分点：引号外的逗号/分号（仅超长区间降级使用）
-                val secondary = ArrayList<Int>()
-                for (i in 1 until line.length) {
-                    if (depths[i] == 0
-                        && match(MARK_SENTENCES_MID, line[i - 1])
-                        && !match(MARK_SENTENCES_MID, line[i])
-                        && line[i] != '“' && line[i] != '"'
-                    ) {
-                        secondary.add(i)
-                    }
-                }
-                // 4. 按目标长度贪心切分，超长区间逐级降级
+                // 3. 按目标长度切分。
+                //
+                // 11-14 用户定稿（「最主要还是得保持他那个合成语义的流畅性，如果这个
+                // 保证不了的话，你切的乱七八糟的，不觉得有什么好」「首先做的就是
+                // 句末切割」）：**唯一的切点来源就是句末标点**。
+                //
+                // 因此删掉了原先的两级兜底（它们违背句末语义，实测会切在半句）：
+                //   · secondary 逗号/分号降级——实测把 100 字逗号连缀段切成 [54, 46]，
+                //     切在句中；
+                //   · refineOverLong + hardCutPosition 按字数硬切——实测把 201 字
+                //     无标点段切成 [50,50,50,51]，每 50 字生切一刀。
+                // 代价已知且为用户接受：整段只有一个句末标点、或无句末标点的长段
+                // 不会被切开（真实正文《明雾烟》10 段超长段中 6 段属此类）。
+                // 用户原话「就算他有一段有 100 个字，我也不觉得有什么问题」——
+                // 不切，远好过乱切。
                 greedyCut(primary, 0, line.length, MAX_PARAGRAPH_LENGTH, cuts)
-                refineOverLong(line, depths, secondary, cuts)
-                // 5. 末段过短并入前段
+                // 4. 末段过短并入前段
                 if (cuts.isNotEmpty() && line.length - cuts.last() < MIN_MERGE_LENGTH) {
                     cuts.removeAt(cuts.size - 1)
                 }
@@ -228,7 +235,7 @@ object ContentHelp {
      * 为什么必须放开这一条（真实正文实测，非推测）：
      * 拿《明雾烟》全章 442 段跑，超过 50 字的 10 段里 **0 段被切开**——
      * 因为小说里最长的段落恰恰是整段对话，引号占比 67%~96%，
-     * 而旧实现只在引号外取点 ⇒ 一个可用切点都没有 ⇒ 长句分割在最该起作用
+     * 而旧实现只在引号外取点 ⇒ 一个可用切点都没有 ⇒ 长段拆分在最该起作用
      * 的文体（出版书、旁白+对话混排）上等于没开。
      *
      * 放开后的边界：
@@ -277,13 +284,14 @@ object ContentHelp {
      *
      * ## 11-14 改：去掉 50~80 字的死区（真实正文实测出来的硬伤）
      *
-     * 旧实现要求 `p - last >= threshold(50)` 才切，看似合理，配上
-     * refineOverLong 的 `> HARD_MAX_LENGTH(80)` 门槛就形成了**死区**：
+     * 旧实现要求 `p - last >= threshold(50)` 才切，而 51~80 字的段落切一刀后
+     * 剩余部分不足 80（当时的降级门槛），降级逻辑不接手，于是形成**死区**：
      *   · 60 字的段落：句末点在 59 处，切下去剩 1 字（< MIN_MERGE 15）⇒ 并回去；
-     *   · 79 字的段落：切完剩 29 字，不足 80 ⇒ refineOverLong 不管；
-     *   ⇒ 长度 51~80 的段落「主切分切不动、降级又不接手」，整段原样输出。
+     *   · 79 字的段落：切完剩 29 字，无人接手；
+     *   ⇒ 长度 51~80 的段落整段原样输出。
+     * （降级逻辑本身已按用户定稿删除，这里保留成因记录，避免将来又把它加回来）
      * 实测：长度 55/60/70/79 全部 1 段，81 才开始切。也就是说
-     * **「长句分割」对 80 字以下的段落完全无效**——而目标段长本来就是 50。
+     * **「长段拆分」对 80 字以下的段落完全无效**——而目标段长本来就是 50。
      *
      * 现在改成三段式：
      *  1. 贪心：达到 threshold 就切（同旧行为，优先保住段长）；
@@ -326,65 +334,6 @@ object ContentHelp {
         }
     }
 
-    /**
-     * 对主切分后仍超过 [HARD_MAX_LENGTH] 的区间做降级：优先逗号/分号，再无引号外的
-     * 位置才按字数硬切。引号内没有可用位置时放弃该区间（引号内绝不下刀）。
-     */
-    private fun refineOverLong(
-        line: String,
-        depths: IntArray,
-        secondary: List<Int>,
-        cuts: MutableList<Int>
-    ) {
-        var progress = true
-        while (progress) {
-            progress = false
-            cuts.sort()
-            var start = 0
-            for (end in cuts + line.length) {
-                if (end - start > HARD_MAX_LENGTH) {
-                    val extra = ArrayList<Int>()
-                    greedyCut(secondary, start, end, MAX_PARAGRAPH_LENGTH, extra)
-                    if (extra.isEmpty()) {
-                        var hs = start
-                        while (end - hs > HARD_MAX_LENGTH) {
-                            val p = hardCutPosition(line, depths, hs + MAX_PARAGRAPH_LENGTH, hs, end)
-                            // 切出过短的段没有意义，直接放弃该区间
-                            if (p - hs < MIN_MERGE_LENGTH) break
-                            extra.add(p)
-                            hs = p
-                        }
-                    }
-                    if (extra.isNotEmpty()) {
-                        cuts.addAll(extra)
-                        progress = true
-                        break
-                    }
-                }
-                start = end
-            }
-        }
-    }
-
-    /**
-     * 硬切：在 target 附近寻找引号外（深度 0）的位置，找不到返回 -1。
-     */
-    private fun hardCutPosition(
-        line: String,
-        depths: IntArray,
-        target: Int,
-        min: Int,
-        to: Int
-    ): Int {
-        var i = minOf(target, line.length - 1)
-        while (i > min && depths[i] != 0) i--
-        if (i > min && depths[i] == 0) return i
-        i = minOf(target, to - 1)
-        while (i < to && depths[i] != 0) i++
-        return if (i < to) i else -1
-    }
-
-    // 强制切分进入对话模式后，未构成 “xxx” 形式的段落
     private fun splitQuote(str: String): String {
         val length = str.length
         if (length < 3) return str
@@ -960,14 +909,14 @@ object ContentHelp {
 
     //  句子结尾的标点。因为引号可能存在误判，不包含引号。
     //
-    // 11-14 用户令（长句分割加强版）：「加强版就是遇到分号也分段」。
+    // 11-14 用户令（长段拆分加强版，当时叫「长句分割」）：「加强版就是遇到分号也分段」。
     // 把 `；;` 并入句末集合：
     //   · 中文里分号常用来并列举证，本身就是一个语义停顿点，切开不影响语义完整；
     //   · 与 UTTS 的 splitSentences 口径（`[。？?！!;；]`）对齐，两端判定一致；
     //   · 出版书里「……第一；……第二；」这种超长并列句，只有按分号才切得动
     //     （否则整段只能靠逗号降级切，会切在半句中间）。
     //
-    // 11-14（长句分割缺口1）：省略号 `…` 从 MID 移到 END。
+    // 11-14（当时叫「长句分割」的缺口1）：省略号 `…` 从 MID 移到 END。
     // 中文里 `……` 绝大多数是**句子收尾**（"他想了想……"/"然后呢……"），
     // 放在 MID 里被当逗号级——降级切分时才会用到它，正常切分根本不认；
     // 结果是含省略号的句子只能靠后面的逗号断，容易断在半句。
@@ -991,16 +940,10 @@ object ContentHelp {
     //  限制字典的长度
     private const val WORD_MAX_LENGTH = 16
 
-    //  长句分割：超长段落兜底切分参数（11-14 由「重新分段」改名）
+    //  长段拆分：超长段落兜底切分参数（11-14 由「重新分段」改名）
     //  依据主流网文（起点/番茄）实测：段落中位数约 30 字、平均约 42 字，
     //  超过 50 字的仅约 1/4，故目标段长取 50，与原生段落长度对齐
     private const val MAX_PARAGRAPH_LENGTH = 50    // 目标段长（字）
-    // 11-14（长句分割缺口2）：降级阈值改为**跟着目标段长走**，不再写死 80。
-    // 原先是硬编码 80，与 50 是人为凑的 1.6 倍；一旦目标段长调整（用户已问过
-    // "50 算不算长段"、将来可能改 100），80 会变成比目标还小 ⇒
-    // greedyCut 切完的段全部被判"超长"，refineOverLong 反复降级到逗号，
-    // 等于把长句分割退化成"按逗号切"。
-    private const val HARD_MAX_LENGTH = MAX_PARAGRAPH_LENGTH * 8 / 5   // 1.6 倍，超此值降级
     private const val MIN_MERGE_LENGTH = 15       // 末段短于此值并入前段
 
     //  其后的引号按反引号处理（用于判定只有一个引号时的引号方向）

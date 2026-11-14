@@ -887,7 +887,7 @@
     <string name="auto_clear_expired">自动清除过期搜索数据</string>
     <string name="auto_clear_expired_summary">超过一天的搜索数据</string>
     <!-- 11-14 用户令：功能已改为「只切超长段」，名字必须跟着改，否则功能变了名没变 -->
-    <string name="re_segment">长句分割</string>
+    <string name="re_segment">长段拆分</string>
     <!-- 档2：旁白/对话分离（默认关，主开关关掉时灰显不可点） -->
     <string name="split_narration">　再分旁白／对话</string>
     <string name="fix_quote">双引号修复</string>

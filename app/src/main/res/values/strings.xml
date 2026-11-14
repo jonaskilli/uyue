@@ -878,7 +878,7 @@
     <string name="theme_name">Theme name</string>
     <string name="auto_clear_expired">"Clear expired search histories automatically "</string>
     <string name="auto_clear_expired_summary">Search histories more than one day</string>
-    <string name="re_segment">Split long sentences</string>
+    <string name="re_segment">Split long paragraphs</string>
     <!--
         档2：旁白/对话分离。
         ⚠️ 默认语言必须有一条——只在 values-zh 里定义、默认缺省的话，

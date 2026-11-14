@@ -100,7 +100,7 @@ class ContentProcessor private constructor(
         reSegment: Boolean = true,
         /**
          * 档2：旁白／对话分离。只在 [reSegment] 也为 true 时被读取——
-         * "长句分割"主开关关掉时，这个参数传什么都不生效（见 ContentHelp.reSegment）。
+         * "长段拆分"主开关关掉时，这个参数传什么都不生效（见 ContentHelp.reSegment）。
          */
         splitNarration: Boolean = false
     ): BookContent {
@@ -140,7 +140,7 @@ class ContentProcessor private constructor(
                 mContent = QuoteFix.fix(mContent)
             }
             if (reSegment && book.getReSegment()) {
-                //长句分割（档2 旁白/对话分离由 splitNarration 决定，默认关）
+                //长段拆分（档2 旁白/对话分离由 splitNarration 决定，默认关）
                 mContent = ContentHelp.reSegment(mContent, chapter.title, splitNarration)
             }
             if (chineseConvert) {
