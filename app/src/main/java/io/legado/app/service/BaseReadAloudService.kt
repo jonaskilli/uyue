@@ -1796,26 +1796,34 @@ abstract class BaseReadAloudService : BaseService(),
             clearAiEffectRuntime()
             var pos = startPos
             val page = textChapter.getPage(pageIndex)!!
-            if (pos > 0) {
-                // 11-13 深夜（用户令「改吧」）：把「页内偏移 startPos」换算成「目标段内偏移 pos」。
-                //
-                // ⚠️ 旧写法 `val tmp = pos - paragraph.length - 1; if (tmp < 0) break; pos = tmp`
-                // 在 `tmp < 0` 时直接 break、**pos 保留原值**。当落点正好在某段开头
-                // （startPos 恰好等于它前面那些段的长度之和）时，tmp 变成负数 →
-                // pos 仍是那个「页内绝对偏移」（如 80）→ 被当作段内偏移写进
-                // paragraphStartPos → getRawText() 里 text.substring(80) 从目标段
-                // 第 80 字起念。
-                // 症状：点某段的小喇叭，有时从该段中间开始念（目标段短于该偏移时
-                // 恰好不截断，侥幸正确，所以偶发）。
-                //
-                // 修法：落点在本段内部或正好卡在段首时，本段就该从段首读，偏移归零。
-                for (paragraph in page.paragraphs) {
-                    val tmp = pos - paragraph.length - 1
-                    if (tmp < 0) {
-                        pos = 0
-                        break
+            // 11-14 二次修（用户实报「乱翻乱点后高亮不准、朗读段落不准，可能跟半截段
+            // 有关」）：把「页内偏移 startPos」换算成「段内偏移」时，旧写法只遍历
+            // page.paragraphs（**本页内**的段），遇到**从上页跨过来的半截段**就错——
+            // 那一段在本页只显示后半截，它的段内偏移必须先加上"上页已显示的部分"。
+            // 真机日志实锤（11-14 11:57）：段 22 跨第 4→5 页，第 5 页起点落在段内
+            // 56 字处；旧算法把 56 当成段内偏移 ⇒ 从段中间 56 字起念（声音错），
+            // 同时 nowSpeak 是对的、readAloudNumber 是页起点 ⇒ 高亮也错。
+            //
+            // 新算法（与 nowSpeak/readAloudNumber 同源，全部由段表推导）：
+            //   目标章内位置 = 页起点 + startPos
+            //   段内偏移     = 目标章内位置 − 该段在段表里的真实起点
+            // 段表起点用 contentList 累加（与 syncToParagraph/prevP/nextP 完全一致），
+            // 不再依赖"本页段落列表"，跨页半截段自然正确。
+            // 仍保留原语义：落在段首/段内偏移<=0 时归零（从段首读）。
+            run {
+                val pageStart = textChapter.getReadLength(pageIndex)
+                val targetAbs = pageStart + startPos
+                // 目标落在哪一段：用【整章】段表反查（pageSplit=false），与 contentList 同粒度
+                val targetPara = textChapter.getParagraphNum(targetAbs + 1, false) - 1
+                if (targetPara >= 0) {
+                    var paraStart = 0
+                    for (i in 0 until targetPara.coerceIn(0, contentList.size)) {
+                        paraStart += contentList[i].length + 1
                     }
-                    pos = tmp
+                    val offsetInPara = targetAbs - paraStart
+                    pos = if (offsetInPara <= 0) 0 else offsetInPara
+                } else {
+                    pos = 0
                 }
             }
             // 11-13：contentList 已恒按整章段落切，定位必须同粒度（pageSplit=false
@@ -1868,13 +1876,33 @@ abstract class BaseReadAloudService : BaseService(),
                             "页首段文本=${contentList.getOrNull(pageFirstParaIdx)?.take(12)}"
                     )
                     nowSpeakLoc = pageFirstParaIdx
-                    // 纠偏后 readAloudNumber 同步对齐页首段起点：它驱动高亮
-                    //（upTtsProgress→TTS_PROGRESS→页内偏移换算）与段推进
+                    // 纠偏后 readAloudNumber 同步对齐**页首段自己的起点**：
+                    // 它驱动高亮（upTtsProgress→TTS_PROGRESS→页内偏移换算）与段推进
                     //（updateNextPos += 段长），不重算会把高亮留在章头、段推进算错。
-                    // 用页首行的 chapterPosition（章内绝对位置）直接对齐，
-                    // 与 getReadLength(pageIndex) 在页首=段首时天然一致。
-                    readAloudNumber = page.lines.firstOrNull { it.paragraphNum > 0 }
-                        ?.chapterPosition ?: readAloudNumber
+                    //
+                    // ⚠️ 11-14 二次修（用户实报「乱翻乱点后高亮不准、朗读段落不准，
+                    // 可能跟半截段有关」——用户判断正确）：
+                    // 旧写法用 `page.lines.first{...}.chapterPosition`（=页首行位置），
+                    // 但**跨页段（半截段）的页起点落在段内部**，不是段的起点。
+                    // 真机日志实锤（11-14 11:57，contentSize=306）：
+                    //   同一段 nowSpeak=22 出现两个 readAloudNumber——
+                    //   873（段 22 真实起点，prevP 链算出来的）
+                    //   929（第 5 页起点，落在段 22 内部 56 字处）
+                    // 结果：声音按 nowSpeak=22 读段 22（对），高亮按 929 换算画到段 23
+                    //（错）——这就是「高亮不准」；再叠加 pageIndex 与 929 不同页时
+                    // aloudSpanStart 越界，红字还会卡在页首/页尾。
+                    //
+                    // 改法：与 syncToParagraph / prevP / nextP 完全同口径——
+                    // 从 0 累加 contentList 到目标段，得到**段的章内真实起点**。
+                    // 这样 nowSpeak 与 readAloudNumber 永远互相对得上（两者都由段表推导），
+                    // 跨页段也不会再把页起点误当段起点。
+                    run {
+                        var acc = 0
+                        for (i in 0 until nowSpeakLoc.coerceIn(0, contentList.size)) {
+                            acc += contentList[i].length + 1
+                        }
+                        readAloudNumber = acc
+                    }
                     paragraphStartPos = 0
                 }
             }
@@ -1900,6 +1928,12 @@ abstract class BaseReadAloudService : BaseService(),
                     // 改为落点计算后由跳段判断处统一消费并复位（见 1825 行附近）。
                     readAloudNumber = textChapter.getLastParagraphPosition()
                     nowSpeak = (contentList.lastIndex - 1).coerceAtLeast(0)
+                    // ⚠️ 11-14 备注：下面这行仍用 page.paragraphs/page.chapterPosition，
+                    // 与上文刚修的「半截段」是同一类隐患（跨页段时页起点在段内部）。
+                    // 但不改：这是 11-13 为「ma末页只有一段」修的，触发条件极窄
+                    //（toLast + 末页恰好单段），真机日志从未触发；改动面大、
+                    // 收益低，保持现状。若将来用户在「回退上一章末段」场景报高亮错，
+                    // 再按上文同样的段表累加方式重写此处。
                     if (page.paragraphs.size == 1) {
                         pos = page.chapterPosition -
                                 textChapter.paragraphs[nowSpeak].chapterPosition

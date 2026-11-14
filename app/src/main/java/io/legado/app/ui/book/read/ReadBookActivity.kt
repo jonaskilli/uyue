@@ -2672,7 +2672,17 @@ class ReadBookActivity : BaseReadBookActivity(),
                     ReadBook.curTextChapter?.let { textChapter ->
                         ReadBook.durChapterPos = chapterStart
                         val pageIndex = ReadBook.durPageIndex
-                        val aloudSpanStart = chapterStart - textChapter.getReadLength(pageIndex)
+                        // 11-14 二次修（用户实报「乱翻乱点后高亮不准」，真因=半截段）：
+                        // 高亮落点 = 段起点(chapterStart) − 当前页起点(getReadLength)。
+                        // 对**跨页段**（半截段）这个差会是**负数**——段从上一页开始，
+                        // 段起点 < 本页起点。真机日志实锤：段 22 起点 873、第 5 页起点 929
+                        // ⇒ aloudSpanStart = -56 ⇒ upPageAloudSpan(-56) 找不到任何行
+                        // ⇒ 红字整段消失（用户看到的就是"高亮不准/没了"）。
+                        // 修法：按定义，页内偏移不可能为负；负值说明「本段在本页之前就
+                        // 开始了」，高亮应从本页第一行起（该段延续部分）。
+                        // 上限则由 upPageAloudSpan 自身忽略越界值兜底。
+                        val aloudSpanStart =
+                            (chapterStart - textChapter.getReadLength(pageIndex)).coerceAtLeast(0)
                         textChapter.getPage(pageIndex)
                             ?.upPageAloudSpan(aloudSpanStart)
                         upContent()
