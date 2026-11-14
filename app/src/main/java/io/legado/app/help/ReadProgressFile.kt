@@ -32,6 +32,19 @@ object ReadProgressFile {
 
     const val FILE_NAME = "readProgress.json"
 
+    /**
+     * 11-14 晚：读改写 readProgress.json 的互斥锁。
+     *
+     * 真机实锤（20:51:16）：`合成前沿写入失败: End of input at character 0 of` ——
+     * [report]（播放段上报，字幕同步循环每 200ms 一次）与 [reportSynthFront]
+     * （合成前沿上报，每提交一笔）**并发**做「readText → JSONObject → writeText」：
+     * A 刚把文件截成 0 字节正在写，B 的 readText 读到空串 ⇒ JSONObject("") 抛
+     * "End of input at character 0"。写失败那方的前沿就丢了，UTTS 进度行会卡在
+     * 旧值（表现为「合成进度不动」）。
+     * 两个函数都是纯内存计算+一次小文件写，加锁开销可忽略。
+     */
+    private val ioLock = Any()
+
     /** 读的人可以用它判断数据新鲜度：超过这个时间视为没有在朗读 */
     const val STALE_MS = 15_000L
 
@@ -74,7 +87,9 @@ object ReadProgressFile {
             }
             val dir = File(EngineDataDir.baseDir())
             if (!dir.exists()) dir.mkdirs()
-            File(dir, FILE_NAME).writeText(json.toString())
+            synchronized(ioLock) {
+                File(dir, FILE_NAME).writeText(json.toString())
+            }
         }.onFailure {
             // 辅助信息，失败不打扰用户，只在 AppLog 留痕
             AppLog.putDebug("朗读进度写入失败: ${it.localizedMessage}")
@@ -97,13 +112,18 @@ object ReadProgressFile {
             val dir = File(EngineDataDir.baseDir())
             if (!dir.exists()) dir.mkdirs()
             val f = File(dir, FILE_NAME)
-            val json = if (f.exists()) JSONObject(f.readText()) else JSONObject()
-            json.put("synthChapterIndex", chapterIndex)
-            json.put("synthSegIndex", segIndex)
-            json.put("synthChapterTitle", chapterTitle)
-            // 前沿章总段数：UTTS 进度行「第x章 3/25」的分母（该章已完成段数的上限）
-            json.put("synthTotalSegs", totalSegs)
-            f.writeText(json.toString())
+            // 读改写必须整体持锁：否则与 [report] 的整文件覆写交错，
+            // 可能读到 0 字节（真机 20:51:16「End of input at character 0」）
+            // 或把对方刚写的字段覆盖回去。
+            synchronized(ioLock) {
+                val json = if (f.exists()) JSONObject(f.readText()) else JSONObject()
+                json.put("synthChapterIndex", chapterIndex)
+                json.put("synthSegIndex", segIndex)
+                json.put("synthChapterTitle", chapterTitle)
+                // 前沿章总段数：UTTS 进度行「第x章 3/25」的分母（该章已完成段数的上限）
+                json.put("synthTotalSegs", totalSegs)
+                f.writeText(json.toString())
+            }
         }.onFailure {
             AppLog.putDebug("合成前沿写入失败: ${it.localizedMessage}")
         }
@@ -121,7 +141,9 @@ object ReadProgressFile {
                 put("playing", false)
                 put("at", System.currentTimeMillis())
             }
-            File(dir, FILE_NAME).writeText(json.toString())
+            synchronized(ioLock) {
+                File(dir, FILE_NAME).writeText(json.toString())
+            }
         }
     }
 }
