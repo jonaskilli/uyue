@@ -220,13 +220,28 @@ object ContentHelp {
     }
 
     /**
-     * 扫描中文句末标点，收集引号外的切分点。
-     * 句末后的连续句末标点（？！、……）与紧随的反引号归入本段，不在其中下刀。
+     * 扫描中文句末标点，收集切分点。
+     *
+     * 11-14 用户拍板方案 A（「只在引号内句末切，不动引入语」）：
+     * **引号内的句末标点也算合法切点**。
+     *
+     * 为什么必须放开这一条（真实正文实测，非推测）：
+     * 拿《明雾烟》全章 442 段跑，超过 50 字的 10 段里 **0 段被切开**——
+     * 因为小说里最长的段落恰恰是整段对话，引号占比 67%~96%，
+     * 而旧实现只在引号外取点 ⇒ 一个可用切点都没有 ⇒ 长句分割在最该起作用
+     * 的文体（出版书、旁白+对话混排）上等于没开。
+     *
+     * 放开后的边界：
+     *  · 只在 **深度 1**（一层引号内）取点，深度 ≥2 的嵌套引号仍不切；
+     *  · 只认句末标点（。！？；…），引号内的逗号仍然不切——
+     *    所以不会把一句话从中间切断，也不会动「他说：」这种引入语；
+     *  · 连续句末标点（？！、……）与紧随的反引号归入本段，不在其中下刀。
      */
     private fun collectSentenceEnds(line: String, depths: IntArray, out: MutableList<Int>) {
         var i = 0
         while (i < line.length) {
-            if (depths[i] == 0 && match(MARK_SENTENCES_END, line[i])) {
+            val inQuote = depths[i] == 1
+            if ((depths[i] == 0 || inQuote) && match(MARK_SENTENCES_END, line[i])) {
                 var end = i + 1
                 while (end < line.length &&
                     (match(MARK_SENTENCES_END, line[end]) || line[end] == '”' || line[end] == '"')
@@ -242,17 +257,40 @@ object ContentHelp {
     }
 
     /**
-     * 添加切分点：必须位于引号外、不是行尾，且不能把连续句末标点（？！、……）切开。
+     * 添加切分点。
+     *
+     * @param pos 候选位置（切在该字符之前）
+     *
+     * 判据：不能是行首/行尾、不能把连续句末标点切开；
+     * **深度约束放宽到 ≤1**——引号外（0）与一层引号内（1）都可切，
+     * 深度 ≥2 的嵌套引号仍视为不可切（见 collectSentenceEnds 的注释）。
      */
     private fun addCut(out: MutableList<Int>, line: String, depths: IntArray, pos: Int) {
         if (pos <= 0 || pos >= line.length) return
-        if (depths[pos] != 0) return
+        if (depths[pos] > 1) return
         if (match(MARK_SENTENCES_END, line[pos])) return
         if (!out.contains(pos)) out.add(pos)
     }
 
     /**
-     * 在 [from, to) 内按目标长度贪心切分：累计长度达到 [threshold] 才在下一个候选位置下刀。
+     * 在 [from, to) 内切分：优先在「累计长度达到 [threshold]」的候选点下刀。
+     *
+     * ## 11-14 改：去掉 50~80 字的死区（真实正文实测出来的硬伤）
+     *
+     * 旧实现要求 `p - last >= threshold(50)` 才切，看似合理，配上
+     * refineOverLong 的 `> HARD_MAX_LENGTH(80)` 门槛就形成了**死区**：
+     *   · 60 字的段落：句末点在 59 处，切下去剩 1 字（< MIN_MERGE 15）⇒ 并回去；
+     *   · 79 字的段落：切完剩 29 字，不足 80 ⇒ refineOverLong 不管；
+     *   ⇒ 长度 51~80 的段落「主切分切不动、降级又不接手」，整段原样输出。
+     * 实测：长度 55/60/70/79 全部 1 段，81 才开始切。也就是说
+     * **「长句分割」对 80 字以下的段落完全无效**——而目标段长本来就是 50。
+     *
+     * 现在改成三段式：
+     *  1. 贪心：达到 threshold 就切（同旧行为，优先保住段长）；
+     *  2. **补刀**：若一个切点都没有、而整段又超过 threshold，
+     *     就在「最接近 threshold 的那个候选点」切一刀——把 51~80 的死区填上；
+     *  3. 只有切出来的两半都不短于 MIN_MERGE_LENGTH 才认，否则整段保留
+     *     （用户定稿：不硬切，宁可保留原段，也不切出碎片）。
      */
     private fun greedyCut(
         positions: List<Int>,
@@ -262,12 +300,29 @@ object ContentHelp {
         out: MutableList<Int>
     ) {
         var last = from
+        val before = out.size
         for (p in positions) {
             if (p <= from || p >= to) continue
             if (p - last >= threshold) {
                 out.add(p)
                 last = p
             }
+        }
+        // 补刀：一个点都没切出来，但整段超过目标段长 ⇒ 在离 threshold 最近的候选点切一刀
+        if (out.size == before && to - from > threshold) {
+            var best = -1
+            var bestDist = Int.MAX_VALUE
+            for (p in positions) {
+                if (p <= from || p >= to) continue
+                // 两半都不能太短，否则没有意义
+                if (p - from < MIN_MERGE_LENGTH || to - p < MIN_MERGE_LENGTH) continue
+                val dist = kotlin.math.abs(p - from - threshold)
+                if (dist < bestDist) {
+                    bestDist = dist
+                    best = p
+                }
+            }
+            if (best > 0) out.add(best)
         }
     }
 
