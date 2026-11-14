@@ -573,6 +573,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
             val params = Bundle().apply {
                 putInt("stream", AudioManager.STREAM_MUSIC)
+                // 11-14：段落位置（用户令「每个请求音频日志都标 1/5 这种段落标记」）。
+                // UTTS 日志页按这个给每张请求卡标 N/M；paraIndex 0-based，
+                // paraTotal 口径与 readProgress.json 的 totalSegs 一致（contentList.size，
+                // 含末尾章末占位段——UTTS 进度行分母就是它，两处必须同源）。
+                // index<0（无段上下文的调用方）不写，UTTS 侧落盘该两段为空，渲染跳过。
+                if (index >= 0) {
+                    putInt("para_index", index)
+                    putInt("para_total", contentList.size)
+                }
             }
 
             val result = tts.runCatching {
