@@ -1371,7 +1371,8 @@ object ProxyServer {
             return
         }
         val model = req.model
-        LogStore.i("Bailian", "调用百炼控制台对话，消息数=${req.messages.size} model=$model")
+        val effectiveModel = BailianClient.effectiveModelId(model)
+        LogStore.i("Bailian", "调用百炼控制台对话，消息数=${req.messages.size} model=$model 实际模型=$effectiveModel")
 
         if (req.stream) {
             call.respond(object : OutgoingContent.WriteChannelContent() {

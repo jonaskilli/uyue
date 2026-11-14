@@ -273,7 +273,9 @@ function parseNameResponse(taskJson, body) {
             if (!it || typeof it.name !== "string" || typeof it.gender !== "string" || typeof it.age !== "string") continue;
             var name = it.name.trim();
             if (name === "") continue;
-            items[padZero(parseInt(key, 10), 2)] = { name: name, gender: it.gender.trim(), age: it.age.trim() };
+            var outItem = { name: name, gender: it.gender.trim(), age: it.age.trim() };
+            if (typeof it.alias === "string" && it.alias.trim() !== "") outItem.alias = it.alias.trim();
+            items[padZero(parseInt(key, 10), 2)] = outItem;
         }
         return JSON.stringify({ items: items });
     } catch (e) {
@@ -394,7 +396,7 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
             "2. 不要仅凭字面相似度推断，需要合理关联" + NL +
             "3. 不确定的默认判定为非别名" + NL +
             "4. 全新角色（从未出现过）判定为非别名" + NL + NL +
-            (ctxText ? "【小说上下文片段】" + NL + ctxText + NL + NL : "") +
+            (ctxText ? "【小说上下文片段】（每句前的 [某某] 是之前自动识别的说话人，仅供参考、可能有误；本片段不带对话序号）" + NL + ctxText + NL + NL : "") +
             "【已有角色列表】" + NL + JSON.stringify(existingRolesList) + NL + NL +
             "【待确认名字列表】" + NL + nameSeqText + NL + NL +
             "【输出要求】" + NL +
@@ -424,9 +426,40 @@ function _parseAliasResult(body) {
     }
     return out;
 }
+// 姓名结果带 alias 时，把旧的那个称呼并到真名下；voice 等字段一律保留。
+function _applyAliasFromNameResult(records, nameResultJson) {
+    var items = _items(nameResultJson);
+    var corrections = {}, skipped = {};
+    for (var key in items) {
+        if (!items.hasOwnProperty(key)) continue;
+        var it = items[key];
+        if (!it || !it.alias || !it.name) continue;
+        var a = String(it.alias).trim(), n = String(it.name).trim();
+        if (!a || !n || a === n || skipped[a]) continue;
+        if (corrections[a] && corrections[a] !== n) { delete corrections[a]; skipped[a] = true; continue; }
+        corrections[a] = n;
+    }
+    for (var a in corrections) {
+        if (!corrections.hasOwnProperty(a)) continue;
+        var real = corrections[a];
+        var idx = _roleIndex(records);
+        var main = idx.main[a] ? a : (idx.alias[a] || "");
+        var target = main ? idx.main[main] : null;
+        if (!target || String(target.name).trim() === real) continue;
+        var old = String(target.name).trim();
+        var aliases = String(target.aliases || old).split("|");
+        for (var i = 0; i < aliases.length; i++) aliases[i] = String(aliases[i]).trim();
+        if (aliases.indexOf(old) === -1) aliases.unshift(old);
+        if (aliases.indexOf(real) === -1) aliases.push(real);
+        target.aliases = aliases.filter(function (s) { return s; }).join("|");
+        target.name = real;
+    }
+    return records;
+}
+
 function parseAliasResponse(taskJson, body, recordsJson, nameResultJson, aliasMetaJson) {
     try {
-        var records = _readRecords(recordsJson);
+        var records = _applyAliasFromNameResult(_readRecords(recordsJson), nameResultJson);
         var meta = JSON.parse(aliasMetaJson || "{}");
         var unknown = _isArray(meta.unknownNames) ? meta.unknownNames : [];
         var batchNames = _isArray(meta.batchNames) ? meta.batchNames : [];
@@ -517,5 +550,9 @@ function buildAnalyzePrompt() {
         "   - 【群众互相对话必须区分】当多个群众（无法确定身份的角色）之间互相对话、且性别年龄相同时，必须在名字后追加“甲/乙/丙/丁…”加以区分（例如“群众男青年甲”“群众男青年乙”），确保对话交替中的每个群众都是不同的具体人物；严禁把互相对话的多个群众识别成同一个名字；\n" +
         "4. 必须包含文本中所有序号的对话结果，不能遗漏、不能多返回、不能少返回。\n" +
         "5. 输出前，请仔细核对每个序号对应的对话内容与上下文，确保说话人归属无误；如遇歧义，优先选择上下文中最合理的角色，并避免因序号相邻而误判。\n" +
+        "**【上文标注说明】**\n" +
+        "【上文历史内容】里每句对话左引号前的「[某某]」是之前分析得到的说话人，不是小说原文，也不是对话序号。\n" +
+        "如果方括号里的某个角色在本次【当前待分析对话内容】里继续说话，而这次正文给出了他的真实姓名，就在该序号的 name 里写真名，并额外返回 alias，值为上文方括号里那个名字；\n" +
+        "否则照旧只返回 name/gender/age，不要返回 alias。输出仍只覆盖本次的【NN】序号。\n" +
         "输出格式示例：\n{\n  \"01\": {\n    \"name\": \"分析出的说话人姓名\",\n    \"gender\": \"性别（男/女/特殊）\",\n    \"age\": \"年龄分类（女性：女童/少女/女青年/女中年/女老年）；（男性：男童/少年/男青年/男中年/男老年）；（特殊：系统/旁白）\"\n  },\n  \"02\": { ... }\n}\n";
 }

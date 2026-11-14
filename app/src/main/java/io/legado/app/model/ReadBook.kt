@@ -1110,11 +1110,15 @@ object ReadBook : CoroutineScope by MainScope() {
         }
         kotlin.runCatching {
             val limit = AppConfig.audioPreDownloadNum + 2
+            // 往前多带一章：朗读脚本的「上文历史」只在 data.json 里往前截 1000 字，
+            // 窗口若从当前章开始，章首就读不到上一章末尾的角色信息。
+            val prevCount = if (durChapterIndex > 0) 1 else 0
+            val fromIndex = durChapterIndex - prevCount
             val sb = StringBuilder()
             var chapterCount = 0
-            for (i in 0 until limit) {
-                val idx = durChapterIndex + i
-                if (idx >= chapterSize) break
+            for (i in 0 until limit + prevCount) {
+                val idx = fromIndex + i
+                if (idx < 0 || idx >= chapterSize) break
                 val ch = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: break
                 val raw = BookHelp.getContent(book, ch)
                 if (!raw.isNullOrBlank()) {
@@ -1149,7 +1153,7 @@ object ReadBook : CoroutineScope by MainScope() {
                 lastSavedFixQuote = fixQuote
                 lastSavedReSegment = reSegment
                 AppLog.putDebug(
-                    "保存 TTS JSON 成功: $bookName 第${chapterIndex}章起, 实收${chapterCount}/${limit}章"
+                    "保存 TTS JSON 成功: $bookName 第${fromIndex}章起(当前${chapterIndex}), 实收${chapterCount}/${limit + prevCount}章"
                 )
             } else {
                 AppLog.put("保存 TTS JSON 失败: $bookName 第${chapterIndex}章起")
@@ -1165,6 +1169,7 @@ object ReadBook : CoroutineScope by MainScope() {
      * 与 [saveTtsTextJson] 的差异：不节流、不动朗读进度记录（lastSaved*），
      * 窗口起点由分析位置决定——脚本（locateParagraphInFullText 等）在分析每个
      * 章节时都能拿到"该位置"的上下文，与朗读时的行为完全一致。
+     * 与朗读窗口一致，往前多带一章，保证章首也能取到上一章末尾的上下文。
      *
      * @return 窗口拼接文本（清洗后），空表示无可分析内容
      */
@@ -1172,10 +1177,12 @@ object ReadBook : CoroutineScope by MainScope() {
         val book = book ?: return null
         return kotlin.runCatching {
             val limit = AppConfig.audioPreDownloadNum + 2
+            val prevCount = if (startIndex > 0) 1 else 0
+            val fromIndex = startIndex - prevCount
             val sb = StringBuilder()
-            for (i in 0 until limit) {
-                val idx = startIndex + i
-                if (idx >= chapterSize) break
+            for (i in 0 until limit + prevCount) {
+                val idx = fromIndex + i
+                if (idx < 0 || idx >= chapterSize) break
                 val ch = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: break
                 val raw = BookHelp.getContent(book, ch)
                 if (!raw.isNullOrBlank()) {
