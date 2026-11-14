@@ -16,63 +16,38 @@ object ContentHelp {
      * @param chapterName 标题
      * @return
      */
+    /**
+     * 长句分割（11-14 用户令改名改功能）。
+     *
+     * ## 改名前它是什么
+     *
+     * 原名「重新分段」，做的是**整章重排**：引号规范化、去段落内空格、把断开的段
+     * 黏合、把 `。”` 之后切开、`findNewLines` 按词典重排……最后才切超长段。
+     * 那五步是"修复排版"，会改变作者本来的分段——正常段落也被动过。
+     *
+     * ## 现在只做一件事：超长段兜底切分
+     *
+     * 用户原话（11-14）：「这个功能就可以删掉了……当你觉得段落长的时候可以给它开开，
+     * 我那个 TTS 里面长句分割也不是一直开呀，基本上都没开过，只有遇到出版书的时候，
+     * 容易遇到一段特别长我才开」。
+     *
+     * 所以语义对齐 UTTS 的「长句分割」（isSplitEnabled，默认关）：
+     * **只在段落超过阈值时才切开，短段一个字都不动**（含空格、引号、换行）。
+     * 实现直接复用原有的 [splitLongParagraph]，它本来就是自包含的：
+     * 逐行判断 `line.length > MAX_PARAGRAPH_LENGTH` 才切，否则原样输出。
+     *
+     * 保留：引号深度跟踪（跨页/跨段延续），保证不会把引号内的话从中间切断。
+     * 丢弃：引号规范化、去空格、段落黏合、`。”` 断句、词典重排——
+     * 这些属于"排版纠正"，不该藏在一个叫"长句分割"的开关后面。
+     *
+     * @param content 章节正文（原文，含它自己的分段与缩进）
+     * @param chapterName 章名（本实现不再用它，保留参数是为了调用方签名稳定）
+     */
     fun reSegment(content: String, chapterName: String): String {
-        var content1 = content
-        val dict = makeDict(content1)
-        var p = content1
-            .replace("&quot;".toRegex(), "“")
-            .replace("[:：]['\"‘”“]+".toRegex(), "：“")
-            .replace("[\"”“]+\\s*[\"”“][\\s\"”“]*".toRegex(), "”\n“")
-            .split("\n(\\s*)".toRegex()).toTypedArray()
-
-        //初始化StringBuilder的长度,在原content的长度基础上做冗余
-        var buffer = StringBuilder((content1.length * 1.15).toInt())
-        //          章节的文本格式为章节标题-空行-首段，所以处理段落时需要略过第一行文本。
-        buffer.append("  ")
-        if (chapterName.trim { it <= ' ' } != p[0].trim { it <= ' ' }) {
-            // 去除段落内空格。unicode 3000 象形字间隔（中日韩符号和标点），不包含在\s内
-            buffer.append(p[0].replace("[\u3000\\s]+".toRegex(), ""))
-        }
-
-        //如果原文存在分段错误，需要把段落重新黏合
-        for (i in 1 until p.size) {
-            if (match(MARK_SENTENCES_END, buffer.last())
-                || (match(MARK_QUOTATION_RIGHT, buffer.last())
-                        && match(MARK_SENTENCES_END, buffer[buffer.lastIndex - 1]))
-            ) {
-                buffer.append("\n")
-            }
-            // 段落开头以外的地方不应该有空格
-            // 去除段落内空格。unicode 3000 象形字间隔（中日韩符号和标点），不包含在\s内
-            buffer.append(p[i].replace("[\u3000\\s]".toRegex(), ""))
-        }
-        //     预分段预处理
-        //         ”“处理为”\n“。
-        //         ”。“处理为”。\n“。不考虑“？”  “！”的情况。
-        // ”。xxx处理为 ”。\n xxx
-        p = buffer.toString()
-            .replace("[\"”“]+\\s*[\"”“]+".toRegex(), "”\n“")
-            .replace("[\"”“]+(？。！?!~)[\"”“]+".toRegex(), "”$1\n“")
-            .replace("[\"”“]+(？。！?!~)([^\"”“])".toRegex(), "”$1\n$2")
-            .replace(
-                "([问说喊唱叫骂道着答])[\\.。]".toRegex(),
-                "$1。\n"
-            )
-            .split("\n".toRegex()).toTypedArray()
-        buffer = StringBuilder((content1.length * 1.15).toInt())
-        for (s in p) {
-            buffer.append("\n")
-            buffer.append(findNewLines(s, dict))
-        }
-        buffer = reduceLength(buffer)
-        buffer = splitLongParagraph(buffer)
-        content1 = (buffer.toString() //         处理章节头部空格和换行
-            .replaceFirst("^\\s+".toRegex(), "")
-            .replace("\\s*[\"”“]+\\s*[\"”“][\\s\"”“]*".toRegex(), "”\n“")
-            .replace("[:：][”“\"\\s]+".toRegex(), "：“")
-            .replace("\n[\"“”]([^\n\"“”]+)([,:，：][\"”“])([^\n\"“”]+)".toRegex(), "\n$1：“$3")
-            .replace("\n(\\s*)".toRegex(), "\n"))
-        return content1
+        // 空正文直接返回，避免 StringBuilder 空跑
+        if (content.isBlank()) return content
+        // 只走超长段切分这一道；splitLongParagraph 自己会跳过短行
+        return splitLongParagraph(StringBuilder(content)).toString()
     }
 
     /**
@@ -362,6 +337,76 @@ object ContentHelp {
             }
         }
         return str
+    }
+
+    /**
+     * 档2：把「旁白 + 对话」混在同一段里的句子拆开（11-14 用户令做二档）。
+     *
+     * ## 为什么不直接复用 splitQuote
+     *
+     * [splitQuote] 有两个限制，拿它当档2 会漏：
+     *  1. **一次只切一刀**：`她说：“A”然后他说：“B”` 只在第一个引号处切开，
+     *     后半段仍是旁白对话混着；用户要的是"分两段"，得切到没有混合为止；
+     *  2. **只认"段首/段尾是引号"两种情况**：段中间的对话
+     *     （`他抬头说：“走。”然后转身。`）它根本不处理。
+     *
+     * 本函数判据（比 splitQuote 宽，但仍保守）：
+     *  - 引号深度 0→1 处（起引号）切成两段：前面旁白、后面对话；
+     *  - 引号深度 1→0 处之后切片：对话结束，后面回到旁白；
+     *  - 只对**同一行**操作，不跨行；
+     *  - 不含字母/数字的碎片（如只剩 `：“`）并回前段——否则 UTTS 会为
+     *    空串发一次请求（用户为此报过"零词请求"）。
+     *
+     * ⚠️ 用户已明说这条的代价：「对话的上下文不清楚，会让 AI 分析不准，
+     * 不知道这句话谁说的」。所以**默认关闭**，只在用户主动开档2时生效。
+     */
+    private fun splitNarrationDialogue(content: String): String {
+        if (content.isBlank()) return content
+        val lines = content.split("\n")
+        val pieces = ArrayList<String>()
+        for (line in lines) {
+            if (line.isBlank()) continue
+            // 逐行按引号深度找下刀位置
+            val cuts = ArrayList<Int>()
+            var depth = 0
+            for (i in line.indices) {
+                val nd = nextQuoteDepth(line, i, depth)
+                if (nd != depth) {
+                    // 0→1（起引号）：在引号前切，旁白独立成段
+                    // 1→0（收引号）：在引号后切，对话独立成段
+                    val pos = if (nd > depth) i else i + 1
+                    if (pos in 1 until line.length && !cuts.contains(pos)) cuts.add(pos)
+                    depth = nd
+                }
+            }
+            if (cuts.isEmpty()) {
+                pieces.add(line)
+                continue
+            }
+            var from = 0
+            for (cut in cuts) {
+                if (cut <= from) continue
+                val piece = line.substring(from, cut)
+                if (piece.isNotBlank()) pieces.add(piece)
+                from = cut
+            }
+            if (from < line.length) {
+                val tail = line.substring(from)
+                if (tail.isNotBlank()) pieces.add(tail)
+            }
+        }
+        // 缺口4：合并「纯标点/空白」碎片并回前段（判据同 UTTS splitSentences）
+        val merged = ArrayList<String>()
+        for (piece in pieces) {
+            if (piece.isBlank()) continue
+            val noContent = piece.none { it.isLetterOrDigit() }
+            if (merged.isNotEmpty() && noContent) {
+                merged[merged.size - 1] = merged.last() + piece
+            } else {
+                merged.add(piece)
+            }
+        }
+        return merged.joinToString("\n")
     }
 
     /**
@@ -839,11 +884,25 @@ object ContentHelp {
     */
 
     //  句子结尾的标点。因为引号可能存在误判，不包含引号。
-    private const val MARK_SENTENCES_END = "？。！?!~"
-    private const val MARK_SENTENCES_END_P = ".？。！?!~"
+    //
+    // 11-14 用户令（长句分割加强版）：「加强版就是遇到分号也分段」。
+    // 把 `；;` 并入句末集合：
+    //   · 中文里分号常用来并列举证，本身就是一个语义停顿点，切开不影响语义完整；
+    //   · 与 UTTS 的 splitSentences 口径（`[。？?！!;；]`）对齐，两端判定一致；
+    //   · 出版书里「……第一；……第二；」这种超长并列句，只有按分号才切得动
+    //     （否则整段只能靠逗号降级切，会切在半句中间）。
+    //
+    // 11-14（长句分割缺口1）：省略号 `…` 从 MID 移到 END。
+    // 中文里 `……` 绝大多数是**句子收尾**（"他想了想……"/"然后呢……"），
+    // 放在 MID 里被当逗号级——降级切分时才会用到它，正常切分根本不认；
+    // 结果是含省略号的句子只能靠后面的逗号断，容易断在半句。
+    // ⚠️ 已知取舍：少数情况下 `……` 是句中停顿（"他想了很久……最后还是走了"），
+    // 这时会被切成两段。误切一次的代价（多一次停顿）远小于"整段只能靠逗号凑"。
+    private const val MARK_SENTENCES_END = "？。！?!~；;…"
+    private const val MARK_SENTENCES_END_P = ".？。！?!~…"
 
     //  句中标点，由于某些网站常把“，”写为"."，故英文句点按照句中标点判断
-    private const val MARK_SENTENCES_MID = ".，、,—…"
+    private const val MARK_SENTENCES_MID = ".，、,—"
     private const val MARK_SENTENCES_SAY = "问说喊唱叫骂道着答"
 
     //  XXX说：“”的冒号
@@ -857,11 +916,16 @@ object ContentHelp {
     //  限制字典的长度
     private const val WORD_MAX_LENGTH = 16
 
-    //  重新分段：超长段落兜底切分参数
+    //  长句分割：超长段落兜底切分参数（11-14 由「重新分段」改名）
     //  依据主流网文（起点/番茄）实测：段落中位数约 30 字、平均约 42 字，
     //  超过 50 字的仅约 1/4，故目标段长取 50，与原生段落长度对齐
     private const val MAX_PARAGRAPH_LENGTH = 50    // 目标段长（字）
-    private const val HARD_MAX_LENGTH = 80        // 超过则降级到逗号/硬切
+    // 11-14（长句分割缺口2）：降级阈值改为**跟着目标段长走**，不再写死 80。
+    // 原先是硬编码 80，与 50 是人为凑的 1.6 倍；一旦目标段长调整（用户已问过
+    // "50 算不算长段"、将来可能改 100），80 会变成比目标还小 ⇒
+    // greedyCut 切完的段全部被判"超长"，refineOverLong 反复降级到逗号，
+    // 等于把长句分割退化成"按逗号切"。
+    private const val HARD_MAX_LENGTH = MAX_PARAGRAPH_LENGTH * 8 / 5   // 1.6 倍，超此值降级
     private const val MIN_MERGE_LENGTH = 15       // 末段短于此值并入前段
 
     //  其后的引号按反引号处理（用于判定只有一个引号时的引号方向）

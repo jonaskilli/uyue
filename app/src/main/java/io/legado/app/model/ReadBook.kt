@@ -1216,7 +1216,19 @@ object ReadBook : CoroutineScope by MainScope() {
         return processed
             .replace(Regex("<br\\s*/?>"), "\n")
             .replace(Regex("</p>"), "\n")
+            // 11-14：段评注释必须**先于**通用的 `<[^>]+>` 清理。
+            // 通用清理只吃掉第一个 `>` 之前的部分，若注释体里含 `>`（如
+            // `<!-- 段评：他说了一句话 > 然后走了 -->`）就会残留半截，被 TTS 念出来。
+            .replace(Regex("(?is)<!--.*?-->"), "")
             .replace(Regex("<[^>]+>"), "")
+            // 11-14：裸图片数据——不在标签里，上面的通用清理碰不到，会整段念成乱码。
+            //   · `data:image/svg+xml;base64,PHN2Zy...` 段评里最常见的形态；
+            //   · 裸图片 URL（`https://.../a.png`），部分源站直接写在正文里。
+            .replace(Regex("(?i)data:image/[^\\s<>\"']+"), "")
+            .replace(
+                Regex("(?i)\\bhttps?://[^\\s<>\"']+\\.(?:avif|bmp|gif|jpe?g|png|svg|webp)"),
+                ""
+            )
             .replace(Regex("&nbsp;"), " ")
             .replace(Regex("&[a-zA-Z#0-9]+;"), "")
             .replace(Regex("[袮꧁]"), " ")
