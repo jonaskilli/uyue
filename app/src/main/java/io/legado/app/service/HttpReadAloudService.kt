@@ -1216,7 +1216,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
             useReplace = AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
             chineseConvert = AppConfig.chineseConverterType != 0,
             fixQuote = book.getFixQuote(),
-            reSegment = book.getReSegment()
+            reSegment = book.getReSegment(),
+            splitNarration = book.getSplitNarration()
         )
         return purifySpeakText(bookContent.toString())
     }

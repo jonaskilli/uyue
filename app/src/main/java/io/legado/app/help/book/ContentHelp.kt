@@ -42,12 +42,22 @@ object ContentHelp {
      *
      * @param content 章节正文（原文，含它自己的分段与缩进）
      * @param chapterName 章名（本实现不再用它，保留参数是为了调用方签名稳定）
+     * @param splitNarration 档2：是否再做「旁白／对话分离」（默认关，见下）
      */
-    fun reSegment(content: String, chapterName: String): String {
+    fun reSegment(
+        content: String,
+        chapterName: String,
+        splitNarration: Boolean = false
+    ): String {
         // 空正文直接返回，避免 StringBuilder 空跑
         if (content.isBlank()) return content
-        // 只走超长段切分这一道；splitLongParagraph 自己会跳过短行
-        return splitLongParagraph(StringBuilder(content)).toString()
+        // 第一道：只切超长段；splitLongParagraph 自己会跳过短行
+        val cut = splitLongParagraph(StringBuilder(content)).toString()
+        // 第二道（档2，默认关）：把「旁白+对话」混在一段的拆开。
+        // 顺序不能反：先进引号分离、再按长度切，会把已经够短的对话又切碎；
+        // 先按长度切出符合目标段长的段，再分离旁白/对话，两边都干净。
+        if (!splitNarration) return cut
+        return splitNarrationDialogue(cut)
     }
 
     /**
@@ -365,7 +375,11 @@ object ContentHelp {
         val lines = content.split("\n")
         val pieces = ArrayList<String>()
         for (line in lines) {
-            if (line.isBlank()) continue
+            // 空行原样保留：正文的段落/空行结构由上游决定，档2 不该顺手吃掉它
+            if (line.isBlank()) {
+                if (pieces.isNotEmpty()) pieces.add("")
+                continue
+            }
             // 逐行按引号深度找下刀位置
             val cuts = ArrayList<Int>()
             var depth = 0
@@ -398,10 +412,16 @@ object ContentHelp {
         // 缺口4：合并「纯标点/空白」碎片并回前段（判据同 UTTS splitSentences）
         val merged = ArrayList<String>()
         for (piece in pieces) {
-            if (piece.isBlank()) continue
+            // 空行（段落分隔）原样进结果，不参与并段
+            if (piece.isEmpty()) {
+                merged.add(piece)
+                continue
+            }
             val noContent = piece.none { it.isLetterOrDigit() }
-            if (merged.isNotEmpty() && noContent) {
-                merged[merged.size - 1] = merged.last() + piece
+            // 只并进**非空的前一段**：前一段是空行时并过去，会把标点并到空行上
+            val prev = merged.lastOrNull()
+            if (prev != null && prev.isNotEmpty() && noContent) {
+                merged[merged.size - 1] = prev + piece
             } else {
                 merged.add(piece)
             }

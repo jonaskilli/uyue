@@ -1412,7 +1412,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         useReplace = AppConfig.replaceEnableDefault && book.getUseReplaceRule(),
                         chineseConvert = AppConfig.chineseConverterType != 0,
                         fixQuote = book.getFixQuote(),
-                        reSegment = book.getReSegment()
+                        reSegment = book.getReSegment(),
+                        splitNarration = book.getSplitNarration()
                     )
                     // 同步 TextChapter.getNeedReadAloud() 中对 [袮꧁] 的替换，确保缓存命中
                     segments = bookContent.toString()

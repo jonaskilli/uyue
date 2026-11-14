@@ -791,7 +791,7 @@
     <string name="theme_name">主題名</string>
     <string name="auto_clear_expired">自動清除過期搜尋資料</string>
     <string name="auto_clear_expired_summary">超過一天的搜尋資料</string>
-    <string name="re_segment">重新分段</string>
+    <string name="re_segment">長句分割</string>
     <string name="style_name">樣式名稱:</string>
     <string name="empty_msg_import_book">點擊右上角資料夾圖示,選擇資料夾</string>
     <string name="scan_folder">智能掃描</string>

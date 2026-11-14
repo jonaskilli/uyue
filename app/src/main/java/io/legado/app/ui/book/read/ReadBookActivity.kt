@@ -546,6 +546,34 @@ class ReadBookActivity : BaseReadBookActivity(),
                     R.id.menu_enable_replace -> item.isChecked = book.getUseReplaceRule()
                     R.id.menu_fix_quote -> item.isChecked = book.getFixQuote()
                     R.id.menu_re_segment -> item.isChecked = book.getReSegment()
+                    // 11-14 档2（方案乙）：跟随主开关
+                    //  · 勾选态取 config 原值（不是 getSplitNarration()——那个带了
+                    //    "主开关关则恒 false"的合取，用它会让用户看到自己勾过的项莫名
+                    //    变成没勾，分不清"没开"还是"被主开关压着"）；
+                    //  · 主开关关着时：不可点 + 灰色标题。
+                    //    传统 Menu 的 itemTextAppearance 是**固定色**（@color/menu_color_default，
+                    //    不是状态选择器），所以 AppCompat 不会自动变灰，必须显式给灰色。
+                    //  · 缩进走标题字符串里的全角空格（见 split_narration 资源）。
+                    R.id.menu_split_narration -> {
+                        val mainOn = book.getReSegment()
+                        item.isChecked = book.config.splitNarration
+                        item.isEnabled = mainOn
+                        item.title = if (mainOn) {
+                            getString(R.string.split_narration)
+                        } else {
+                            // 40% 不透明度（102/255）——与本文件其它禁用态同档
+                            val dim = getCompatColor(R.color.menu_color_default)
+                                .let { c -> (c and 0x00FFFFFF) or (0x66 shl 24) }
+                            android.text.SpannableString(getString(R.string.split_narration))
+                                .apply {
+                                    setSpan(
+                                        android.text.style.ForegroundColorSpan(dim),
+                                        0, length,
+                                        android.text.Spannable.SPAN_INCLUSIVE_EXCLUSIVE
+                                    )
+                                }
+                        }
+                    }
 //                    R.id.menu_enable_review -> {
 //                        item.isVisible = BuildConfig.DEBUG
 //                        item.isChecked = AppConfig.enableReview
@@ -654,8 +682,23 @@ class ReadBookActivity : BaseReadBookActivity(),
                 ReadBook.loadContent(false)
             }
             R.id.menu_re_segment -> ReadBook.book?.let {
-                it.setReSegment(!it.getReSegment())
-                item.isChecked = it.getReSegment()
+                val on = !it.getReSegment()
+                it.setReSegment(on)
+                item.isChecked = on
+                // 11-14 方案乙规则①：主开关关掉时，档2 连带清成 false。
+                // 理由：档2 是"在主开关之上再切一刀"，主开关关着它没有任何效果；
+                // 若保留 true，菜单会出现"主开关未勾、子项却勾着"的悬空态，
+                // 下次再开主开关时档2 会**悄悄自动生效**，用户不知道自己在开什么。
+                if (!on) it.setSplitNarration(false)
+                ReadBook.loadContent(false)
+            }
+
+            R.id.menu_split_narration -> ReadBook.book?.let {
+                // 主开关关着时该 item 已 isEnabled=false，走不到这里；
+                // 这里再判一次是为了防止某些机型/键盘操作绕过 enabled。
+                if (!it.getReSegment()) return@let
+                it.setSplitNarration(!it.config.splitNarration)
+                item.isChecked = it.config.splitNarration
                 ReadBook.loadContent(false)
             }
 

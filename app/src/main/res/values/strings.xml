@@ -878,7 +878,14 @@
     <string name="theme_name">Theme name</string>
     <string name="auto_clear_expired">"Clear expired search histories automatically "</string>
     <string name="auto_clear_expired_summary">Search histories more than one day</string>
-    <string name="re_segment">Re-segment</string>
+    <string name="re_segment">Split long sentences</string>
+    <!--
+        档2：旁白/对话分离。
+        ⚠️ 默认语言必须有一条——只在 values-zh 里定义、默认缺省的话，
+        非中文系统运行时会 Resources$NotFoundException 崩溃。
+        行首的全角空格是**子项缩进**（传统 Menu 无法按项设缩进，只能用标题字符实现）。
+    -->
+    <string name="split_narration">　Narration / dialogue apart</string>
     <string name="fix_quote">Fix quotes</string>
     <string name="style_name">Style name:</string>
     <string name="empty_msg_import_book">Click the folder icon in the upper right corner and select the folder</string>
