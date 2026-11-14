@@ -154,26 +154,15 @@ object ContentHelp {
                     addCut(primary, line, depths, next)
                     next = sentenceIterator.next()
                 }
-                // 3. 按目标长度切分。
+                // 3. 切点计算：只认句末标点（含一层引号内，省略号在内）。
                 //
-                // 11-14 用户定稿（「最主要还是得保持他那个合成语义的流畅性，如果这个
-                // 保证不了的话，你切的乱七八糟的，不觉得有什么好」「首先做的就是
-                // 句末切割」）：**唯一的切点来源就是句末标点**。
-                //
-                // 因此删掉了原先的两级兜底（它们违背句末语义，实测会切在半句）：
-                //   · secondary 逗号/分号降级——实测把 100 字逗号连缀段切成 [54, 46]，
-                //     切在句中；
-                //   · refineOverLong + hardCutPosition 按字数硬切——实测把 201 字
-                //     无标点段切成 [50,50,50,51]，每 50 字生切一刀。
-                // 代价已知且为用户接受：整段只有一个句末标点、或无句末标点的长段
-                // 不会被切开（真实正文《明雾烟》10 段超长段中 6 段属此类）。
-                // 用户原话「就算他有一段有 100 个字，我也不觉得有什么问题」——
-                // 不切，远好过乱切。
-                greedyCut(primary, 0, line.length, MAX_PARAGRAPH_LENGTH, cuts)
-                // 4. 末段过短并入前段
-                if (cuts.isNotEmpty() && line.length - cuts.last() < MIN_MERGE_LENGTH) {
-                    cuts.removeAt(cuts.size - 1)
-                }
+                // ⚠️ 唯一的切点来源就是句末。原先的两级兜底已按用户定稿删除，
+                // 它们违背句末语义、实测会切在半句：
+                //   · 逗号/分号降级——把 100 字逗号连缀段切成 [54, 46]，切在句中；
+                //   · 按字数硬切——把 201 字无标点段切成 [50,50,50,51]，每 50 字生切一刀。
+                // 用户原话：「最主要还是得保持他那个合成语义的流畅性，如果这个
+                // 保证不了的话，你切的乱七八糟的，不觉得有什么好」。
+                cuts.addAll(computeCuts(primary, line.length, MAX_PARAGRAPH_LENGTH))
             } else {
                 // 短行无需切分，但仍要延续引号深度
                 var d = depth
@@ -239,7 +228,8 @@ object ContentHelp {
      * 的文体（出版书、旁白+对话混排）上等于没开。
      *
      * 放开后的边界：
-     *  · 只在 **深度 1**（一层引号内）取点，深度 ≥2 的嵌套引号仍不切；
+     *  · 只在**引号内**取点（深度 1）。注意本实现深度只会在 0/1 之间跳，
+     *    同层引号按开合配对（见 nextQuoteDepth），不会出现 ≥2；
      *  · 只认句末标点（。！？；…），引号内的逗号仍然不切——
      *    所以不会把一句话从中间切断，也不会动「他说：」这种引入语；
      *  · 连续句末标点（？！、……）与紧随的反引号归入本段，不在其中下刀。
@@ -269,8 +259,13 @@ object ContentHelp {
      * @param pos 候选位置（切在该字符之前）
      *
      * 判据：不能是行首/行尾、不能把连续句末标点切开；
-     * **深度约束放宽到 ≤1**——引号外（0）与一层引号内（1）都可切，
-     * 深度 ≥2 的嵌套引号仍视为不可切（见 collectSentenceEnds 的注释）。
+     * **深度约束放宽到 ≤1**——引号外（0）与引号内（1）都可切。
+     *
+     * ⚠️ 关于「嵌套引号」：本实现的 [nextQuoteDepth] 把同层引号按开合配对，
+     * 深度只在 0/1 间跳，**永远不会产生 ≥2 的值**（实测 `他说：“她告诉我：
+     * ‘明天别来了。’我记住了。”` 最大深度仍是 1）。也就是说这里写 `> 1` 是
+     * 一道**语义上的保险**，当前实现下不会命中；真出现 ≥2 的深度说明引号判定
+     * 逻辑将来被改动，届时这道保险自动生效。
      */
     private fun addCut(out: MutableList<Int>, line: String, depths: IntArray, pos: Int) {
         if (pos <= 0 || pos >= line.length) return
@@ -280,58 +275,54 @@ object ContentHelp {
     }
 
     /**
-     * 在 [from, to) 内切分：优先在「累计长度达到 [threshold]」的候选点下刀。
+     * 在一整行（段落）内计算切分点。
      *
-     * ## 11-14 改：去掉 50~80 字的死区（真实正文实测出来的硬伤）
+     * ## 11-14 用户定稿：无差别切分 + 碎片并回
      *
-     * 旧实现要求 `p - last >= threshold(50)` 才切，而 51~80 字的段落切一刀后
-     * 剩余部分不足 80（当时的降级门槛），降级逻辑不接手，于是形成**死区**：
-     *   · 60 字的段落：句末点在 59 处，切下去剩 1 字（< MIN_MERGE 15）⇒ 并回去；
-     *   · 79 字的段落：切完剩 29 字，无人接手；
-     *   ⇒ 长度 51~80 的段落整段原样输出。
-     * （降级逻辑本身已按用户定稿删除，这里保留成因记录，避免将来又把它加回来）
-     * 实测：长度 55/60/70/79 全部 1 段，81 才开始切。也就是说
-     * **「长段拆分」对 80 字以下的段落完全无效**——而目标段长本来就是 50。
+     * 用户原话：「我一直以为你说的是整段超过 50 字，然后点开启就开始切分。要不那样呗，
+     * 无差别切分不行吗？不管这段到底多长，只要开启都进行切分……至于切出来短句就
+     * 切出来，也不处理，你觉得合适吗？还是得加个限制？」
      *
-     * 现在改成三段式：
-     *  1. 贪心：达到 threshold 就切（同旧行为，优先保住段长）；
-     *  2. **补刀**：若一个切点都没有、而整段又超过 threshold，
-     *     就在「最接近 threshold 的那个候选点」切一刀——把 51~80 的死区填上；
-     *  3. 只有切出来的两半都不短于 MIN_MERGE_LENGTH 才认，否则整段保留
-     *     （用户定稿：不硬切，宁可保留原段，也不切出碎片）。
+     * 结论：**切分本身无差别，但碎片必须并回**。实测依据（《明雾烟》10 个超长段）：
+     * 完全放任不管会切出 `“尝尝。”`（5 字）、`付雪梨呢？`（5 字）这种光杆段——
+     * 朗读时每段单独发一次合成请求，5 个字独立开口、独立收尾，段间还要停一拍，
+     * 恰恰破坏用户最在意的「合成语义的流畅性」。所以碎片要并回前段。
+     *
+     * ## 规则（三条，取代原先的贪心分组 + 补刀 + 降级）
+     *
+     *  1. 段落不超过 [threshold]（50 字）⇒ **一刀不切**，短段一个字都不动；
+     *  2. 超过 ⇒ **每一个候选句末点都切**，不再要求「距上一个切点 ≥ threshold」。
+     *     旧实现那条约束才是省略号失效的真正原因：省略号多出现在句子早期
+     *     （实测 `他想了很久……最后还是决定…`，省略号在第 5 字），
+     *     一律被跳过，于是 51 字段落明明有切点却一刀不切。
+     *  3. 切出来的段不足 [MIN_MERGE_LENGTH]（15 字）⇒ **并回前段**，不产生碎片。
+     *
+     * 候选点由 [collectSentenceEnds] 提供（句末标点，含一层引号内；省略号在其中）。
+     *
+     * @param positions 候选切点（升序，已含引号深度约束）
+     * @param limit 判定用的目标段长
      */
-    private fun greedyCut(
+    private fun computeCuts(
         positions: List<Int>,
-        from: Int,
-        to: Int,
-        threshold: Int,
-        out: MutableList<Int>
-    ) {
-        var last = from
-        val before = out.size
+        lineLength: Int,
+        limit: Int
+    ): MutableList<Int> {
+        val cuts = ArrayList<Int>()
+        // 规则①：短段一个字都不动
+        if (lineLength <= limit) return cuts
+        // 规则②：每个候选点都切
         for (p in positions) {
-            if (p <= from || p >= to) continue
-            if (p - last >= threshold) {
-                out.add(p)
-                last = p
-            }
+            if (p <= 0 || p >= lineLength) continue
+            // 规则③：切出来不足 MIN_MERGE_LENGTH 的，不设切点（等于并回前段）。
+            // 判定看「这一段相对上一个切点有多长」，不是相对段首——
+            // 否则连续几个短句会被反复跳过，最后一段反而超长。
+            val prev = cuts.lastOrNull() ?: 0
+            if (p - prev < MIN_MERGE_LENGTH) continue
+            // 末尾残段过短也并回：不在这里切，让它留在最后一段里
+            if (lineLength - p < MIN_MERGE_LENGTH) continue
+            if (!cuts.contains(p)) cuts.add(p)
         }
-        // 补刀：一个点都没切出来，但整段超过目标段长 ⇒ 在离 threshold 最近的候选点切一刀
-        if (out.size == before && to - from > threshold) {
-            var best = -1
-            var bestDist = Int.MAX_VALUE
-            for (p in positions) {
-                if (p <= from || p >= to) continue
-                // 两半都不能太短，否则没有意义
-                if (p - from < MIN_MERGE_LENGTH || to - p < MIN_MERGE_LENGTH) continue
-                val dist = kotlin.math.abs(p - from - threshold)
-                if (dist < bestDist) {
-                    bestDist = dist
-                    best = p
-                }
-            }
-            if (best > 0) out.add(best)
-        }
+        return cuts
     }
 
     private fun splitQuote(str: String): String {
