@@ -273,8 +273,9 @@ function parseNameResponse(taskJson, body) {
             if (!it || typeof it.name !== "string" || typeof it.gender !== "string" || typeof it.age !== "string") continue;
             var name = it.name.trim();
             if (name === "") continue;
-            items[padZero(parseInt(key, 10), 2)] = { name: name, gender: it.gender.trim(), age: it.age.trim() };
-        }
+            var outItem = { name: name, gender: it.gender.trim(), age: it.age.trim() };
+            if (typeof it.alias === "string" && it.alias.trim() !== "") outItem.alias = it.alias.trim();
+            items[padZero(parseInt(key, 10), 2)] = outItem;        }
         return JSON.stringify({ items: items });
     } catch (e) {
         _log("姓名结果解析失败: " + e);
@@ -375,8 +376,49 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
     var records = _readRecords(recordsJson);
     var items = _items(nameResultJson);
     var batchNames = _batchNames(items);
-    var unknown = _unknownFromBatch(records, batchNames);
-    var candidates = _existingRolesList(records, 50);
+    // 姓名 AI 把同一次出场的主名+别名错当成「真名+旧称呼」返回时，
+    // 两个名字都不在名单里 → 一起交给别名 API，各占一个编号；
+    // 只要有一个已在名单里 → 维持保护，不交给别名 API。
+    var idx0 = _roleIndex(records);
+    var pairs = [], excludedNames = {};
+    for (var ak in items) {
+        if (!items.hasOwnProperty(ak)) continue;
+        var ai = items[ak];
+        if (!ai || !ai.name || !ai.alias) continue;
+        var px = String(ai.name).trim(), py = String(ai.alias).trim();
+        if (!px || !py || px === py) continue;
+        var pxKnown = !!(idx0.main[px] || idx0.alias[px]);
+        var pyKnown = !!(idx0.main[py] || idx0.alias[py]);
+        if (!pxKnown && !pyKnown) {
+            pairs.push({
+                main: px, alias: py,
+                gender: String(ai.gender || "男").trim() || "男",
+                age: String(ai.age || "青年").trim() || "青年"
+            });
+        } else {
+            excludedNames[px] = true;
+        }
+    }
+    var unknown = [];
+    var rawUnknown = _unknownFromBatch(records, batchNames);
+    for (var ui = 0; ui < rawUnknown.length; ui++) {
+        if (!excludedNames[String(rawUnknown[ui].name).trim()]) unknown.push(rawUnknown[ui]);
+    }
+    var seenUnknown = {};
+    for (var si = 0; si < unknown.length; si++) seenUnknown[String(unknown[si].name).trim()] = true;
+    for (var pi = 0; pi < pairs.length; pi++) {
+        var pr = pairs[pi];
+        var two = [
+            { name: pr.main, gender: pr.gender, age: pr.age },
+            { name: pr.alias, gender: pr.gender, age: pr.age }
+        ];
+        for (var ti = 0; ti < two.length; ti++) {
+            if (!seenUnknown[two[ti].name]) {
+                seenUnknown[two[ti].name] = true;
+                unknown.push(two[ti]);
+            }
+        }
+    }    var candidates = _existingRolesList(records, 50);
     var existingRolesList = candidates.list;
     var requests = [];
     if (unknown.length > 0) {
@@ -394,8 +436,7 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
             "2. 不要仅凭字面相似度推断，需要合理关联" + NL +
             "3. 不确定的默认判定为非别名" + NL +
             "4. 全新角色（从未出现过）判定为非别名" + NL + NL +
-            (ctxText ? "【小说上下文片段】" + NL + ctxText + NL + NL : "") +
-            "【已有角色列表】" + NL + JSON.stringify(existingRolesList) + NL + NL +
+            (ctxText ? "【小说上下文片段】（每句前的 [某某] 是之前自动识别的说话人，仅供参考、可能有误；本片段不带对话序号）" + NL + ctxText + NL + NL : "") +            "【已有角色列表】" + NL + JSON.stringify(existingRolesList) + NL + NL +
             "【待确认名字列表】" + NL + nameSeqText + NL + NL +
             "【输出要求】" + NL +
             "输出严格JSON格式，键为序号（如" + Q + "01" + Q + "），值为 {isAlias: true/false, mainName: " + Q + "匹配的主名或null" + Q + "}。" + NL +
@@ -409,8 +450,8 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
         unknownNames: unknown,
         batchNames: batchNames,
         aliasToMainMap: candidates.aliasToMainMap,
-        candidateCount: existingRolesList.length
-    });
+        candidateCount: existingRolesList.length,
+        pairs: pairs    });
 }
 
 function _parseAliasResult(body) {
@@ -424,23 +465,187 @@ function _parseAliasResult(body) {
     }
     return out;
 }
+// 姓名结果带 alias 时，把旧的那个称呼并到真名下；voice 等字段一律保留。
+function _namesOfRecord(rec) {
+    var out = [];
+    var arr = String(rec.aliases || "").split("|");
+    for (var i = 0; i < arr.length; i++) {
+        var s = String(arr[i] || "").trim();
+        if (s && out.indexOf(s) === -1) out.push(s);
+    }
+    return out;
+}
+
+function _findMainRecord(records, name) {
+    var n = String(name || "").trim();
+    if (!n) return null;
+    for (var i = 0; i < records.length; i++) {
+        var r = records[i];
+        if (r && String(r.name || "").trim() === n) return r;
+    }
+    for (var j = 0; j < records.length; j++) {
+        var rec = records[j];
+        if (rec && _namesOfRecord(rec).indexOf(n) >= 0) return rec;
+    }
+    return null;
+}
+
+// alias 必须是当前名单里独立的主名记录；降为别人的别名就永久失去合并资格。
+// strict=true（真名已在原名单）时，还要求这条记录的别名栏只有它自己。
+function _findMergeableRecord(records, aliasName, strict) {
+    var alias = String(aliasName || "").trim();
+    if (!alias) return null;
+    var pure = null, count = 0;
+    for (var i = 0; i < records.length; i++) {
+        var r = records[i];
+        if (!r) continue;
+        var names = _namesOfRecord(r);
+        var main = String(r.name || "").trim();
+        if (main === alias) {
+            pure = r;
+            count++;
+            if (strict) {
+                for (var k = 0; k < names.length; k++) if (names[k] !== alias) return null;
+            }
+        } else if (names.indexOf(alias) >= 0) {
+            return null;
+        }
+    }
+    return count === 1 ? pure : null;
+}
+
+// mainInfo = 本批姓名 AI 返回的 {name, gender, age}：
+// 性别年龄一律以最终主名这次返回的值为准，voice 保持已分配的不动。
+function _mergeIntoMainRecord(records, aliasName, mainInfo) {
+    var alias = String(aliasName || "").trim();
+    var info = mainInfo || {};
+    var main = String(info.name || "").trim();
+    var mainGender = String(info.gender || "").trim();
+    var mainAge = String(info.age || "").trim();
+    if (!alias || !main || alias === main) return records;
+    // 真名已在原名单 → 严谨；真名是全新的 → 宽松，允许旧称呼带着它的别名一起改名
+    var mainRec = _findMainRecord(records, main);
+    var strict = !!mainRec;
+    var pure = _findMergeableRecord(records, alias, strict);
+    if (!pure) return records;
+    if (mainRec) {
+        var finalMain = String(mainRec.name || "").trim() || main;
+        var merged = _namesOfRecord(mainRec);
+        if (merged.indexOf(finalMain) === -1) merged.unshift(finalMain);
+        var extra = _namesOfRecord(pure);
+        extra.unshift(alias);
+        for (var i = 0; i < extra.length; i++) {
+            if (extra[i] && merged.indexOf(extra[i]) === -1) merged.push(extra[i]);
+        }
+        mainRec.aliases = merged.join("|");
+        if (mainGender) mainRec.gender = mainGender;
+        if (mainAge) mainRec.age = mainAge;
+        var out = [];
+        for (var j = 0; j < records.length; j++) {
+            var r = records[j];
+            if (!r || r === pure) continue;
+            if (r !== mainRec && String(r.name || "").trim() === finalMain) continue;
+            out.push(r);
+        }
+        return out;
+    }
+    var oldName = String(pure.name || "").trim() || alias;
+    var names = _namesOfRecord(pure);
+    if (names.indexOf(oldName) === -1) names.unshift(oldName);
+    if (names.indexOf(main) === -1) names.push(main);
+    pure.aliases = names.join("|");
+    pure.name = main;
+    if (mainGender) pure.gender = mainGender;
+    if (mainAge) pure.age = mainAge;
+    return records.slice();
+}
+
+function _applyAliasFromNameResult(records, nameResultJson) {
+    var items = _items(nameResultJson);
+    var corrections = {}, skipped = {};
+    for (var key in items) {
+        if (!items.hasOwnProperty(key)) continue;
+        var it = items[key];
+        if (!it || !it.alias || !it.name) continue;
+        var a = String(it.alias).trim(), n = String(it.name).trim();
+        if (!a || !n || a === n || skipped[a]) continue;
+        if (corrections[a] && corrections[a].name !== n) { delete corrections[a]; skipped[a] = true; continue; }
+        corrections[a] = {
+            name: n,
+            gender: String(it.gender || "").trim(),
+            age: String(it.age || "").trim()
+        };
+    }
+    for (var a in corrections) {
+        if (!corrections.hasOwnProperty(a)) continue;
+        records = _mergeIntoMainRecord(records, a, corrections[a]);
+    }
+    return records;
+}
+
 function parseAliasResponse(taskJson, body, recordsJson, nameResultJson, aliasMetaJson) {
     try {
-        var records = _readRecords(recordsJson);
-        var meta = JSON.parse(aliasMetaJson || "{}");
+        var records = _applyAliasFromNameResult(_readRecords(recordsJson), nameResultJson);        var meta = JSON.parse(aliasMetaJson || "{}");
         var unknown = _isArray(meta.unknownNames) ? meta.unknownNames : [];
         var batchNames = _isArray(meta.batchNames) ? meta.batchNames : [];
         var aliasToMainMap = meta.aliasToMainMap || {};
         var result = {};
         if (body && String(body).trim() !== "") result = _parseAliasResult(body);
         var idx = _roleIndex(records);
+        // 双新组按组统一处理：任意一个判成别名 → 两个名字一起挂到那个主角色后面；
+        // 分别判给不同主名 → 以「主名」那条为准；都没判成别名 → 一起新建一条记录。
+        var pairs = _isArray(meta.pairs) ? meta.pairs : [];
+        var handled = {};
+        for (var pi = 0; pi < pairs.length; pi++) {
+            var pr = pairs[pi];
+            var sx = -1, sy = -1;
+            for (var uu = 0; uu < unknown.length; uu++) {
+                var un = String(unknown[uu].name || "").trim();
+                if (un === String(pr.main || "").trim()) sx = uu;
+                if (un === String(pr.alias || "").trim()) sy = uu;
+            }
+            if (sx < 0 || sy < 0) continue;
+            var kx = padZero(sx + 1, 2), ky = padZero(sy + 1, 2);
+            handled[kx] = true;
+            handled[ky] = true;
+            var rx = result[kx], ry = result[ky];
+            var mn = "";
+            if (rx && rx.isAlias && rx.mainName) mn = String(rx.mainName).trim();
+            else if (ry && ry.isAlias && ry.mainName) mn = String(ry.mainName).trim();
+            var mappedMain = mn ? (aliasToMainMap[mn] || idx.alias[mn] || mn) : "";
+            var target = mn ? (idx.main[mn] || idx.main[mappedMain]) : null;
+            if (target) {
+                var arr = String(target.aliases || "").split("|");
+                var merged = [];
+                for (var mi = 0; mi < arr.length; mi++) {
+                    var ss = String(arr[mi] || "").trim();
+                    if (ss && merged.indexOf(ss) === -1) merged.push(ss);
+                }
+                var pm = String(pr.main || "").trim(), pa = String(pr.alias || "").trim();
+                if (pm && merged.indexOf(pm) === -1) merged.push(pm);
+                if (pa && merged.indexOf(pa) === -1) merged.push(pa);
+                target.aliases = merged.join("|");
+            } else {
+                records.unshift({
+                    name: String(pr.main || "").trim(),
+                    aliases: String(pr.main || "").trim() + "|" + String(pr.alias || "").trim(),
+                    gender: String(pr.gender || "男"),
+                    age: String(pr.age || "青年"),
+                    voice: "",
+                    usageCount: 100,
+                    fixedVoice: false
+                });
+            }
+        }
         for (var i = 0; i < unknown.length; i++) {
             var u = unknown[i];
             var seq = padZero(i + 1, 2);
+            if (handled[seq]) continue;
             var res = result[seq];
             var name = String(u.name || "").trim();
             if (!name) continue;
-            var target = null;
+            // 已是别人的别名就不再参与合并，避免泛称呼把一串角色连起来
+            if (idx.alias[name]) continue;            var target = null;
             if (res && res.isAlias && res.mainName) {
                 // 按当前内置朗读脚本：mainName 可能是主名，也可能是别名，
                 // 通过 mainNameSet / aliasToMainMap 找到真正的主名记录。
@@ -517,5 +722,8 @@ function buildAnalyzePrompt() {
         "   - 【群众互相对话必须区分】当多个群众（无法确定身份的角色）之间互相对话、且性别年龄相同时，必须在名字后追加“甲/乙/丙/丁…”加以区分（例如“群众男青年甲”“群众男青年乙”），确保对话交替中的每个群众都是不同的具体人物；严禁把互相对话的多个群众识别成同一个名字；\n" +
         "4. 必须包含文本中所有序号的对话结果，不能遗漏、不能多返回、不能少返回。\n" +
         "5. 输出前，请仔细核对每个序号对应的对话内容与上下文，确保说话人归属无误；如遇歧义，优先选择上下文中最合理的角色，并避免因序号相邻而误判。\n" +
-        "输出格式示例：\n{\n  \"01\": {\n    \"name\": \"分析出的说话人姓名\",\n    \"gender\": \"性别（男/女/特殊）\",\n    \"age\": \"年龄分类（女性：女童/少女/女青年/女中年/女老年）；（男性：男童/少年/男青年/男中年/男老年）；（特殊：系统/旁白）\"\n  },\n  \"02\": { ... }\n}\n";
+        "**【上文标注说明】**\n" +
+        "【上文历史内容】里每句对话左引号前的「[某某]」是之前分析得到的说话人，不是小说原文，也不是对话序号。\n" +
+        "如果方括号里的某个角色在本次【当前待分析对话内容】里继续说话，而这次正文给出了他的真实姓名，就在该序号的 name 里写真名，并额外返回 alias，值为上文方括号里那个名字；\n" +
+        "否则照旧只返回 name/gender/age，不要返回 alias。输出仍只覆盖本次的【NN】序号。\n" +        "输出格式示例：\n{\n  \"01\": {\n    \"name\": \"分析出的说话人姓名\",\n    \"gender\": \"性别（男/女/特殊）\",\n    \"age\": \"年龄分类（女性：女童/少女/女青年/女中年/女老年）；（男性：男童/少年/男青年/男中年/男老年）；（特殊：系统/旁白）\"\n  },\n  \"02\": { ... }\n}\n";
 }

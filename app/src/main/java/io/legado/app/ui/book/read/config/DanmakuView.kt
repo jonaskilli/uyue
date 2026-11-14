@@ -263,11 +263,34 @@ class DanmakuView @JvmOverloads constructor(
         }
     }
 
+    /** 同一个 View 在三个朗读界面窗口之间迁移时，保留在屏弹幕，回来接着飘 */
+    var keepStateOnDetach = false
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (active.isNotEmpty()) startFrameLoop()
+    }
+
     override fun onDetachedFromWindow() {
-        clearDanmaku()
+        if (keepStateOnDetach) {
+            stopFrameLoop()
+            lastFrameTime = 0L
+        } else {
+            clearDanmaku()
+        }
         super.onDetachedFromWindow()
     }
 
+    /** 临时隐藏：停帧但不清在屏弹幕 */
+    fun pause() {
+        stopFrameLoop()
+        lastFrameTime = 0L
+    }
+
+    /** 重新显示：接着上次的位移继续飘 */
+    fun resume() {
+        if (active.isNotEmpty()) startFrameLoop()
+    }
     private fun measureWidth(text: String, scale: Float): Float {
         basePaint.textSize = danmakuTextSize * scale
         return max(basePaint.measureText(text), 1f)

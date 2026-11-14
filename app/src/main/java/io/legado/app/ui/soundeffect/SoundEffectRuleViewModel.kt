@@ -21,6 +21,22 @@ class SoundEffectRuleViewModel(application: Application) : BaseViewModel(applica
 
     val data = mutableListOf<SoundEffectGroupWithRules>()
 
+    /**
+     * 是否有尚未落盘的数据改动。只在真正改了规则/开关/顺序时置位，
+     * 切换模式、展开分组、搜索等浏览操作据此跳过写文件。
+     */
+    @Volatile
+    var dirty = false
+        private set
+
+    fun markDirty() {
+        dirty = true
+    }
+
+    fun clearDirty() {
+        dirty = false
+    }
+
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     /**
@@ -71,6 +87,7 @@ class SoundEffectRuleViewModel(application: Application) : BaseViewModel(applica
                 mode = newMode
                 data.clear()
                 data.addAll(loaded)
+                dirty = false
             }
             null
         }.onError {

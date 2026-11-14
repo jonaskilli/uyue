@@ -496,13 +496,17 @@
             android:paddingLeft="6dp"
             android:paddingRight="6dp">
 
-            <androidx.appcompat.widget.AppCompatImageView
+            <!-- 小号文字加减（与「音效规则管理 → 修改音量」每段音量加减同一写法） -->
+            <TextView
                 android:id="@+id/iv_tts_speech_reduce"
                 android:layout_width="30dp"
                 android:layout_height="30dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
                 android:contentDescription="@string/tts_speech_reduce"
-                android:src="@drawable/ic_reduce"
-                android:tint="@color/primaryText"
+                android:gravity="center"
+                android:text="−"
+                android:textColor="@color/primaryText"
+                android:textSize="20sp"
                 android:tooltipText="@string/tts_speech_reduce"
                 tools:ignore="UnusedAttribute" />
 
@@ -513,13 +517,16 @@
                 android:layout_weight="1"
                 android:max="450" />
 
-            <androidx.appcompat.widget.AppCompatImageView
+            <TextView
                 android:id="@+id/iv_tts_speech_add"
                 android:layout_width="30dp"
                 android:layout_height="30dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
                 android:contentDescription="@string/tts_speech_add"
-                android:src="@drawable/ic_add"
-                android:tint="@color/primaryText"
+                android:gravity="center"
+                android:text="+"
+                android:textColor="@color/primaryText"
+                android:textSize="20sp"
                 android:tooltipText="@string/tts_speech_add"
                 tools:ignore="UnusedAttribute" />
 

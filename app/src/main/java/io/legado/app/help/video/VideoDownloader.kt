@@ -46,7 +46,7 @@ import javax.crypto.spec.SecretKeySpec
  *
  * - mp4 等单文件直链：流式保存（走 [VideoCache]，与播放共用同一份缓存）
  * - m3u8：逐段下载（支持 AES-128 加密与 EXT-X-MAP 初始化段），按顺序拼接成完整文件
- * - 保存位置：/storage/emulated/0/Download/保存视频/<视频名>/，后缀统一 .mp4
+ * - 保存位置：/storage/emulated/0/Download/A保存视频/<视频名>/，后缀统一 .mp4
  *
  * 网络读取一律经由 [VideoCache]：播放缓冲过的分片直接命中，不再重复下载，
  * 没看过的部分才真正联网，联网结果同样进缓存供下次播放复用。
@@ -85,7 +85,7 @@ object VideoDownloader {
         val title: String,
         val progress: Int, // 0-99 下载中，100 已完成
         val status: DlStatus,
-        /** 保存目录名（Download/保存视频/<dirName>）：界面按它把条目归到各视频名下 */
+        /** 保存目录名（Download/A保存视频/<dirName>）：界面按它把条目归到各视频名下 */
         val dirName: String = "",
         /** 合并 MP4 进度（0-100）；-1 = 未在合并。界面在播放按钮左侧的圆圈上显示 */
         val mergeProgress: Int = -1,
@@ -222,6 +222,14 @@ object VideoDownloader {
     // 而磁盘上的 .mp4 / .part 还躺在那里没人认领。这里落一份索引，
     // 下次启动按索引 + 磁盘实际文件恢复，中断的还能接着下。
     private val indexFile: File by lazy { File(appCtx.filesDir, "video_download/tasks.json") }
+
+    /**
+     * 外部备份：跟视频文件一起放在 Download/A保存视频/ 下。
+     * 内部那份在 appCtx.filesDir，清数据、卸载重装或系统清理就没了；这份随文件走，
+     * 用户也能在文件管理器里直接看到。两份由 [saveNow] 同步写、由 [restore] 合并恢复。
+     */
+    private val backupFile: File by lazy { File(rootDir(), "下载记录.json") }
+
     private val saveLock = Any()
     private var saveScheduled = false
 
@@ -230,21 +238,45 @@ object VideoDownloader {
 
     private val restoreLock = Any()
 
+    /** 读一份记录文件；文件不存在、为空或损坏时返回空列表，绝不让备份问题影响主流程 */
+    private fun readRecords(file: File): List<org.json.JSONObject> {
+        val text = runCatching { file.readText() }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: return emptyList()
+        val arr = runCatching { org.json.JSONArray(text) }.getOrNull() ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+    }
+
+    /** 一条记录的去重键：书 + 章节地址 + 集号（与 [watchKey] 的语义一致） */
+    private fun recordKey(o: org.json.JSONObject): String =
+        o.optString("bookUrl") + "|" + o.optString("chapterUrl") + "|" + o.optInt("index", 0)
+
     /** 恢复上次的下载记录（幂等，只跑一次）。App 启动与进入播放页都会调用。 */
     fun restoreIfNeeded() {
         synchronized(restoreLock) {
             if (restored) return
             restored = true
         }
-        scope.launch { runCatching { restore() } }
+        scope.launch {
+            // 装完新版本必须先打开一次 App 才会执行目录迁移；这里主动触发，
+            // 不依赖后续是否访问保存目录，也避免「只装不看」时目录一直没变化
+            runCatching { saveRootDir }
+            runCatching { restore() }
+        }
     }
 
     private fun restore() {
-        val text = runCatching { indexFile.readText() }.getOrNull()?.takeIf { it.isNotBlank() }
-            ?: return
-        val arr = runCatching { org.json.JSONArray(text) }.getOrNull() ?: return
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
+        // 两份记录对比合并去重：内部优先，外部备份独有的补进来。
+        // 内部那份被清掉或损坏时，外部备份就是恢复来源。
+        val inner = readRecords(indexFile)
+        val outer = readRecords(backupFile)
+        val merged = LinkedHashMap<String, org.json.JSONObject>()
+        inner.forEach { merged[recordKey(it)] = it }
+        outer.forEach { merged.putIfAbsent(recordKey(it), it) }
+        if (merged.isEmpty()) return
+        AppLog.put(
+            "下载记录: 内部 ${inner.size} 条、外部备份 ${outer.size} 条，合并去重后 ${merged.size} 条"
+        )
+        for (o in merged.values) {
             val book = appDb.bookDao.getBook(o.optString("bookUrl")) ?: continue
             val source = appDb.bookSourceDao.getBookSource(o.optString("sourceUrl")) ?: continue
             val chapterUrl = o.optString("chapterUrl")
@@ -304,6 +336,9 @@ object VideoDownloader {
             saveCoverAsync(task)
         }
         publishStates()
+        // 合并结果立即回写两份：内部那份被清掉时，这一次就把记录补回来，
+        // 也让外部备份与内部保持同一份快照
+        runCatching { saveNow() }
     }
 
     /** 状态变化后延迟落盘（进度更新很频繁，节流一下） */
@@ -335,9 +370,24 @@ object VideoDownloader {
                 }
             )
         }
-        indexFile.parentFile?.mkdirs()
-        indexFile.writeText(arr.toString())
+        val text = arr.toString()
+        writeRecord(indexFile, text)
+        // 外部备份写失败（没拿到外部存储权限、目录被手动删掉等）不能影响内部记录
+        runCatching { writeRecord(backupFile, text) }
+            .onFailure { AppLog.putDebug("下载记录: 外部备份写入失败 ${it.localizedMessage}") }
     }
+
+    /** 先写 .tmp 再改名：避免写到一半被杀进程，留下半截 JSON 导致整份记录读不出来 */
+    private fun writeRecord(file: File, text: String) {
+        file.parentFile?.mkdirs()
+        val tmp = File(file.path + ".tmp")
+        tmp.writeText(text)
+        if (!tmp.renameTo(file)) {
+            file.writeText(text)
+            tmp.delete()
+        }
+    }
+
     /** 同一来源的请求头，避免每次分段请求都重新构建 */
     private var cachedHeaders: Pair<String, Map<String, String>>? = null
     /** 正在写入的临时文件路径（下载队列与边看边存互斥同一选集） */
@@ -607,6 +657,8 @@ object VideoDownloader {
     fun deleteMp4(state: TaskState) {
         File(dirOf(state.task), "${state.title}.mp4").delete()
         removeState(state.key)
+        // 不等 800ms 节流：删除立即同步到内部记录和外部备份，两边一起删
+        scope.launch { runCatching { saveNow() } }
     }
 
     // ---------- 已缓存视频（按视频分组管理） ----------
@@ -616,7 +668,7 @@ object VideoDownloader {
         /** 有下载记录时是 bookUrl，只有目录没有记录时是 "dir:<目录名>" */
         val key: String,
         val name: String,
-        /** 保存目录名（Download/保存视频/<dirName>） */
+        /** 保存目录名（Download/A保存视频/<dirName>） */
         val dirName: String,
         val episodeCount: Int,
         val completedCount: Int,
@@ -641,11 +693,95 @@ object VideoDownloader {
     fun groupAddTime(dirName: String): Long =
         runCatching { File(rootDir(), dirName).lastModified() }.getOrDefault(0L)
 
-    private fun rootDir(): File = File(
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-        "保存视频"
-    )
+    /** 保存目录名：A 开头，在文件管理器里排在中文目录前面，方便找 */
+    const val SAVE_ROOT_NAME = "A保存视频"
+    private const val OLD_SAVE_ROOT_NAME = "保存视频"
 
+    /**
+     * 把旧目录搬到新目录：同一外部存储分区里 renameTo 只是改目录项，瞬时完成、不复制数据，
+     * 已下载的视频、分片、封面、下载记录.json 都跟着过去。
+     * 公共 Download 分区有时会拒绝「整体改名」，这时退化成逐项搬；全都没搬成才继续用旧目录，
+     * 绝不让已有视频凭空消失。每一步都写日志，方便在应用日志里直接核对结果。
+     */
+    private val saveRootDir: File by lazy {
+        val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val newDir = File(downloads, SAVE_ROOT_NAME)
+        val oldDir = File(downloads, OLD_SAVE_ROOT_NAME)
+        val granted = Environment.isExternalStorageManager()
+        if (!oldDir.isDirectory) {
+            AppLog.put("保存目录: 旧目录不存在，直接使用 $SAVE_ROOT_NAME")
+            return@lazy newDir
+        }
+        if (!newDir.isDirectory && oldDir.renameTo(newDir)) {
+            AppLog.put("保存目录已改名：$OLD_SAVE_ROOT_NAME → $SAVE_ROOT_NAME")
+            return@lazy newDir
+        }
+        val entries = oldDir.listFiles()
+        if (entries == null) {
+            AppLog.put("保存目录改名失败：读不到旧目录（权限=$granted），继续沿用 $OLD_SAVE_ROOT_NAME")
+            return@lazy oldDir
+        }
+        // 整体改名被拒或新目录已存在：逐项搬，同名条目保留新目录里的
+        if (!newDir.isDirectory) newDir.mkdirs()
+        var moved = 0
+        var failed = 0
+        entries.forEach { f ->
+            val target = File(newDir, f.name)
+            if (target.exists()) {
+                moved++
+            } else if (f.renameTo(target)) {
+                moved++
+            } else {
+                failed++
+            }
+        }
+        if (failed == 0 && oldDir.listFiles().isNullOrEmpty()) oldDir.delete()
+        AppLog.put(
+            "保存目录迁移: 权限=$granted，旧目录 ${entries.size} 项，搬入/同名 $moved 项，" +
+                "失败 $failed 项，当前使用 ${newDir.name}，" +
+                "旧目录${if (oldDir.exists()) "仍存在" else "已移除"}"
+        )
+        if (moved == 0 && entries.isNotEmpty()) {
+            AppLog.put("保存目录改名失败，继续沿用 $OLD_SAVE_ROOT_NAME")
+            return@lazy oldDir
+        }
+        newDir
+    }
+
+    /** 供 AdFilter 等共用同一个根目录（迁移只做一次） */
+    fun saveRoot(): File = saveRootDir
+
+    private fun rootDir(): File = saveRootDir
+
+    /**
+     * 每部视频体积缓存：存到该视频目录下的 [SIZE_CACHE_FILE]（随缓存走，重装/换设备都在）。
+     * 这样打开下载管理时不必每次递归遍历整目录算体积（几千个切片文件能卡 1 秒），
+     * 直接读记录即可。记录目录 mtime：目录有变动（新增/删除/改名集）时判定过期，
+     * 重新算并把结果写回，下次再开又变"直接读"。
+     */
+    private const val SIZE_CACHE_FILE = ".size_cache.json"
+
+    private data class DirSizeMeta(val sizeBytes: Long, val mtime: Long)
+
+    private fun readDirSize(dirName: String): DirSizeMeta? {
+        val f = File(File(rootDir(), dirName), SIZE_CACHE_FILE)
+        return runCatching {
+            val text = f.readText().takeIf { it.isNotBlank() } ?: return null
+            val o = org.json.JSONObject(text)
+            DirSizeMeta(o.optLong("size", -1), o.optLong("mtime", -1))
+        }.getOrNull()
+    }
+
+    private fun writeDirSize(dirName: String, sizeBytes: Long, mtime: Long) {
+        runCatching {
+            File(File(rootDir(), dirName), SIZE_CACHE_FILE).writeText(
+                org.json.JSONObject().apply {
+                    put("size", sizeBytes)
+                    put("mtime", mtime)
+                }.toString()
+            )
+        }
+    }
     /**
      * 每部视频体积缓存：存到该视频目录下的 [SIZE_CACHE_FILE]（随缓存走，重装/换设备都在）。
      * 这样打开下载管理时不必每次递归遍历整目录算体积（几千个切片文件能卡 1 秒），
@@ -847,6 +983,8 @@ object VideoDownloader {
             }
             // 文件真的删完了再刷新一次统计，避免把"还没删完"的目录算进已缓存大小
             refreshVideoGroups()
+            // 删除立即同步到内部记录和外部备份，不等 800ms 节流窗口
+            runCatching { saveNow() }
         }
         return targets.size
     }
@@ -878,6 +1016,9 @@ object VideoDownloader {
                     .onFailure { AppLog.put("删除视频缓存失败：$dirName", it) }
             }
             refreshVideoGroups()
+            // 外部备份在保存目录根部、不在被删的子目录里；这里立即回写两份，
+            // 让删除后的记录两边一致（备份不会把已删条目留在里面）
+            runCatching { saveNow() }
         }
         return keys.size
     }
@@ -971,10 +1112,7 @@ object VideoDownloader {
      */
     fun findLocalFile(bookName: String, index: Int, title: String): File? {
         val name = bookName.replace(AppPattern.fileNameRegex, "").ifBlank { "未命名" }
-        val dir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "保存视频/$name"
-        )
+        val dir = File(rootDir(), name)
         val t = title.replace(AppPattern.fileNameRegex, "").ifBlank { "第${index + 1}集" }
         // 合并成品优先
         val mp4 = File(dir, "$t.mp4")
@@ -995,8 +1133,8 @@ object VideoDownloader {
     }
 
     private fun dirOf(task: Task): File = File(
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-        "保存视频/${task.book.name.replace(AppPattern.fileNameRegex, "").ifBlank { "未命名" }}"
+        rootDir(),
+        task.book.name.replace(AppPattern.fileNameRegex, "").ifBlank { "未命名" }
     )
 
     private fun titleOf(task: Task): String =
@@ -1007,8 +1145,7 @@ object VideoDownloader {
     // （表现为下载记录里多集视频刷不出封面）。所以封面一旦拿到就存进
     // 视频自己的下载目录，之后一律优先用本地文件，跟着视频走、永远刷得出来。
 
-    /** 封面在下载目录里的落地文件：Download/保存视频/<dirName>/cover.jpg */
-    private fun coverFileOf(dirName: String): File = File(rootDir(), "$dirName/cover.jpg")
+    /** 封面在下载目录里的落地文件：Download/A保存视频/<dirName>/cover.jpg */    private fun coverFileOf(dirName: String): File = File(rootDir(), "$dirName/cover.jpg")
 
     /**
      * 校验文件头是不是真图片（JPEG / PNG / GIF / WEBP 魔数）。
@@ -2053,7 +2190,7 @@ object VideoDownloader {
      * 记下来反而会让"其实已经好了"的分片被永久跳过。下次播到那儿再试一次，
      * 好了就正常播，还坏就再跳一次。
      *
-     * 生成的清单放在 cacheDir（临时目录，24 小时后自动清），不动 `Download/保存视频/`
+     * 生成的清单放在 cacheDir（临时目录，24 小时后自动清），不动 `Download/A保存视频/`
      * 里的任何东西。清单内容仍由 [buildLocalPlaylist] 产出：已缓存的分片走本地文件，
      * 其余保留原始 http 地址由播放器实时取，只是少了那一片。
      *
@@ -2085,7 +2222,7 @@ object VideoDownloader {
             }
             if (playlistUri.startsWith("file:")) {
                 // 播的是本地清单：把原始清单复制到临时目录，下面的剔除只在副本上做，
-                // 绝不能改 Download/保存视频/ 里的原件
+                // 绝不能改 Download/A保存视频/ 里的原件
                 val src = Uri.parse(playlistUri).path?.let { File(it).parentFile }
                     ?: return@withContext null
                 val srcPlaylist = File(src, "playlist.m3u8")
@@ -2332,7 +2469,7 @@ object VideoDownloader {
     /** 值得重试的 HTTP 状态码：请求超时 / 过早关闭 / 限流 / 服务端错误 */
     private val RETRYABLE_HTTP_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
 
-    /** 某一集的分片缓存目录：Download/保存视频/<dir>/<标题>/ */
+    /** 某一集的分片缓存目录：Download/A保存视频/<dir>/<标题>/ */
     private fun epFolderOf(dir: File, title: String): File = File(dir, title)
 
     /** 直播归档文件名匹配：<标题>001.mp4 / <标题>002.mp4 … */
@@ -2620,8 +2757,7 @@ object VideoDownloader {
 
     /** 一个无下载记录的缓存条目：整份分片文件夹，或一个成品 mp4 */
     data class OrphanCache(
-        /** 所属视频的保存目录名（Download/保存视频/<dirName>） */
-        val dirName: String,
+        /** 所属视频的保存目录名（Download/A保存视频/<dirName>） */        val dirName: String,
         /** 分片文件夹名 / mp4 文件名（不含 .mp4 后缀） */
         val title: String,
         /** true = m3u8 分片文件夹；false = 单文件 mp4 */

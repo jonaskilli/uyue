@@ -110,6 +110,7 @@ import io.legado.app.ui.book.read.config.AutoReadDialog
 import io.legado.app.ui.book.read.config.CharacterManagerDialog
 import io.legado.app.ui.book.read.config.CharacterProfileDialog
 import io.legado.app.ui.book.read.config.CharacterVoiceHelper
+import io.legado.app.ui.book.read.config.DanmakuHost
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.BG_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_ACCENT_COLOR
 import io.legado.app.ui.book.read.config.BgTextConfigDialog.Companion.TEXT_COLOR
@@ -279,12 +280,6 @@ class ReadBookActivity : BaseReadBookActivity(),
     private val timeBatteryReceiver = TimeBatteryReceiver()
     private var screenTimeOut: Long = 0
     private var loadStates: Boolean = false
-    // AI处理章节：是否有任务在跑
-    private var aiFixRunning = false
-    // 当前 AI 处理任务：切章取消后据此判断能否立刻启动下一章的预分析
-    private var aiFixJob: Job? = null
-    // AI自动处理：上一次触发时的章节下标，避免翻页时重复触发
-    private var lastAiAutoChapterIndex = -1
     // 恢复进度确认框是否已显示：系统手势返回可能连发，避免对话框反复创建堆积在主线程
     private var restoreProgressDialogShowing = false
     // 首次 initData 是否已启动（idleHandler 与超时兜底共用，防止重复初始化）
@@ -789,79 +784,37 @@ class ReadBookActivity : BaseReadBookActivity(),
         force: Boolean,
         silent: Boolean
     ) {
-        if (aiFixRunning) {
-            if (!silent) toastOnUi("上一个AI处理任务还没结束")
-            return
-        }
-        if (startIndex >= ReadBook.chapterSize) {
-            if (!silent) toastOnUi("后面没有章节了")
-            return
-        }
-        val n = template.chapterCount.coerceIn(1, AiChapterFixService.MAX_COUNT)
-        aiFixRunning = true
-        val onlyCached = n > 1
         val startTitle = appDb.bookChapterDao.getChapter(book.bookUrl, startIndex)?.title.orEmpty()
+        // 界面只负责等待框；任务在单例服务的进程级作用域里跑，
+        // 锁屏、关屏、阅读界面销毁都不会中断它
         val waitDialog = if (silent) null else {
             WaitDialog(this).setText("AI处理《$startTitle》…").apply {
                 setCancelable(true)
                 show()
             }
         }
-        val job = lifecycleScope.launch {
-            val result = AiChapterFixService.fixChapters(
-                book, ReadBook.bookSource, template, startIndex, n, force, onlyCached
-            ) { progress ->
-                // 回调发生在 IO 线程，更新弹窗必须切回主线程
-                runOnUiThread {
-                    // 弹窗实时显示当前处理的章节与分块完成数（如《第1章》已完成 2/5）
-                    waitDialog?.setText("AI处理：$progress")
+        val ui = waitDialog?.let { dialog ->
+            object : AiChapterFixService.FixUi {
+                override fun onProgress(text: String) {
+                    runOnUiThread { runCatching { dialog.setText("AI处理：$text") } }
+                }
+
+                override fun onFinish(message: String) {
+                    // 不弹提示，只收起等待框；结果统一写进应用日志
+                    runOnUiThread { runCatching { dialog.dismiss() } }
                 }
             }
-            waitDialog?.dismiss()
-            // 改过的章节要丢弃旧排版重新读取，否则界面还是修改前的正文
-            result.changedIndexes.forEach { ReadBook.reloadChapter(it) }
-            // 最终结果（成功/失败都算）写入应用日志：toast 展示时间短且长消息会截断，日志便于回看
-            AppLog.put("AI处理章节: ${result.message}")
-            toastOnUi(result.message)
         }
-        aiFixJob = job
-        // 自动任务登记下来：切章时若还没跑完就直接取消，不写回、不落盘
-        if (silent) AiChapterFixService.registerAutoJob(book.bookUrl, job)
-        // 调用可能比较久，允许返回键中断
-        waitDialog?.setOnCancelListener { job.cancel() }
-        job.invokeOnCompletion {
-            // 只有「自己仍是当前任务」时才复位守卫：切章取消旧任务后新任务可能已启动，
-            // 旧任务的完成回调不能把新任务的运行状态清掉，否则会冒出并发任务
-            if (aiFixJob === job) {
-                aiFixRunning = false
-                aiFixJob = null
-            }
-            AiChapterFixService.clearAutoJob(book.bookUrl, job)
-        }
-    }
-
-    /**
-     * 自动处理：章节一切换就处理后续章节（下标没变时不重复触发）。
-     */
-    private fun autoAiFixChapter() {
-        val book = ReadBook.book ?: return
-        // 自动处理开关按书生效
-        if (!AiChapterFixService.isAutoFixEnabled(book.name, book.bookUrl)) return
-        val index = ReadBook.durChapterIndex
-        if (index == lastAiAutoChapterIndex) return
-        // 切章：上一章预热出来、还没跑完的分析立刻作废，绝不让它在切章后落盘
-        // （ReadBook 的统一切章钩子已先取消一次，这里再调是幂等的）
-        AiChapterFixService.cancelAutoJob(book.bookUrl)
-        // 旧任务已取消时同步放开守卫：否则 invokeOnCompletion 还没回调，
-        // startAiChapterFix 会被 aiFixRunning 静默挡住，下下章的预分析就断了
-        if (aiFixJob?.isActive != true) aiFixRunning = false
-        lastAiAutoChapterIndex = index
-        val template = AiChapterFixService.getEffectiveTemplate(book.name, book.bookUrl)
-        if (template.apiConfig.isBlank()) return
-        val start = index + 1
-        if (start >= ReadBook.chapterSize) return
-        startAiChapterFix(book, template, start, force = false, silent = true)
-    }
+        val job = AiChapterFixService.startFix(
+            book, template, startIndex, force, silent, ui
+        )
+        if (job == null) {
+            // 被守卫挡住或后面没有章节：服务已写日志，这里只收起等待框
+            runCatching { waitDialog?.dismiss() }
+        } else {
+            // 返回键可中断这一次任务，但不影响其它切章调度
+            waitDialog?.setOnCancelListener { job.cancel() }
+        }    }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
         return onCompatOptionsItemSelected(item)
@@ -1346,7 +1299,6 @@ class ReadBookActivity : BaseReadBookActivity(),
             loadStates = false
             success?.invoke()
         }
-        autoAiFixChapter()
     }
 
     override suspend fun upContentAwait(
@@ -2601,7 +2553,15 @@ class ReadBookActivity : BaseReadBookActivity(),
         SourceCallBack.callBackBook(SourceCallBack.END_READ, ReadBook.bookSource, ReadBook.book, ReadBook.curTextChapter?.chapter)
     }
 
+    /** 朗读面板 / 视觉舞台 / 全屏大图共用一套弹幕浮层，随阅读页生命周期创建与销毁 */
+    private var danmakuHost: DanmakuHost? = null
+
+    fun danmakuHost(): DanmakuHost = danmakuHost ?: DanmakuHost(this).also { danmakuHost = it }
+
     override fun onDestroy() {
+        // 先移除共享弹幕浮层，避免窗口销毁后残留
+        danmakuHost?.destroy()
+        danmakuHost = null
         super.onDestroy()
         // 先停掉图片回位定时器，避免销毁后仍在 runOnUiThread 里触发 Glide 加载
         cancelReadAiImageReset()

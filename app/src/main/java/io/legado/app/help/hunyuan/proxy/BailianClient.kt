@@ -26,15 +26,19 @@ import java.util.concurrent.TimeUnit
  *
  * 配置 JSON：{"cookies":"...", "bx_ua":"...", "bx_et":"...", "bx_umidtoken":"...",
  *            "model_id":"qwen3.8-max", "user_agent":"可选"}
+ *
+ * 调用方模型名可写成 bailian-<模型ID>（如 bailian-qwen3.7-plus），
+ * 此时忽略各配置里的 model_id，所有游客身份统一使用后缀指定的模型。
  */
 object BailianClient {
     private const val TAG = "Bailian"
+    private const val DEFAULT_MODEL_ID = "qwen3.8-max"
 
     @Volatile var cookies: String = ""
     @Volatile var bxUa: String = ""
     @Volatile var bxEt: String = ""
     @Volatile var bxUmidToken: String = ""
-    @Volatile var modelId: String = "qwen3.8-max"
+    @Volatile var modelId: String = DEFAULT_MODEL_ID
     @Volatile var userAgent: String =
         "Mozilla/5.0 (Linux; Android 15; V2352A Build/AP3A.240905.015.A2) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/126.0.6478.71 Mobile Safari/537.36"
@@ -50,7 +54,7 @@ object BailianClient {
             bxUa = ""
             bxEt = ""
             bxUmidToken = ""
-            modelId = "qwen3.8-max"
+            modelId = DEFAULT_MODEL_ID
             return
         }
         try {
@@ -59,11 +63,25 @@ object BailianClient {
             bxUa = o.optString("bx_ua", "")
             bxEt = o.optString("bx_et", "")
             bxUmidToken = o.optString("bx_umidtoken", "")
-            modelId = o.optString("model_id", "qwen3.8-max").ifBlank { "qwen3.8-max" }
+            modelId = o.optString("model_id", DEFAULT_MODEL_ID).ifBlank { DEFAULT_MODEL_ID }
             o.optString("user_agent", "").takeIf { it.isNotBlank() }?.let { userAgent = it }
         } catch (_: Exception) {
         }
     }
+
+    /**
+     * 解析调用方模型名里手动指定的模型 ID：bailian- 之后的整段内容。
+     * 无前缀、或后缀为空时返回 null（沿用各游客配置里的 model_id）。
+     */
+    fun parseModelOverride(requestModel: String): String? {
+        val m = requestModel.trim()
+        if (!m.lowercase().startsWith("bailian-")) return null
+        return m.substring("bailian-".length).trim().takeIf { it.isNotBlank() }
+    }
+
+    /** 本次请求实际发给百炼的模型 ID：手动指定优先，否则用当前游客配置的 model_id。 */
+    fun effectiveModelId(requestModel: String): String =
+        parseModelOverride(requestModel) ?: modelId.ifBlank { DEFAULT_MODEL_ID }
 
     /** 配置是否完整（能发起一次对话）。 */
     fun isConfigured(): Boolean =
@@ -153,10 +171,10 @@ object BailianClient {
     }
 
     /** 创建百炼对话会话，返回 sessionId。 */
-    private fun createSession(label: String): String {
+    private fun createSession(label: String, useModelId: String): String {
         val data = JSONObject().apply {
             put("session", JSONObject().apply {
-                put("bizId", modelId)
+                put("bizId", useModelId)
                 put("bizType", "AgentInference")
                 put("label", label.take(50))
             })
@@ -169,12 +187,12 @@ object BailianClient {
     }
 
     /** 组装内嵌 predict JSON（JSON_TEXT 的 value）。 */
-    private fun predictInner(content: String, sessionId: String, tabCode: String): String {
+    private fun predictInner(content: String, sessionId: String, tabCode: String, useModelId: String): String {
         return JSONObject().apply {
             put("Api", "zeldaEasy.bmp.agentPredictRpcService.predict")
             put("Data", JSONObject().apply {
                 put("predictRequest", JSONObject().apply {
-                    put("modelId", modelId)
+                    put("modelId", useModelId)
                     put("ancestorModelId", "")
                     put("modelTypeIds", JSONArray().put("Reasoning").put("VU").put("TG"))
                     put("contentList", JSONArray().put(JSONObject().apply {
@@ -215,8 +233,10 @@ object BailianClient {
                 else -> "user: $c"
             }
         }
+        // 模型 ID：调用方可用 bailian-<模型ID> 统一覆盖各游客配置里的 model_id
+        val useModelId = effectiveModelId(model)
         // 1. 创建会话
-        val sessionId = createSession(content)
+        val sessionId = createSession(content, useModelId)
         // 2. 签发短时对话令牌（放在 URL 路径，stream 接口无 header 认证）
         val accessToken = generateAccessToken()
         // 3. 流式 predict
@@ -224,7 +244,7 @@ object BailianClient {
             put("messageId", uuid())
             put("data", JSONArray().put(JSONObject().apply {
                 put("type", "JSON_TEXT")
-                put("value", predictInner(content, sessionId, uuid().replace("-", "")))
+                put("value", predictInner(content, sessionId, uuid().replace("-", ""), useModelId))
             }))
         }
         val req = Request.Builder().url(STREAM_BASE + accessToken)

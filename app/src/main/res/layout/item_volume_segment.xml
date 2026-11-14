@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingTop="6dp"
+    android:paddingBottom="10dp">
+
+    <!-- 第一行：外显名字。AI 音效没有括号名字、也没有轮换段，
+         所以它的倍率与播放按钮直接放在这行的右边 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/tv_name"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="外显名字"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/tv_gain_ai"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:minWidth="42dp"
+            android:gravity="end"
+            android:text="1.00"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp"
+            android:visibility="gone" />
+
+        <ImageButton
+            android:id="@+id/btn_play_ai"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="试听"
+            android:padding="6dp"
+            android:src="@drawable/ic_play_24dp"
+            android:tint="@color/primaryText"
+            android:visibility="gone" />
+
+    </LinearLayout>
+
+    <!-- 第二行：用来识别音效的括号名字，例如 (打雷音效)；AI 音效隐藏 -->
+    <TextView
+        android:id="@+id/tv_effect"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textColor="@color/primaryText"
+        android:textSize="13sp"
+        android:alpha="0.85"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <!-- 第三行：段序号「音效一/音效二…」，右边是这一段的倍率与播放按钮。
+         同一个音效名下的多个轮换音频，每一段都有独立的一行和独立的滑块 -->
+    <LinearLayout
+        android:id="@+id/ll_segment"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/tv_segment"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="音效一"
+            android:textColor="@color/primaryText"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/tv_gain"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:minWidth="42dp"
+            android:gravity="end"
+            android:text="1.00"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp" />
+
+        <ImageButton
+            android:id="@+id/btn_play"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="试听"
+            android:padding="6dp"
+            android:src="@drawable/ic_play_24dp"
+            android:tint="@color/primaryText" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/btn_minus"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="音量减 0.05"
+            android:gravity="center"
+            android:text="−"
+            android:textColor="@color/primaryText"
+            android:textSize="22sp" />
+
+        <SeekBar
+            android:id="@+id/seek_gain"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:max="1000" />
+
+        <TextView
+            android:id="@+id/btn_plus"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="音量加 0.05"
+            android:gravity="center"
+            android:text="+"
+            android:textColor="@color/primaryText"
+            android:textSize="22sp" />
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tv_error"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/primaryText"
+        android:textSize="11sp"
+        android:visibility="gone" />
+
+</LinearLayout>

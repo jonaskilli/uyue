@@ -67,8 +67,7 @@ object ContentHelp {
         // 空正文直接返回，避免 StringBuilder 空跑
         if (content.isBlank()) return content
         // 只切超长段；splitLongParagraph 自己会跳过短行
-        return splitLongParagraph(StringBuilder(content)).toString()
-    }
+        return splitLongParagraph(StringBuilder(content)).toString()    }
 
     /**
      * 强制切分，减少段落内的句子
@@ -126,8 +125,7 @@ object ContentHelp {
      *
      * ⚠️ 11-14 用户定稿：切点**只认句末标点**，不做任何字数硬切/逗号降级。
      * 原先的「超长区间降级到逗号、再无位置才按字数硬切」已删除，
-     * 因为它会把句子从中间切断，破坏合成语义的连贯。
-     *
+     * 因为它会把句子从中间切断，破坏合成语义的连贯。     *
      * @param str 待分段内容，行间以 \n 分隔
      */
     private fun splitLongParagraph(str: StringBuilder): StringBuilder {
@@ -184,8 +182,7 @@ object ContentHelp {
                 // 短行无需切分，但仍要延续引号深度
                 var d = depth
                 for (i in bodyText.indices) {
-                    d = nextQuoteDepth(bodyText, i, d)
-                }
+                    d = nextQuoteDepth(bodyText, i, d)                }
                 depth = d
             }
             if (cuts.isEmpty()) {
@@ -198,8 +195,7 @@ object ContentHelp {
                 }
                 // 最后一段带上被摘下的行尾标签（段评/配图跟着它前面那句话走）
                 result.append(bodyText, start, bodyText.length)
-                result.append(tailTags).append("\n")
-            }
+                result.append(tailTags).append("\n")            }
         }
         // 去掉末尾多出的一个换行，保持与入参一致的行结构
         if (result.isNotEmpty() && result.last() == '\n') {
@@ -244,8 +240,7 @@ object ContentHelp {
         return line.substring(0, end) to line.substring(end)
     }
 
-    /**
-     * 计算第 [i] 个字符之后的引号深度。
+    /**     * 计算第 [i] 个字符之后的引号深度。
      * 只有一个引号时按上下文判定它是起引号还是反引号：
      * 起引号之后的内容（直到出现反引号，可跨段落）全部视为引号内，绝不下刀。
      */
@@ -287,14 +282,12 @@ object ContentHelp {
      *    同层引号按开合配对（见 nextQuoteDepth），不会出现 ≥2；
      *  · 只认句末标点（。！？；…），引号内的逗号仍然不切——
      *    所以不会把一句话从中间切断，也不会动「他说：」这种引入语；
-     *  · 连续句末标点（？！、……）与紧随的反引号归入本段，不在其中下刀。
-     */
+     *  · 连续句末标点（？！、……）与紧随的反引号归入本段，不在其中下刀。     */
     private fun collectSentenceEnds(line: String, depths: IntArray, out: MutableList<Int>) {
         var i = 0
         while (i < line.length) {
             val inQuote = depths[i] == 1
-            if ((depths[i] == 0 || inQuote) && match(MARK_SENTENCES_END, line[i])) {
-                var end = i + 1
+            if ((depths[i] == 0 || inQuote) && match(MARK_SENTENCES_END, line[i])) {                var end = i + 1
                 while (end < line.length &&
                     (match(MARK_SENTENCES_END, line[end]) || line[end] == '”' || line[end] == '"')
                 ) {
@@ -324,8 +317,7 @@ object ContentHelp {
      */
     private fun addCut(out: MutableList<Int>, line: String, depths: IntArray, pos: Int) {
         if (pos <= 0 || pos >= line.length) return
-        if (depths[pos] > 1) return
-        if (match(MARK_SENTENCES_END, line[pos])) return
+        if (depths[pos] > 1) return        if (match(MARK_SENTENCES_END, line[pos])) return
         if (!out.contains(pos)) out.add(pos)
     }
 
@@ -379,7 +371,6 @@ object ContentHelp {
         }
         return cuts
     }
-
     private fun splitQuote(str: String): String {
         val length = str.length
         if (length < 3) return str
@@ -909,8 +900,7 @@ object ContentHelp {
     //  长段拆分：超长段落兜底切分参数（11-14 由「重新分段」改名）
     //  依据主流网文（起点/番茄）实测：段落中位数约 30 字、平均约 42 字，
     //  超过 50 字的仅约 1/4，故目标段长取 50，与原生段落长度对齐
-    private const val MAX_PARAGRAPH_LENGTH = 50    // 目标段长（字）
-    private const val MIN_MERGE_LENGTH = 15       // 末段短于此值并入前段
+    private const val MAX_PARAGRAPH_LENGTH = 50    // 目标段长（字）    private const val MIN_MERGE_LENGTH = 15       // 末段短于此值并入前段
 
     //  其后的引号按反引号处理（用于判定只有一个引号时的引号方向）
     private const val MARK_QUOTE_AFTER_CLOSE = "。？！~…,，、;；:："

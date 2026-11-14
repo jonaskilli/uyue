@@ -600,12 +600,14 @@ object SceneEffectGenerator {
         val result = try {
             BgmAIService.callOpenAIApi(
                 provider,
-                buildPrompt(bookName, chapterTitle, paragraphs)
-            )
+                buildPrompt(bookName, chapterTitle, paragraphs),
+                // 与弹幕共用区间队列，硬停止时同样掐断在途的 AI 增强请求
+                onCallCreated = DanmakuRuntime::registerCall            )
         } catch (e: Exception) {
             AppLog.put("场景特效: AI增强失败 ${e.localizedMessage}")
             return emptyList()
-        }
+        } finally {
+            DanmakuRuntime.clearInFlight()        }
         return parseAiResult(result, paragraphs.map { it.first }.toSet())
     }
 

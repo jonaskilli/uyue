@@ -1995,7 +1995,7 @@ internal fun DownloadDialog(
                                 }
                                 VideoDownloader.enqueue(tasks)
                                 context.toastOnUi(
-                                    "已加入下载队列 ${tasks.size} 集\n保存到 Download/保存视频/$bookName"
+                                    "已加入下载队列 ${tasks.size} 集\n保存到 Download/A保存视频/$bookName"
                                 )
                                 // 下载在后台进行，切到进度页可实时查看；关闭弹窗也不中断
                                 tab = 1

@@ -878,8 +878,7 @@
     <string name="theme_name">Theme name</string>
     <string name="auto_clear_expired">"Clear expired search histories automatically "</string>
     <string name="auto_clear_expired_summary">Search histories more than one day</string>
-    <string name="re_segment">Split long paragraphs</string>
-    <string name="fix_quote">Fix quotes</string>
+    <string name="re_segment">Split long paragraphs</string>    <string name="fix_quote">Fix quotes</string>
     <string name="style_name">Style name:</string>
     <string name="empty_msg_import_book">Click the folder icon in the upper right corner and select the folder</string>
     <string name="scan_folder">Intelligent scanning</string>
@@ -1545,8 +1544,7 @@
     <string name="ai_set_api">设置 AI 接口</string>
     <string name="ai_set_api_hint">接口@@模型@@密钥（3 段一组，可多组追加轮换）</string>
     <string name="ai_verify_source">AI 校验并修正</string>
-    <string name="disable_source_verification">禁止弹出验证</string>
-    <string name="exclude_video_source">不搜索视频源</string>
+    <string name="disable_source_verification">禁止弹出验证/内置浏览器</string>    <string name="exclude_video_source">不搜索视频源</string>
     <string name="replace_domain">替换域名</string>
     <string name="replace_domain_old">原域名（如 https://old.com）</string>
     <string name="replace_domain_new">新域名（如 https://new.com）</string>

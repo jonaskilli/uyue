@@ -230,8 +230,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 停下来后才一次性补齐后续；不操作时行为与原来完全一致（多等 500ms，
      * 而那时用户正在听当前段，感知不到）。
      */
-    private val forwardSynthQuietMs = 500L
-    /** 主合成协程 */
+    private val forwardSynthQuietMs = 500L    /** 主合成协程 */
     private var synthesisTask: Job? = null
     /** 跨章预加载协程 */
     private var preloadJob: Job? = null
@@ -289,8 +288,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 合成专用作用域：与 service 同生命周期（10-12 在途去重配套）
         synthScope.cancel()
         stopSubtitleSync()
-        // 取消自动清理：停止朗读时不应删除已缓存的音频文件
-        // Coroutine.async { removeCacheFile() }
+        // 停止朗读后在后台清理过期音频缓存：进程级协程，界面/服务销毁都不受影响；
+        // 单次删除有数量与时间上限，不会和朗读 / AI 章节分析抢磁盘
+        Coroutine.async { removeCacheFile() }
     }
 
     // ====== TTS 初始化 ======
@@ -387,8 +387,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 11-13 巡检实锤：framework 会先回调新签名 onError(utteranceId, errorCode)
             // 再回调旧签名 onError(s)（同一事件两次），日志每条 -3 出现两行。
             // 这里登记已处理 id，旧重载据此幂等跳过（completer 只 complete 一次）。
-            if (utteranceId != null) handledErrorCallbacks.add(utteranceId)
-            synthesisTargetFiles.remove(utteranceId)
+            if (utteranceId != null) handledErrorCallbacks.add(utteranceId)            synthesisTargetFiles.remove(utteranceId)
             val completer = synthesisCompleters.remove(utteranceId)
             completer?.complete(null)
         }
@@ -426,8 +425,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 上报时退回 ReadBook.durChapterIndex/contentList.size（主播放路径恒正确；
         // 跨章预加载路径必须显式传自己的章序与段数，否则前沿章/段全是播放章的值）。
         synthChapterIdx: Int? = null,
-        synthTotalSegs: Int? = null,
-    ): File? {
+        synthTotalSegs: Int? = null,    ): File? {
         val cacheFile = getCacheFileForText(rawText, index, chapterTitle)
         if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
             return cacheFile
@@ -464,7 +462,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 canceledAt.remove(cacheKey)
             }
         }
-
         // ② 自己成为这一笔的持有者
         val mine = CompletableDeferred<File?>()
         val winner = inFlightSyntheses.putIfAbsent(cacheKey, mine)
@@ -482,7 +479,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             chapterTitle,
             synthTotalSegs ?: contentList.size,
         )
-
         // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
         // 这样某一方被 cancel 不会掐断这一笔——否则 mine 永不 complete，等它的人会永久挂住。
         // 外层 NonCancellable 只为「把子协程启起来」：调用方在 launch 这一瞬被取消，
@@ -514,8 +510,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 }
                 inFlightSyntheses.remove(cacheKey)
                 // 正常出结果（成功或失败）就清掉冷却，免得 1.2 秒内重播被误挡
-                canceledAt.remove(cacheKey)
-                mine.complete(result)
+                canceledAt.remove(cacheKey)                mine.complete(result)
             }
         }
         // 持有者（即提交这一笔的人）可被取消，发给引擎的那笔请求照旧跑完并落缓存
@@ -713,8 +708,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      */
     private suspend fun synthesizeSingle(index: Int, precomputedText: String? = null): File? {
         val rawText = getRawText(index)
-        val text = precomputedText ?: applyTtsScripts(rawText, paragraphIndex = index)
-        if (text.matches(AppPattern.notReadAloudRegex)) {
+        val text = precomputedText ?: applyTtsScripts(rawText, paragraphIndex = index)        if (text.matches(AppPattern.notReadAloudRegex)) {
             val fileName = getFileNameHelper(textChapter?.chapter?.title ?: "", rawText, index)
             if (!hasSpeakFile(fileName)) createSilentSound(fileName)
             return getSpeakFileAsMd5(fileName)
@@ -734,16 +728,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
     // ====== 播放调度（复制/适配转发器）======
 
+    /** 本次服务生命周期内，开始朗读时只补清一次，避免切章 / 恢复播放反复触发 */
+    private var startCleanDone = false
+
     @Synchronized
     override fun play(affectBgm: Boolean) {
-        // 11-13 诊断（配 nextP 那行一起看，定位「连点同段重复提交」）：
-        // 这行能回答「play 进来时 nowSpeak 是多少、引擎是否就绪、是否走了早退」。
-        LogUtils.d(
-            TAG,
-            "play: nowSpeak=$nowSpeak ttsInitFinish=$ttsInitFinish pendingPlay=$pendingPlay " +
-                "contentSize=${contentList.size}"
-        )
-        if (!ttsInitFinish) {
+        // 兜底上次直接杀后台（没走 onDestroy）没清成的缓存；延后几秒，让朗读先启动
+        if (!startCleanDone) {
+            startCleanDone = true
+            Coroutine.async {
+                delay(3000)
+                removeCacheFile()
+            }
+        }        if (!ttsInitFinish) {
             pendingPlay = true
             // ⚠️ 早退也要消费掉「刚停过」标记：否则它会泄漏到下一次 play()，
             // 让那次本该执行的 stop()+代次自增被跳过（在途合成没被掐、代次没变，
@@ -771,10 +768,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             TtsEngineActivator.activateTtsEngine(this, sysTtsPkg)
         }
         // BGM移到onPlaybackStateChanged(STATE_READY)中触发，避免和朗读启动争抢资源
-        // 取消自动清理：开始朗读时不应删除已缓存的音频文件
-        // lifecycleScope.launch(Dispatchers.IO) {
-        //     removeCacheFile()
-        // }
 
         synthesisTask?.cancel()
         playIndexJob?.cancel()
@@ -1188,9 +1181,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
 
         if (hasNext) {
-            // 下一章若还在自动分析中，直接停掉：分析完再写回会把刚落盘的内容弄乱
-            ReadBook.book?.let { AiChapterFixService.cancelAutoJob(it.bookUrl) }
-            // 自动切章：下一章通常已排版好，不会走 newReadAloud / contentLoadFinish，
+            // 切章时的「取消旧分析 + 按新章号重新排期」已由 ReadBook 的统一钩子完成。
+            // 这里不能再取消：moveToNextChapter 内部已经同步启动新一轮分析，
+            // 在此取消会把刚排出来的新任务杀掉，朗读自动换章就永远处理不了后续章节。            // 自动切章：下一章通常已排版好，不会走 newReadAloud / contentLoadFinish，
             // 必须在恢复合成前同步重落盘 data.json，保证朗读脚本读到的是新窗口内容
             ReadBook.saveTtsTextJson(force = true)
             // 跨章接续：上一章放到一半的歌，本章接着放后半段
@@ -1626,19 +1619,35 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     // ====== 缓存管理 ======
 
     /**
-     * 移除缓存文件
-     * 如果时间设置为0，则不再保护当前章节，退出即全删。
-     * 保护当前章节及后续 audioPreDownloadNum 章的预加载缓存，避免已合成但未播放的音频被误删。
+     * 开始 / 停止朗读时在后台清理过期音频缓存。
+     *
+     * 两条约束叠加：
+     *  1) 保留水位：音频文件不超过 AUDIO_CACHE_KEEP_FLOOR 个就完全不清，
+     *     超出也只删多出来的那部分，始终留够水位；
+     *  2) 单次限额：一次最多删 AUDIO_CACHE_MAX_PER_RUN 个、最多跑 60 秒，
+     *     每 50 个歇 1 秒，避免历史缓存堆积时磁盘 IO 峰值拖慢朗读和 AI 分析。
+     * 候选按文件修改时间升序（最旧先删），仍只删超过保留时间、
+     * 且不在当前章 / 上一章 / 后续预下载章保护前缀里的文件。
+     * 系统 TTS 的静音占位文件沿用原有规则：无论是否过期都删。
      */
-    private fun removeCacheFile() {
+    private suspend fun removeCacheFile() {
+        val startedAt = System.currentTimeMillis()
         val keepTime = AppConfig.audioCacheCleanTime
-        if (keepTime == 0L) {
-            FileUtils.listDirsAndFiles(ttsFolderPath)?.forEach {
-                FileUtils.delete(it.absolutePath)
-            }
+        val entries = FileUtils.listDirsAndFiles(ttsFolderPath) ?: return
+        // 水位只按真正的音频文件算：.tmp / 子目录都不计入
+        val audioFiles = entries.filter {
+            it.isFile && (it.name.endsWith(".mp3") || it.name.endsWith(".wav"))
+        }
+        val total = audioFiles.size
+        if (total <= BaseReadAloudService.AUDIO_CACHE_KEEP_FLOOR) {
+            AppLog.put(
+                "音频缓存清理: 当前 $total 个，未超过保留水位 " +
+                        "${BaseReadAloudService.AUDIO_CACHE_KEEP_FLOOR}，跳过"
+            )
             return
         }
-
+        val excess = total - BaseReadAloudService.AUDIO_CACHE_KEEP_FLOOR
+        val quota = minOf(excess, BaseReadAloudService.AUDIO_CACHE_MAX_PER_RUN)
         val book = ReadBook.book ?: return
         val currentIdx = ReadBook.durChapterIndex
         val limit = AppConfig.audioPreDownloadNum
@@ -1647,32 +1656,58 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         if (currentTitle.isNotEmpty()) {
             protectedPrefixes.add(MD5Utils.md5Encode16(currentTitle.trim()))
         }
-        runBlocking {
-            // 保护上一章，避免回退时被清理
-            val prevChapter = appDb.bookChapterDao.getChapter(book.bookUrl, currentIdx - 1)
-            if (prevChapter != null) {
-                protectedPrefixes.add(MD5Utils.md5Encode16(prevChapter.title.trim()))
-            }
-            for (i in 1..limit) {
-                val nextChapter = appDb.bookChapterDao.getChapter(book.bookUrl, currentIdx + i)
-                if (nextChapter != null) {
-                    protectedPrefixes.add(MD5Utils.md5Encode16(nextChapter.title.trim()))
-                }
+        // 开始朗读时 textChapter 可能还没就绪，再按章号补一次当前章
+        appDb.bookChapterDao.getChapter(book.bookUrl, currentIdx)?.let {
+            protectedPrefixes.add(MD5Utils.md5Encode16(it.title.trim()))
+        }
+        // 保护上一章，避免回退时被清理
+        appDb.bookChapterDao.getChapter(book.bookUrl, currentIdx - 1)?.let {
+            protectedPrefixes.add(MD5Utils.md5Encode16(it.title.trim()))
+        }
+        for (i in 1..limit) {
+            appDb.bookChapterDao.getChapter(book.bookUrl, currentIdx + i)?.let {
+                protectedPrefixes.add(MD5Utils.md5Encode16(it.title.trim()))
             }
         }
-
-        FileUtils.listDirsAndFiles(ttsFolderPath)?.forEach { fileItem ->
-            val isSilentSound = fileItem.length() == BaseReadAloudService.SILENT_SOUND_SIZE.toLong()
-            val isProtected = protectedPrefixes.any { fileItem.name.startsWith(it) }
-            val shouldDelete = if (isProtected) {
-                false
-            } else {
-                (System.currentTimeMillis() - fileItem.lastModified() > keepTime)
+        var deleted = 0
+        var failed = 0
+        var stoppedByLimit = false
+        // 最旧优先：只删多出来的那部分时，必须保证先淘汰最早的缓存
+        val candidates = audioFiles.sortedBy { it.lastModified() }
+        for (index in candidates.indices) {
+            if (deleted >= quota ||
+                System.currentTimeMillis() - startedAt >= BaseReadAloudService.AUDIO_CACHE_MAX_DURATION_MS
+            ) {
+                stoppedByLimit = true
+                break
             }
-            if (shouldDelete || isSilentSound) {
-                FileUtils.delete(fileItem.absolutePath)
+            val fileItem = candidates[index]
+            val fName = fileItem.name
+            // 文件名固定以 16 位章标题 MD5 开头，直接查集合即可
+            val isProtected = fName.take(16) in protectedPrefixes
+            val isSilentSound = fileItem.length() == BaseReadAloudService.SILENT_SOUND_SIZE
+            val shouldDelete = isSilentSound ||
+                    (!isProtected && System.currentTimeMillis() - fileItem.lastModified() > keepTime)
+            if (!shouldDelete) continue
+            val ok = runCatching { FileUtils.delete(fileItem.absolutePath) }.getOrDefault(false)
+            if (!ok) {
+                failed++
+                continue
+            }
+            deleted++
+            // 每批歇 1 秒；最后一项和已达配额时不再白等
+            if (deleted % BaseReadAloudService.AUDIO_CACHE_BATCH_SIZE == 0 &&
+                deleted < quota && index < candidates.lastIndex
+            ) {
+                delay(BaseReadAloudService.AUDIO_CACHE_BATCH_DELAY_MS)
             }
         }
+        val tail = if (stoppedByLimit) "，已达单次限额或时间预算，剩余下次继续" else "，本轮扫描完毕"
+        AppLog.put(
+            "音频缓存清理: 共 $total 个、超出水位 $excess 个，" +
+                    "本次删除 $deleted 个、失败 $failed 个，" +
+                    "耗时 ${System.currentTimeMillis() - startedAt}ms$tail"
+        )
     }
 
     private fun deleteCurrentSpeakFile() {

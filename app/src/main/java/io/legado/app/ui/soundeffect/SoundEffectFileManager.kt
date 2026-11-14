@@ -3,6 +3,7 @@ package io.legado.app.ui.soundeffect
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Base64
 import io.legado.app.constant.AppLog
 import io.legado.app.service.BaseReadAloudService
 import io.legado.app.utils.EncoderUtils
@@ -154,4 +155,58 @@ object SoundEffectFileManager {
         audio: ByteArray,
         overwrite: Boolean = true
     ): SaveResult = save(name, listOf(audio), overwrite)
+
+    /** 读取音效 JSON 的 `audios` 数组（base64 -> MP3 字节），并保留 `currentIndex`。 */
+    data class AudioJson(val currentIndex: Int, val audios: MutableList<ByteArray>)
+
+    fun readAudioJson(name: String): AudioJson? {
+        val file = fileOf(name)
+        if (!file.exists()) return null
+        return runCatching {
+            val obj = JSONObject(file.readText())
+            val arr = obj.optJSONArray("audios") ?: return@runCatching null
+            val list = ArrayList<ByteArray>(arr.length())
+            for (i in 0 until arr.length()) {
+                list.add(Base64.decode(arr.optString(i).trim(), Base64.DEFAULT))
+            }
+            AudioJson(obj.optInt("currentIndex", 0), list)
+        }.getOrNull()
+    }
+
+    /**
+     * 写回音效 JSON。**保留 `currentIndex`**（[save] 会把它重置为 0，不适合音量调整），
+     * 写前留 `.bak` 备份并清理此前解码出来的 mp3。
+     * @return 错误信息，成功为 null
+     */
+    fun saveAudioJson(name: String, currentIndex: Int, audios: List<ByteArray>): String? {
+        if (name.isBlank()) return "音效名为空"
+        if (audios.isEmpty()) return "没有音频内容"
+        val file = fileOf(name)
+        deleteDerivedMp3(name)
+        val tmp = File(file.absolutePath + ".tmp")
+        return try {
+            if (!dir.exists()) dir.mkdirs()
+            val arr = JSONArray()
+            audios.forEach { arr.put(EncoderUtils.base64Encode(it)) }
+            val json = JSONObject().apply {
+                put("currentIndex", currentIndex)
+                put("audios", arr)
+            }
+            tmp.writeText(json.toString())
+            if (file.exists()) {
+                runCatching { file.copyTo(File(file.absolutePath + ".bak"), true) }
+                file.delete()
+            }
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, true)
+                tmp.delete()
+            }
+            AppLog.put("[音效文件] 音量调整已写回：${file.absolutePath}，${audios.size} 个音频")
+            null
+        } catch (e: Exception) {
+            tmp.delete()
+            AppLog.put("[音效文件] 音量调整写入失败：${e.message}", e)
+            e.message ?: "保存失败"
+        }
+    }
 }

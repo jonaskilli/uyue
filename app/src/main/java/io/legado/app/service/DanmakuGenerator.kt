@@ -102,12 +102,14 @@ object DanmakuGenerator {
         val result = try {
             BgmAIService.callOpenAIApi(
                 provider,
-                buildPrompt(bookName, chapterTitle, count, paragraphs)
-            )
+                buildPrompt(bookName, chapterTitle, count, paragraphs),
+                // 登记在途 Call：连续失活 60 秒硬停止时可掐断，不必等 180 秒超时
+                onCallCreated = DanmakuRuntime::registerCall            )
         } catch (e: Exception) {
             AppLog.put("AI弹幕: 请求失败 ${e.localizedMessage}")
             return emptyList()
-        }
+        } finally {
+            DanmakuRuntime.clearInFlight()        }
         val validParas = paragraphs.map { it.first }.toSet()
         return redistributeIfClustered(parseResult(result, validParas), validParas)
     }

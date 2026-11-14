@@ -268,8 +268,8 @@ class BookSourceActivity : VMBaseActivity<ActivityBookSourceBinding, BookSourceV
                 upBookSource(searchView.query?.toString())
             }
 
-            // 禁止弹出验证：勾选后所有书源都不会再弹图片验证码/验证网页，
-            // 需要验证码才能过的源会直接失败，不再打断搜索与阅读
+            // 禁止弹出内置浏览器：勾选后图片验证码、验证网页、书源 startBrowser
+            // 以及视频播放兜底的浏览器页面一律不弹，不再打断搜索与阅读
             R.id.menu_disable_verification -> {
                 item.isChecked = !item.isChecked
                 AppConfig.disableSourceVerification = item.isChecked

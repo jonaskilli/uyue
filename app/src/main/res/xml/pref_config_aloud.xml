@@ -149,9 +149,9 @@
 
         <io.legado.app.lib.prefs.EditTextPreference
             android:key="audioCacheCleanTime"
-            android:title="音频缓存保留时间(分钟)，输入 0 为退出即刻清理"
-            android:summary="听书缓存文件保留多久后自动删除，输入 0 代表退出即刻清理"
-            android:defaultValue="1"
+            android:title="音频缓存保留时间(分钟)"
+            android:summary="超过该时间的旧音频才可能被清理；音频总数不足 2000 个时不清理"
+            android:defaultValue="2000"
             android:inputType="number"
             app:iconSpaceReserved="false" />
 

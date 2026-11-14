@@ -373,6 +373,7 @@ class SoundEffectRuleAdapter(
             when (menuItem.itemId) {
                 R.id.menu_top -> callBack.toTop(rule)
                 R.id.menu_bottom -> callBack.toBottom(rule)
+                R.id.menu_adjust_volume -> callBack.adjustVolume(rule)
                 R.id.menu_del -> {
                     callBack.delete(rule)
                     selected.remove(rule)
@@ -440,6 +441,7 @@ class SoundEffectRuleAdapter(
         fun edit(rule: SoundEffectRule)
         fun toTop(rule: SoundEffectRule)
         fun toBottom(rule: SoundEffectRule)
+        fun adjustVolume(rule: SoundEffectRule)
         fun upCountView()
         fun onPlayError(message: String)
         fun onDataChanged()

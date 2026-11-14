@@ -226,15 +226,33 @@
         </LinearLayout>
 
         <!-- 角色列表标签 -->
-        <TextView
-            android:id="@+id/tv_character_label"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="角色列表 (单击标记/长按菜单):"
-            android:textColor="@color/primaryText"
-            android:textSize="14sp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
             android:layout_marginTop="4dp"
-            android:layout_marginBottom="4dp"/>
+            android:layout_marginBottom="4dp">
+
+            <TextView
+                android:id="@+id/tv_character_label"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="角色列表 (单击标记/长按菜单):"
+                android:textColor="@color/primaryText"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/tv_character_count"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="共 0 个角色"
+                android:textColor="@color/primaryText"
+                android:textSize="14sp" />
+
+        </LinearLayout>
 
     </LinearLayout>
 

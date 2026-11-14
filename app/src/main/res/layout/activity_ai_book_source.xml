@@ -85,14 +85,20 @@
                     tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
             </io.legado.app.ui.widget.text.TextInputLayout>
 
-            <TextView
+            <io.legado.app.ui.widget.text.TextInputLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:lineSpacingExtra="2dp"
-                android:text="上面两个填了就用你指定的页面，程序不再去猜；同时会在书籍信息页源码里标出「这个目录网址位于哪个位置」（链接文字 / href / 所属容器 / 上下文 HTML），写目录规则时直接照它来。目录页那栏填网址或入口文字（如 查看全部章节、......）都可以，填文字就按文字去书籍信息页里找对应链接。"
-                android:textColor="@color/secondaryText"
-                android:textSize="11sp" />
+                android:layout_marginTop="8dp"
+                android:hint="章节正文页网址（可选，填某一章的正文页；填了就不再猜章节地址）">
+
+                <io.legado.app.lib.theme.view.ThemeEditText
+                    android:id="@+id/et_content_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textUri"
+                    android:maxLines="3"
+                    tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
+            </io.legado.app.ui.widget.text.TextInputLayout>
 
             <io.legado.app.ui.widget.text.TextInputLayout
                 android:layout_width="match_parent"
@@ -120,7 +126,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="需要登录才能看正文时：填登录页地址 → 点右侧按钮登录 → 再开始生成"
+                    android:text="需要登录时：填登录页地址（留空则用上面的小说网站地址）→ 去登录 → 再开始生成"
                     android:textColor="@color/secondaryText"
                     android:textSize="11sp" />
 

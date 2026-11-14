@@ -26,26 +26,26 @@
         app:iconSpaceReserved="false" />
 
     <io.legado.app.lib.prefs.Preference
-        android:icon="@drawable/ic_cfg_replace"
+        android:icon="@drawable/ic_cfg_tts_script"
         android:key="ttsScriptManage"
         android:summary="@string/tts_script_desc"
         android:title="@string/tts_script"
         app:iconSpaceReserved="false" />
 
     <io.legado.app.lib.prefs.Preference
-        android:icon="@drawable/ic_taiji"
+        android:icon="@drawable/ic_cfg_tts_plugin"
         android:key="ttsPluginManage"
         android:summary="管理 TTS 引擎插件配置，通过标签调用不同音色合成音频"
         android:title="TTS 引擎插件" />
 
     <io.legado.app.lib.prefs.Preference
-        android:icon="@drawable/ic_taiji_color"
+        android:icon="@drawable/ic_cfg_hunyuan_taiji"
         android:key="hunyuanTaiji"
         android:summary="本地 OpenAI 兼容中转服务，支持混元/豆包/Kimi/千问/智谱/DeepSeek"
         android:title="混元太极" />
 
     <io.legado.app.lib.prefs.Preference
-        android:icon="@drawable/ic_taiji_color"
+        android:icon="@drawable/ic_cfg_sound_effect_rule"
         android:key="soundEffectRuleManage"
         android:summary="编辑朗读时自动插入音效的替换规则（全部音效 / 普通音效）"
         android:title="音效规则管理" />

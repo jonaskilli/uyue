@@ -20,19 +20,21 @@ import io.legado.app.utils.getPrefString
 import io.legado.app.utils.putPrefBoolean
 import io.legado.app.utils.putPrefString
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJobimport kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import splitties.init.appCtx
-import java.util.concurrent.ConcurrentHashMap
+import java.lang.ref.WeakReferenceimport java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -60,29 +62,152 @@ object AiChapterFixService {
     /** 并发请求数上限 */
     const val MAX_CONCURRENCY = 20
 
-    /** 正在跑的自动分析任务（按书），切章时取消未完成的那一章 */
+    /** 正在跑的自动分析任务（按书），切章 / 关开关 / 换书时取消未完成的那一章 */
     private val autoJobs = ConcurrentHashMap<String, Job>()
 
-    /** 登记自动分析任务；同书若还有没跑完的，先取消旧的 */
-    fun registerAutoJob(bookUrl: String, job: Job) {
-        autoJobs[bookUrl]?.cancel()
+    /**
+     * 进程级作用域：不跟阅读界面的 lifecycleScope 绑定。
+     * 锁屏、关屏、阅读界面销毁之后，正在跑的分析照常跑完。
+     */
+    private val fixScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** 同一时间只跑一个处理任务（手动与自动共用），避免并发请求、同时写盘 */
+    private val jobLock = Any()
+
+    @Volatile
+    private var runningJob: Job? = null
+
+    /** 上一次自动调度对应的书 + 章号：同章不重复触发，换书不误判 */
+    @Volatile
+    private var lastAutoBookUrl = ""
+
+    @Volatile
+    private var lastAutoChapterIndex = -1
+
+    /** 仅手动处理时用的界面回调；服务只持弱引用，界面销毁后自然不再回调 */
+    interface FixUi {
+        fun onProgress(text: String)
+        fun onFinish(message: String)
+    }
+
+    /** 登记自动分析任务；同书若还有没跑完的，先取消旧的（调用方持有 jobLock） */
+    private fun registerAutoJob(bookUrl: String, job: Job) {        autoJobs[bookUrl]?.cancel()
         autoJobs[bookUrl] = job
     }
 
-    /** 任务结束（含被取消）后清掉引用 */
-    fun clearAutoJob(bookUrl: String, job: Job) {
-        autoJobs.remove(bookUrl, job)
+    /** 只清掉自己：旧任务的完成回调绝不会把新登记的任务清掉 */
+    private fun clearAutoJob(bookUrl: String, job: Job) {        autoJobs.remove(bookUrl, job)
     }
 
     /** 切章时调用：还没分析完就停掉，未完成的章节不写回、不落盘、不标记完成 */
-    fun cancelAutoJob(bookUrl: String) {
+    private fun cancelAutoJob(bookUrl: String) {
         val job = autoJobs.remove(bookUrl) ?: return
         if (job.isActive) {
             job.cancel()
-            AppLog.put("$TAG: 切章，取消未完成的自动章节分析")
+            AppLog.put("AI处理章节: 取消未完成的自动章节分析（切章 / 关开关 / 换书）")
         }
     }
 
+    /** 换书 / 关闭自动开关：该书没跑完的自动分析立即作废，并重置去重标记 */
+    fun cancelForBook(bookUrl: String) {
+        if (bookUrl.isBlank()) return
+        synchronized(jobLock) {
+            cancelAutoJob(bookUrl)
+            if (lastAutoBookUrl == bookUrl) {
+                lastAutoBookUrl = ""
+                lastAutoChapterIndex = -1
+            }
+        }
+    }
+
+    /**
+     * 章节切换的统一入口：手动切章与朗读自动切章都走这里。
+     *
+     * 顺序固定为「先取消旧任务、再按新章号重新排一轮」，且全程在同一把锁里，
+     * 保证取消只会打到上一轮任务，不会误杀刚启动的新任务。
+     * 调度在单例里完成，不依赖阅读界面是否还活着（锁屏 / 关屏 / 后台朗读同样生效）。
+     */
+    fun onChapterChanged() {
+        val book = ReadBook.book ?: return
+        val url = book.bookUrl
+        val index = ReadBook.durChapterIndex
+        synchronized(jobLock) {
+            // 章号没变（同章内翻页、进度微调）时不动正在跑的任务
+            if (url == lastAutoBookUrl && index == lastAutoChapterIndex) return
+            cancelAutoJob(url)
+            if (!isAutoFixEnabled(book.name, url)) return
+            val start = index + 1
+            if (start >= ReadBook.chapterSize) return
+            val template = getEffectiveTemplate(book.name, url)
+            if (template.apiConfig.isBlank()) return
+            // 被「上一个任务还没结束」挡住时不记去重标记，下次切章还能重试
+            if (startFix(book, template, start, force = false, silent = true) != null) {
+                lastAutoBookUrl = url
+                lastAutoChapterIndex = index
+                AppLog.put("AI处理章节: 切章，从第 ${start + 1} 章起重新排期")
+            }
+        }
+    }
+
+    /**
+     * 启动一次处理（手动 / 自动共用）。作用域是进程级的 [fixScope]，
+     * 阅读界面销毁不会中断；返回 null 表示被守卫挡住或后面没有章节了。
+     */
+    fun startFix(
+        book: Book,
+        template: AiChapterFixTemplate,
+        startIndex: Int,
+        force: Boolean,
+        silent: Boolean,
+        ui: FixUi? = null
+    ): Job? {
+        if (startIndex >= ReadBook.chapterSize) {
+            AppLog.put("AI处理章节: 后面没有章节了")
+            if (!silent) ui?.onFinish("后面没有章节了")
+            return null
+        }
+        val uiRef = ui?.let { WeakReference(it) }
+        val n = template.chapterCount.coerceIn(1, MAX_COUNT)
+        val onlyCached = n > 1
+        // 启动时把书源快照下来，任务跑到一半换书也不会用错书源
+        val bookSource = ReadBook.bookSource
+        val url = book.bookUrl
+        val job: Job
+        synchronized(jobLock) {
+            if (runningJob?.isActive == true) {
+                AppLog.put("AI处理章节: 上一个处理任务还没结束，本次跳过")
+                if (!silent) ui?.onFinish("上一个AI处理任务还没结束")
+                return null
+            }
+            job = fixScope.launch {
+                val result = fixChapters(
+                    book, bookSource, template, startIndex, n, force, onlyCached
+                ) { progress ->
+                    uiRef?.get()?.onProgress(progress)
+                }
+                // 只刷新仍是当前书、且落在阅读器缓存范围内的章节
+                if (ReadBook.book?.bookUrl == url) {
+                    result.changedIndexes.forEach { ReadBook.reloadChapter(it) }
+                }
+                // 完成日志写清「哪本书 / 从第几章起 / 结果」，便于在应用日志里核对是否被处理
+                val logMessage =
+                    "AI处理章节: 《${book.name}》从第 ${startIndex + 1} 章起 → ${result.message}"
+                // 只写日志，不弹任何提示：想看结果自己去应用日志里查
+                AppLog.put(logMessage)
+                // 手动任务的界面回调只负责收起等待框，不再 toast
+                if (!silent) uiRef?.get()?.onFinish(result.message)
+            }
+            runningJob = job
+            if (silent) registerAutoJob(url, job)
+        }
+        job.invokeOnCompletion {
+            synchronized(jobLock) {
+                if (runningJob === job) runningJob = null
+                clearAutoJob(url, job)
+            }
+        }
+        return job
+    }
     /** 兜底判定「单键值吞并了别的段落」时被比对段落的最小长度，避免短对话误判 */
     private const val MIN_SWALLOW_LEN = 8
 
@@ -286,6 +411,8 @@ object AiChapterFixService {
     fun setAutoFixEnabled(bookName: String, bookUrl: String, enabled: Boolean) {
         val key = autoFixKey(bookName, bookUrl) ?: return
         appCtx.putPrefBoolean(key, enabled)
+        // 关掉开关时，该书没跑完的自动分析立即作废：不写回、不落盘
+        if (!enabled) cancelForBook(bookUrl)
     }
 
     /**

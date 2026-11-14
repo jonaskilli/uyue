@@ -94,10 +94,11 @@ object SourceVerificationHelp {
     ) {
         source ?: throw NoStackTraceException("startBrowser parameter source cannot be null")
         require(url.length < 64 * 1024) { "startBrowser parameter url too long" }
-        // 只有「验证用途」的调用会被总开关拦下（saveResult=true 表示要把网页结果回传给书源）。
-        // 视频播放走的是 videoMode=true 且 saveResult=false，属于播放而非验证，必须放行。
-        if (saveResult == true && AppConfig.disableSourceVerification) {
-            throw NoStackTraceException("已开启「禁止弹出验证」，跳过书源验证")
+        // 总开关「禁止弹出验证」：勾选后所有经这里启动的内置浏览器一律不弹，
+        // 包括验证网页、视频播放用的 videoMode 页面、书源规则里的普通 startBrowser。
+        // 不勾选时维持原行为（验证用途仍由 getVerificationResult 里的检查负责）。
+        if (AppConfig.disableSourceVerification) {
+            throw NoStackTraceException("已开启「禁止弹出验证」，禁止拉起内置浏览器")
         }
         appCtx.startActivity<WebViewActivity> {
             putExtra("title", title)

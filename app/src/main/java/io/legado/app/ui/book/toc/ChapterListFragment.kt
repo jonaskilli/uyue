@@ -455,17 +455,22 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
                 // （与自动合并一致，重叠音效按播放队列行为顺序延后，输出 WAV）
                 val effectMode = if (book.bookUrl.isNotBlank())
                     AppConfig.getEffectiveSoundEffectMode(book.bookUrl) else AppConfig.soundEffectMode
-                val wantEffect = AppConfig.mixSoundEffectOnMerge && effectMode != "off"
+                // 两类音效各管各的：正则音效看「音效模式」，AI 音效只看「启用AI音效」开关
+                val wantRuleEffect = AppConfig.mixSoundEffectOnMerge && effectMode != "off"
+                val wantAiEffect = AppConfig.mixSoundEffectOnMerge && AppConfig.aiEffectEnabled
                 val wantBgm = AppConfig.mixBgmOnMerge
-                if (wantEffect || wantBgm) {
-                    AudioLogCollector.log("步骤3.5: 尝试混音合并(音效=$wantEffect, 背景音乐=$wantBgm)")
+                if (wantRuleEffect || wantAiEffect || wantBgm) {
+                    AudioLogCollector.log(
+                        "步骤3.5: 尝试混音合并(正则音效=$wantRuleEffect, AI音效=$wantAiEffect, 背景音乐=$wantBgm)"
+                    )
                     val mixed = HttpTtsAudioCache.mergeChapterAudioWithEffects(
                         book = book,
                         chapter = bookChapter,
                         audioFiles = audioFiles,
                         outputFolder = downloadFolder,
                         filePrefix = filePrefix,
-                        withEffects = wantEffect
+                        withRuleEffects = wantRuleEffect,
+                        withAiEffects = wantAiEffect
                     )
                     if (mixed) {
                         success = true

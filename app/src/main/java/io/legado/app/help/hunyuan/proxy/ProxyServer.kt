@@ -538,8 +538,7 @@ object ProxyServer {
         }
         // 11-13：传具名函数引用而非尾 lambda——绕开 R8 合成类反射（详见 configureApplication 注释）
         engine = embeddedServer(CIO, port = port, host = "0.0.0.0", module = ::configureApplication)
-            .start(wait = false)
-    }
+            .start(wait = false)    }
 
     fun stop() {
         engine?.stop(1000, 2000)
@@ -744,16 +743,14 @@ object ProxyServer {
     }
 
     /** 是否「混元」（aistudio 网页版）模型：hunyuan3 / hunyuan3-think / hunyuan4 / hunyuan4-think。 */
-    internal fun isHunyuanModel(m: String): Boolean {
-        // 生图模型（hunyuan-image）名字里同样含 hunyuan，先排除，避免被聊天通道误吞
+    internal fun isHunyuanModel(m: String): Boolean {        // 生图模型（hunyuan-image）名字里同样含 hunyuan，先排除，避免被聊天通道误吞
         if (isHunyuanImageModel(m)) return false
         val lower = m.lowercase()
         return HUNYUAN_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否混元生图模型（hunyuan-image / 混元生图）。 */
-    internal fun isHunyuanImageModel(m: String): Boolean {
-        val lower = m.lowercase()
+    internal fun isHunyuanImageModel(m: String): Boolean {        val lower = m.lowercase()
         return HUNYUAN_IMAGE_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
@@ -803,8 +800,7 @@ object ProxyServer {
     }
 
     /** 是否 StudioGlobal 生图模型（免登录）：model 名含 gpt-image（gpt-image-2 / gpt-image-1.5 / gpt-image-2.5）。 */
-    internal fun isStudioGlobalImageModel(m: String): Boolean {
-        val lower = m.lowercase()
+    internal fun isStudioGlobalImageModel(m: String): Boolean {        val lower = m.lowercase()
         return STUDIO_GLOBAL_IMAGE_MODELS.any { lower.contains(it) }
     }
 
@@ -844,8 +840,7 @@ object ProxyServer {
      * 豆包 ratio（9:16 等）映射到混元生图的 scale（如 720x1280）。
      * 网页端生图只认常用比例，2:5 / 5:2 用最近的竖屏/横屏近似。
      */
-    internal fun ratioToHunyuanScale(ratio: String): String = when (ratio) {
-        "1:1" -> "1024x1024"
+    internal fun ratioToHunyuanScale(ratio: String): String = when (ratio) {        "1:1" -> "1024x1024"
         "3:4" -> "768x1024"
         "4:3" -> "1024x768"
         "16:9" -> "1280x720"
@@ -1286,7 +1281,8 @@ object ProxyServer {
             return
         }
         val model = req.model
-        LogStore.i("Bailian", "调用百炼控制台对话，消息数=${req.messages.size} model=$model")
+        val effectiveModel = BailianClient.effectiveModelId(model)
+        LogStore.i("Bailian", "调用百炼控制台对话，消息数=${req.messages.size} model=$model 实际模型=$effectiveModel")
 
         if (req.stream) {
             call.respond(object : OutgoingContent.WriteChannelContent() {
@@ -1859,8 +1855,7 @@ object ProxyServer {
      * 会话路由挂在 URL 上，故每次请求先新建一个会话，回复完成后按开关删除（与千问一致，避免堆积历史）。
      * 思考链（type=thought）不混入正文，只取 type=text。
      */
-    internal suspend fun RoutingContext.handleHunyuanChat(
-        req: ChatCompletionRequest, completionId: String, created: Int
+    internal suspend fun RoutingContext.handleHunyuanChat(        req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val cookie = nextHunyuanCookie()
         val text = extractDoubaoPrompt(req.messages)
@@ -2010,8 +2005,7 @@ object ProxyServer {
         )
     }
 
-    internal suspend fun RoutingContext.handleQwenChat(
-        req: ChatCompletionRequest, completionId: String, created: Int
+    internal suspend fun RoutingContext.handleQwenChat(        req: ChatCompletionRequest, completionId: String, created: Int
     ) {
         val cookie = nextQwenCookie()
         val text = extractDoubaoPrompt(req.messages)

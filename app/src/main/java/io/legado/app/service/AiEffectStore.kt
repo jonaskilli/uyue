@@ -52,7 +52,7 @@ data class AiEffectRecord(
  */
 object AiEffectStore {
 
-    private const val TAG = "AiEffectStore"
+    private const val TAG = "AI音效"
     private const val DIR_NAME = "ai_effect"
 
     private val lock = Mutex()

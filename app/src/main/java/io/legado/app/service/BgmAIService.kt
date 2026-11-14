@@ -8,6 +8,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -171,8 +172,9 @@ object BgmAIService {
         provider: BgmAIProvider,
         prompt: String,
         maxTokens: Int? = null,
-        callTimeoutSeconds: Long = DEFAULT_CALL_TIMEOUT_SECONDS
-    ): String = withContext(Dispatchers.IO) {
+        callTimeoutSeconds: Long = DEFAULT_CALL_TIMEOUT_SECONDS,
+        /** 可选：登记本次 Call，供弹幕可见性闸门在硬停止时取消在途请求 */
+        onCallCreated: ((Call) -> Unit)? = null    ): String = withContext(Dispatchers.IO) {
         val url = if (provider.url.endsWith("/")) {
             "${provider.url}chat/completions"
         } else {
@@ -217,7 +219,9 @@ object BgmAIService {
             .readTimeout(callTimeoutSeconds, TimeUnit.SECONDS)
             .callTimeout(callTimeoutSeconds, TimeUnit.SECONDS)
             .build()
-        val response: Response = callClient.newCall(request).execute()
+        val call = callClient.newCall(request)
+        onCallCreated?.invoke(call)
+        val response: Response = call.execute()
         
         if (!response.isSuccessful) {
             throw Exception("API调用失败: ${response.code}")

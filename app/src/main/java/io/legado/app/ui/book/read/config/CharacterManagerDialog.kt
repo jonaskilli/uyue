@@ -21,7 +21,12 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.textfield.TextInputEditText
 import io.legado.app.R
+import io.legado.app.data.appDb
 import io.legado.app.help.MiyueKeyManager
+import io.legado.app.model.ReadBook
+import io.legado.app.ui.book.read.page.DialogRoleManager
+import io.legado.app.ui.book.read.page.entities.TextChapter
+import io.legado.app.ui.book.read.page.entities.column.TextColumn
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -32,6 +37,7 @@ class CharacterManagerDialog : DialogFragment() {
     private lateinit var contentLayout: LinearLayout
     private lateinit var rvCharacters: RecyclerView
     private lateinit var tvCharacterLabel: TextView
+    private lateinit var tvCharacterCount: TextView
     private lateinit var spinnerBook: Spinner
     private lateinit var btnSaveKey: Button
     private lateinit var btnRestoreKey: Button
@@ -63,6 +69,14 @@ class CharacterManagerDialog : DialogFragment() {
     private var isSearchMode = false
 
     private lateinit var characterAdapter: CharacterAdapter
+
+    // 打开界面瞬间按「当前页最下方引号」往回推测出的置顶主名（只影响显示顺序）
+    private var pinnedMainNames: List<String> = emptyList()
+
+    companion object {
+        /** 往回推测时要凑够的「不同主名」数量；去重按主名，不按引号或别名 */
+        private const val PINNED_MAIN_NAME_LIMIT = 10
+    }
 
     // 颜色常量（适配深色模式）
     private var colorDefault = Color.parseColor("#333333")  // 默认文字色（浅色模式，深色模式会改为白色）
@@ -120,6 +134,14 @@ class CharacterManagerDialog : DialogFragment() {
         super.onStart()
         // 页面渲染完毕后，切换到当前阅读书籍
         autoSwitchToCurrentBook()
+        // 切书时 useBook 会写盘，写完之后再按当前页推测一次，只改内存顺序；
+        // 「置顶」本身不触发落盘，只有用户修改并保存时才把当前显示顺序写进三份文件
+        collectPinnedMainNames()
+        applyPinnedToRecords()
+        if (::characterAdapter.isInitialized) {
+            updateCharacterList()
+            updateLabel()
+        }
     }
 
     override fun onResume() {
@@ -137,6 +159,7 @@ class CharacterManagerDialog : DialogFragment() {
         contentLayout = rootView.findViewById(R.id.content_layout)
         rvCharacters = rootView.findViewById(R.id.rv_characters)
         tvCharacterLabel = rootView.findViewById(R.id.tv_character_label)
+        tvCharacterCount = rootView.findViewById(R.id.tv_character_count)
         spinnerBook = rootView.findViewById(R.id.spinner_book)
         btnSaveKey = rootView.findViewById(R.id.btn_save_key)
         btnRestoreKey = rootView.findViewById(R.id.btn_restore_key)
@@ -279,6 +302,131 @@ class CharacterManagerDialog : DialogFragment() {
 
         // 只有内置TTS引擎下发音人标签才与配置列表一一对应，其他引擎不做关联显示
         voiceTagRefs = CharacterVoiceHelper.getVoiceTagRefsForCurrentEngine()
+        // 打开/刷新时按当前页往回推测一次，并把顺序落到内存数据上（不写盘）
+        collectPinnedMainNames()
+        applyPinnedToRecords()
+    }
+
+    /**
+     * 打开/刷新界面时，按「当前阅读页最下面那个显示了名字的左双引号」往回推测置顶角色。
+     *
+     * - 起点是当前页的引号序号，不是朗读进度，所以没在朗读时同样可用；
+     * - 标注里的名字可能是别名或简称，统一归一到角色记录的主名，同一主名只收一次；
+     * - 当前章扫完仍凑不够才跨到上一章，最多跨这一个章节，不碰上上章；
+     * - 结果只用于 [updateCharacterList] 的显示重排，绝不改动 characterRecords 或写文件。
+     */
+    private fun collectPinnedMainNames() {
+        pinnedMainNames = emptyList()
+        val book = ReadBook.book ?: return
+        val chapter = ReadBook.curTextChapter ?: return
+        val startSeq = currentPageLastQuoteSeq(chapter) ?: return
+        val pinned = LinkedHashSet<String>()
+        collectBackward(
+            DialogRoleManager.loadChapterCache(book.name, chapter.title),
+            startSeq, pinned
+        )
+        // 当前章没凑够 10 个不同主名，才跨到上一章（最多这一章）
+        if (pinned.size < PINNED_MAIN_NAME_LIMIT && ReadBook.durChapterIndex > 0) {
+            val prevTitle = runCatching {
+                appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex - 1)?.title
+            }.getOrNull()
+            if (!prevTitle.isNullOrEmpty()) {
+                val prevCache = DialogRoleManager.loadChapterCache(book.name, prevTitle)
+                val lastSeq = prevCache.keys.maxOrNull() ?: 0
+                if (lastSeq > 0) collectBackward(prevCache, lastSeq, pinned)
+            }
+        }
+        pinnedMainNames = pinned.toList()
+    }
+
+    /** 当前页上 seq 最大的标注，就是最下面那个显示了名字的左双引号 */
+    private fun currentPageLastQuoteSeq(chapter: TextChapter): Int? {
+        val pageIndex = ReadBook.durPageIndex
+        val page = chapter.getPage(pageIndex)
+        var maxSeq = 0
+        page?.lines?.forEach { line ->
+            synchronized(line.roleAnnotations) {
+                line.roleAnnotations.forEach { anno ->
+                    if (anno.seq > maxSeq) maxSeq = anno.seq
+                }
+            }
+        }
+        if (maxSeq > 0) return maxSeq
+        // 标注未加载（开关关闭 / 本章还没分析）时，按排版数左引号，复现 attachAnnotations 的序号
+        var seq = 0
+        for (p in 0..pageIndex) {
+            val pg = chapter.getPage(p) ?: continue
+            pg.lines.forEach { line ->
+                line.columns.forEach { column ->
+                    if (column is TextColumn && column.charData == "“") seq++
+                }
+            }
+        }
+        return seq.takeIf { it > 0 }
+    }
+
+    /** 从序号往回逐个取名字 → 归一主名 → 去重，凑够上限或到本章开头即止 */
+    private fun collectBackward(
+        cache: Map<Int, DialogRoleManager.RoleInfo>,
+        fromSeq: Int,
+        out: LinkedHashSet<String>
+    ) {
+        var seq = fromSeq
+        while (seq > 0 && out.size < PINNED_MAIN_NAME_LIMIT) {
+            val name = cache[seq]?.name.orEmpty()
+            if (name.isNotEmpty()) {
+                resolveMainName(name)?.let { out.add(it) }
+            }
+            seq--
+        }
+    }
+
+    /** 标注名（可能是别名/简称）→ 角色记录里的主名；匹配不到返回 null，不参与置顶 */
+    private fun resolveMainName(name: String): String? {
+        val n = name.trim()
+        if (n.isEmpty()) return null
+        for (i in 0 until characterRecords.length()) {
+            val obj = characterRecords.optJSONObject(i) ?: continue
+            val main = obj.optString("name", "").trim()
+            if (main == n) return main
+        }
+        for (i in 0 until characterRecords.length()) {
+            val obj = characterRecords.optJSONObject(i) ?: continue
+            val main = obj.optString("name", "").trim()
+            if (main.isEmpty()) continue
+            val aliases = obj.optString("aliases", "").split("|").map { it.trim() }
+            if (aliases.any { it == n }) return main
+        }
+        return null
+    }
+
+    /**
+     * 把推测出的置顶顺序真正落到内存里的 characterRecords 上（**不写盘**）。
+     *
+     * 之后界面显示、标记、合并/拆分/释放/删除，以及保存时落盘，全部以这个内存顺序为准，
+     * 释放出来的新角色才会紧跟当前角色，不会被文件原顺序打乱。
+     * 只有用户做了修改触发 saveCharacters() 时，这个顺序才写进三份文件。
+     */
+    private fun applyPinnedToRecords() {
+        if (pinnedMainNames.isEmpty()) return
+        val rank = pinnedMainNames.mapIndexed { index, name -> name to index }.toMap()
+        val pinned = mutableListOf<Pair<Int, JSONObject>>()
+        val rest = mutableListOf<JSONObject>()
+        for (i in 0 until characterRecords.length()) {
+            val obj = characterRecords.optJSONObject(i) ?: continue
+            val main = obj.optString("name", "").trim()
+            val r = rank[main]
+            if (r != null) pinned.add(r to obj) else rest.add(obj)
+        }
+        if (pinned.isEmpty()) return
+        pinned.sortBy { it.first }
+        val newArray = JSONArray()
+        pinned.forEach { newArray.put(it.second) }
+        rest.forEach { newArray.put(it) }
+        characterRecords = newArray
+        // 真实索引已经变化，旧的标记/选中状态作废，避免指到别的角色
+        markedIndices.clear()
+        selectedIndex = -1
     }
 
     private fun setupRecyclerView() {
@@ -486,6 +634,8 @@ class CharacterManagerDialog : DialogFragment() {
             }
         }
         characterAdapter.notifyDataSetChanged()
+        // 只统计角色主名（每条记录一个主名，aliases 里的别名不单独计数）
+        tvCharacterCount.text = "共 ${characterRecords.length()} 个角色"
     }
 
     private fun updateLabel() {
@@ -618,6 +768,7 @@ class CharacterManagerDialog : DialogFragment() {
                 JSONArray()
             }
             characterRecords = parsedData
+
             
             // 切换书籍后刷新UI
             currentBook = bookName
@@ -1425,13 +1576,26 @@ class CharacterManagerDialog : DialogFragment() {
 
     // ==================== 辅助方法 ====================
 
+    /**
+     * 刷新 = 与进入界面完全一致：全部角色重新从文件读取，再按当前阅读页重新定位置顶。
+     * 后台脚本实时写入的新角色、新书籍列表都在这里生效；推测置顶本身不写盘。
+     */
     private fun refresh() {
+        // 1) 重读 cunfang.txt / liebiao.json，重置当前书与书籍列表
+        initFileSystem()
+        // 2) 从文件读全部角色，并按当前页推测一次（只改内存，不落盘）
         loadCharacters()
+        // 3) 切回当前正在阅读的书（与 onStart 一致；useBook 内部会写盘并重建列表）
+        autoSwitchToCurrentBook()
+        // 切书后数据已换，按当前页重新推测一次，保证显示与后续修改/保存都按这个顺序
+        collectPinnedMainNames()
+        applyPinnedToRecords()
         markedIndices.clear()
         selectedIndex = -1
+        updateSpinner()
         updateCharacterList()
         updateLabel()
-        toast("已刷新")
+        toast("已重新读取文件并按当前页定位")
     }
 
     private fun saveCharacters() {

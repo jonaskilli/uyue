@@ -10,6 +10,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.help.http.BackstageWebView
 import io.legado.app.help.http.CookieStore
 import io.legado.app.help.http.okHttpClient
+import io.legado.app.help.video.VideoSourcePlayer
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonObject
@@ -164,6 +165,7 @@ object AiBookSourceGenerator {
         fixRounds: Int = 2,
         manualBookInfo: String? = null,
         manualTocUrl: String? = null,
+        manualContentUrl: String? = null,
         singleBook: Boolean = false,
         codeAssist: Boolean = false,
         videoMode: Boolean = false,
@@ -173,7 +175,8 @@ object AiBookSourceGenerator {
             val seed = normalize(seedUrl)
             AppLog.put(
                 "[AI书源] generate 开始：manualBookInfo=${manualBookInfo?.take(120)}, " +
-                "manualTocUrl=${manualTocUrl?.take(120)}, keyword=$keyword"
+                "manualTocUrl=${manualTocUrl?.take(120)}, " +
+                "manualContentUrl=${manualContentUrl?.take(120)}, keyword=$keyword"
             )
             // 手动指定的页面：用户填了就优先使用，不再靠程序猜
             val manualInfo = manualBookInfo?.trim()?.takeIf { it.isNotBlank() }?.let { normalize(it) }
@@ -181,7 +184,15 @@ object AiBookSourceGenerator {
             val manualTocRaw = manualTocUrl?.trim()?.takeIf { it.isNotBlank() }
             val manualToc = manualTocRaw?.takeIf { looksLikeUrl(it) }?.let { normalize(it) }
             val manualTocText = manualTocRaw?.takeUnless { looksLikeUrl(it) }
+            // 正文框只收网址：填了就直接用这一章的页面，不再从目录里猜第一章
+            val manualContent = manualContentUrl?.trim()
+                ?.takeIf { it.isNotBlank() && looksLikeUrl(it) }
+                ?.let { normalize(it) }
             val meta = HashMap<String, String>()
+            if (manualContent != null) {
+                meta["正文页(手动指定)"] = "用户手动指定了章节正文页：$manualContent；" +
+                    "正文规则请以该页面源码为准，不要再猜测章节地址。"
+            }
             // 用户同时填了「书籍详情页」与「目录页」两个网址：调一次 AI 推导二者的地址规律，
             // 得到一个能把详情页地址换成目录页地址的正则兜底规则（作用于 baseUrl）。
             // 仅当两个网址都给了且不同才调用，避免无谓的请求；推导不出则返回 null。
@@ -642,7 +653,9 @@ object AiBookSourceGenerator {
             val chapterOrder = tocCheck?.str("order").orEmpty()
 
             // ---------- 5) 正文页 ----------
-            var contentUrl = tocCheck?.str("firstChapterUrl")?.takeIf { it.startsWith("http") }
+            // 手动指定了正文页就直接用它，跳过「AI 质检猜第一章 / 目录页取第一章链接」
+            var contentUrl = manualContent
+                ?: tocCheck?.str("firstChapterUrl")?.takeIf { it.startsWith("http") }
             val tocHtmlFinal = tocHtml
             if (contentUrl == null && tocHtmlFinal != null) {
                 contentUrl = firstChapterLink(
@@ -650,11 +663,17 @@ object AiBookSourceGenerator {
                 )
             }
             if (contentUrl != null) {
-                onProgress(if (videoMode) "抓取播放页…" else "抓取正文页…")
+                onProgress(
+                    if (manualContent != null) "抓取正文页（手动指定）…"
+                    else if (videoMode) "抓取播放页…" else "抓取正文页…"
+                )
                 var contentHtml = fetch(contentUrl)
                 // 死链兜底：详情页上的「点击阅读」常是 301 回详情页的死链，
-                // 抓回来的页面若与详情页相同，改用目录页里的章节链接
-                if (contentHtml != null && detailHtml != null && pageSimilar(contentHtml, detailHtml)) {
+                // 抓回来的页面若与详情页相同，改用目录页里的章节链接。
+                // 手动指定的正文页不参与该兜底，始终以用户给的页面为准。
+                if (manualContent == null && contentHtml != null && detailHtml != null &&
+                    pageSimilar(contentHtml, detailHtml)
+                ) {
                     onProgress("该章节地址无效（返回了详情页），改用目录页中的章节链接…")
                     tocHtmlFinal?.let { toc ->
                         val alt = firstChapterLink(
@@ -679,11 +698,15 @@ object AiBookSourceGenerator {
                         meta[if (videoMode) "播放质检" else "正文质检"] =
                             "单本模式：已跳过 AI 质检"
                     } else {
-                        val c = aiCheckPage(CHECK_CONTENT, html, url)
+                        val c = if (videoMode) aiCheckPage(CHECK_PLAY_PAGE, html, url)
+                        else aiCheckPage(CHECK_CONTENT, html, url)
+                        val pageOk = if (videoMode) c?.bool("hasPlayUrl") == true
+                        else c?.bool("hasContent") == true
                         meta[if (videoMode) "播放质检" else "正文质检"] = c?.str("problem")
                             ?.takeIf { p -> p.isNotBlank() }
-                            ?: if (c?.bool("hasContent") == true) "通过" else "疑似无正文"
-                        if (c?.bool("hasContent") != true) {
+                            ?: if (pageOk) "通过"
+                            else if (videoMode) "页面未发现可播直链" else "疑似无正文"
+                        if (!pageOk) {
                             onProgress(if (videoMode) "播放页异常，用电脑版 UA 重试…" else "正文页异常，用电脑版 UA 重试…")
                             fetch(url, pcUa = true)?.let {
                                 pages.add(Page("${contentRole}(重试)", url, it))
@@ -989,7 +1012,9 @@ object AiBookSourceGenerator {
         includeExplore: Boolean = true,
         codeAssist: Boolean = true,
         videoMode: Boolean = false,
-        onProgress: (String) -> Unit
+        manualBookInfo: String? = null,
+        manualTocUrl: String? = null,
+        manualContentUrl: String? = null,        onProgress: (String) -> Unit
     ): Result<GenResult> = withContext(Dispatchers.IO) {
         runCatching {
             // 深拷贝：不直接改动 Room 里正在使用的对象，撤回时也能整份还原
@@ -999,13 +1024,44 @@ object AiBookSourceGenerator {
             val seed = current.bookSourceUrl
             ensureMobileUa(current)
             normalizeSourceRules(current)
+            // 校验修正视频源时同样按文档补齐类型 / 请求头并清洗违规写法
+            if (videoMode) markAsVideoSource(current)
 
-            val pages = collectPagesForVerify(current, kw, includeExplore, videoMode, onProgress)
-            val holder = VerifyHolder()
-            val meta = mapOf(
-                "校验模式" to "这是用户已保存的书源，只修正验证失败的环节，不要重写其它规则"
+            // 与生成模式一致：目录框可填网址或入口文字，详情/正文框只收网址
+            val manualInfo = manualBookInfo?.trim()
+                ?.takeIf { it.isNotBlank() && looksLikeUrl(it) }?.let { normalize(it) }
+            val manualTocRaw = manualTocUrl?.trim()?.takeIf { it.isNotBlank() }
+            val manualToc = manualTocRaw?.takeIf { looksLikeUrl(it) }?.let { normalize(it) }
+            val manualTocText = manualTocRaw?.takeUnless { looksLikeUrl(it) }
+            val manualContent = manualContentUrl?.trim()
+                ?.takeIf { it.isNotBlank() && looksLikeUrl(it) }?.let { normalize(it) }
+
+            val pages = collectPagesForVerify(
+                source = current,
+                keyword = kw,
+                includeExplore = includeExplore,
+                videoMode = videoMode,
+                manualInfo = manualInfo,
+                manualToc = manualToc,
+                manualTocText = manualTocText,
+                manualContent = manualContent,
+                onProgress = onProgress
             )
-
+            val holder = VerifyHolder()
+            val meta = HashMap<String, String>()
+            meta["校验模式"] = "这是用户已保存的书源，只修正验证失败的环节，不要重写其它规则"
+            if (manualInfo != null || manualToc != null || manualTocText != null || manualContent != null) {
+                meta["用户指定的参考页面"] = buildString {
+                    append("用户手动指定了以下页面，请优先以这些页面的源码为参考修规则：")
+                    manualInfo?.let { append("\n  书籍详情页：").append(it) }
+                    manualToc?.let { append("\n  目录页：").append(it) }
+                    manualTocText?.let {
+                        append("\n  目录入口文字：").append(it)
+                            .append("（需在书籍详情页里按该文字找到对应链接）")
+                    }
+                    manualContent?.let { append("\n  章节正文页：").append(it) }
+                }
+            }
             onProgress("开始逐项实测校验…")
             var report = verifySource(
                 current, kw, pages, onProgress,
@@ -1072,21 +1128,44 @@ object AiBookSourceGenerator {
                 }
                 report = merged.values.toList()
             }
+            // ===== 历史成功规则补齐 =====
+            // 生成时存下「当时通过的环节」，校验时也要拿来补当前失败环节，不能只校验不利用
+            val patchedSteps = ArrayList<String>()
+            val failedSteps = report.filter { !it.ok && it.blocking }.map { it.step }.toSet()
+            val record = AiSourceHistory.pickBest(seed, failedSteps)
+            val old = record?.let { AiSourceHistory.parse(it) }
+            if (record != null && old != null) {
+                val patchable = failedSteps.filter { it in record.okSteps }.toSet()
+                if (patchable.isNotEmpty()) {
+                    onProgress("发现该网址的历史记录，正在补齐：${patchable.joinToString("、")}…")
+                    patchable.forEach { copyStepRules(old, current, it) }
+                    val re = verifySource(
+                        current, kw, pages, onProgress,
+                        videoMode = videoMode, steps = patchable, holder = holder
+                    )
+                    val merged = report.associateBy { it.step }.toMutableMap()
+                    re.forEach { merged[it.step] = it }
+                    report = merged.values.toList()
+                    patchedSteps.addAll(patchable.filter { s -> re.any { it.step == s && it.ok } })
+                }
+            }
             onProgress("校验完成：${report.count { it.ok }}/${report.size} 项通过")
-            GenResult(current, report, rounds)
-        }
+            GenResult(current, report, rounds, patchedSteps)        }
     }
 
     /**
-     * 按书源自己的 URL 规则采集页面源码：内置规则竞速和 AI 修正提示词都要用真实 HTML。
-     * 尽力而为——某个页面取不到就跳过，verifySource 仍会用 WebBook 引擎做真实校验。
-     */
+     * 采集页面源码：用户在界面上手动指定的页面优先，其余按书源自己的 URL 规则抓。
+     * 内置规则竞速和 AI 修正提示词都要用真实 HTML；尽力而为——某个页面取不到就跳过，
+     * verifySource 仍会用 WebBook 引擎做真实校验。     */
     private suspend fun collectPagesForVerify(
         source: BookSource,
         keyword: String,
         includeExplore: Boolean,
         videoMode: Boolean,
-        onProgress: (String) -> Unit
+        manualInfo: String? = null,
+        manualToc: String? = null,
+        manualTocText: String? = null,
+        manualContent: String? = null,        onProgress: (String) -> Unit
     ): List<Page> {
         val pages = ArrayList<Page>(6)
         val seed = source.bookSourceUrl
@@ -1111,18 +1190,21 @@ object AiBookSourceGenerator {
         if (searchHtml.isNotBlank()) pages.add(Page("搜索结果页", seed, searchHtml))
 
         onProgress("校验准备：抓取详情页 / 目录 / 正文…")
-        val firstBook = runCatching {
+        // 手动指定的详情页优先，填了就不再靠搜索结果猜
+        var detailUrl: String? = manualInfo
+        val firstBook = if (detailUrl == null) runCatching {
             WebBook.searchBookAwait(source, keyword, 1).firstOrNull()?.toBook()
                 ?.also { it.origin = seed }
-        }.getOrNull()
-        var detailUrl = firstBook?.bookUrl?.takeIf { it.isNotBlank() }?.let { absUrl(it, seed) }
-        if (detailUrl.isNullOrBlank() && searchHtml.isNotBlank()) {
-            detailUrl = runCatching { firstBookLink(searchHtml, seed) }.getOrNull()
-        }
-        if (detailUrl.isNullOrBlank() && homeHtml.isNotBlank()) {
-            // 搜索规则全坏时，首页推荐位通常也有书籍链接，用它兜底
-            detailUrl = runCatching { firstBookLink(homeHtml, seed) }.getOrNull()
-        }
+        }.getOrNull() else null
+        if (detailUrl == null) {
+            detailUrl = firstBook?.bookUrl?.takeIf { it.isNotBlank() }?.let { absUrl(it, seed) }
+            if (detailUrl.isNullOrBlank() && searchHtml.isNotBlank()) {
+                detailUrl = runCatching { firstBookLink(searchHtml, seed) }.getOrNull()
+            }
+            if (detailUrl.isNullOrBlank() && homeHtml.isNotBlank()) {
+                // 搜索规则全坏时，首页推荐位通常也有书籍链接，用它兜底
+                detailUrl = runCatching { firstBookLink(homeHtml, seed) }.getOrNull()
+            }        }
         val detailHtml = detailUrl?.let { fetch(it) }.orEmpty()
         if (detailUrl != null && detailHtml.isNotBlank()) {
             pages.add(Page("书籍详情页", detailUrl, detailHtml))
@@ -1131,26 +1213,40 @@ object AiBookSourceGenerator {
         val infoBook = firstBook?.let {
             runCatching { WebBook.getBookInfoAwait(source, it, canReName = true) }.getOrNull()
         }
-        val tocUrl = infoBook?.tocUrl?.takeIf { it.isNotBlank() }
-            ?.let { absUrl(it, detailUrl ?: seed) } ?: detailUrl
-        val tocHtml = tocUrl?.let { fetch(it) }.orEmpty()
+        // 目录页同样以手动指定优先；填的是入口文字时，按文字在详情页里找对应链接
+        var tocUrl: String? = manualToc
+        if (tocUrl == null && manualTocText != null && detailHtml.isNotBlank()) {
+            tocUrl = runCatching {
+                heuristicTocLinks(detailHtml, detailUrl ?: seed, listOf(manualTocText)).firstOrNull()
+            }.getOrNull()
+            if (tocUrl != null) {
+                onProgress("按你指定的入口「$manualTocText」找到目录页：$tocUrl")
+            }
+        }
+        if (tocUrl == null) {
+            tocUrl = infoBook?.tocUrl?.takeIf { it.isNotBlank() }
+                ?.let { absUrl(it, detailUrl ?: seed) } ?: detailUrl
+        }        val tocHtml = tocUrl?.let { fetch(it) }.orEmpty()
         if (tocUrl != null && tocHtml.isNotBlank()) {
             pages.add(Page("目录页", tocUrl, tocHtml))
         }
-        var chapterUrl = infoBook?.let { b ->
-            runCatching {
-                WebBook.getChapterListAwait(source, b).getOrNull()?.firstOrNull()?.url
-            }.getOrNull()
-        }?.takeIf { it.isNotBlank() }?.let { absUrl(it, tocUrl ?: seed) }
-        if (chapterUrl.isNullOrBlank() && tocHtml.isNotBlank()) {
-            // 目录规则坏到 0 章时，直接从目录页里找第一章链接，保证 AI 能看到正文页
-            chapterUrl = runCatching {
-                val chapterName = Regex("第\\s*[0-9零〇一二两三四五六七八九十百千万]+\\s*[章节回集]")
-                Jsoup.parse(tocHtml, tocUrl ?: seed).select("a[href]")
-                    .firstOrNull { chapterName.containsMatchIn(it.text()) }
-                    ?.attr("abs:href")
-            }.getOrNull()?.takeIf { it.startsWith("http") }
-        }
+        // 手动指定的章节正文页优先：填了就直接用，不再从目录里猜第一章
+        var chapterUrl: String? = manualContent
+        if (chapterUrl == null) {
+            chapterUrl = infoBook?.let { b ->
+                runCatching {
+                    WebBook.getChapterListAwait(source, b).getOrNull()?.firstOrNull()?.url
+                }.getOrNull()
+            }?.takeIf { it.isNotBlank() }?.let { absUrl(it, tocUrl ?: seed) }
+            if (chapterUrl.isNullOrBlank() && tocHtml.isNotBlank()) {
+                // 目录规则坏到 0 章时，直接从目录页里找第一章链接，保证 AI 能看到正文页
+                chapterUrl = runCatching {
+                    val chapterName = Regex("第\\s*[0-9零〇一二两三四五六七八九十百千万]+\\s*[章节回集]")
+                    Jsoup.parse(tocHtml, tocUrl ?: seed).select("a[href]")
+                        .firstOrNull { chapterName.containsMatchIn(it.text()) }
+                        ?.attr("abs:href")
+                }.getOrNull()?.takeIf { it.startsWith("http") }
+            }        }
         val contentHtml = chapterUrl?.let { fetch(it) }.orEmpty()
         if (chapterUrl != null && contentHtml.isNotBlank()) {
             pages.add(Page(if (videoMode) "播放页" else "正文页", chapterUrl, contentHtml))
@@ -2067,7 +2163,8 @@ object AiBookSourceGenerator {
             .replace("{pages}", sb.toString())
             .replace("{exploreFields}", exploreFields)
             .replace("{exploreRule}", exploreRule)
-            .replace("{exploreHardRule}", exploreHardRule) + PATTERN_LIBRARY
+            .replace("{exploreHardRule}", exploreHardRule) + PATTERN_LIBRARY +
+            (if (videoMode) VIDEO_HARD_RULES else "")
         // 单本模式：模板里的 searchUrl 字段说明一并置空，避免 AI 困惑着去编搜索地址
         val user = if (singleBook) {
             base.replace(Regex("\"searchUrl\":\\s*\"[^\"]*\""), "\"searchUrl\": \"\"")
@@ -2179,7 +2276,8 @@ object AiBookSourceGenerator {
         val user = FIX_PROMPT
             .replace("{fails}", sb.toString())
             .replace("{source}", current)
-            .replace("{hints}", hintsText) + PATTERN_LIBRARY
+            .replace("{hints}", hintsText) + PATTERN_LIBRARY +
+            (if (videoMode) VIDEO_HARD_RULES else "")
         val raw = chat(user, 8000) ?: return null
         val json = extractJson(raw) ?: return null
         val aiJson = runCatching { JsonParser.parseString(json).asJsonObject }.getOrNull() ?: return null
@@ -3473,12 +3571,18 @@ object AiBookSourceGenerator {
                 val chapter = firstChapter ?: error("目录验证未通过，无法继续")
                 val content = WebBook.getContentAwait(source, b, chapter, null, needSave = false)
                 if (videoMode) {
-                    if (content.isBlank() || !(content.contains("m3u8", true)
-                                || content.contains("mp4", true)
-                                || content.contains("startBrowserAwait", true)
-                                || content.startsWith("http"))
-                    ) error("未能解析出播放地址")
-                    report.add(VerifyItem("播放", true, "解析到播放地址：${content.take(60)}"))
+                    // 与时光播放器 VideoSourcePlayer.isPlayableUrl 同一口径：
+                    // 正文必须是「单个可播直链」，HTML / 提示语 / 网页地址都不能算通过
+                    val text = content.trim()
+                    if (text.isEmpty()) error("正文规则返回空，未能解析出播放地址")
+                    if (!VideoSourcePlayer.isPlayableUrl(text)) {
+                        val hit = VideoSourcePlayer.extractPlayableUrl(text)
+                        error(
+                            if (hit != null) "播放地址夹杂了其它内容，应只返回一个直链：$hit"
+                            else "返回的不是可播直链（需 .mp4/.m3u8/.m4v/.webm，或含 /m3u8/、authPath）"
+                        )
+                    }
+                    report.add(VerifyItem("播放", true, "解析到播放地址：${text.take(60)}"))
                 } else {
                     val plain = Jsoup.parse(content).text().trim()
                     if (plain.length < MIN_CONTENT_CHARS) error("正文过短（${plain.length} 字）")
@@ -3744,6 +3848,18 @@ object AiBookSourceGenerator {
          "order": "asc（旧到新）或 desc（新到旧）",
          "nextTocUrl": "目录分页下一页的完整网址，没有填 null",
          "problem": "异常时简述原因（如：页面是详情页/是正文页/需要登录），正常则留空"}
+    """.trimIndent()
+
+    /** 视频播放页专用质检：判断是否取得到可播直链，不用小说正文页的口径 */
+    private val CHECK_PLAY_PAGE = """
+        这是一个视频 / 影视 / 短剧站的播放页或单集页 HTML。请判断能否从页面里取到可直接播放的流地址
+        （路径以 .mp4/.m3u8/.m4v/.webm 结尾，或含 /m3u8/、authPath、.m3u8? 的代理型直链）。
+        注意：这里不是小说正文页，不要用「有没有小说正文容器」来判断；
+        年龄确认页、验证码页、只有网页播放器地址的页面都算异常。
+        只输出 JSON（不要解释）：
+        {"hasPlayUrl": true或false,
+         "playUrl": "页面里第一个可播直链的完整网址；没有填 null",
+         "problem": "异常时简述原因（如：其实是详情页/年龄确认页/只有网页播放器地址），正常则留空"}
     """.trimIndent()
 
     private val CHECK_CONTENT = """
@@ -4229,6 +4345,8 @@ object AiBookSourceGenerator {
          "bookSourceName": "站点名称",
          "bookSourceGroup": "视频",
          "bookSourceType": 4,
+         "header": "{\"User-Agent\":\"桌面 Chrome UA\",\"Referer\":\"站点根地址/\"}",
+         "enabledCookieJar": true,
          "searchUrl": "搜索地址，关键词用 {{key}}，翻页用 {{page}}",
         {exploreFields}
          "ruleSearch": {"bookList": "搜索结果列表规则", "name": "片名规则", "author": "",
@@ -4239,12 +4357,14 @@ object AiBookSourceGenerator {
            "intro": "简介规则", "coverUrl": "封面规则", "tocUrl": "选集页链接规则，不确定留空"},
          "ruleToc": {"chapterList": "剧集列表规则", "chapterName": "集数名规则",
            "chapterUrl": "单集地址规则", "nextTocUrl": "选集翻页规则，没有留空"},
-         "ruleContent": {"content": "播放地址规则", "sourceRegex": ".*\\.(m3u8|mp4).*"}}
+         "ruleContent": {"content": "播放地址规则", "sourceRegex": ".*\\.(m3u8|mp4|m4v|webm).*"}}
 
-        【播放地址（ruleContent.content）三种写法，按优先级选】
-        1. 单集地址本身就是 m3u8 / mp4 直链
-        2. 用 java.startBrowserAwait(播放页地址, 片名)，App 会拦截并用播放器打开（注意：这种方式无法下载）
-        3. 绝不能把网页文本或占位文字当播放地址返回，那会被判失败
+        【播放地址（ruleContent.content）写法，按优先级选】
+        1. 单集地址本身就是 m3u8 / mp4 / m4v / webm 直链，或含 /m3u8/、authPath 的代理型直链
+        2. 页面或接口里能拿到直链时，用 @js: + ES5 从 result 中提取，结果只返回一个 URL，
+           以 `result = 直链; result;` 收尾；需要二次请求用 java.ajax / java.post
+        3. 只返回一个 URL 字符串，前后不要有任何其它字符；绝不能返回 HTML、JSON 对象、
+           MPD、提示语或网页地址，也绝对不要调用 java.startBrowser / java.startBrowserAwait
 
         【规则语法要点】
         1. CSS 选择器（Jsoup）：如 class.video-item、tag.a@href；
@@ -4259,6 +4379,57 @@ object AiBookSourceGenerator {
         4. searchUrl 与 exploreUrl 是两个完全不同的东西，绝不能混写；
         5. bookSourceType 必须是 4，bookSourceGroup 必须含「视频 / 影视 / 动漫 / 短剧」字样。
         """.trimIndent()
+
+    /**
+     * 视频源硬规则，对应 docs/视频源开发指南.md 的 §1 硬规则速查表、§2 时光播放器链路、§3 Rhino 语法。
+     * 生成、AI 修正、已有书源校验修正三条链路都会拼上，避免写出「验证通过但时光播放器播不了」的规则。
+     */
+    private val VIDEO_HARD_RULES = """
+
+        【视频源硬规则（时光播放器 · 唯一链路，必须全部遵守）】
+        目标：每集在首次解析就拿到能直接交给 ExoPlayer 的流地址，本项目不接受网页播放器兜底。
+        1. bookSourceType 必须是 4，bookSourceGroup 必须含「视频 / 影视 / 短剧」字样；不要写 videoSourceWhitelist。
+        2. chapterUrl 必须是普通 http(s) 地址，禁止 data: URI 与 javascript: 链接。
+        3. ruleContent.content 必须只返回【一个】URL 字符串，前后不能有任何其它字符，
+           不能是 HTML、JSON 对象、MPD 文本、提示语或网页地址。
+           可播判定：路径以 .mp4/.m3u8/.m4v/.webm 结尾，或含 /m3u8/、authPath、.m3u8? 之一。
+        4. 正文、登录检查里绝对不要调用 java.startBrowser() / java.startBrowserAwait()；
+           也不要依赖 jsLib 自定义函数、java.readBookConfig、Map("cookie") 等私有扩展。
+        5. Rhino 是 ES5：不要写 new URL()、fetch、XMLHttpRequest、document、window、箭头函数、模板字符串；
+           相对地址用字符串拼接补全。
+        6. header 必须是静态 JSON 字符串，同时带桌面 User-Agent 与 Referer
+           （播放器只按默认请求属性注入，移动 UA 常被 CDN 拒绝）；需要会话 Cookie 时写 enabledCookieJar: true。
+        7. chapterList / bookList 用 <js> 返回时必须是字符串数组，
+           每条是 JSON.stringify 后的 JSON 字符串，配套写 chapterName: ${'$'}.name、chapterUrl: ${'$'}.url。
+        8. @js: 规则统一用 `result = 结果; result;` 收尾，不要用 IIFE；
+           规则字段插值用 {${'$'}.field} 形式（如 bookUrl 里拼 JSON 字段），
+           URL 里只认 {{key}}、{{page}}，两者绝不能混用，否则 URL 里会出现字面量导致 404。
+        9. 多字段兜底：分集页与电影页字段可能不同，播放地址要把 durl / hls_url / url 等候选都取到，
+           只依赖单一字段会让一类内容全挂。
+        10. 优先用站点 JSON API 生成目录与取流地址，别依赖页面 DOM；
+            bookUrl 与每个 chapterUrl 必须保持同一视图参数与请求头（如 ?__view=mobile）。
+        11. ruleContent.sourceRegex 建议写 .*\.(m3u8|mp4|m4v|webm).*；
+            不要返回 #EXT-X-STREAM-INF 主清单，时光播放器不支持 MPD。
+        12. HTTP 200 不等于能解析：用书源真正拼出的 URL（含全部参数与 header）验证，
+            对比响应体积与特征字段，排除年龄确认页 / 验证页 / 桌面版页面。
+        """.trimIndent()
+
+    /** 播放页没有裸直链时的纯代码兜底：ES5 从响应里抠出第一个可播地址，只返回单个 URL */
+    private val VIDEO_CONTENT_EXTRACT_JS = """
+        @js:
+        var s = String(result || '');
+        var m = s.match(/https?:\/\/[^\s"'<>\\]+/g) || [];
+        var out = '';
+        for (var i = 0; i < m.length; i++) {
+            var u = m[i].replace(/&amp;/g, '&');
+            if (/\.(m3u8|mp4|m4v|webm)/i.test(u) || /\/m3u8\//i.test(u) || /authPath/i.test(u)) {
+                out = u;
+                break;
+            }
+        }
+        result = out;
+        result;
+    """.trimIndent()
 
     // ---------- 视频源纯代码解析辅助（与章节侧同构，按「集数」语义改写） ----------
 
@@ -4335,19 +4506,27 @@ object AiBookSourceGenerator {
         return best
     }
 
-    /** 从播放页 HTML 里直接抠出可播放直链（m3u8 / mp4） */
+    /** 从播放页 HTML 里直接抠出可播放直链（与 VideoSourcePlayer.isPlayableUrl 同口径） */
     private fun extractPlayableUrl(html: String): String? {
-        val re = Regex("https?://[^\\s\"'<>]+\\.(?:m3u8|mp4)[^\\s\"'<>]*")
-        return re.find(html)?.value
+        val re = Regex(
+            "https?://[^\\s\"'<>]+\\.(?:m3u8|mp4|m4v|webm)[^\\s\"'<>]*",
+            RegexOption.IGNORE_CASE
+        )
+        re.find(html)?.value?.let { return it }
+        // 代理型直链：/media/m3u8?url=...、/m3u8/...、authPath=...（PATTERN_LIBRARY 形态 D）
+        return Regex("https?://[^\\s\"'<>]+").findAll(html)
+            .map { it.value }
+            .firstOrNull { VideoSourcePlayer.isPlayableUrl(it) }
     }
 
     /**
-     * 播放地址规则：能直接抠出 m3u8/mp4 直链就留空（由 sourceRegex 命中），
-     * 否则退回网页播放器拉起写法。
+     * 播放地址规则：能直接抠出直链就留空（由 sourceRegex 命中）；
+     * 否则用 ES5 从响应里提取单个直链，绝不退回 java.startBrowserAwait
+     * （文档 §1#5：拉起网页播放器属于失败设计）。
      */
     private fun playContentRule(html: String): String {
         val u = extractPlayableUrl(html)
-        return if (u != null) "" else "java.startBrowserAwait(url, title)"
+        return if (u != null) "" else VIDEO_CONTENT_EXTRACT_JS
     }
 
     /** 从首页纯代码解析出分类导航，拼成「分类名::网址」多行 exploreUrl */
@@ -4578,22 +4757,54 @@ object AiBookSourceGenerator {
                 hints["播放地址(代码提取)"] = "播放页纯代码已提取到可播放直链：" +
                     "${u.take(80)}，ruleContent.content 可留空（由 sourceRegex 命中）"
             } ?: run {
-                hints["播放地址(代码提取)"] = "播放页未直接出现 m3u8/mp4 直链，" +
-                    "需二次请求/JS 提取，建议 content 用 @js 或 java.startBrowserAwait"
+                hints["播放地址(代码提取)"] = "播放页未直接出现可播直链，" +
+                    "需 java.ajax / java.post 二次请求或用 @js: 从 result 里提取；" +
+                    "content 必须只返回一个直链，禁止 java.startBrowser* 与网页地址"
             }
         }
         return hints
     }
 
-    /** 把已生成的书源标记为视频源：bookSourceType=4、组名含「视频」、补 sourceRegex */
+    /** 把已生成的书源标记为视频源：类型 / 组名 / sourceRegex / 请求头，并按文档做禁词自检 */
     private fun markAsVideoSource(source: BookSource) {
         source.bookSourceType = 4
         val g = source.bookSourceGroup ?: ""
         val keywords = listOf("动漫", "短剧", "视频", "影视", "电影", "剧集", "电视")
         val hit = keywords.any { g.contains(it) }
         source.bookSourceGroup = if (g.isBlank()) "视频" else if (hit) "$g·视频" else g
+
         val sr = source.getContentRule().sourceRegex
-        if (sr.isNullOrBlank()) source.getContentRule().sourceRegex = ".*\\.(m3u8|mp4).*"
+        if (sr.isNullOrBlank()) {
+            source.getContentRule().sourceRegex = ".*\\.(m3u8|mp4|m4v|webm).*"
+        }
+        // 文档 §1#7 / §2.5：静态 JSON header 必须同时带桌面 UA 与 Referer，
+        // 否则直链常被 CDN 判 403（移动 UA 尤其明显）
+        val headers = source.header?.takeIf { it.isNotBlank() }?.let {
+            runCatching { GSON.fromJsonObject<Map<String, String>>(it).getOrNull() }.getOrNull()
+        }?.toMutableMap() ?: mutableMapOf()
+        val uaKey = headers.keys.firstOrNull { it.equals(AppConst.UA_NAME, ignoreCase = true) }
+            ?: AppConst.UA_NAME
+        headers[uaKey] = PC_UA
+        val refererKey = headers.keys.firstOrNull { it.equals("Referer", ignoreCase = true) } ?: "Referer"
+        if (headers[refererKey].isNullOrBlank()) {
+            val referer = runCatching {
+                val u = java.net.URI(source.bookSourceUrl)
+                val host = u.host
+                val scheme = u.scheme ?: "https"
+                if (!host.isNullOrBlank()) "$scheme://$host/" else ""
+            }.getOrDefault("")
+            if (referer.isNotBlank()) headers[refererKey] = referer
+        }
+        source.header = GSON.toJson(headers)
+        source.enabledCookieJar = true
+
+        // 文档 §8 自查清单：生成结果里不允许出现这些失败写法
+        val contentRule = source.getContentRule().content.orEmpty()
+        val forbidden = listOf("startBrowser", "readBookConfig", "data:", "MPD")
+        if (forbidden.any { contentRule.contains(it, true) }) {
+            AppLog.put("[AI书源] 视频源正文规则含禁用写法，改用直链提取 JS：$contentRule")
+            source.getContentRule().content = VIDEO_CONTENT_EXTRACT_JS
+        }
     }
 
     /** 视频源目录全候选竞速：与 refineTocRules 同构，按「集数」语义择优 */

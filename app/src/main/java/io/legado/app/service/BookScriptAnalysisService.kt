@@ -58,7 +58,8 @@ class BookScriptAnalysisService : BaseService() {
         private const val RACE_DELAY = 25_000L
         private const val EXTRACT_LENGTH = 1000
         private const val DOWNLOAD_ROOT = "/storage/emulated/0/Download/"
-
+        private val CHAPTER_TITLE_REGEX =
+            Regex("^\\s*第\\s*[0-9一二三四五六七八九十百千零〇两]+\\s*章")
         @Volatile
         var isRun = false
 
@@ -177,6 +178,8 @@ class BookScriptAnalysisService : BaseService() {
     private val jsDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     private val nl = System.lineSeparator()
 
+    /** 角色记录内存快照：分析开始时读一次磁盘，之后所有读取与修改只基于它 */
+    private var recordsSnapshot: String = "[]"
     private val analysisJsExtensions = object : JsExtensions {
         override fun getSource(): BaseSource? = null
         override fun getTag(): String = "BookAnalysis"
@@ -354,6 +357,17 @@ class BookScriptAnalysisService : BaseService() {
         val engineDir = EngineDataDir.baseDir()
         AppLog.put("全书分析: 《${book.name}》全书共${total}章，从第${startIndex + 1}章开始，目录 $engineDir")
 
+        // 分析开始时按 cunfang.txt 判定读源，角色记录只读这一次磁盘，之后全程使用内存快照
+        val initAnalysisJson = JSONObject()
+            .put("bookName", book.name)
+            .put("engineDir", engineDir)
+            .put("cunfangPath", engineDir + "cunfang.txt")
+            .put("characterRecordsPath", engineDir + "characterRecords.json")
+            .put("shumingPath", engineDir + "shuming." + book.name + ".json")
+            .toString()
+        recordsSnapshot = readFileOrEmpty(
+            resolveRecordsTarget(initAnalysisJson, JSONObject(initAnalysisJson))
+        ).ifBlank { "[]" }
         for (idx in startIndex until total) {
             currentCoroutineContext().ensureActive()
             val ch = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: continue
@@ -496,6 +510,75 @@ class BookScriptAnalysisService : BaseService() {
         return ChapterWindow(sb.toString(), spans)
     }
 
+    /** 对话文本归一化，用于校验章节缓存里的 dialogText 是否就是当前这一句 */
+    private fun normalizeDialog(s: String): String = s.replace(
+        Regex("[\\s\\u3000]+|【\\d+】|[“”‘’\"'。，、；：！？（）【】《》…—·]"),
+        ""
+    )
+
+    /** 从该章的缓存文件里取章内序号对应的说话人名字；文本对不上则不认 */
+    private fun readCachedSpeakerName(span: ChapterSpan, realSeq: Int, dialogText: String): String? {
+        return runCatching {
+            val file = File(span.cachePath)
+            if (!file.isFile) return null
+            val results = JSONObject(file.readText()).optJSONObject("results") ?: return null
+            val item = results.optJSONObject(realSeq.toString()) ?: return null
+            val name = item.optString("name", "").trim()
+            if (name.isEmpty()) return null
+            val cached = item.optString("dialogText", "")
+            if (cached.isNotBlank() && normalizeDialog(cached) != normalizeDialog(dialogText)) return null
+            name
+        }.getOrNull()
+    }
+
+    /**
+     * 给上文 1000 字里已分析过的对话，在左引号前插入 [说话人]。
+     * 与朗读脚本 annotateAboveContext 同口径：绝对位置 → 所属章 → 章内对话序号。
+     * 窗口已包含上一章，章首也能拿到上一章末尾的标注。
+     */
+    private fun annotateAboveContext(
+        above: String,
+        aboveStart: Int,
+        spans: List<ChapterSpan>
+    ): String {
+        if (above.isEmpty() || spans.isEmpty()) return above
+        val inserts = mutableListOf<Pair<Int, String>>()
+        val lines = above.split('\n')
+        var lineStart = 0
+        for (line in lines) {
+            if (!CHAPTER_TITLE_REGEX.containsMatchIn(line)) {
+                var idx = 0
+                while (idx < line.length) {
+                    val left = line.indexOf('“', idx)
+                    if (left < 0) break
+                    val right = line.indexOf('”', left + 1)
+                    val text = if (right >= 0) {
+                        line.substring(left + 1, right)
+                    } else {
+                        line.substring(left + 1).take(1000)
+                    }
+                    if (text.isNotBlank()) {
+                        val absPos = aboveStart + lineStart + left
+                        val span = spans.firstOrNull { absPos >= it.bodyStart && absPos < it.end }
+                        if (span != null) {
+                            val offset = (absPos - span.bodyStart).coerceIn(0, span.bodyText.length)
+                            val realSeq = countDialogues(span.bodyText.substring(0, offset)) + 1
+                            val name = readCachedSpeakerName(span, realSeq, text)
+                            if (!name.isNullOrBlank()) inserts.add((lineStart + left) to "[$name]")
+                        }
+                    }
+                    idx = if (right >= 0) right + 1 else line.length
+                }
+            }
+            lineStart += line.length + 1
+        }
+        if (inserts.isEmpty()) return above
+        val out = StringBuilder(above)
+        inserts.sortedByDescending { it.first }.forEach { (pos, mark) ->
+            out.insert(pos, mark)
+        }
+        return out.toString()
+    }
     private fun buildTasks(
         book: Book,
         ch: BookChapter,
@@ -535,10 +618,9 @@ class BookScriptAnalysisService : BaseService() {
             }
             val paraPosInChapter = paraInfo.start
             val paraPosFull = currentSpan.start + paraPosInChapter
-            val above = if (paraPosFull > 0) {
-                fullText.substring((paraPosFull - EXTRACT_LENGTH).coerceAtLeast(0), paraPosFull)
-            } else ""
-            val belowStart = (paraPosFull + para.length).coerceAtMost(fullText.length)
+            val aboveStart = (paraPosFull - EXTRACT_LENGTH).coerceAtLeast(0)
+            val aboveRaw = if (paraPosFull > 0) fullText.substring(aboveStart, paraPosFull) else ""
+            val above = annotateAboveContext(aboveRaw, aboveStart, window.spans)            val belowStart = (paraPosFull + para.length).coerceAtMost(fullText.length)
             val belowEnd = (belowStart + EXTRACT_LENGTH).coerceAtMost(fullText.length)
             val below = if (belowStart < fullText.length) {
                 fullText.substring(belowStart, belowEnd)
@@ -735,17 +817,10 @@ class BookScriptAnalysisService : BaseService() {
 
     private suspend fun doAliasAndWrite(outcome: NameOutcome, analysisJson: String) {
         val analysisObj = JSONObject(analysisJson)
-        val engineDir = analysisObj.optString("engineDir")
         val aliasTaskJson = JSONObject(buildTaskJson(outcome.task))
             .put("keyIndex", keyIndex.getAndIncrement())
             .toString()
-        val target = evalString(
-            "resolveRecordsTarget()",
-            mapOf("analysisJson" to analysisJson)
-        )?.takeIf { it.startsWith(engineDir) }
-            ?: analysisObj.optString("shumingPath")
-        val recordsJson = readFileOrEmpty(target).ifBlank { "[]" }
-
+        val recordsJson = recordsSnapshot
         val values = mutableMapOf<String, Any?>(
             "analysisJson" to analysisJson,
             "taskJson" to aliasTaskJson,
@@ -765,8 +840,8 @@ class BookScriptAnalysisService : BaseService() {
             values
         )
         if (!merged.isNullOrBlank()) {
-            writeRecords(target, merged, analysisObj)
-        }
+            recordsSnapshot = merged
+            writeRecords(merged, analysisObj, analysisJson)        }
         val newFiles = writeChapterPatches(outcome.chapterPatches)
         bumpAnalyzedChapterCount(analysisObj.optString("bookName"), newFiles)
     }
@@ -814,15 +889,24 @@ class BookScriptAnalysisService : BaseService() {
         if (file.isFile) file.readText() else ""
     }.getOrDefault("")
 
-    private fun writeRecords(target: String, merged: String, analysisObj: JSONObject) {
+    /**
+     * 每次调用都会重新读取 cunfang.txt：是当前分析的书 → characterRecords.json，
+     * 否则 → shuming.<书名>.json。启动时用于选定读源，落盘前用于选定写目标。
+     */
+    private suspend fun resolveRecordsTarget(analysisJson: String, analysisObj: JSONObject): String {
         val engineDir = analysisObj.optString("engineDir")
-        if (!target.startsWith(engineDir)) return
-        writeAtomic(File(target), merged)
-        val shuming = analysisObj.optString("shumingPath")
-        if (shuming.isNotBlank() && shuming != target && shuming.startsWith(engineDir)) {
-            writeAtomic(File(shuming), merged)
-        }
+        return evalString(
+            "resolveRecordsTarget()",
+            mapOf("analysisJson" to analysisJson)
+        )?.takeIf { it.startsWith(engineDir) }
+            ?: analysisObj.optString("shumingPath")
     }
+
+    /** 落盘前按 cunfang.txt 当前内容重新判定目标，只写这一个文件 */
+    private suspend fun writeRecords(merged: String, analysisObj: JSONObject, analysisJson: String) {
+        val target = resolveRecordsTarget(analysisJson, analysisObj)
+        if (!target.startsWith(analysisObj.optString("engineDir"))) return
+        writeAtomic(File(target), merged)    }
 
     private fun writeChapterPatches(patches: List<ChapterPatch>): Int {
         var created = 0
