@@ -213,6 +213,24 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private val canceledAt = ConcurrentHashMap<String, Long>()
     /** 取消后的冷却窗口：短到用户感觉不到，长到足以覆盖连续点击的间隔 */
     private val canceledCooldownMs = 1200L
+
+    /**
+     * 11-15 用户实况（原话）：「我基本上没有老老实实的听，我都是听着动着翻页呀、
+     * 跳章呀，然后朗读上一段、下一段就这样一直不停的动」——即**连续操作是常态**，
+     * 不是偶发。真机日志实锤（appLog-26-11-15_01-27，13 秒内 8 次跳转）：
+     * 80 次提交只覆盖 59 个段，其中 `Legado59` 被提交 **7 次**，每次 SUCCESS
+     * 后立刻 -3（被下一次 play() 的 stop() 掐掉），音频没落盘、下次还得重来。
+     *
+     * 机制：合成循环是 `for (i in nowSpeak until endIndex)`，从当前段一路往后合成
+     * 到章末。每点一次跳转，这个循环就**从头重跑**，把后面几十段重新提交一遍；
+     * 而每笔都要等引擎回调、每次都花钱。
+     *
+     * 修法（不动播放速度）：**当前段立即合成**（用户感到"点哪播哪"的关键），
+     * 后面的段落等这么久没有新跳转才开始预合成。连续操作时每跳转只合成 1 段，
+     * 停下来后才一次性补齐后续；不操作时行为与原来完全一致（多等 500ms，
+     * 而那时用户正在听当前段，感知不到）。
+     */
+    private val forwardSynthQuietMs = 500L
     /** 主合成协程 */
     private var synthesisTask: Job? = null
     /** 跨章预加载协程 */
@@ -795,6 +813,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         val endIndex = if (singleParagraphMode) (nowSpeak + 1).coerceAtMost(contentList.size) else contentList.size
         synthesisTask = lifecycleScope.launch(Dispatchers.IO) {
             var needPreload = false
+            // 首段=用户正要听的那段，立即做；其余是「往后备货」，见下方
+            // forwardSynthQuietMs 处的等待（**只等一次、且只在真要花钱时等**）。
+            var firstIteration = true
             for (i in nowSpeak until endIndex) {
                 ensureActive()
 
@@ -827,6 +848,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         AppLog.putDebug("TTS缓存命中: ${cachedFile.name}")
                         cachedFile
                     } else {
+                        // ===== 11-15：往后备货前等一次静默期（只等一次）=====
+                        // 位置刻意放在「确认未命中缓存」之后——命中的段不花钱，
+                        // 等它反而拖慢翻页时播放队列的填充（用户要求「点哪播哪要快」）。
+                        // 首段（用户马上要听的）永远不等。
+                        // 等待可被取消：期间有新 play() → synthesisTask cancel →
+                        // delay 立即抛 CancellationException，这次备货整体作废。
+                        if (!firstIteration && forwardSynthQuietMs > 0) {
+                            delay(forwardSynthQuietMs)
+                        }
                         // 未命中缓存才跑规则脚本：它决定「这段该不该念」和送引擎的文本
                         val speakText = applyTtsScripts(rawText, paragraphIndex = i)
                         if (speakText.matches(AppPattern.notReadAloudRegex)) {
@@ -864,6 +894,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         exoPlayer.addMediaItem(mediaItem)
                     }
                 }
+
+                firstIteration = false
 
                 if (!singleParagraphMode && contentList.size - i <= PRELOAD_TRIGGER_REMAIN) {
                     needPreload = true
