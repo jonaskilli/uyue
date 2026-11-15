@@ -1217,22 +1217,21 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         // 系统 TTS 引擎（UTTS）还有一层自己的 synth_cache（它私有目录，本 App 删不到），
         // 不清的话清完再听仍命中旧音频。是否连带清，交给「实时更新音频」开关决定：
         // 开着才通知，关着就只清本 App 的 wav（用户 11-15 晚定调「接入这个开关，开或不开由用户选」）。
-        notifyUtssClearSynthCacheIfEnabled()
+        notifyUtssClearSynthCache()
     }
 
     /**
      * 通知系统 TTS 引擎（UTTS）清掉它的 synth_cache（11-15 晚）。
      *
-     * 通道：往朗读规则目录戳一个 `.clear_synth_cache` 文件（内容是时间戳），
-     * UTTS 侧每 3 秒最多看一眼 mtime，变了就整池清空——两个 App 私有目录互不可见，
-     * 只有共享存储这条路（同目录已有 readProgress.json 这条单向通道）。
-     *
-     * 门控：只在「实时更新音频」打开时执行。这个开关的语义本来就是
-     * 「换角色/音色后让音频跟着更新」，需要清到对方缓存的正是这条链路；
-     * 关掉时用户要的是"只清自己、别动引擎的缓存"。
+     * **不做门控、默认就是做**（用户 11-15 晚 23:14 定稿）：
+     * 「清理音频缓存」和「实时更新音频」不是同一类事——前者是用户按下的手动动作，
+     * 后者是检测 gengxin 信号后的自动重启。把我此前拿后者去门控前者，等于让一个
+     * 自动化开关兼管手动操作，语义不对（用户原话：「那个跟这个清缓存是同一种类型吗？」）。
+     * 所以：手动清理一律连带清 UTTS 的共享缓存目录，不管那个开关开没开；
+     * 「实时更新音频」开关仍只管它自己那条自动重启链路（那里也会调本函数，因为
+     * 那条链路本来就要让音频跟着更新）。
      */
-    fun notifyUtssClearSynthCacheIfEnabled() {
-        if (!gengxinRealtimeUpdate) return
+    fun notifyUtssClearSynthCache() {
         // ① 直接删共享缓存目录（UTTS 11-15 晚已把 synth_cache 挪到
         //    /storage/emulated/0/Download/chajian/utts_synth_cache，公共目录本 App 删得动）——
         //    这是正路：删完下一次合成就是全新，不依赖对方进程活着/有没有监听。

@@ -823,8 +823,10 @@ abstract class BaseReadAloudService : BaseService(),
         AppLog.put("gengxin 触发处理: speaking=$speaking, curIndex=$curIndex")
         // 只有走到这里（=开关打开且信号真的变了）才连带清 UTTS 的合成缓存，
         // 否则用户关着开关也会被清——那就成了"强制更新"。
-        // 与「清音频缓存」同一套通知：门控在 AppConfig 里（实时更新音频开关）
-        AppConfig.notifyUtssClearSynthCacheIfEnabled()
+        // gengxin 链路本来就要「让音频跟着更新」，顺带清掉 UTTS 的合成缓存。
+        // 注意：手动清理那条路是无条件清的（见 AppConfig.notifyUtssClearSynthCache 注释），
+        // 这两条不是同一类事件，只是共用同一个动作。
+        AppConfig.notifyUtssClearSynthCache()
         if (speaking) {
             // 正在朗读：只删除当前段之后的缓存，当前段及之前保留
             deleteGengxinCachesAfter(curIndex)
