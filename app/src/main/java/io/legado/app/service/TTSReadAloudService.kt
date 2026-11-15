@@ -5,6 +5,8 @@ import android.content.Context
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import org.json.JSONArray
+import org.json.JSONObject
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.lifecycle.lifecycleScope
@@ -76,6 +78,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     companion object {
         private const val TAG = "TTSReadAloudService"
         private const val PRELOAD_TRIGGER_REMAIN = 5
+
+        /**
+         * 批量预热每批段数（11-15，路 C）。
+         *
+         * 为什么是 4：取消粒度＝整批。用户跳段时这一批的预热成果全部作废
+         * （系统 TTS 的 PCM 流无段边界，UTTS 侧也只能整批丢），
+         * 4 段 × 约 3.4s 的最坏损失可接受；再大就会「跳一下损失十几秒算力」。
+         */
+        private const val PRELOAD_BATCH_SIZE = 4
     }
 
     // ====== TTS 核心 ======
@@ -708,6 +719,57 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      *   传 null 则本函数自己跑。11-14 晚：合成主循环改为「命中缓存不跑脚本」后，
      *   未命中的段由调用方算好再传进来，避免同一段脚本跑两遍。
      */
+    /**
+     * 后台批量预热（11-15，默认关闭；任务书-U阅批量提交多段 · 路 C）。
+     *
+     * 把 `start` 起若干**未命中本地缓存**的段打包成一条 `batch_json` 请求交给 UTTS：
+     * UTTS 内部按段并行合成，结果写进**它自己的文本缓存**，回给我们的是一段极短静音
+     * （协议约定，见 UTTS 侧 preloadSegments 注释）。这里不等结果、不落盘、不入播放列表。
+     *
+     * 为什么不直接把返回音频当缓存用：系统 TTS 一次只产出一个文件，N 段音频拼成的
+     * 连续流没有段边界，没法按段切分落盘。真正的收益在后续：逐段请求到达 UTTS 时
+     * 命中它的缓存，本来 3~8 秒的合成变成读文件。
+     *
+     * 失败一律静默（只记 debug 日志）：预热是优化，坏了也不能影响正常朗读。
+     */
+    private fun launchPreloadBatch(start: Int, end: Int, chapterTitle: String) {
+        if (!AppConfig.isPreloadBatchEnabled) return
+        if (singleParagraphMode) return
+        val tts = textToSpeech ?: return
+        if (!ttsInitFinish) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                val limit = minOf(start + PRELOAD_BATCH_SIZE, end)
+                val indexes = ArrayList<Int>(PRELOAD_BATCH_SIZE)
+                for (i in start until limit) {
+                    val raw = getRawText(i)
+                    if (raw.isBlank()) continue
+                    // 已有缓存的段不必再花一次请求
+                    val cached = getCacheFileForText(raw, i, chapterTitle)
+                    val hit = cached.exists() && cached.length() > 0 && isValidAudioFile(cached)
+                    if (!hit) indexes.add(i)
+                }
+                // 少于 2 段没意义：UTTS 侧单段会回落成普通合成路径
+                if (indexes.size < 2) return@launch
+
+                val arr = JSONArray()
+                indexes.forEach { i ->
+                    arr.put(JSONObject().put("text", getRawText(i)).put("paraIndex", i))
+                }
+                val json = JSONObject().put("segments", arr).toString()
+                val params = Bundle().apply { putString("batch_json", json) }
+                val tmp = File(cacheDir, "preload_${System.currentTimeMillis()}.wav")
+                val uid = "PRELOADBATCH_${System.currentTimeMillis()}"
+                // 文本参数在批量路径下被 UTTS 忽略（它用 batch_json 里的段），
+                // 这里传首段文本只是为了满足 API 签名与可能的旧版引擎回退
+                val ret = tts.synthesizeToFile(getRawText(indexes.first()), params, tmp, uid)
+                AppLog.putDebug("批量预热提交: n=${indexes.size} ret=$ret")
+                tmp.delete()
+            }.onFailure { AppLog.putDebug("批量预热失败: ${it.localizedMessage}") }
+        }
+    }
+
     private suspend fun synthesizeSingle(index: Int, precomputedText: String? = null): File? {
         val rawText = getRawText(index)
         val text = precomputedText ?: applyTtsScripts(rawText, paragraphIndex = index)
@@ -808,6 +870,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         val chapterTitle = textChapter?.title ?: textChapter?.chapter?.title ?: ""
         val endIndex = if (singleParagraphMode) (nowSpeak + 1).coerceAtMost(contentList.size) else contentList.size
+        // 11-15（路 C）：整章批量预热（默认关闭）。
+        // 放在逐段循环之前：先把开头几段打包交给 UTTS 并行合成，
+        // 之后逐段请求到达时命中 UTTS 缓存即秒回——这才是「合成跑赢播放」的来源。
+        // 必须传入本章标题，缓存键含章节（同一段正文在不同章可能算两次）。
+        if (!singleParagraphMode && AppConfig.isPreloadBatchEnabled) {
+            launchPreloadBatch(nowSpeak, endIndex, chapterTitle)
+        }
+
         synthesisTask = lifecycleScope.launch(Dispatchers.IO) {
             var needPreload = false
             // 首段=用户正要听的那段，立即做；其余是「往后备货」，见下方
@@ -815,6 +885,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             var firstIteration = true
             for (i in nowSpeak until endIndex) {
                 ensureActive()
+
+                // 滚动补货：每走 PRELOAD_BATCH_SIZE 段，为再往后的一批发预热。
+                // 不在循环里一次性全发：取消粒度是整批，发太远会「跳一下白烧十几秒」。
+                if (AppConfig.isPreloadBatchEnabled &&
+                    i > nowSpeak && (i - nowSpeak) % PRELOAD_BATCH_SIZE == 0
+                ) {
+                    launchPreloadBatch(i, endIndex, chapterTitle)
+                }
 
                 val rawText = getRawText(i)
                 val isEndMarker = i == contentList.lastIndex

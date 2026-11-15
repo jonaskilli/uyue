@@ -326,6 +326,14 @@ object PreferKey {
     // 系统TTS当前使用的voice名称（用于缓存文件名匹配）
     const val sysTtsVoiceName = "sysTtsVoiceName"
 
+    /**
+     * 11-15：后台批量预热开关（默认关闭）。
+     * 开启后朗读预取会把后面若干段打包发给 UTTS 做并行合成，结果存进 UTTS 侧缓存，
+     * 后续单段请求命中缓存即秒回——目的是让「已合成时长」跑赢「已播放时长」。
+     * 关闭时行为与改动前完全一致（逐段串行预取）。
+     */
+    const val preloadBatchEnabled = "preloadBatchEnabled"
+
     // 朗读封面跑马灯边框
     const val readAloudCoverMarqueeEnabled = "readAloudCoverMarqueeEnabled"
     const val readAloudCoverMarqueeSpeed = "readAloudCoverMarqueeSpeed"

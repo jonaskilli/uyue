@@ -1577,6 +1577,17 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefString(PreferKey.sysTtsVoiceName, "default") ?: "default"
         set(value) = appCtx.putPrefString(PreferKey.sysTtsVoiceName, value)
 
+    /**
+     * 后台批量预热（11-15，默认关闭）。
+     *
+     * 为什么要默认关：它依赖 UTTS 侧的批量预热协议（`batch_json`）。
+     * 换回旧版 UTTS 或别的 TTS 引擎时，这个请求只会被当成普通合成——
+     * 白白多合成一次、还浪费一次 API。默认关掉，用户确认引擎支持后再开。
+     */
+    var isPreloadBatchEnabled: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.preloadBatchEnabled, false)
+        set(value) = appCtx.putPrefBoolean(PreferKey.preloadBatchEnabled, value)
+
     // 12. 朗读封面跑马灯边框开关
     var readAloudCoverMarqueeEnabled: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.readAloudCoverMarqueeEnabled, false)

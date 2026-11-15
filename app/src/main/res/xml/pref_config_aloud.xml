@@ -14,6 +14,14 @@
             android:summary="@string/ignore_audio_focus_summary"
             android:title="@string/ignore_audio_focus_title" />
 
+        <!-- 11-15：后台批量预热（默认关闭）。依赖 UTTS 侧 batch_json 协议；
+             换回旧版引擎时开启只会白多合成一次，所以默认关。 -->
+        <io.legado.app.lib.prefs.SwitchPreference
+            android:defaultValue="false"
+            android:key="preloadBatchEnabled"
+            android:summary="把后面几段打包交给 UTTS 并行合成并存入其缓存，播放时直接命中。需配合支持批量预热的 UTTS 版本；默认关闭。"
+            android:title="后台批量预热（实验）" />
+
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="false"
             android:key="pauseReadAloudWhilePhoneCalls"
