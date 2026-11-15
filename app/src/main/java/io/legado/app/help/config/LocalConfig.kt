@@ -64,9 +64,11 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
         get() = isLastVersion(1, "ruleHelpVersion")
 
     val needUpHttpTTS: Boolean
-        // 6 → 7：「内置TTS插件」的 id 由正数 1780805418993 改为负数 -30，
-        // 使其纳入 deleteDefault(id < 0) 的覆盖范围。老用户的 httpTtsVersion
-        // 早已置成 6，不升版本号则永远不会重新导入，内置引擎脚本无法更新。
+        // 6 → 7：让老用户（httpTtsVersion 早已置成 6）也重新走一次默认引擎导入。
+        // 起因：「内置TTS插件」的 id 始终是正数 1780805418993（HttpTTS.BUILTIN_TTS_PLUGIN_ID），
+        // 不在 deleteDefault(id < 0) 的覆盖范围内，而 insert 会主键冲突使整批导入回滚，
+        // 内置引擎因此永远无法随 APP 升级更新。现改为按固定 id 先删后插，
+        // 见 DefaultData.importDefaultHttpTTS；版本号升到 7 才会触发这次重新导入。
         get() = !isLastVersion(7, "httpTtsVersion")
 
     val needUpTxtTocRule: Boolean
