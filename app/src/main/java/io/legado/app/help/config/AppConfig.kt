@@ -1233,12 +1233,21 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
      */
     fun notifyUtssClearSynthCacheIfEnabled() {
         if (!gengxinRealtimeUpdate) return
+        // ① 直接删共享缓存目录（UTTS 11-15 晚已把 synth_cache 挪到
+        //    /storage/emulated/0/Download/chajian/utts_synth_cache，公共目录本 App 删得动）——
+        //    这是正路：删完下一次合成就是全新，不依赖对方进程活着/有没有监听。
+        runCatching { FileUtils.delete(UTSS_SYNTH_CACHE_DIR, false) }
+        // ② 顺手戳握手文件：旧版 UTTS（缓存仍在私有目录）收到后会自己整池清。
+        //    新版不再读它，留着不花成本，兼容回退版本。
         runCatching {
             val dir = File(io.legado.app.help.EngineDataDir.baseDir())
             if (!dir.exists()) dir.mkdirs()
             File(dir, ".clear_synth_cache").writeText(System.currentTimeMillis().toString())
         }
     }
+
+    /** 与 UTTS `SynthesizedAudioCache.SHARED_ROOT` 必须一致（跨 App 约定，改一处要改两处）。 */
+    private const val UTSS_SYNTH_CACHE_DIR = "/storage/emulated/0/Download/chajian/utts_synth_cache"
 
     /**
      * 清理全部临时缓存：
