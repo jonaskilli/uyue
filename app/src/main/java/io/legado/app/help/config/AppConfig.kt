@@ -1211,6 +1211,17 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
                 FileUtils.delete(it.absolutePath)
             }
         }
+        // 11-15 晚：系统 TTS 引擎（UTTS）还有一层**它自己**的合成缓存
+        // （cacheDir/synth_cache，按文本+音色+参数做键），本 App 删不到它——
+        // 那是另一个 App 的私有目录。留一个握手文件：UTTS 每 3 秒最多看一眼它的
+        // mtime，变了就整池清空。不这么做的话，清空音频后重听会全部命中旧缓存：
+        // 秒回、且日志页上不出现请求卡（实测 21:23 段 24–27 全命中，首卡是段 28，
+        // 被误读成「起点跳到页尾」）。
+        runCatching {
+            val dir = File(io.legado.app.help.EngineDataDir.baseDir())
+            if (!dir.exists()) dir.mkdirs()
+            File(dir, ".clear_synth_cache").writeText(System.currentTimeMillis().toString())
+        }
     }
 
     /**
