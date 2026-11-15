@@ -816,11 +816,34 @@ abstract class BaseReadAloudService : BaseService(),
      * - 未朗读：删除所有缓存
      * 由子类实现 deleteGengxinCachesAfter() 删除指定段之后的缓存。
      */
+    /**
+     * 通知系统 TTS 引擎（UTTS）清掉它自己的合成缓存（11-15 晚）。
+     *
+     * 为什么需要：UTTS 另有一层按「文本+音色+参数」做键的 synth_cache（私有目录），
+     * 本 App 删不到（跨 App 沙箱）；不清的话，改完角色再听会命中旧音频，且命中段
+     * 在 UTTS 日志页上看起来像「没请求过」。
+     *
+     * 挂在哪：只跟「实时更新音频」这条路走（AppConfig.gengxinRealtimeUpdate）——
+     * 用户 11-15 晚定调「直接启用也不行，接入这个开关比较好，开或不开由用户选」。
+     * 所以不放在 clearTtsCache()（那个会被很多无关动作调用）。
+     */
+    private fun notifyUtssClearSynthCache() {
+        runCatching {
+            val dir = java.io.File(io.legado.app.help.EngineDataDir.baseDir())
+            if (!dir.exists()) dir.mkdirs()
+            java.io.File(dir, ".clear_synth_cache")
+                .writeText(System.currentTimeMillis().toString())
+        }.onFailure { AppLog.put("通知 UTTS 清合成缓存失败: ${it.localizedMessage}") }
+    }
+
     private fun handleGengxinTrigger() {
         gengxinHandling = true
         val speaking = isPlay()
         val curIndex = nowSpeak
         AppLog.put("gengxin 触发处理: speaking=$speaking, curIndex=$curIndex")
+        // 只有走到这里（=开关打开且信号真的变了）才连带清 UTTS 的合成缓存，
+        // 否则用户关着开关也会被清——那就成了"强制更新"。
+        notifyUtssClearSynthCache()
         if (speaking) {
             // 正在朗读：只删除当前段之后的缓存，当前段及之前保留
             deleteGengxinCachesAfter(curIndex)
