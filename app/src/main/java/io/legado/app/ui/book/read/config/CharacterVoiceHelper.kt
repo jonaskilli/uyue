@@ -116,9 +116,31 @@ object CharacterVoiceHelper {
             records.put(newChar)
         }
         val jsonData = records.toString()
-        writeTxtFile("characterRecords.json", jsonData)
-        writeTxtFile("shuming.$bookName.json", jsonData)
-        createGengxinFile(records)
+        // 写盘必须与 getCharacterRecords 的读口径对称：主表 characterRecords.json 归属的是
+        // cunfang.txt 里那本书，只有「当前编辑的书 == cunfang.txt」时它才代表本书。
+        //
+        // 不一致时（换书瞬间：data.json/阅读器已切到 B，规则侧还没把 cunfang 切过去）
+        // 无条件写主表会造成三连伤：
+        //   ① 主表被 B 的角色顶掉，A 的角色整表消失；
+        //   ② 随后 ensureBookSynced 换书时又会把这张脏主表备份进 shuming.A.json，A 的存档被永久覆盖；
+        //   ③ gengxin.json 是三方共享邮筒且无书名标记，B 的表会被下游当成 A 的更新消费。
+        // 规则侧 v1.7.10 的归属校验只在「书名一致」时才跑，正好拦不住这种不一致时刻，故必须在源头挡。
+        val isCurrentBook = bookName.trim() == readTxtFile("cunfang.txt").ifEmpty { "默认" }.trim()
+        if (isCurrentBook) {
+            writeTxtFile("characterRecords.json", jsonData)
+            writeTxtFile("shuming.$bookName.json", jsonData)
+            createGengxinFile(records)
+        } else {
+            // 只落本书自己的存档，主表与邮筒一概不碰——等规则侧换书同步把 cunfang 切过来后，
+            // 那份存档会按正常路径被载入主表。
+            writeTxtFile("shuming.$bookName.json", jsonData)
+            android.util.Log.i(
+                "CharacterVoiceHelper",
+                "saveCharacterVoice: 当前书「$bookName」≠ cunfang「" +
+                    readTxtFile("cunfang.txt").ifEmpty { "默认" }.trim() +
+                    "」，只写本书存档，跳过主表与 gengxin"
+            )
+        }
     }
 
     private fun createGengxinFile(records: JSONArray) {
