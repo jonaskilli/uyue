@@ -2014,6 +2014,60 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     "本次删除 $deleted 个、失败 $failed 个，" +
                     "耗时 ${System.currentTimeMillis() - startedAt}ms$tail"
         )
+        // UTTS 预合成的共享缓存（.pcm）按同一保留时间清旧（11-16：自动清理接入预合成缓存）。
+        // 只有系统 TTS 链路接它：synth_cache 只由 UTTS 引擎产生，HTTP 朗读服务不经过它。
+        cleanUtssSynthCache(keepTime)
+    }
+
+    /**
+     * 自动清理 UTTS 共享预合成缓存（/storage/emulated/0/Download/chajian/utts_synth_cache 的 .pcm）。
+     *
+     * 与本地缓存清理的差异（为什么不同，两套口径都有意为之）：
+     *  - 本地缓存按「水位 + 保留时间」清：水位防抖动，避免刚合成的段被马上清掉又重合成；
+     *  - synth_cache 的缓存键是「文本+音色+参数」，没有章节概念，播放永远走本地缓存，
+     *    对它没有任何依赖，旧 .pcm 只占磁盘——过了保留时间直接删，不吃水位；
+     *  - 没有章节保护前缀可查（键里没有章节），也不存在静音占位文件。
+     * 纪律与本地清理一致：最旧先删、单次限额、时间预算、每 50 个歇 1 秒，
+     * 绝不因清理拖慢朗读；只删 .pcm（UTTS 缓存键文件），不碰子目录与其它文件。
+     * 手动「清除全部缓存音频」走 [AppConfig.notifyUtssClearSynthCache] 整池清，与本函数无关。
+     */
+    private suspend fun cleanUtssSynthCache(keepTime: Long) {
+        val startedAt = System.currentTimeMillis()
+        val entries = AppConfig.listUtssSynthCacheEntries() ?: return
+        val pcmFiles = entries.filter { it.isFile && it.name.endsWith(".pcm") }
+        if (pcmFiles.isEmpty()) return
+        var deleted = 0
+        var failed = 0
+        var stoppedByLimit = false
+        // 最旧优先。按修改时间升序排好后，一旦遇到未过期的文件即可整段收工：
+        // 它后面的只会更新，不存在「后面的反而更旧」的情况（本地清理不能这样断，
+        // 是因为那里还有保护前缀和静音占位两类与时间无关的删除条件）。
+        val candidates = pcmFiles.sortedBy { it.lastModified() }
+        for (index in candidates.indices) {
+            val fileItem = candidates[index]
+            if (System.currentTimeMillis() - fileItem.lastModified() <= keepTime) break
+            if (deleted >= BaseReadAloudService.AUDIO_CACHE_MAX_PER_RUN ||
+                System.currentTimeMillis() - startedAt >= BaseReadAloudService.AUDIO_CACHE_MAX_DURATION_MS
+            ) {
+                stoppedByLimit = true
+                break
+            }
+            val ok = runCatching { FileUtils.delete(fileItem.absolutePath) }.getOrDefault(false)
+            if (ok) deleted++ else failed++
+            if (deleted % BaseReadAloudService.AUDIO_CACHE_BATCH_SIZE == 0 &&
+                deleted < BaseReadAloudService.AUDIO_CACHE_MAX_PER_RUN &&
+                index < candidates.lastIndex
+            ) {
+                delay(BaseReadAloudService.AUDIO_CACHE_BATCH_DELAY_MS)
+            }
+        }
+        if (deleted == 0 && failed == 0 && !stoppedByLimit) return
+        val tail = if (stoppedByLimit) "，已达单次限额或时间预算，剩余下次继续" else "，本轮扫描完毕"
+        AppLog.put(
+            "UTTS共享缓存清理: 共 ${pcmFiles.size} 个 .pcm，" +
+                    "本次删除 $deleted 个、失败 $failed 个，" +
+                    "耗时 ${System.currentTimeMillis() - startedAt}ms$tail"
+        )
     }
 
     private fun deleteCurrentSpeakFile() {
