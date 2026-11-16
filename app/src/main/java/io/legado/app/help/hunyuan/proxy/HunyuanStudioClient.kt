@@ -51,6 +51,8 @@ object HunyuanStudioClient {
     const val MODEL_ID_HY3 = "hy3"
     /** 混元4 的 chatModelId（2026-11-04 抓包为 hy4；旧 hy4-preview 已失效）。普通/思考模式共用。 */
     const val MODEL_ID_HY4 = "hy4"
+    /** 混元4 Flash 的 chatModelId（2026-11-16 实测更快，普通/思考模式共用； effort=no_think/high）。 */
+    const val MODEL_ID_HY4_FLASH = "hy4-flash"
 
     /** effort：快速回答（关闭深度思考）。 */
     const val EFFORT_FAST = "no_think"
@@ -68,9 +70,14 @@ object HunyuanStudioClient {
      */
     fun resolve(model: String): Pair<String, String> {
         val lower = model.lowercase()
+        val isHy4Flash = lower.contains("hunyuan4-flash") || lower.contains("hy4-flash")
         val isHy4 = lower.contains("hunyuan4") || lower.contains("hy4")
         val think = lower.contains("think") || lower.contains("reason") || lower.contains("思考")
-        val chatModelId = if (isHy4) MODEL_ID_HY4 else MODEL_ID_HY3
+        val chatModelId = when {
+            isHy4Flash -> MODEL_ID_HY4_FLASH
+            isHy4 -> MODEL_ID_HY4
+            else -> MODEL_ID_HY3
+        }
         val effort = if (think) EFFORT_THINK else EFFORT_FAST
         return chatModelId to effort
     }

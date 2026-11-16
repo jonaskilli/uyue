@@ -257,9 +257,6 @@ object VideoDownloader {
             restored = true
         }
         scope.launch {
-            // 装完新版本必须先打开一次 App 才会执行目录迁移；这里主动触发，
-            // 不依赖后续是否访问保存目录，也避免「只装不看」时目录一直没变化
-            runCatching { saveRootDir }
             runCatching { restore() }
         }
     }
@@ -695,57 +692,13 @@ object VideoDownloader {
 
     /** 保存目录名：A 开头，在文件管理器里排在中文目录前面，方便找 */
     const val SAVE_ROOT_NAME = "A保存视频"
-    private const val OLD_SAVE_ROOT_NAME = "保存视频"
 
-    /**
-     * 把旧目录搬到新目录：同一外部存储分区里 renameTo 只是改目录项，瞬时完成、不复制数据，
-     * 已下载的视频、分片、封面、下载记录.json 都跟着过去。
-     * 公共 Download 分区有时会拒绝「整体改名」，这时退化成逐项搬；全都没搬成才继续用旧目录，
-     * 绝不让已有视频凭空消失。每一步都写日志，方便在应用日志里直接核对结果。
-     */
+    /** 保存目录固定使用 A保存视频；旧目录不再自动迁移，如需保留请用户自行移动或改名。 */
     private val saveRootDir: File by lazy {
-        val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val newDir = File(downloads, SAVE_ROOT_NAME)
-        val oldDir = File(downloads, OLD_SAVE_ROOT_NAME)
-        val granted = Environment.isExternalStorageManager()
-        if (!oldDir.isDirectory) {
-            AppLog.put("保存目录: 旧目录不存在，直接使用 $SAVE_ROOT_NAME")
-            return@lazy newDir
-        }
-        if (!newDir.isDirectory && oldDir.renameTo(newDir)) {
-            AppLog.put("保存目录已改名：$OLD_SAVE_ROOT_NAME → $SAVE_ROOT_NAME")
-            return@lazy newDir
-        }
-        val entries = oldDir.listFiles()
-        if (entries == null) {
-            AppLog.put("保存目录改名失败：读不到旧目录（权限=$granted），继续沿用 $OLD_SAVE_ROOT_NAME")
-            return@lazy oldDir
-        }
-        // 整体改名被拒或新目录已存在：逐项搬，同名条目保留新目录里的
-        if (!newDir.isDirectory) newDir.mkdirs()
-        var moved = 0
-        var failed = 0
-        entries.forEach { f ->
-            val target = File(newDir, f.name)
-            if (target.exists()) {
-                moved++
-            } else if (f.renameTo(target)) {
-                moved++
-            } else {
-                failed++
-            }
-        }
-        if (failed == 0 && oldDir.listFiles().isNullOrEmpty()) oldDir.delete()
-        AppLog.put(
-            "保存目录迁移: 权限=$granted，旧目录 ${entries.size} 项，搬入/同名 $moved 项，" +
-                "失败 $failed 项，当前使用 ${newDir.name}，" +
-                "旧目录${if (oldDir.exists()) "仍存在" else "已移除"}"
+        File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            SAVE_ROOT_NAME
         )
-        if (moved == 0 && entries.isNotEmpty()) {
-            AppLog.put("保存目录改名失败，继续沿用 $OLD_SAVE_ROOT_NAME")
-            return@lazy oldDir
-        }
-        newDir
     }
 
     /** 供 AdFilter 等共用同一个根目录（迁移只做一次） */

@@ -7,6 +7,7 @@ import io.legado.app.BuildConfig
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
+import io.legado.app.data.entities.HttpTTS
 import io.legado.app.help.book.AiImageBookPrefs
 import io.legado.app.utils.GSON
 import io.legado.app.utils.canvasrecorder.CanvasRecorderFactory
@@ -571,6 +572,8 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
 
     var ttsEngine: String?
         get() = appCtx.getPrefString(PreferKey.ttsEngine)
+            .takeUnless { it.isNullOrBlank() }
+            ?: HttpTTS.BUILTIN_TTS_PLUGIN_ID.toString()
         set(value) {
             appCtx.putPrefString(PreferKey.ttsEngine, value)
         }

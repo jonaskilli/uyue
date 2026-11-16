@@ -590,6 +590,8 @@ fun ProxyScreen(
         "hunyuan3-think" to "hunyuan3-think",
         "hunyuan4" to "hunyuan4",
         "hunyuan4-think" to "hunyuan4-think",
+        "hunyuan4-flash" to "hunyuan4-flash",
+        "hunyuan4-flash-think" to "hunyuan4-flash-think",
         "hunyuan-image" to "混元生图",
         "doubao" to "豆包",
         "doubao-think" to "豆包-思考",
