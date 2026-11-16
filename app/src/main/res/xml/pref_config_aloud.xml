@@ -14,7 +14,7 @@
         <io.legado.app.lib.prefs.EditTextPreference
             android:defaultValue="5"
             android:key="preloadSpan"
-            android:summary="朗读时预合成后续段落音频，播放时直接命中缓存。0=关闭，建议 5；引擎较慢时可加大（上限 15）。非 U·TTS 勿启用此键。"
+            android:summary="朗读时预合成后续段落音频，播放时直接命中缓存。0=关闭，建议 5；引擎较慢时可加大（上限 15）。仅对支持预合成协议的引擎有效。"
             android:title="U·TTS预合成段数(段)"
             android:inputType="number"
             android:maxLines="1"
