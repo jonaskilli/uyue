@@ -1414,7 +1414,25 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         if ((nowSpeak - PRELOAD_START_AFTER) % PRELOAD_BATCH_SIZE != 0) return
         val chapterTitle = textChapter?.title ?: textChapter?.chapter?.title ?: ""
         val endIndex = contentList.size
-        launchPreloadBatch(nowSpeak, endIndex, chapterTitle)
+        // ===== 11-16 二修（真机两轮实锤「预合成 8 段命中 1 段 → 0/3」）=====
+        //
+        // 一修（f035aed）只解决了「预热不触发」；这轮暴露第二个问题：
+        // **备货起点是 nowSpeak —— 正在播的这一段**。预热串行备 nowSpeak..nowSpeak+2，
+        // 备完第 1 段（约 1.6~5s）时播放早就越过它了：真机 17:26 时间线——
+        //   17:26:23.311 播放请求段44「青年：现在的目的？」
+        //   17:26:24.767 预热请求   「　　青年：现在的目的？」 ← 备的就是它！
+        //   17:26:26.150 预合成完成段44                      ← 段已开播，白做
+        //   17:26:26.533 播放请求段45「哲人：你的朋友…」      ← 这段从未被预热
+        // 慢插件轮（17:11）同款：段14/25/30/34 播放先到 4~10 秒。两轮两个插件
+        // 模式一致 ⇒ 备的是「现在时」，永远慢播放一拍。
+        //
+        // 修法：起点前移 [PRELOAD_BATCH_SIZE] 段（跳过正在播的和马上要播的）。
+        // 预热串行 3 段 ≈5s（快插件）~14s（慢插件），播放走 4 段 ≈12s+——
+        // 快插件富余 7s，慢插件虽勉强但那本来就是预热追不上的插件，命中
+        // 与否先由插件速度决定，不因起点错位再额外损失。
+        // 出界保护：launchPreloadBatch 内 limit=minOf(start+SPAN, end)，
+        // start ≥ end 时链空转（okCount=0），无副作用。
+        launchPreloadBatch(nowSpeak + PRELOAD_BATCH_SIZE, endIndex, chapterTitle)
     }
 
     private fun updateNextPos() {
