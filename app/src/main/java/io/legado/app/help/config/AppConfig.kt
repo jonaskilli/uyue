@@ -1631,6 +1631,18 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.preloadBatchEnabled, false)
         set(value) = appCtx.putPrefBoolean(PreferKey.preloadBatchEnabled, value)
 
+    /**
+     * 11-17：预热备货段数（每次预热触发往后续备几段），默认 5。
+     *
+     * 03-18 装机台账：PRELOAD_SPAN=3 时备货 1.5 段/分钟，播放消耗 15 段/分钟，
+     * 预热只覆盖 10%。备货量改用户可调：值越大命中越多，跳段时白备的也越多
+     * （每段成本只是几秒插件时间）。设 1~15 合理范围，代码再 clamp 到 1..15。
+     */
+    var preloadSpan: Int
+        get() = (appCtx.getPrefString(PreferKey.preloadSpan, "5")?.toIntOrNull() ?: 5)
+            .coerceIn(1, 15)
+        set(value) = appCtx.putPrefString(PreferKey.preloadSpan, value.toString())
+
     // 12. 朗读封面跑马灯边框开关
     var readAloudCoverMarqueeEnabled: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.readAloudCoverMarqueeEnabled, false)

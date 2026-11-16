@@ -22,6 +22,16 @@
             android:summary="把后面几段打包交给 UTTS 并行合成并存入其缓存，播放时直接命中。需配合支持批量预热的 UTTS 版本；默认关闭。"
             android:title="后台批量预热（实验）" />
 
+        <!-- 11-17：预热备货段数，默认 5（1~15）。 -->
+        <io.legado.app.lib.prefs.EditTextPreference
+            android:defaultValue="5"
+            android:key="preloadSpan"
+            android:summary="每次预热往后续备几段。越大命中越多，跳段时白备的也越多；慢插件（如讯飞配音）建议 5~10。默认 5。"
+            android:title="预热备货段数"
+            android:inputType="number"
+            android:maxLines="1"
+            app:iconSpaceReserved="false" />
+
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="false"
             android:key="pauseReadAloudWhilePhoneCalls"

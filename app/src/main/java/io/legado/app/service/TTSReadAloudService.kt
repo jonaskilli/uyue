@@ -107,8 +107,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 11-16：由「每批 4 段、并发」改为「链式串行、每次触发备 N 段」。
          * 取 3 的理由：串行下每段约 1.3 秒，3 段≈4 秒，刚好是播放 1~2 段的时长，
          * 既不堆积、又能持续领先播放；比原来一次 4 并发更稳（并发会被串行门挡住）。
+         *
+         * 11-17：改为用户可调（[AppConfig.preloadSpan]，默认 5）。03-18 装机台账
+         * span=3 备货 1.5 段/分钟 vs 播放消耗 15 段/分钟（预热只覆盖 10%），用户令
+         * 「这个应该让自己设置」——默认 5 提一档，慢插件用户可自行调大。
          */
-        private const val PRELOAD_SPAN = 3
+        private val PRELOAD_SPAN get() = AppConfig.preloadSpan
         /**
          * 单个预热段的等待上限（毫秒）。
          *

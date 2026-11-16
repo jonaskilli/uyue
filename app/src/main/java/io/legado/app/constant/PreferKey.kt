@@ -334,6 +334,9 @@ object PreferKey {
      */
     const val preloadBatchEnabled = "preloadBatchEnabled"
 
+    // 11-17：预热备货段数（每次预热触发往后续备几段），默认 5
+    const val preloadSpan = "preloadSpan"
+
     // 朗读封面跑马灯边框
     const val readAloudCoverMarqueeEnabled = "readAloudCoverMarqueeEnabled"
     const val readAloudCoverMarqueeSpeed = "readAloudCoverMarqueeSpeed"
