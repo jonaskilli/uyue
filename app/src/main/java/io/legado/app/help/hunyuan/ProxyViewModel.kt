@@ -135,6 +135,19 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.setBailianConfigList(bailianConfigs.value)
     }
 
+    /**
+     * 浏览器页「百炼模型名」输入框的内容：一键捕获时写入配置 model_id 的唯一来源。
+     * 必须独立持久化，不能从选中的配置反推——否则一键获取新开空白槽位（配置里没有
+     * model_id）或刷新页面时，会把用户刚输入的模型名重置回 qwen3.8-max，等于白输。
+     */
+    val bailianModelName =
+        MutableStateFlow(prefs.getString("bailian_model_name", "qwen3.8-max") ?: "qwen3.8-max")
+
+    fun setBailianModelName(name: String) {
+        bailianModelName.value = name
+        prefs.edit().putString("bailian_model_name", name).apply()
+    }
+
     /** 设置百炼配置（写入选中下标并持久化+应用）。 */
     fun setBailianConfig(value: String) {
         val i = bailianSelectedIndex.value
@@ -211,12 +224,10 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         if (bxUa.isNotBlank()) o.put("bx_ua", bxUa)
         if (bxEt.isNotBlank()) o.put("bx_et", bxEt)
         if (bxUmidToken.isNotBlank()) o.put("bx_umidtoken", bxUmidToken)
-        // 模型名：浏览器页显式传入了非空值 → 覆盖；否则保留配置里已有的（首次给默认值）
-        if (modelId.isNotBlank()) {
-            o.put("model_id", modelId)
-        } else if (!o.has("model_id")) {
-            o.put("model_id", "qwen3.8-max")
-        }
+        // 模型名一律以浏览器页输入框为准：显式传入优先，其次取持久化的输入框值，
+        // 都为空才回默认。绝不保留旧配置里的 model_id，否则用户改了输入名也不生效。
+        val finalModelId = modelId.ifBlank { bailianModelName.value }.ifBlank { "qwen3.8-max" }
+        o.put("model_id", finalModelId)
         setBailianConfig(o.toString())
     }
 

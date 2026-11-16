@@ -344,6 +344,7 @@ fun App(vm: ProxyViewModel) {
     LaunchedEffect(bailianConfigFlow) { bailianConfig = bailianConfigFlow }
     val bailianConfigsFlow by vm.bailianConfigsFlow.collectAsState()
     val bailianSelIdx by vm.bailianSelectedIndex.collectAsState()
+    val bailianModelName by vm.bailianModelName.collectAsState()
 
     var provider by remember { mutableStateOf(providerFlow) }
     var cookieText by remember { mutableStateOf(cookiesFlow.getOrNull(selectedIdx) ?: "") }
@@ -521,9 +522,10 @@ fun App(vm: ProxyViewModel) {
                     onClearCredentials = { vm.clearProviderCredentials(it) },
                     onLongCatCaptured = { m, t, c, u -> vm.setLongCatFromRequest(m, t, c, u) },
                     onBailianCaptured = { c, ua, et, um, mid -> vm.setBailianFromRequest(c, ua, et, um, mid) },
-                    bailianModel = runCatching {
-                        org.json.JSONObject(bailianConfigFlow).optString("model_id", "qwen3.8-max")
-                    }.getOrNull()?.ifBlank { null } ?: "qwen3.8-max",
+                    // 模型名只认输入框持久化的值，不再从选中配置的 model_id 反推，
+                    // 避免一键获取新开空槽位/刷新页面时把用户输入改回默认的 qwen3.8-max
+                    bailianModel = bailianModelName,
+                    onBailianModelChange = { vm.setBailianModelName(it) },
                     bailianCount = bailianConfigsFlow.count { it.isNotBlank() },
                     onCookieExtracted = {
                         vm.updateSelectedCookie(it)
@@ -1067,6 +1069,7 @@ fun BrowserScreen(
     onLongCatCaptured: (String, String, String, String) -> Unit,
     onBailianCaptured: (String, String, String, String, String) -> Unit,
     bailianModel: String = "qwen3.8-max",
+    onBailianModelChange: (String) -> Unit,
     bailianCount: Int = 0,
     onCookieExtracted: (String) -> Unit,
     onDeepSeekTokenExtracted: (String) -> Unit,
@@ -1087,9 +1090,11 @@ fun BrowserScreen(
     val capturedToken = remember { mutableStateOf<String?>(null) }
     val capturedLongCat = remember { mutableStateOf<LongCatCaptured?>(null) }
     val capturedBailian = remember { mutableStateOf<BailianCaptured?>(null) }
-    // 百炼模型名：默认 qwen3.8-max，可手动改；自动/手动捕获时随凭证一起写入配置
+    // 百炼模型名输入框：值由用户输入驱动并持久化，自动/手动捕获都读这里。
+    // 关键：不能随选中配置的 model_id 反向同步——一键获取会新开空白槽位（没有
+    // model_id），旧逻辑在那里把输入改回默认 qwen3.8-max，导致用户输的模型名失效。
+    // 这里只在首次进入时取持久化的上次输入，之后任何配置变化都不动它。
     var bailianModelInput by remember { mutableStateOf(bailianModel) }
-    LaunchedEffect(bailianModel) { if (bailianModel.isNotBlank()) bailianModelInput = bailianModel }
     // 自动捕获去重：同一个 bx 指纹（ua+et）只自动写入一次，避免每个 RPC 请求都触发保存
     val lastAutoBailianKey = remember { mutableStateOf<String?>(null) }
     // 自动捕获写入节流：bx-ua 每个请求都会变，光靠指纹去重挡不住刷屏，再加最小间隔
@@ -1552,7 +1557,11 @@ fun BrowserScreen(
                 Spacer(Modifier.width(6.dp))
                 // 模型名：捕获的凭证不带模型名（在 RPC 请求体里，拦截器看不到），手动设定
                 CField(
-                    value = bailianModelInput, onValueChange = { bailianModelInput = it },
+                    value = bailianModelInput,
+                    onValueChange = {
+                        bailianModelInput = it
+                        onBailianModelChange(it)
+                    },
                     placeholder = "模型名",
                     singleLine = true,
                     modifier = Modifier.width(100.dp).heightIn(min = CompactBtnHeight)
