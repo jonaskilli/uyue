@@ -94,15 +94,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 引擎提交返回 SUCCESS 却连 onStart 都不回调时，旧逻辑要等满
          * `sysTtsSynthesizeTimeout`（默认 120 秒）——真机 06:20 就是这样卡住的。
          *
-         * 11-17 二调（03:28 Legado24 实锤「慢被误判成死」）：8 秒对快插件够用，
+         * 11-17 二调（03:28 Legado24 实锤「慢被误判成死」）：固定 8 秒对快插件够用，
          * 但慢链路会冤枉——规则姓名分析 31.2s + UTTS 内部排队 3s，UTTS 实际已在
-         * 处理（内部 onSynthesizeStart 有记录），系统 onStart 却没在 8 秒窗口内
-         * 到达 → 看门狗判死 → 清引擎重试 → 每轮都撞墙 → 三轮耗尽（旧代码当时
-         * 还会静音占位跳句）。慢 ≠ 失败：放宽到 30 秒（快插件无感——onStart
-         * 通常 1~4 秒就到，看门狗只是兜底；慢链路多给 22 秒免冤死）。
-         * 若仍误判再考虑 UTTS 受理 ack 协议（区分「无响应」与「正在处理」）。
+         * 处理（内部 onSynthesizeStart 有记录），系统 onStart 却没在窗口内到达。
+         *
+         * 11-17 三调（用户令「人家原设计 120 秒，我用 20 秒已缩很多，你用 8 秒不合适」）：
+         * 固定值都不对——用户可把总超时设到 20s，8s 占一半太激进，30s 又会顶穿总超时。
+         * 改为**跟随总超时联动**：`min(总超时, 30s)`，且不低于 8s。
+         *   总超时 120s（默认）→ 看门狗 30s（覆盖慢分析 31s 场景差 1s，可接受，
+         *     且 onStart 后还有完整总超时等结果）；
+         *   总超时 20s（用户现设）→ 看门狗 8s（不顶穿总超时，慢请求由总超时兜底）。
+         * 总超时本身就是用户显式设的「最多等多久」，看门狗只该是它的前置快筛。
          */
-        private const val FIRST_CALLBACK_TIMEOUT_MS = 30_000L
+        private val firstCallbackTimeoutMs: Long
+            get() = (AppConfig.sysTtsSynthesizeTimeout * 1000L).coerceAtMost(30_000L)
+                .coerceAtLeast(8_000L)
 
         /** 11-16：播放推进到本段之后才允许后台预热（用户令「开头不预热」）。 */
         private const val PRELOAD_START_AFTER = 3
@@ -239,7 +245,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 引擎**既没有 onStart 也没有 onDone/onError**，播放链一直等到
      * `sysTtsSynthesizeTimeout`（默认 120 秒）才放弃，用户看到的就是「卡住不动」。
      *
-     * 所以补一个「首回调看门狗」：提交后 [FIRST_CALLBACK_TIMEOUT_MS] 内
+     * 所以补一个「首回调看门狗」：提交后 [firstCallbackTimeoutMs] 内
      * 连 onStart 都没来，就判定引擎根本没接收这笔请求 → 立刻清实例走重试，
      * 不必陪它干等两分钟。
      *
@@ -713,7 +719,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 try {
                     // 11-16：先等「首回调」——引擎若根本没接手，没必要陪它等满 120 秒。
                     // 判据：窗口内既无 onStart、completer 也未完成 ⇒ 引擎没反应。
-                    val firstCb = withTimeoutOrNull(FIRST_CALLBACK_TIMEOUT_MS) {
+                    val firstCb = withTimeoutOrNull(firstCallbackTimeoutMs) {
                         while (!completer.isCompleted && !startedCallbacks.contains(currentUtteranceId)) {
                             delay(100L)
                         }
@@ -724,7 +730,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         synthesisTargetFiles.remove(currentUtteranceId)
                         clearTTS()
                         AppLog.put(
-                            "TTS首回调超时：提交 ${FIRST_CALLBACK_TIMEOUT_MS / 1000} 秒内引擎无 onStart，" +
+                            "TTS首回调超时：提交 ${firstCallbackTimeoutMs / 1000} 秒内引擎无 onStart，" +
                                 "已清除实例待重试: $currentUtteranceId"
                         )
                         throw SynthesisFirstCallbackTimeout()
