@@ -93,10 +93,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          *
          * 引擎提交返回 SUCCESS 却连 onStart 都不回调时，旧逻辑要等满
          * `sysTtsSynthesizeTimeout`（默认 120 秒）——真机 06:20 就是这样卡住的。
-         * 取 8 秒：正常插件从提交到 onStart 通常在 1~2 秒内，
-         * 留 4 倍余量已足够；慢引擎最坏也只是多花这 8 秒就重试。
+         *
+         * 11-17 二调（03:28 Legado24 实锤「慢被误判成死」）：8 秒对快插件够用，
+         * 但慢链路会冤枉——规则姓名分析 31.2s + UTTS 内部排队 3s，UTTS 实际已在
+         * 处理（内部 onSynthesizeStart 有记录），系统 onStart 却没在 8 秒窗口内
+         * 到达 → 看门狗判死 → 清引擎重试 → 每轮都撞墙 → 三轮耗尽（旧代码当时
+         * 还会静音占位跳句）。慢 ≠ 失败：放宽到 30 秒（快插件无感——onStart
+         * 通常 1~4 秒就到，看门狗只是兜底；慢链路多给 22 秒免冤死）。
+         * 若仍误判再考虑 UTTS 受理 ack 协议（区分「无响应」与「正在处理」）。
          */
-        private const val FIRST_CALLBACK_TIMEOUT_MS = 8_000L
+        private const val FIRST_CALLBACK_TIMEOUT_MS = 30_000L
 
         /** 11-16：播放推进到本段之后才允许后台预热（用户令「开头不预热」）。 */
         private const val PRELOAD_START_AFTER = 3
