@@ -1956,6 +1956,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private suspend fun removeCacheFile() {
         val startedAt = System.currentTimeMillis()
         val keepTime = AppConfig.audioCacheCleanTime
+        // UTTS 共享 synth_cache 清旧与本地清理**独立进行**（11-16 复核修正）：
+        // 本地缓存不足水位时本函数在下方提前 return，历史缓存少的用户永远走不到
+        // 函数末尾——共享缓存清旧若挂在末尾就跟着失效（装机验证 G1 会验不出）。
+        // 故挂在开头：无论本地清不清、本地目录可不可读，都执行。
+        // 它有自己的单次限额与时间预算，不会挤占下面的本地清理。
+        cleanUtssSynthCache(keepTime)
         val entries = FileUtils.listDirsAndFiles(ttsFolderPath) ?: return
         // 水位只按真正的音频文件算：.tmp / 子目录都不计入
         val audioFiles = entries.filter {
@@ -2031,13 +2037,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     "本次删除 $deleted 个、失败 $failed 个，" +
                     "耗时 ${System.currentTimeMillis() - startedAt}ms$tail"
         )
-        // UTTS 预合成的共享缓存（.pcm）按同一保留时间清旧（11-16：自动清理接入预合成缓存）。
-        // 只有系统 TTS 链路接它：synth_cache 只由 UTTS 引擎产生，HTTP 朗读服务不经过它。
-        cleanUtssSynthCache(keepTime)
     }
 
     /**
      * 自动清理 UTTS 共享预合成缓存（/storage/emulated/0/Download/chajian/utts_synth_cache 的 .pcm）。
+     *
+     * 由 [removeCacheFile] **开头**调用（11-16 复核修正：挂末尾会随本地水位提前
+     * return 而失效）；只有系统 TTS 链路调用——synth_cache 只由 UTTS 引擎产生，
+     * HTTP 朗读服务不经过它。
      *
      * 与本地缓存清理的差异（为什么不同，两套口径都有意为之）：
      *  - 本地缓存按「水位 + 保留时间」清：水位防抖动，避免刚合成的段被马上清掉又重合成；
