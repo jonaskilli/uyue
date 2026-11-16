@@ -1250,7 +1250,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
      * 只做枚举、不做删除——删哪些由调用方按保留时间决定；
      * 整池清走 [notifyUtssClearSynthCache]，与本函数是两条路。
      */
-    fun listUtssSynthCacheEntries(): List<File>? =
+    fun listUtssSynthCacheEntries(): Array<File>? =
         runCatching { FileUtils.listDirsAndFiles(UTSS_SYNTH_CACHE_DIR) }.getOrNull()
 
     /** 与 UTTS `SynthesizedAudioCache.SHARED_ROOT` 必须一致（跨 App 约定，改一处要改两处）。 */
