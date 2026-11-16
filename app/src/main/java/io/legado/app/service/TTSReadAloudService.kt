@@ -26,7 +26,6 @@ import io.legado.app.model.VnSubtitlePos
 import io.legado.app.constant.AppPattern
 import io.legado.app.constant.EventBus
 import io.legado.app.data.appDb
-import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.MediaHelp
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
@@ -936,14 +935,27 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
         val utteranceId = "${AppConst.APP_TAG}$index"
         val chapterTitle = textChapter?.title ?: textChapter?.chapter?.title ?: ""
-        return synthesizeText(text, utteranceId, index, chapterTitle, rawText) ?: run {
-            if (!AppConfig.ttsRetrySkipOnFail) {
-                throw NoStackTraceException(
-                    "TTS合成失败，超过最大重试次数${AppConfig.ttsRetryCount}次，文本：$text"
-                )
+        // 11-17 用户红线「绝对不能接受跳句」：重试耗尽后不再写静音占位，
+        // 改为**原地慢速循环重合成**——每 10 秒再来一轮完整重试（看门狗+引擎重建
+        // 都在 synthesizeText 内），成功才返回、播放队列才往下走。
+        // 极端故障的表现=朗读停在这一段（不跳过、不漏内容），用户可手动干预。
+        // 「失败后跳过继续朗读」开关（ttsRetrySkipOnFail）保留但语义收紧：
+        // 开=旧行为（静音占位跳过）；关=本红线行为（原地等待）。默认 true 不变，
+        // 用户关掉即启用永不跳句。
+        var attemptRound = 0
+        while (true) {
+            val result = synthesizeText(text, utteranceId, index, chapterTitle, rawText)
+            if (result != null) return result
+            attemptRound++
+            if (AppConfig.ttsRetrySkipOnFail) {
+                AppLog.put("TTS合成失败，第 $attemptRound 轮耗尽，静音占位跳过: index=$index")
+                val fileName = silentPlaceholderName(rawText, chapterTitle, index)
+                return getSpeakFileAsMd5(fileName)
             }
-            val fileName = silentPlaceholderName(rawText, chapterTitle, index)
-            getSpeakFileAsMd5(fileName)
+            AppLog.put(
+                "TTS合成失败，第 $attemptRound 轮耗尽，10 秒后原地重试（永不跳句模式）: index=$index, 文本：${text.take(20)}"
+            )
+            delay(10_000L)
         }
     }
 
@@ -1096,6 +1108,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                             try {
                                 // 传已算好的 speakText：上面刚跑过一次脚本，别跑第二遍
                                 synthesizeSingle(i, speakText) ?: run {
+                                    // 11-17 永不跳句模式下这里只在 ttsRetrySkipOnFail=true 时到达；
+                                    // false 时 synthesizeSingle 内部已原地循环，永不返回 null。
                                     AppLog.put("TTS合成失败，使用静音文件占位: index=$i")
                                     // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
                                     getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
@@ -1105,10 +1119,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                                 // 绝不能写静音占位——此前统一走 withDefault 的静音兜底，
                                 // 真机日志实测「用户点停止 → onDestroy 取消 → 写静音占位」，
                                 // 那几段就永久哑了（占位文件写进正式缓存路径，重读也命中静音）。
+                                // 11-17 永不跳句模式：synthesizeSingle 不再抛"超过最大重试"，
+                                // 此 catch 只会接到真正的意外异常（磁盘满等）——按取消上报，
+                                // 不再吞掉写占位（旧逻辑吞异常导致开关"关闭后暂停朗读"形同虚设）。
                                 if (e is CancellationException) throw e
-                                AppLog.put("TTS合成异常，使用静音文件占位: index=$i, ${e.message}")
-                                // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
-                                getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
+                                throw e
                             }
                         }
                     }
