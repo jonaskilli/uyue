@@ -5,6 +5,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import org.json.JSONArray
 import org.json.JSONObject
 import android.speech.tts.TextToSpeech
@@ -18,6 +19,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import io.legado.app.R
+import io.legado.app.exception.SynthesisGiveUpException
 import io.legado.app.constant.AppConst
 import io.legado.app.help.audio.GainAudioProcessor
 import io.legado.app.constant.AppLog
@@ -100,11 +102,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          *
          * 11-17 三调（用户令「人家原设计 120 秒，我用 20 秒已缩很多，你用 8 秒不合适」）：
          * 固定值都不对——用户可把总超时设到 20s，8s 占一半太激进，30s 又会顶穿总超时。
-         * 改为**跟随总超时联动**：`min(总超时, 30s)`，且不低于 8s。
-         *   总超时 120s（默认）→ 看门狗 30s（覆盖慢分析 31s 场景差 1s，可接受，
-         *     且 onStart 后还有完整总超时等结果）；
-         *   总超时 20s（用户现设）→ 看门狗 8s（不顶穿总超时，慢请求由总超时兜底）。
+         * 改为**跟随总超时联动**：`min(总超时, 30s)`，且不低于 8s。实际取值：
+         *   总超时 ≥30s（默认 120）→ 看门狗 **30s**（覆盖慢分析 31s 场景，差 1s 可接受，
+         *     且 onStart 之后还有完整总超时等结果）；
+         *   总超时 20s → **20s**（= 总超时本身，不顶穿，慢请求由它兜底）；
+         *   总超时 10s → **10s**；≤8s → **8s**（保底）。
          * 总超时本身就是用户显式设的「最多等多久」，看门狗只该是它的前置快筛。
+         *
+         * 11-17 四调（用户问「要不要专门设个键」）：**不设键**。理由——
+         * ① 它是内部快筛，不承载用户意图；用户真正想调的是「最多等多久」＝总超时，
+         *    看门狗跟着它走就够，多一个键等于让用户面对两个含义重叠的超时；
+         * ② 加键就要加文案、加范围校验、加「两者不许打架」的约束，成本远大于收益；
+         * ③ 实际需要调的场景已有出口：想让它更宽容 → 调大总超时。
          */
         private val firstCallbackTimeoutMs: Long
             get() = (AppConfig.sysTtsSynthesizeTimeout * 1000L).coerceAtMost(30_000L)
@@ -131,6 +140,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 一段卡住就跳过，绝不能让后台挂 2 分钟（真机 06:40 就是这样假死 6 分钟的）。
          */
         private const val PRELOAD_SEGMENT_TIMEOUT_MS = 15_000L
+        /**
+         * 11-17：慢重试总预算（毫秒）——「永不跳句」模式下给失败段原地重来的总时长。
+         *
+         * 为什么要有上限：用户原话「只能满足一定的条件它才跳，不然一直等着一个不会合成的
+         * 卡在那儿也不行」。每 10 秒一轮，1 分钟 = 6 轮，足够覆盖插件抖动/短暂限流；
+         * 真合不出来的段（插件永久拒绝该文本等）不能无限占着播放队列。
+         *
+         * 超预算后的行为看用户那个已有的开关（「失败后跳过继续朗读」）：
+         *   开 → 静音占位跳过；关 → 暂停朗读。与开关文案完全一致。
+         */
+        private const val SLOW_RETRY_BUDGET_MS = 60_000L
     }
 
     // ====== TTS 核心 ======
@@ -802,7 +822,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 }
             }
             val result = tryOnce(attempt)
-            if (result != null) return result
+            if (result != null) {
+                // 11-17：重试后成功也要留痕（用户令「重试记录要有」）——
+                // 否则日志上只看到一次成功，看不出前面失败过几轮。
+                if (attempt > 0) {
+                    AppLog.put("[阅读→引擎] 重试成功：第 ${attempt + 1} 次尝试拿到音频（第 ${index + 1} 段，前 ${attempt} 次失败）")
+                }
+                return result
+            }
+            // 11-17：每次失败都留一行（用户令「日志上要有重试记录，不然搞不清楚为啥停顿」）。
+            // 这是**段级**日志（非 debug），会进日志页——用户就是靠它看懂「卡在哪一轮」。
+            AppLog.put(
+                "[阅读→引擎] 合成失败：第 ${attempt + 1}/${AppConfig.ttsRetryCount} 次尝试（第 ${index + 1} 段，文本：${text.take(20)}）"
+            )
 
             // 合成失败（非最后一次重试）：清除实例，让下一次重试时强制重建
             if (attempt < AppConfig.ttsRetryCount - 1) {
@@ -947,26 +979,59 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
         val utteranceId = "${AppConst.APP_TAG}$index"
         val chapterTitle = textChapter?.title ?: textChapter?.chapter?.title ?: ""
-        // 11-17 用户红线「绝对不能接受跳句」：重试耗尽后不再写静音占位，
-        // 改为**原地慢速循环重合成**——每 10 秒再来一轮完整重试（看门狗+引擎重建
-        // 都在 synthesizeText 内），成功才返回、播放队列才往下走。
-        // 极端故障的表现=朗读停在这一段（不跳过、不漏内容），用户可手动干预。
-        // 「失败后跳过继续朗读」开关（ttsRetrySkipOnFail）保留但语义收紧：
-        // 开=旧行为（静音占位跳过）；关=本红线行为（原地等待）。默认 true 不变，
-        // 用户关掉即启用永不跳句。
+        // 11-17 用户红线「绝对不能接受跳句」+ 用户二修「但也不能一直等一个合不出来的段」：
+        // 重试耗尽后不再**立刻**写静音占位，改「原地慢速循环重合成」，但**有总时长上限**。
+        //
+        // 链路（三档，全部沿用朗读设置里已有的键，不新增）：
+        //   ① 快重试：synthesizeText 内部按「TTS合成失败重试次数」（用户设，默认 3）跑，
+        //      每轮带首回调看门狗 + 引擎重建；
+        //   ② 慢重试：①全失败后，每 10 秒再来一轮，累计最多 SLOW_RETRY_BUDGET_MS（1 分钟）；
+        //      —— 这一档覆盖「插件抖一下、几十秒后恢复」的绝大多数情况；
+        //   ③ 超限（1 分钟仍合不出来）→ 看用户那个开关怎么设：
+        //        「失败后跳过继续朗读」= 开 → 静音占位跳过，继续下一段（旧行为）；
+        //        = 关 → **暂停朗读**（与该开关键文案「关闭后将暂停朗读」一致），
+        //              不写占位、不漏内容，用户手动继续后会重新合成。
+        val slowRetryDeadline = SystemClock.elapsedRealtime() + SLOW_RETRY_BUDGET_MS
         var attemptRound = 0
+        // 11-17：进慢重试前先留一行「要开始慢重试了」——用户令「日志上得有重试记录，
+        // 不然搞不清楚为啥停顿」。开头这一行 + 每轮一行 + 结局一行，三处构成完整证据链。
+        AppLog.put(
+            "[阅读→引擎] 开始慢重试：快重试已耗尽，" +
+                (if (AppConfig.ttsRetrySkipOnFail) "开关已开启 → 走静音占位跳过"
+                else "开关已关闭 → 每 10 秒重来一轮，总预算 ${SLOW_RETRY_BUDGET_MS / 1000} 秒") +
+                "（第 ${index + 1} 段，文本：${text.take(20)}）"
+        )
         while (true) {
             val result = synthesizeText(text, utteranceId, index, chapterTitle, rawText)
-            if (result != null) return result
+            if (result != null) {
+                if (attemptRound > 0) {
+                    AppLog.put("[阅读→引擎] 慢重试成功：第 $attemptRound 轮后拿到音频（第 ${index + 1} 段）")
+                }
+                return result
+            }
             attemptRound++
+            val overBudget = SystemClock.elapsedRealtime() >= slowRetryDeadline
             if (AppConfig.ttsRetrySkipOnFail) {
-                AppLog.put("TTS合成失败，第 $attemptRound 轮耗尽，静音占位跳过: index=$index")
+                AppLog.put("[阅读→引擎] 慢重试第 $attemptRound 轮耗尽，走静音占位跳过（第 ${index + 1} 段）")
                 val fileName = silentPlaceholderName(rawText, chapterTitle, index)
                 return getSpeakFileAsMd5(fileName)
             }
-            AppLog.put(
-                "TTS合成失败，第 $attemptRound 轮耗尽，10 秒后原地重试（永不跳句模式）: index=$index, 文本：${text.take(20)}"
-            )
+            if (overBudget) {
+                // 关开关 + 超预算：不写占位，交上层暂停朗读
+                AppLog.put(
+                    "[阅读→引擎] 慢重试第 $attemptRound 轮耗尽、已等满 ${SLOW_RETRY_BUDGET_MS / 1000} 秒，" +
+                        "开关「失败后跳过继续朗读」已关闭 → 暂停朗读（第 ${index + 1} 段，文本：${text.take(20)}）"
+                )
+                throw SynthesisGiveUpException(index, text)
+            }
+            val remainSec = ((slowRetryDeadline - SystemClock.elapsedRealtime()) / 1000).coerceAtLeast(0)
+            // 11-17 用户令「按你推荐的来」：每轮都打太吵（满预算会打 6 条），
+            // 只在**跨过整十秒节点**时打一条（60/50/40/30/20/10），保留进展感又不刷屏。
+            if (remainSec % 10 == 9L || remainSec <= 10) {
+                AppLog.put(
+                    "[阅读→引擎] 慢重试第 $attemptRound 轮耗尽，10 秒后重来（剩余 ${remainSec} 秒预算，第 ${index + 1} 段）"
+                )
+            }
             delay(10_000L)
         }
     }
@@ -1126,6 +1191,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                                     // 占位走独立文件名，绝不覆盖正式缓存，下次仍会重新合成
                                     getSpeakFileAsMd5(silentPlaceholderName(rawText, chapterTitle, i))
                                 }
+                            } catch (e: SynthesisGiveUpException) {
+                                // 11-17：「失败后跳过继续朗读」= 关，且慢重试 1 分钟预算耗尽。
+                                // 按该开关的文案「关闭后将暂停朗读」执行——暂停而不是静音占位，
+                                // 那段不会被写成哑文件，用户手动继续后会重新合成。
+                                withContext(Dispatchers.Main) {
+                                    pauseReadAloud(abandonFocus = false)
+                                }
+                                return@launch
                             } catch (e: Exception) {
                                 // 11-13：主动停止/翻页/切章导致的协程取消**不是合成失败**，
                                 // 绝不能写静音占位——此前统一走 withDefault 的静音兜底，
