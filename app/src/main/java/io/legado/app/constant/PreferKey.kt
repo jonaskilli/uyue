@@ -332,9 +332,7 @@ object PreferKey {
      * 后续单段请求命中缓存即秒回——目的是让「已合成时长」跑赢「已播放时长」。
      * 关闭时行为与改动前完全一致（逐段串行预取）。
      */
-    const val preloadBatchEnabled = "preloadBatchEnabled"
-
-    // 11-17：预热备货段数（每次预热触发往后续备几段），默认 5
+    // 11-17 二合一：U·TTS 预合成段数（0=关，1~15 开启），原 preloadBatchEnabled 开关键已并入
     const val preloadSpan = "preloadSpan"
 
     // 朗读封面跑马灯边框

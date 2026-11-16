@@ -1621,26 +1621,18 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.putPrefString(PreferKey.sysTtsVoiceName, value)
 
     /**
-     * 后台批量预热（11-15，默认关闭）。
+     * 11-17（二合一，用户拍板「单键，0=关」）：U·TTS 预合成段数——每次预热触发往后续备几段。
+     * 0 = 关闭后台预合成；1~15 = 开启并生效。
      *
-     * 为什么要默认关：它依赖 UTTS 侧的批量预热协议（`batch_json`）。
-     * 换回旧版 UTTS 或别的 TTS 引擎时，这个请求只会被当成普通合成——
-     * 白白多合成一次、还浪费一次 API。默认关掉，用户确认引擎支持后再开。
-     */
-    var isPreloadBatchEnabled: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.preloadBatchEnabled, false)
-        set(value) = appCtx.putPrefBoolean(PreferKey.preloadBatchEnabled, value)
-
-    /**
-     * 11-17：预热备货段数（每次预热触发往后续备几段），默认 5。
-     *
-     * 03-18 装机台账：PRELOAD_SPAN=3 时备货 1.5 段/分钟，播放消耗 15 段/分钟，
-     * 预热只覆盖 10%。备货量改用户可调：值越大命中越多，跳段时白备的也越多
-     * （每段成本只是几秒插件时间）。设 1~15 合理范围，代码再 clamp 到 1..15。
+     * 03-18 装机台账：span=3 时备货 1.5 段/分钟，播放消耗 15 段/分钟，预热只覆盖 10%。
+     * 值越大命中越多，跳段时白备的也越多（每段成本只是几秒插件时间）。
+     * 只在引擎为 U·TTS（支持 batch_json 预热协议）时有意义；其他引擎读到的
+     * 段数会被 launchPreloadBatch 的兼容守卫忽略（batch_json 不识别即静音丢弃），
+     * 旧版引擎用户建议填 0。
      */
     var preloadSpan: Int
         get() = (appCtx.getPrefString(PreferKey.preloadSpan, "5")?.toIntOrNull() ?: 5)
-            .coerceIn(1, 15)
+            .coerceIn(0, 15)
         set(value) = appCtx.putPrefString(PreferKey.preloadSpan, value.toString())
 
     // 12. 朗读封面跑马灯边框开关

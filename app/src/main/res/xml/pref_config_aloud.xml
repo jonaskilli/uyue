@@ -14,20 +14,14 @@
             android:summary="@string/ignore_audio_focus_summary"
             android:title="@string/ignore_audio_focus_title" />
 
-        <!-- 11-15：后台批量预热（默认关闭）。依赖 UTTS 侧 batch_json 协议；
-             换回旧版引擎时开启只会白多合成一次，所以默认关。 -->
-        <io.legado.app.lib.prefs.SwitchPreference
-            android:defaultValue="false"
-            android:key="preloadBatchEnabled"
-            android:summary="把后面几段打包交给 UTTS 并行合成并存入其缓存，播放时直接命中。需配合支持批量预热的 UTTS 版本；默认关闭。"
-            android:title="后台批量预热（实验）" />
-
-        <!-- 11-17：预热备货段数，默认 5（1~15）。 -->
+        <!-- 11-17 二合一（用户拍板「单键，0=关」）：U·TTS 预合成段数，0=关，1~15 开启，默认 5。
+             仅对 U·TTS 引擎生效（依赖其 batch_json 预热协议）；内置引擎或其他 TTS 不受影响，
+             但建议非 U·TTS 用户填 0。 -->
         <io.legado.app.lib.prefs.EditTextPreference
             android:defaultValue="5"
             android:key="preloadSpan"
-            android:summary="每次预热往后续备几段。越大命中越多，跳段时白备的也越多；慢插件（如讯飞配音）建议 5~10。默认 5。"
-            android:title="预热备货段数"
+            android:summary="U·TTS 专属：朗读时往后续备几段存入其缓存，播放到直接命中秒回。0=关闭；值越大命中越多，跳段白备也越多；慢插件（如讯飞配音）建议 5~10，默认 5。其他引擎请填 0。"
+            android:title="U·TTS预合成段数(段)"
             android:inputType="number"
             android:maxLines="1"
             app:iconSpaceReserved="false" />

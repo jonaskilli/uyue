@@ -855,7 +855,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 真正占时间的是云端合成（约 1.3 秒/段），与本函数是否分多段无关。
      */
     private fun launchPreloadBatch(start: Int, end: Int, chapterTitle: String) {
-        if (!AppConfig.isPreloadBatchEnabled) return
+        if (AppConfig.preloadSpan <= 0) return
         if (singleParagraphMode) return
         val tts = textToSpeech ?: return
         if (!ttsInitFinish) return
@@ -1456,7 +1456,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 触发频率与旧的合成循环口径一致（每 4 段一批），只是驱动源换了。
      */
     private fun maybePreloadFromPlayback() {
-        if (!AppConfig.isPreloadBatchEnabled) return
+        if (AppConfig.preloadSpan <= 0) return
         if (singleParagraphMode) return
         if (nowSpeak < PRELOAD_START_AFTER) return
         if ((nowSpeak - PRELOAD_START_AFTER) % PRELOAD_BATCH_SIZE != 0) return
