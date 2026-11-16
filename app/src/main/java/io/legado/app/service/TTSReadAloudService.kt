@@ -88,6 +88,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 4 段 × 约 3.4s 的最坏损失可接受；再大就会「跳一下损失十几秒算力」。
          */
         private const val PRELOAD_BATCH_SIZE = 4
+        /**
+         * 11-16：播放请求的「首回调看门狗」（毫秒）。
+         *
+         * 引擎提交返回 SUCCESS 却连 onStart 都不回调时，旧逻辑要等满
+         * `sysTtsSynthesizeTimeout`（默认 120 秒）——真机 06:20 就是这样卡住的。
+         * 取 8 秒：正常插件从提交到 onStart 通常在 1~2 秒内，
+         * 留 4 倍余量已足够；慢引擎最坏也只是多花这 8 秒就重试。
+         */
+        private const val FIRST_CALLBACK_TIMEOUT_MS = 8_000L
+
         /** 11-16：播放推进到本段之后才允许后台预热（用户令「开头不预热」）。 */
         private const val PRELOAD_START_AFTER = 3
         /**
@@ -138,6 +148,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private var playIndexJob: Job? = null
     /** 11-16：后台预热链（串行，一次只允许一条；见 launchPreloadBatch）。 */
     private var preloadChainJob: Job? = null
+    /** 11-16：STATE_ENDED 后重新拉起合成时的重入守卫（见该分支注释）。 */
+    private var resumeGuardAfterEnded = false
+
+    /** 11-16：首回调看门狗超时的内部信号（不走 Exception 抛给上层，仅用于跳出等待）。 */
+    private class SynthesisFirstCallbackTimeout : Exception("first callback timeout")
     private var playErrorNo = 0
     // 11-13：framework 双 onError 重载去重（见 onError 内注释）
     private val handledErrorCallbacks = java.util.Collections.synchronizedSet(HashSet<String>())
@@ -209,6 +224,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     )
     /** 把 TTS onDone/onError 回调转成挂起函数的 CompletableDeferred */
     private val synthesisCompleters = ConcurrentHashMap<String, CompletableDeferred<File?>>()
+    /**
+     * 11-16 用户实报（06:20 卡死）：`Legado51` 提交返回 SUCCESS 后，
+     * 引擎**既没有 onStart 也没有 onDone/onError**，播放链一直等到
+     * `sysTtsSynthesizeTimeout`（默认 120 秒）才放弃，用户看到的就是「卡住不动」。
+     *
+     * 所以补一个「首回调看门狗」：提交后 [FIRST_CALLBACK_TIMEOUT_MS] 内
+     * 连 onStart 都没来，就判定引擎根本没接收这笔请求 → 立刻清实例走重试，
+     * 不必陪它干等两分钟。
+     *
+     * 为什么盯 onStart 而不是 onDone：onStart 是「引擎已接手」的最早信号；
+     * 长句合成本身可能超过看门狗时长，所以只在**没有任何回调**时才触发。
+     */
+    private val startedCallbacks = ConcurrentHashMap.newKeySet<String>()
     /** utteranceId -> 合成目标临时文件 */
     private val synthesisTargetFiles = ConcurrentHashMap<String, File>()
     /**
@@ -393,6 +421,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private val ttsUtteranceListener = object : UtteranceProgressListener() {
         override fun onStart(s: String?) {
             LogUtils.d(TAG, "onStart synthesis utteranceId:$s")
+            // 11-16：首回调看门狗用（见 startedCallbacks 注释）
+            s?.let { startedCallbacks.add(it) }
         }
 
         override fun onDone(s: String?) {
@@ -400,6 +430,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 【诊断日志】回调到达（10-12 加，只记录不改逻辑）
             AppLog.putDebug("TTS回调 onDone id=$s")
             s ?: return
+            startedCallbacks.remove(s)
             val targetFile = synthesisTargetFiles.remove(s)
             val completer = synthesisCompleters.remove(s)
             if (completer != null) {
@@ -418,7 +449,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 11-13 巡检实锤：framework 会先回调新签名 onError(utteranceId, errorCode)
             // 再回调旧签名 onError(s)（同一事件两次），日志每条 -3 出现两行。
             // 这里登记已处理 id，旧重载据此幂等跳过（completer 只 complete 一次）。
-            if (utteranceId != null) handledErrorCallbacks.add(utteranceId)
+            if (utteranceId != null) {
+                handledErrorCallbacks.add(utteranceId)
+                startedCallbacks.remove(utteranceId)
+            }
             synthesisTargetFiles.remove(utteranceId)
             val completer = synthesisCompleters.remove(utteranceId)
             completer?.complete(null)
@@ -432,6 +466,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 handledErrorCallbacks.remove(s)
                 return
             }
+            startedCallbacks.remove(s)
             synthesisTargetFiles.remove(s)
             val completer = synthesisCompleters.remove(s)
             completer?.complete(null)
@@ -650,7 +685,27 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
             val synthesizedFile = if (result == TextToSpeech.SUCCESS) {
                 try {
+                    // 11-16：先等「首回调」——引擎若根本没接手，没必要陪它等满 120 秒。
+                    // 判据：窗口内既无 onStart、completer 也未完成 ⇒ 引擎没反应。
+                    val firstCb = withTimeoutOrNull(FIRST_CALLBACK_TIMEOUT_MS) {
+                        while (!completer.isCompleted && !startedCallbacks.contains(currentUtteranceId)) {
+                            delay(100L)
+                        }
+                        true
+                    }
+                    if (firstCb == null && !completer.isCompleted) {
+                        synthesisCompleters.remove(currentUtteranceId)
+                        synthesisTargetFiles.remove(currentUtteranceId)
+                        clearTTS()
+                        AppLog.put(
+                            "TTS首回调超时：提交 ${FIRST_CALLBACK_TIMEOUT_MS / 1000} 秒内引擎无 onStart，" +
+                                "已清除实例待重试: $currentUtteranceId"
+                        )
+                        throw SynthesisFirstCallbackTimeout()
+                    }
                     withTimeout(AppConfig.sysTtsSynthesizeTimeout * 1000L) { completer.await() }
+                } catch (_: SynthesisFirstCallbackTimeout) {
+                    null
                 } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
                     // 超时：引擎可能已死，清除实例以便重试时重新初始化
                     synthesisCompleters.remove(currentUtteranceId)
@@ -1162,6 +1217,27 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 updateNextPos()
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
+                // 11-16 用户实报（06:20 卡死）：「队列播空后整段死等，只能手动停」。
+                //
+                // 根因：合成循环是 `for (i in nowSpeak until endIndex)`，**只跑一轮**。
+                // 二次点朗读会把 nowSpeak 重置回当前落点（如 37），循环从 37 跑到 51；
+                // 若这段全命中缓存、秒回入队，循环很快结束。等 51 播完触发 STATE_ENDED，
+                // updateNextPos 把 nowSpeak 推到 52 —— **但 52 段从未被合成**，
+                // 且已无循环在跑，队列永远空着，表现为「播完一句就静音，等很久也不动」。
+                //
+                // 修法：推进段号后，若还有后续段落而合成循环已结束，就**重新拉起一轮**
+                // （复用 play() 这条已验证的主路径，它从当前 nowSpeak 起合成到章末）。
+                // 守卫避免递归：仅在「确实还有段 + 无循环在跑」时触发，且清空标志防重入。
+                if (!singleParagraphMode &&
+                    nowSpeak < contentList.lastIndex &&
+                    synthesisTask?.isActive != true &&
+                    !resumeGuardAfterEnded
+                ) {
+                    resumeGuardAfterEnded = true
+                    AppLog.putDebug("播放队列播空但段未合成，重新拉起合成: nowSpeak=$nowSpeak") 
+                    play(affectBgm = false)
+                    resumeGuardAfterEnded = false
+                }
             }
             else -> {}
         }
