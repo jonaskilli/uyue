@@ -37,6 +37,7 @@ import io.legado.app.lib.dialogs.SelectItem
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.read.page.entities.TextChapter
+import io.legado.app.utils.AudioCacheValidator
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.GSON
 import io.legado.app.utils.LogUtils
@@ -495,7 +496,23 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         synthTotalSegs: Int? = null,    ): File? {
         val cacheFile = getCacheFileForText(rawText, index, chapterTitle)
         if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
-            return cacheFile
+            // B 方案 + 判定以文字为准（11-16 用户定稿）：**段里有文字**（汉字/英文字母/
+            // 数字等可读内容，即不匹配 notReadAloudRegex）时，静音/超短音频才可能是
+            // 「合成失败」留下的垃圾缓存——空文件/半截/全零静音，每次命中都播静音。
+            // 此时深检（复用 AudioCacheValidator：阈值=「超短音频判定阈值」设置，0=关闭），
+            // 判坏删除，落到下面重新合成。
+            // 纯标点段读出来就是静音，是合法产物，**永不判坏**——文字为准，不看文件。
+            // （AudioCacheValidator 里另有 844B 静音占位豁免：那是给看不到文字的
+            // HTTP 侧兜底用的；本入口拿得到 text，文字判据更硬，两处口径见各自注释。）
+            // 深检只在命中瞬间做：合成新音频的验收仍是宽松口径，不会循环打回。
+            if (!text.matches(AppPattern.notReadAloudRegex) &&
+                AudioCacheValidator.isBadCache(cacheFile)
+            ) {
+                AppLog.put("TTS缓存无效（有文字但空/超短/全静音），删除重新合成: ${cacheFile.name}")
+                cacheFile.delete()
+            } else {
+                return cacheFile
+            }
         }
         val cacheKey = cacheFile.absolutePath
 

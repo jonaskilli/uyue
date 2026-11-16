@@ -1179,7 +1179,7 @@
     <string name="mix_sound_effect_on_merge">合并时混音效</string>
     <string name="mix_sound_effect_on_merge_summary">开启后，合并完整WAV时会按文本正则提取音效标记，并将音效混音到对应时间段（需先开启音效模式且非关闭，并在朗读过一次之后合并）</string>
     <string name="short_audio_min_duration">超短音频判定阈值</string>
-    <string name="short_audio_min_duration_summary">系统TTS合成的音频若时长低于此值（秒）会视为无效并重试。设为0表示不限制</string>
+    <string name="short_audio_min_duration_summary">缓存命中时校验音频内容：空文件/超短/全零静音视为坏缓存，删除并重新合成（段里没有文字时不判，纯标点段静音是正常的）。只深检小于「值×1000KB」的文件（0.1=100KB）。设为0表示不检测</string>
     <string name="sys_tts_synthesize_timeout">系统TTS合成超时</string>
     <string name="sys_tts_synthesize_timeout_summary">系统TTS和转换器单句请求超过此秒数未收到响应则视为超时，自动重试（范围5~300，默认120）</string>
     <string name="tts_retry_count">TTS合成失败重试次数</string>

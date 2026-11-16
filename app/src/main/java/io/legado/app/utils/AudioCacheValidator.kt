@@ -30,11 +30,25 @@ object AudioCacheValidator {
     /** WAV 头最小长度，小于此值连文件头都不完整 */
     private const val MIN_WAV_HEADER = 44L
 
-    /** 最短有效时长：低于此值判定为坏缓存（本项目自带静音仅 50ms） */
+    /** 最短有效时长：低于此值判定为坏缓存（挡的是引擎返回的超短垃圾；
+     *  自带静音占位由 [SILENT_WAV_SIZE] 在 L0 短路豁免，走不到这里） */
     private const val MIN_DURATION_MS = 100L
 
     /** 归一化能量阈值，低于此值视为静音（约 -60dB） */
     private const val SILENCE_RMS_THRESHOLD = 0.001f
+
+    /**
+     * 自带静音占位文件的固定大小：generateSilentWavBytes(50)（8kHz·16bit·单声道·50ms
+     * = 44 头 + 800 数据）。与 BaseReadAloudService.SILENT_SOUND_SIZE 同源——
+     * utils 包不能反向引用 service，故在此复制数值，两处任一改动都要同步。
+     *
+     * 豁免口径（11-16 用户定稿「判定以文字为准」）：系统 TTS 入口拿得到段文本，
+     * 用**文字判据**（不含文字的段静音即合法，见 TTSReadAloudService.synthesizeText）；
+     * 本校验器只看得到文件，是给 HTTP 侧兜底的近似口径——844B 恰为纯标点段
+     * 自带静音的固定大小，超过此大小的「有文字段垃圾」仍由上层文字判据拦。
+     * 844 < 默认 100KB 深检范围，必须在深检前短路放行。
+     */
+    private const val SILENT_WAV_SIZE = 844L
 
     /**
      * 判定是否为坏缓存。
@@ -42,6 +56,7 @@ object AudioCacheValidator {
      * 检测大小上限复用「超短音频判定阈值」（[AppConfig.shortAudioMinDuration]），
      * 按「值 × 1000」换算为 KB：0.1（默认）→ 100KB 以下，0.3 → 300KB 以下。
      * 设为 0 表示关闭检测，此时一律视为有效缓存、直接放行。
+     * 静音占位（SILENT_WAV_SIZE，纯标点段合法静音）短路豁免，不判坏。
      *
      * @return true 表示该缓存应删除并重新合成
      */
@@ -55,6 +70,7 @@ object AudioCacheValidator {
         val size = file.length()
         if (size == 0L) return true                 // 空流写出的文件
         if (size < MIN_WAV_HEADER) return true      // 连 WAV 头都不完整
+        if (size == SILENT_WAV_SIZE) return false   // 自带静音占位：合法静音，豁免（见常量注释）
         if (size > maxCheckSize) return false       // 超过上限，正常音频
 
         // ---- L1：格式与时长 ----
