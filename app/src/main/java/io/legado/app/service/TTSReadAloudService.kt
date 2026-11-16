@@ -1273,6 +1273,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         if (i < contentList.size) advancedLen += contentList[i].length + 1
                     }
                     checkAiImageTrigger(advancedLen)
+                    // ===== 11-16 补（真机实证「开关开着却一条预热日志都没有」）=====
+                    //
+                    // 预热钩子**挂错位置**了：`maybePreloadFromPlayback()` 此前只被
+                    // `updateNextPos()` 调用，而 updateNextPos 在 TTS 服务里只有 5 个
+                    // 调用点，**全是边界/异常分支**（STATE_ENDED 队列播空、mediaIndex 越界、
+                    // 媒体项异常、onPlayerError 重试）。正常连播时段落推进走的本函数
+                    // → syncToParagraph(mediaIndex)，**根本不经过 updateNextPos**，
+                    // 于是预热永远不触发：日志里 `preloadSegments`/`预热链结束` 恒为 0，
+                    // UTTS 侧 batchSize 恒为 0（114 次采样全 0）。
+                    //
+                    // 放在「播放真在前进」分支内（mediaIndex > oldIndex）：
+                    //   · 回退/跳页不触发，符合「朗读一段时间后才有」；
+                    //   · maybePreloadFromPlayback 自带两道闸（nowSpeak>=3、
+                    //     每 4 段一次）+ preloadChainJob 防重入，多次调用不会叠链。
+                    maybePreloadFromPlayback()
                 }
             } else {
                 updateNextPos()
