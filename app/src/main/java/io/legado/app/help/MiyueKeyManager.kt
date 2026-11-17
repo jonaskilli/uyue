@@ -7,10 +7,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.net.Uri
+import android.view.DragEvent
 import android.preference.PreferenceManager
 import android.text.Editable
 import android.text.TextWatcher
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Point
 import android.graphics.drawable.ColorDrawable
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -20,6 +24,7 @@ import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.BaseExpandableListAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ExpandableListView
 import android.widget.ImageButton
@@ -32,6 +37,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.material.textfield.TextInputEditText
 import io.legado.app.R
 import io.legado.app.lib.theme.primaryColor
+import io.legado.app.ui.widget.SwipeRevealLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -204,7 +210,7 @@ object MiyueKeyManager {
                     key = key,
                     scene = "保存密钥",
                 )
-                showModelsDialog(context, entry) { picked -> etModel.setText(picked) }
+                showModelsDialog(context, entry, onPick = { picked -> etModel.setText(picked) })
             }
         }
         modelRow.addView(
@@ -334,6 +340,17 @@ object MiyueKeyManager {
         var bottomAdapter: KeyExpandableAdapter? = null
         var topAdapter: KeyExpandableAdapter? = null
 
+        // 长按抓起子行开始拖拽，位置随 DragEvent 传给落点行
+        fun startChildDrag(view: View, adapter: KeyExpandableAdapter, pos: DragChildPos) {
+            // 左划正处于打开态时立即归位（无动画），免得快照/影子带着删除按钮
+            (view as? SwipeRevealLayout)?.setOpen(false, animate = false)
+            // 先在可见状态下截好原样影子并发起拖拽，再把该行标记为空白占位并刷新
+            val shadow = OpaqueDragShadow(view)
+            view.startDrag(null, shadow, pos, 0)
+            adapter.dragPos = pos
+            adapter.notifyDataSetChanged()
+        }
+
         /**
          * 重建顶部「正在使用的密钥」分区。
          * 任何一区数据有变（换模型 / 删 API / 改名 / 切换使用中）都从这里走一遍：
@@ -384,14 +401,18 @@ object MiyueKeyManager {
                 top.showDetail(g, c)
                 true
             }
-            currentListView.setOnItemLongClickListener { _, _, position, _ ->
+            currentListView.setOnItemLongClickListener { _, view, position, _ ->
                 val packed = currentListView.getExpandableListPosition(position)
                 if (ExpandableListView.getPackedPositionType(packed)
                     == ExpandableListView.PACKED_POSITION_TYPE_CHILD
                 ) {
-                    top.confirmRemoveAt(
-                        ExpandableListView.getPackedPositionGroup(packed),
-                        ExpandableListView.getPackedPositionChild(packed)
+                    startChildDrag(
+                        view,
+                        top,
+                        DragChildPos(
+                            ExpandableListView.getPackedPositionGroup(packed),
+                            ExpandableListView.getPackedPositionChild(packed)
+                        )
                     )
                 }
                 true
@@ -443,16 +464,20 @@ object MiyueKeyManager {
             adapter.showDetail(g, c)
             true
         }
-        // 长按子项 = 删掉这一个 API。整份（组）的删除走组行「修改」里的删除按钮，
-        // 那里删完会 refresh() 刷新整个列表。
-        listView.setOnItemLongClickListener { _, _, position, _ ->
+        // 长按子项 = 抓起这一条拖动排序（左划才露出删除）。整份（组）的删除走组行
+        // 「修改」里的删除按钮，那里删完会 refresh() 刷新整个列表。
+        listView.setOnItemLongClickListener { _, view, position, _ ->
             val packed = listView.getExpandableListPosition(position)
             if (ExpandableListView.getPackedPositionType(packed)
                 == ExpandableListView.PACKED_POSITION_TYPE_CHILD
             ) {
-                adapter.confirmRemoveAt(
-                    ExpandableListView.getPackedPositionGroup(packed),
-                    ExpandableListView.getPackedPositionChild(packed)
+                startChildDrag(
+                    view,
+                    adapter,
+                    DragChildPos(
+                        ExpandableListView.getPackedPositionGroup(packed),
+                        ExpandableListView.getPackedPositionChild(packed)
+                    )
                 )
             }
             // 一律消费掉，避免长按再冒泡出别的默认行为
@@ -506,11 +531,17 @@ object MiyueKeyManager {
      *
      * 点条目 = 把这份密钥里该 API 的模型直接换成它，同时复制一份到剪贴板；
      * [onPick] 传 null 时只复制、不改动密钥。
+     *
+     * [allowMulti]=true 时每行左侧出现勾选框：未有勾选时点整行仍是原来的单选切换；
+     * 一旦有勾选，点整行改为切换勾选，并出现「全部添加」按钮，确认后回调 [onBatchAdd]。
+     * 勾选状态用模型名（非 position）保存，搜索过滤重建列表后依然正确。
      */
     fun showModelsDialog(
         context: Context,
         entry: ApiEntry,
         onPick: ((model: String) -> Unit)? = null,
+        allowMulti: Boolean = false,
+        onBatchAdd: ((models: List<String>) -> Unit)? = null,
     ) {
         val dialog = Dialog(context)
         dialog.setContentView(R.layout.dialog_models)
@@ -525,10 +556,17 @@ object MiyueKeyManager {
         val etSearch = dialog.findViewById<EditText>(R.id.et_model_search)
         val listView = dialog.findViewById<ListView>(R.id.lv_models)
         val btnClose = dialog.findViewById<Button>(R.id.btn_model_close)
+        val btnAdd = dialog.findViewById<Button>(R.id.btn_model_add)
 
         tvTip.text = "加载中…（${entry.host()}）"
 
         var allModels: List<String> = emptyList()
+        // 勾选收集：用模型名做 key，搜索过滤重建 adapter 后状态不丢
+        val selected = LinkedHashSet<String>()
+        fun updateAddButton() {
+            btnAdd.visibility = if (selected.isEmpty()) View.GONE else View.VISIBLE
+            btnAdd.text = "全部添加（${selected.size}）"
+        }
         val adapter = object : ArrayAdapter<String>(
             context, R.layout.dialog_models_item, R.id.tv_model_name, mutableListOf()
         ) {
@@ -537,6 +575,16 @@ object MiyueKeyManager {
                     .inflate(R.layout.dialog_models_item, parent, false)
                 val model = getItem(position) ?: ""
                 view.findViewById<TextView>(R.id.tv_model_name).text = model
+                view.findViewById<CheckBox>(R.id.cb_model_select).apply {
+                    visibility = if (allowMulti && onBatchAdd != null) View.VISIBLE else View.GONE
+                    // 先清监听再设状态，避免复用 view 时 setOnCheckedChangeListener 误触发
+                    setOnCheckedChangeListener(null)
+                    isChecked = model in selected
+                    setOnCheckedChangeListener { _, isChecked ->
+                        if (isChecked) selected.add(model) else selected.remove(model)
+                        updateAddButton()
+                    }
+                }
                 // 只有点这个按钮才复制；复制完弹窗保持打开，可以接着复制下一个
                 view.findViewById<Button>(R.id.btn_model_copy).setOnClickListener {
                     val cm =
@@ -548,9 +596,15 @@ object MiyueKeyManager {
             }
         }
         listView.adapter = adapter
-        // 点整行 = 切换为该模型。复制不再顺带发生，交给行内的「复制」按钮
+        // 点整行：未勾选时=原来的单选切换；已勾选时=切换这一行的勾选
         listView.setOnItemClickListener { _, _, position, _ ->
             val model = adapter.getItem(position) ?: return@setOnItemClickListener
+            if (allowMulti && onBatchAdd != null && selected.isNotEmpty()) {
+                if (!selected.add(model)) selected.remove(model)
+                adapter.notifyDataSetChanged()
+                updateAddButton()
+                return@setOnItemClickListener
+            }
             if (onPick == null) {
                 val cm =
                     context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -580,6 +634,11 @@ object MiyueKeyManager {
             }
         })
         btnClose.setOnClickListener { dialog.dismiss() }
+        btnAdd.setOnClickListener {
+            if (selected.isEmpty()) return@setOnClickListener
+            onBatchAdd?.invoke(selected.toList())
+            dialog.dismiss()
+        }
 
         keyScope.launch {
             val result = MiyueKeyTester.fetchModels(entry)
@@ -588,7 +647,11 @@ object MiyueKeyManager {
                 return@launch
             }
             allModels = result.models
-            tvTip.text = "共 ${allModels.size} 个模型 · 点整行切换，点右侧「复制」复制"
+            tvTip.text = if (allowMulti && onBatchAdd != null) {
+                "共 ${allModels.size} 个模型 · 勾选后点「全部添加」批量扩充"
+            } else {
+                "共 ${allModels.size} 个模型 · 点整行切换，点右侧「复制」复制"
+            }
             adapter.clear()
             adapter.addAll(allModels)
         }
@@ -871,6 +934,33 @@ object MiyueKeyManager {
  * 组 = 一份已保存的密钥，子 = 这份密钥里解析出来的每个 API。
  * 除了展示，还负责三种粒度的测试（单个 / 整份 / 全部）以及状态圆点的维护。
  */
+/** 拖拽排序时随 DragEvent 传递的状态；c 随实时重排更新，committed 保证松手只同步一次 */
+private class DragChildPos(val g: Int, var c: Int, var committed: Boolean = false)
+
+/** 不透明、原样的拖拽影子：把行的快照画出来，跟手移动时和 ItemTouchHelper 观感一致 */
+private class OpaqueDragShadow(view: View) : View.DragShadowBuilder(view) {
+    private val bitmap: Bitmap
+    private val size: Point
+
+    init {
+        // 在构造时就把行快照下来（此时还是可见的原样），避免稍后被设为空白占位后截到空图
+        val w = view.width.coerceAtLeast(1)
+        val h = view.height.coerceAtLeast(1)
+        size = Point(w, h)
+        bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        view.draw(Canvas(bitmap))
+    }
+
+    override fun onProvideShadowMetrics(outShadowSize: Point, outShadowTouchPoint: Point) {
+        outShadowSize.set(size.x, size.y)
+        outShadowTouchPoint.set(size.x / 2, size.y / 2)
+    }
+
+    override fun onDrawShadow(canvas: Canvas) {
+        canvas.drawBitmap(bitmap, 0f, 0f, null)
+    }
+}
+
 private class KeyExpandableAdapter(
     private val context: Context,
     /** 可变：改了密钥名字或删掉一份之后要原地更新这个列表 */
@@ -893,6 +983,12 @@ private class KeyExpandableAdapter(
     /** 测试结果，key = "密钥名#下标" */
     private val results = HashMap<String, ApiTestResult>()
     private val testing = HashSet<String>()
+    /** 当前左划打开的子行，保证同时只有一行露出删除 */
+    private var openSwipe: SwipeRevealLayout? = null
+    /** 当前左划打开的组行，保证同时只有一个组露出删除整份 */
+    private var openGroupSwipe: SwipeRevealLayout? = null
+    /** 正在拖动的子项位置：该行在列表里渲染成空白占位（跟手的那份由拖拽影子显示） */
+    var dragPos: DragChildPos? = null
 
     private val dotOk = Color.parseColor("#4CAF50")
     private val dotFail = Color.parseColor("#F44336")
@@ -966,6 +1062,21 @@ private class KeyExpandableAdapter(
         val name = names[groupPosition]
         val list = entriesOf(name)
 
+        // 左划露出「删除」：删掉整份密钥（走带确认的 deleteKey）
+        val swipe = view as SwipeRevealLayout
+        // 顶部「正在使用」区保留淡蓝卡片底色，底部用中性色；content 必须不透明才能盖住删除区
+        view.findViewById<View>(R.id.group_swipe_content).setBackgroundColor(
+            ContextCompat.getColor(
+                context,
+                if (isCurrentSection) R.color.key_current_bg else R.color.background
+            )
+        )
+        view.findViewById<Button>(R.id.btn_group_delete).setOnClickListener {
+            swipe.setOpen(false)
+            MiyueKeyManager.deleteKey(context, name) { refresh() }
+        }
+        swipe.onOpened = { openGroupSwipe?.let { if (it !== swipe) it.setOpen(false) }; openGroupSwipe = swipe }
+
         view.findViewById<TextView>(R.id.tv_group_arrow).text = if (isExpanded) "▾" else "▸"
         view.findViewById<TextView>(R.id.tv_group_name).text = name
         val count = view.findViewById<TextView>(R.id.tv_group_count)
@@ -1019,6 +1130,59 @@ private class KeyExpandableAdapter(
         val name = names[groupPosition]
         val entry = entriesOf(name)[childPosition]
 
+        // 拖拽排序：本行作为落点，把来源（同组）的子项移到自己的位置
+        val here = DragChildPos(groupPosition, childPosition)
+        view.setTag(R.id.tv_child_index, here)
+        view.setOnDragListener { v, event ->
+            val from = event.localState as? DragChildPos
+            when (event.action) {
+                DragEvent.ACTION_DRAG_STARTED -> true
+                DragEvent.ACTION_DRAG_LOCATION -> {
+                    // 手指划到哪一行，就把被拖条目实时移到那，其余行当场让位；
+                    // 被拖条目所在行渲染为空白占位（见下方 visibility），跟手的由拖拽影子显示
+                    if (from != null && from.g == groupPosition && from.c != childPosition) {
+                        if (moveApi(groupPosition, from.c, childPosition, notifyOthers = false)) {
+                            from.c = childPosition
+                            // dragPos 与 from 同一对象，c 更新后再刷一次让空白占位跟到新位置
+                            notifyDataSetChanged()
+                        }
+                    }
+                    true
+                }
+                DragEvent.ACTION_DROP -> {
+                    // 位置已在 LOCATION 阶段实时落位，这里收尾：清缓存+同步另一分区
+                    if (from != null && from.g == groupPosition && !from.committed) {
+                        from.committed = true
+                        finishDrag(name)
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_EXITED -> true
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    // 拖出列表外松手也要收尾（DROP 不一定触发）
+                    if (from != null && !from.committed) {
+                        from.committed = true
+                        finishDrag(names[from.g])
+                    }
+                    true
+                }
+                else -> true
+            }
+        }
+
+        // 被拖动的这一行渲染成空白占位；其余行保持原样。convertView 会复用，必须每次都重置
+        val isDraggingRow = dragPos?.let { it.g == groupPosition && it.c == childPosition } == true
+        view.findViewById<View>(R.id.swipe_content).visibility =
+            if (isDraggingRow) View.INVISIBLE else View.VISIBLE
+
+        // 左划露出的「删除」按钮：删掉这一条 API
+        val swipe = view as SwipeRevealLayout
+        view.findViewById<Button>(R.id.btn_child_delete).setOnClickListener {
+            swipe.setOpen(false)
+            confirmRemove(name, entry)
+        }
+        // 同时只允许一行处于左划打开状态
+        swipe.onOpened = { openSwipe?.let { if (it !== swipe) it.setOpen(false) }; openSwipe = swipe }
         view.findViewById<TextView>(R.id.tv_child_index).text = "${childPosition + 1}."
         // 主行只显示模型名；来源场景与域名用小字补充，
         // 否则同名模型挂在两个接口上时根本分不清是哪一条
@@ -1056,10 +1220,14 @@ private class KeyExpandableAdapter(
             testOne(groupPosition, childPosition)
         }
         view.findViewById<Button>(R.id.btn_child_models).setOnClickListener {
-            // 列出该接口的全部模型，点哪个就把这条 API 的模型换成哪个
-            MiyueKeyManager.showModelsDialog(context, entry) { picked ->
-                applyModel(name, entry, picked)
-            }
+            // 列出该接口的全部模型：未勾选时点行=单选替换；勾选后「全部添加」=扩充多个模型
+            MiyueKeyManager.showModelsDialog(
+                context,
+                entry,
+                onPick = { picked -> applyModel(name, entry, picked) },
+                allowMulti = true,
+                onBatchAdd = { models -> applyModels(name, entry, models) },
+            )
         }
         return view
     }
@@ -1189,6 +1357,66 @@ private class KeyExpandableAdapter(
         notifyDataSetChanged()
         onDataChanged?.invoke()
         Toast.makeText(context, "${entry.model} → $newModel（已复制）", Toast.LENGTH_SHORT).show()
+    }
+
+    /** 把这条 API 扩充为多个模型（保留原模型，追加勾选的），只有改的是当前密钥才同步生效 */
+    private fun applyModels(name: String, entry: ApiEntry, newModels: List<String>) {
+        val wasCurrent = isCurrent(name)
+        val old = keyMap.optString(name, "")
+        val now = MiyueKeyTester.addModels(old, entry, newModels)
+        if (now == old) {
+            Toast.makeText(context, "没有需要新增的模型（可能已存在）", Toast.LENGTH_SHORT).show()
+            return
+        }
+        keyMap.put(name, now)
+        MiyueKeyManager.saveKeyMap(keyMap)
+        // 改的正是当前在用的那份：同步刷新 miyue.txt 与偏好；非当前那份只扩充、不改变使用状态
+        if (wasCurrent) MiyueKeyManager.applyKey(context, now)
+        entriesCache.remove(name)
+        results.keys.removeAll(results.keys.filter { it.startsWith("$name#") }.toSet())
+        notifyDataSetChanged()
+        onDataChanged?.invoke()
+        Toast.makeText(context, "已为 ${entry.model} 扩充 ${newModels.size} 个模型", Toast.LENGTH_SHORT)
+            .show()
+    }
+
+    /**
+     * 同一份密钥内把子项从 [from] 拖到 [to] 位置；跨姓名/别名分界即改变归属段。
+     * 只有改的是当前正在使用的那份才 applyKey 同步生效，其余只改 keys.json。
+     */
+    fun moveApi(g: Int, from: Int, to: Int, notifyOthers: Boolean = true): Boolean {
+        val name = names[g]
+        val entries = entriesOf(name)
+        if (from !in entries.indices || to !in entries.indices || from == to) return false
+        val old = keyMap.optString(name, "")
+        val now = MiyueKeyTester.moveEntry(old, from, to)
+        if (now == old) return false
+        val wasCurrent = isCurrent(name)
+        keyMap.put(name, now)
+        MiyueKeyManager.saveKeyMap(keyMap)
+        // 拖动中（notifyOthers=false）只更新 keys.json 与界面，miyue.txt 的同步留到松手统一做：
+        // 否则第一次移动后 keyMap 内容变了、isCurrent 会翻转，后续步骤就不再同步
+        if (notifyOthers && wasCurrent) MiyueKeyManager.applyKey(context, now)
+        entriesCache.remove(name)
+        if (notifyOthers) {
+            results.keys.removeAll(results.keys.filter { it.startsWith("$name#") }.toSet())
+            onDataChanged?.invoke()
+        }
+        notifyDataSetChanged()
+        return true
+    }
+
+    /** 拖拽结束收尾：当前密钥同步 miyue.txt/偏好，清测试缓存并同步另一分区 */
+    private fun finishDrag(name: String) {
+        // 松手：清掉空白占位标记，被拖条目在落位正常显示
+        dragPos = null
+        if (isCurrent(name)) {
+            MiyueKeyManager.applyKey(context, keyMap.optString(name, ""))
+        }
+        entriesCache.remove(name)
+        results.keys.removeAll(results.keys.filter { it.startsWith("$name#") }.toSet())
+        notifyDataSetChanged()
+        onDataChanged?.invoke()
     }
 
     /** 测某一个 API */

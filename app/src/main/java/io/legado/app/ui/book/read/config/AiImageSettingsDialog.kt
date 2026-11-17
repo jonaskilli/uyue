@@ -992,10 +992,10 @@ sk-aaa@@sk-bbb@@sk-ccc
             key = etModelKey.text?.toString()?.trim().orEmpty(),
             scene = "aiImage",
         )
-        MiyueKeyManager.showModelsDialog(requireContext(), entry) { picked ->
+        MiyueKeyManager.showModelsDialog(requireContext(), entry, onPick = { picked ->
             etModelName.setText(picked)
             toastOnUi("已选择模型：$picked")
-        }
+        })
     }
 
     /** 保存当前模板配置到数据库 */

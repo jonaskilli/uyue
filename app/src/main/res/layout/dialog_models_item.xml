@@ -9,6 +9,15 @@
     android:paddingStart="12dp"
     android:paddingEnd="8dp">
 
+    <CheckBox
+        android:id="@+id/cb_model_select"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="2dp"
+        android:clickable="true"
+        android:focusable="false"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/tv_model_name"
         android:layout_width="0dp"

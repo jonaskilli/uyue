@@ -1,101 +1,135 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 恢复密钥：组行（一个已保存的密钥）。整行点击展开/折叠，右侧是常用操作 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:orientation="horizontal"
+<!-- 恢复密钥：组行（一个已保存的密钥）。整行点击展开/折叠，右侧是常用操作。
+     整体套 SwipeRevealLayout：左划露出右侧「删除」删掉整份密钥。 -->
+<io.legado.app.ui.widget.SwipeRevealLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:gravity="center_vertical"
-    android:paddingStart="12dp"
-    android:paddingEnd="8dp"
-    android:paddingTop="10dp"
-    android:paddingBottom="10dp">
+    android:layout_height="wrap_content">
 
-    <!-- 箭头自己接管点击：列表 item 里放了 Button 后，整行点击常被焦点抢掉，
-         这里让箭头与密钥名直接触发展开，不依赖 item 的点击分发 -->
-    <TextView
-        android:id="@+id/tv_group_arrow"
-        android:layout_width="wrap_content"
+    <!-- 左划后露出的删除区 -->
+    <LinearLayout
+        android:id="@+id/group_swipe_reveal"
+        android:layout_width="96dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end|center_vertical"
+        android:gravity="center"
+        android:background="@color/key_delete_bg">
+
+        <Button
+            android:id="@+id/btn_group_delete"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:minHeight="30dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="删除"
+            android:textColor="@android:color/white"
+            android:textSize="12sp"
+            android:focusable="false" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/group_swipe_content"
+        android:orientation="horizontal"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginEnd="6dp"
-        android:clickable="true"
-        android:focusable="false"
-        android:paddingStart="4dp"
-        android:paddingEnd="4dp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp"
-        android:text="▸"
-        android:textSize="15sp" />
-
-    <View
-        android:id="@+id/view_group_dot"
-        android:layout_width="11dp"
-        android:layout_height="11dp"
-        android:layout_marginEnd="8dp"
-        android:background="@drawable/bg_key_dot" />
-
-    <TextView
-        android:id="@+id/tv_group_name"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:clickable="true"
-        android:focusable="false"
-        android:ellipsize="end"
-        android:singleLine="true"
-        android:textColor="@color/primaryText"
-        android:textStyle="bold"
-        android:textSize="16sp" />
-
-    <TextView
-        android:id="@+id/tv_group_count"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="6dp"
-        android:textSize="12sp"
-        android:textColor="@color/secondaryText" />
-
-    <Button
-        android:id="@+id/btn_group_restore"
-        style="?android:attr/buttonStyleSmall"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:minWidth="0dp"
-        android:minHeight="30dp"
-        android:paddingStart="8dp"
+        android:background="@color/background"
+        android:gravity="center_vertical"
+        android:paddingStart="12dp"
         android:paddingEnd="8dp"
-        android:text="使用"
-        android:textSize="11sp" 
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp">
+
+        <!-- 箭头自己接管点击：列表 item 里放了 Button 后，整行点击常被焦点抢掉，
+             这里让箭头与密钥名直接触发展开，不依赖 item 的点击分发 -->
+        <TextView
+            android:id="@+id/tv_group_arrow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:clickable="true"
+            android:focusable="false"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="▸"
+            android:textSize="15sp" />
+
+        <View
+            android:id="@+id/view_group_dot"
+            android:layout_width="11dp"
+            android:layout_height="11dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_key_dot" />
+
+        <TextView
+            android:id="@+id/tv_group_name"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:clickable="true"
+            android:focusable="false"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:textColor="@color/primaryText"
+            android:textStyle="bold"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/tv_group_count"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:textSize="12sp"
+            android:textColor="@color/secondaryText" />
+
+        <Button
+            android:id="@+id/btn_group_restore"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:minHeight="30dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="使用"
+            android:textSize="11sp"
             android:paddingTop="2dp"
             android:paddingBottom="2dp"
             android:includeFontPadding="false"
             android:focusable="false" />
 
-    <Button
-        android:id="@+id/btn_group_test"
-        style="?android:attr/buttonStyleSmall"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="4dp"
-        android:minWidth="0dp"
-        android:minHeight="30dp"
-        android:paddingStart="8dp"
-        android:paddingEnd="8dp"
-        android:text="测试"
-        android:textSize="11sp" 
+        <Button
+            android:id="@+id/btn_group_test"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:minWidth="0dp"
+            android:minHeight="30dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="测试"
+            android:textSize="11sp"
             android:paddingTop="2dp"
             android:paddingBottom="2dp"
             android:includeFontPadding="false"
             android:focusable="false" />
 
-    <ImageButton
-        android:id="@+id/btn_group_edit"
-        android:layout_width="32dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="2dp"
-        android:background="?attr/selectableItemBackgroundBorderless"
-        android:contentDescription="修改密钥"
-        android:padding="6dp"
-        android:src="@drawable/ic_edit" 
+        <ImageButton
+            android:id="@+id/btn_group_edit"
+            android:layout_width="32dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="2dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="修改密钥"
+            android:padding="6dp"
+            android:src="@drawable/ic_edit"
             android:focusable="false" />
 
-</LinearLayout>
+    </LinearLayout>
+
+</io.legado.app.ui.widget.SwipeRevealLayout>

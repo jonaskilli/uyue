@@ -26,6 +26,8 @@
     <color name="tts_config_card_stroke">#DCDCDC</color>
     <!-- 密钥管理顶部「正在使用的密钥」卡片底色：主题色淡蓝，日夜间都比列表底色醒目一档 -->
     <color name="key_current_bg">#E3F2FD</color>
+    <!-- 密钥列表子项左划露出的删除区底色：醒目红 -->
+    <color name="key_delete_bg">#D32F2F</color>
     <color name="background_menu">@color/md_grey_200</color>
     <color name="background_prefs">#7fffffff</color>
 

@@ -59,6 +59,14 @@ object MiyueKeyTester {
         return result
     }
 
+    /** 段名，与 [parse] 里的口径一致，仅用于显示 */
+    private fun sceneName(index: Int, total: Int): String = when {
+        total == 1 -> "通用"
+        index == 0 -> "姓名分析"
+        index == 1 -> "别名分析"
+        else -> "其它${index + 1}"
+    }
+
     private fun parseGroup(content: String, scene: String, sceneIndex: Int): List<ApiEntry> {
         if (content.isEmpty()) return emptyList()
         if (!content.contains("@@")) {
@@ -209,6 +217,77 @@ object MiyueKeyTester {
             "${it.endpoint}@@${it.model}@@${it.key}"
         }
         return scenes.joinToString("##")
+    }
+
+    /**
+     * 把指定 API 扩充为多个模型：保留原来的那一条，再把 [newModels] 追加成同地址、
+     * 同密钥、不同模型的三元组。与 [replaceModel] 同样按 sceneIndex/indexInScene 精确定位，
+     * 只重写目标所在的一小段，`##` 另一侧不动。已存在的模型（含本次选中的、以及本场景
+     * 同地址同密钥下已有的）会被去重，不做重复添加。返回新文本。
+     */
+    fun addModels(content: String, target: ApiEntry, newModels: List<String>): String {
+        val scenes = content.split("##").toMutableList()
+        val si = target.sceneIndex
+        if (si !in scenes.indices) return content
+        val list = parseGroup(scenes[si].trim(), target.scene, si).toMutableList()
+        val idx = target.indexInScene
+        if (idx !in list.indices) return content
+        val old = list[idx]
+        // 本场景同地址同密钥下已占用的模型，避免造出重复三元组
+        val existModels = list.filterIndexed { i, e ->
+            i != idx && e.endpoint == old.endpoint && e.key == old.key
+        }.map { it.model }.toMutableSet()
+        val models = mutableListOf(old.model)
+        newModels.forEach { m ->
+            val name = m.trim()
+            if (name.isNotEmpty() && name !in existModels && name !in models) {
+                models += name
+            }
+        }
+        if (models.size == 1) return content
+        val expanded = models.map { ApiEntry(old.endpoint, it, old.key, old.scene, si, 0) }
+        list.removeAt(idx)
+        list.addAll(idx, expanded)
+        scenes[si] = list.joinToString("@@") { "${it.endpoint}@@${it.model}@@${it.key}" }
+        return scenes.joinToString("##")
+    }
+
+    /**
+     * 把子项从扁平列表的 [fromFlat] 位置移到 [toFlat] 位置，返回新文本。
+     *
+     * 扁平顺序是「姓名分析段在前、别名分析段在后」。条目落到哪一段就属于哪一段：
+     * 拖进姓名段即 sceneIndex=0，拖进别名段即 sceneIndex=1，因此上拉/下拉可跨段，
+     * 段内也可自由重排；其余条目的归属不变。`##` 分段的个数保持不变（空段留空），
+     * 保证 JS 侧仍按两段解析。
+     */
+    fun moveEntry(content: String, fromFlat: Int, toFlat: Int): String {
+        val entries = parse(content)
+        if (fromFlat !in entries.indices || toFlat !in entries.indices || fromFlat == toFlat) {
+            return content
+        }
+        val sceneCount = content.split("##").size.coerceAtLeast(1)
+        // 落点行原本属于哪一段，被拖条目就归入哪一段：上拉进姓名段、下拉进别名段。
+        val targetScene = entries[toFlat].sceneIndex
+        val remaining = entries.toMutableList()
+        val moved = remaining.removeAt(fromFlat)
+        // 占据落点行的槽位（后续行顺延），这样拖到相邻一行也有可见移动
+        val insertIdx = toFlat.coerceIn(0, remaining.size)
+        val movedNew = moved.copy(
+            sceneIndex = targetScene,
+            scene = sceneName(targetScene, sceneCount),
+            indexInScene = 0,
+        )
+        remaining.add(insertIdx, movedNew)
+
+        // 按段序列化，段内保持新的先后顺序
+        val parts = Array(sceneCount) { StringBuilder() }
+        remaining.forEach { e ->
+            if (e.sceneIndex !in parts.indices) return@forEach
+            val sb = parts[e.sceneIndex]
+            if (sb.isNotEmpty()) sb.append("@@")
+            sb.append(e.endpoint).append("@@").append(e.model).append("@@").append(e.key)
+        }
+        return parts.joinToString("##") { it.toString() }
     }
 
     /**
