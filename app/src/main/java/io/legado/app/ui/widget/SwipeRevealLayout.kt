@@ -36,6 +36,10 @@ class SwipeRevealLayout @JvmOverloads constructor(
     private var startTx = 0f
     private var decided = false
     private var swiping = false
+    private var hasDown = false
+
+    /** 最近一次按下的 x（相对本行，-1 表示尚未按下），供「只点左侧区域才弹详情」判断 */
+    val lastDownX: Float get() = if (hasDown) downX else -1f
 
     private fun revealWidth(): Float = reveal?.width?.toFloat() ?: 0f
 
@@ -59,6 +63,7 @@ class SwipeRevealLayout @JvmOverloads constructor(
                 startTx = content?.translationX ?: 0f
                 decided = false
                 swiping = false
+                hasDown = true
                 // 交还子 View：按钮点击、展开、长按拖拽都靠这一手 DOWN 正常分发
                 return super.dispatchTouchEvent(ev)
             }

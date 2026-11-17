@@ -339,6 +339,11 @@ object MiyueKeyManager {
 
         var bottomAdapter: KeyExpandableAdapter? = null
         var topAdapter: KeyExpandableAdapter? = null
+        // 只点子行左侧 25% 才弹详情：按下坐标由 SwipeRevealLayout 自己记录
+        fun tappedLeftQuarter(row: View): Boolean {
+            val x = (row as? SwipeRevealLayout)?.lastDownX ?: -1f
+            return x < 0f || x <= row.width * 0.25f
+        }
 
         // 长按抓起子行开始拖拽，位置随 DragEvent 传给落点行
         fun startChildDrag(view: View, adapter: KeyExpandableAdapter, pos: DragChildPos) {
@@ -396,9 +401,9 @@ object MiyueKeyManager {
             currentListView.setAdapter(top)
             currentListView.expandGroup(0)
             topAdapter = top
-            // 与下方列表同款的行级交互：点子行看详情、长按删单个 API
-            currentListView.setOnChildClickListener { _, _, g, c, _ ->
-                top.showDetail(g, c)
+            // 与下方列表同款的行级交互：点子行左侧 25% 看详情、长按拖动排序
+            currentListView.setOnChildClickListener { _, row, g, c, _ ->
+                if (tappedLeftQuarter(row)) top.showDetail(g, c)
                 true
             }
             currentListView.setOnItemLongClickListener { _, view, position, _ ->
@@ -459,9 +464,9 @@ object MiyueKeyManager {
             }
             true
         }
-        // 点子行 = 打开这个 API 的详情菜单（复制地址 / 复制密钥 / 删除该 API）
-        listView.setOnChildClickListener { _, _, g, c, _ ->
-            adapter.showDetail(g, c)
+        // 点子行左侧 25% = 打开这个 API 的详情菜单（复制地址 / 复制密钥 / 删除该 API）
+        listView.setOnChildClickListener { _, row, g, c, _ ->
+            if (tappedLeftQuarter(row)) adapter.showDetail(g, c)
             true
         }
         // 长按子项 = 抓起这一条拖动排序（左划才露出删除）。整份（组）的删除走组行
