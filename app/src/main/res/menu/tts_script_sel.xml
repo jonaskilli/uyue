@@ -21,4 +21,8 @@
         android:id="@+id/menu_export_selection"
         android:title="@string/export" />
 
+    <item
+        android:id="@+id/menu_export_onLine"
+        android:title="@string/upload_url" />
+
 </menu>

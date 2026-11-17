@@ -19,6 +19,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_import_onLine"
+        android:title="@string/import_on_line"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_help"
         android:title="@string/help"
         app:showAsAction="never" />

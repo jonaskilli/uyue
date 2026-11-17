@@ -19,22 +19,31 @@ import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import io.legado.app.R
 import io.legado.app.base.VMBaseActivity
+import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.TtsScript
 import io.legado.app.databinding.ActivityTtsScriptBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.help.DirectLinkUpload
 import io.legado.app.help.MiyueKeyManager
+import io.legado.app.help.http.decompressed
+import io.legado.app.help.http.newCallResponseBody
+import io.legado.app.help.http.okHttpClient
+import io.legado.app.help.http.text
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.widget.SelectActionBar
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
+import io.legado.app.utils.ACache
 import io.legado.app.utils.GSON
 import io.legado.app.utils.StringUtils
+import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.readText
 import io.legado.app.utils.sendToClip
+import io.legado.app.utils.splitNotBlank
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.showHelp
 import io.legado.app.utils.toastOnUi
@@ -58,6 +67,7 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
     private val adapter by lazy { TtsScriptAdapter(this, this) }
     private var scriptFlowJob: Job? = null
     private var dataInit = false
+    private val importRecordKey = "ttsScriptImportRecordKey"
 
     private val editActivity =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -68,33 +78,117 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
 
     private val importDoc = registerForActivityResult(HandleFileContract()) {
         kotlin.runCatching {
-            it.uri?.readText(this)?.let { source ->
-                kotlin.runCatching {
-                    GSON.fromJson(source, Array<TtsScript>::class.java)?.let { scripts ->
-                        lifecycleScope.launch {
-                            appDb.ttsScriptDao.insert(*scripts)
-                        }
-                        setResult(RESULT_OK)
-                    }
-                }.onFailure { e ->
-                    toastOnUi("import error: ${e.localizedMessage}")
-                }
-            }
+            it.uri?.readText(this)?.let { source -> importScriptsText(source) }
         }.onFailure { e ->
             toastOnUi("readTextError:${e.localizedMessage}")
         }
     }
 
+    /** 解析脚本 JSON 并入库，本地导入与网络导入共用 */
+    private fun importScriptsText(source: String) {
+        kotlin.runCatching {
+            GSON.fromJson(source, Array<TtsScript>::class.java)?.let { scripts ->
+                lifecycleScope.launch {
+                    appDb.ttsScriptDao.insert(*scripts)
+                }
+                setResult(RESULT_OK)
+                toastOnUi("已导入 ${scripts.size} 条朗读脚本")
+            }
+        }.onFailure { e ->
+            toastOnUi("import error: ${e.localizedMessage}")
+        }
+    }
+
+    /** 网络导入：输入网址对话框 + 下载（兼容 #requestWithoutUA 与 zip 压缩） */
+    @SuppressLint("InflateParams")
+    private fun showImportDialog() {
+        val aCache = ACache.get(cacheDir = false)
+        val cacheUrls = aCache.getAsString(importRecordKey)
+            ?.splitNotBlank(",")?.toMutableList() ?: mutableListOf()
+        alert(titleResource = R.string.import_on_line) {
+            val alertBinding = DialogEditTextBinding.inflate(layoutInflater).apply {
+                editView.hint = "url"
+                editView.setFilterValues(cacheUrls)
+                editView.delCallBack = {
+                    cacheUrls.remove(it)
+                    aCache.put(importRecordKey, cacheUrls.joinToString(","))
+                }
+            }
+            customView { alertBinding.root }
+            okButton {
+                val text = alertBinding.editView.text?.toString()
+                if (!text.isNullOrBlank()) {
+                    if (text.isAbsUrl() && !cacheUrls.contains(text)) {
+                        cacheUrls.add(0, text)
+                        aCache.put(importRecordKey, cacheUrls.joinToString(","))
+                    }
+                    importScriptsFromUrl(text.trim())
+                }
+            }
+            cancelButton()
+        }
+    }
+
+    private fun importScriptsFromUrl(url: String) {
+        lifecycleScope.launch {
+            runCatching {
+                val text = withContext(IO) {
+                    okHttpClient.newCallResponseBody {
+                        if (url.endsWith("#requestWithoutUA")) {
+                            url(url.substringBeforeLast("#requestWithoutUA"))
+                            header(AppConst.UA_NAME, "null")
+                        } else {
+                            url(url)
+                        }
+                    }.decompressed().text()
+                }
+                importScriptsText(text)
+            }.onFailure { e ->
+                toastOnUi("网络导入失败: ${e.localizedMessage}")
+            }
+        }
+    }
+
     private val exportResult = registerForActivityResult(HandleFileContract()) {
         it.uri?.let { uri ->
-            alert(R.string.export_success) {
-                val alertBinding = DialogEditTextBinding.inflate(layoutInflater).apply {
-                    editView.hint = getString(R.string.path)
-                    editView.setText(uri.toString())
+            showExportResult(uri.toString())
+        }
+    }
+
+    /** 网络导出：把选中脚本序列化为 JSON 后直传，拿到分享链接 */
+    private fun exportScriptsToNetwork() {
+        if (adapter.selection.isEmpty()) {
+            toastOnUi("请先选择要导出的脚本")
+            return
+        }
+        lifecycleScope.launch {
+            runCatching {
+                withContext(IO) {
+                    DirectLinkUpload.upLoad(
+                        "exportTtsScript.json",
+                        GSON.toJson(adapter.selection).toByteArray(),
+                        "application/json"
+                    )
                 }
-                customView { alertBinding.root }
-                okButton { sendToClip(uri.toString()) }
+            }.onSuccess { url ->
+                showExportResult(url)
+            }.onFailure { e ->
+                toastOnUi("网络导出失败: ${e.localizedMessage}")
             }
+        }
+    }
+
+    private fun showExportResult(uriText: String) {
+        alert(R.string.export_success) {
+            if (uriText.isAbsUrl()) {
+                setMessage(DirectLinkUpload.getSummary())
+            }
+            val alertBinding = DialogEditTextBinding.inflate(layoutInflater).apply {
+                editView.hint = getString(R.string.path)
+                editView.setText(uriText)
+            }
+            customView { alertBinding.root }
+            okButton { sendToClip(uriText) }
         }
     }
 
@@ -185,6 +279,7 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
                 mode = HandleFileContract.FILE
                 allowExtensions = arrayOf("txt", "json")
             }
+            R.id.menu_import_onLine -> showImportDialog()
             R.id.menu_help -> showHelp("ttsScriptHelp")
         }
         return super.onCompatOptionsItemSelected(item)
@@ -204,6 +299,7 @@ class TtsScriptActivity : VMBaseActivity<ActivityTtsScriptBinding, TtsScriptView
                     "application/json"
                 )
             }
+            R.id.menu_export_onLine -> exportScriptsToNetwork()
         }
         return false
     }

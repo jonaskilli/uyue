@@ -18,6 +18,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.help.http.decompressed
 import io.legado.app.help.http.newCallResponseBody
 import io.legado.app.help.http.okHttpClient
+import io.legado.app.help.http.text
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.model.RuleUpdate
 import io.legado.app.utils.GSON
@@ -29,6 +30,7 @@ import io.legado.app.utils.isJsonArray
 import io.legado.app.utils.isJsonObject
 import io.legado.app.utils.isUri
 import io.legado.app.utils.splitNotBlank
+import io.legado.app.utils.Utf8BomUtils
 
 
 class ImportBookSourceViewModel(app: Application) : BaseViewModel(app) {
@@ -151,14 +153,7 @@ class ImportBookSourceViewModel(app: Application) : BaseViewModel(app) {
                     }
                 }
 
-                mText.isJsonArray() -> GSON.fromJsonArray<BookSource>(mText).getOrThrow()
-                    .let { items ->
-                        val source = items.firstOrNull() ?: return@let
-                        if (source.bookSourceUrl.isEmpty()) {
-                            throw NoStackTraceException("不是书源")
-                        }
-                        allSources.addAll(items)
-                    }
+                mText.isJsonArray() -> addSources(mText)
 
                 mText.isAbsUrl() -> {
                     importSourceUrl(mText)
@@ -166,15 +161,10 @@ class ImportBookSourceViewModel(app: Application) : BaseViewModel(app) {
 
                 mText.isUri() -> {
                     val uri = Uri.parse(mText)
-                    uri.inputStream(context).getOrThrow().use { inputS ->
-                        GSON.fromJsonArray<BookSource>(inputS).getOrThrow().let {
-                            val source = it.firstOrNull() ?: return@let
-                            if (source.bookSourceUrl.isEmpty()) {
-                                throw NoStackTraceException("不是书源")
-                            }
-                            allSources.addAll(it)
-                        }
+                    val text = uri.inputStream(context).getOrThrow().use { inputS ->
+                        inputS.bufferedReader(Charsets.UTF_8).use { it.readText() }
                     }
+                    addSources(text)
                 }
 
                 else -> throw NoStackTraceException(context.getString(R.string.wrong_format))
@@ -200,15 +190,27 @@ class ImportBookSourceViewModel(app: Application) : BaseViewModel(app) {
             } else {
                 url(url)
             }
-        }.decompressed().byteStream().use {
-            GSON.fromJsonArray<BookSource>(it).getOrThrow().let { list ->
-                val source = list.firstOrNull() ?: return@let
-                if (source.bookSourceUrl.isEmpty()) {
-                    throw NoStackTraceException("不是书源")
-                }
-                allSources.addAll(list)
-            }
+        }.decompressed().text().let { addSources(it) }
+    }
+
+    /**
+     * 把一段书源文本解析入库，兼容两种写法：
+     * - 数组 [{...}, {...}]（多个书源，首尾方括号）
+     * - 单个对象 {...}（一个书源，无外层方括号）
+     * 无外层方括号的情况过去只有「粘贴源」入口能识别，文件/网络导入会失败，这里统一兼容。
+     */
+    private fun addSources(text: String) {
+        val trimmed = Utf8BomUtils.removeUTF8BOM(text).trim()
+        val items = when {
+            trimmed.isJsonArray() -> GSON.fromJsonArray<BookSource>(trimmed).getOrThrow()
+            trimmed.isJsonObject() -> listOf(GSON.fromJsonObject<BookSource>(trimmed).getOrThrow())
+            else -> throw NoStackTraceException(context.getString(R.string.wrong_format))
         }
+        val source = items.firstOrNull() ?: return
+        if (source.bookSourceUrl.isEmpty()) {
+            throw NoStackTraceException("不是书源")
+        }
+        allSources.addAll(items)
     }
 
     private fun comparisonSource() {
