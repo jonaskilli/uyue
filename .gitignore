@@ -86,3 +86,17 @@ build_ai_locate*.log
 # 签名密钥与口令不入库（11-17 用户令）：本地备份在《流程/签名密钥-勿入库/》，CI 走 GitHub Secrets
 app/*.jks
 app/*.keystore
+
+# ── 内部文档不入库（11-17 用户令：公开仓库不留内部规范/流程说明）────────
+# 判据：面向仓库协作/内部流程的 md 一律只存本地《流程/》目录。
+# 例外（不挡）：app/src/main/assets/ 下的 md 是 App 运行时读取的内置资源（帮助/声明），
+# 必须入库；上游源码目录里已跟踪的 README 属代码注释性质，合并上游时由复查流程处理。
+/*.md
+/docs/
+/流程/
+# 通用兜底：任何位置的「内部说明类」文件名（勿列入 assets 运行时资源）
+CONTRIBUTING.md
+README-INTERNAL.md
+TODO*.md
+笔记*.md
+草稿*.md
