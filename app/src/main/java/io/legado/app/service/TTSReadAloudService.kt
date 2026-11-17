@@ -973,6 +973,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         val rawText = getRawText(index)
         val text = precomputedText ?: applyTtsScripts(rawText, paragraphIndex = index)
         if (text.matches(AppPattern.notReadAloudRegex)) {
+            // 11-18 用户令（02:25 排查实证）：纯符号段走静音文件，此前**零日志**——
+            // 用户只听到空一下、日志页 0 行，完全查不出「为什么这段没声」
+            //（29 章实测：47/53~55/70~85/89 等 20+ 段全静默消失）。
+            // 补一行：段号 + 原文缩略，明确指出「静音跳过」而非合成失败。
+            AppLog.put("纯符号段静音跳过: index=$index text=${rawText.trim().take(12)}")
             val fileName = getFileNameHelper(textChapter?.chapter?.title ?: "", rawText, index)
             if (!hasSpeakFile(fileName)) createSilentSound(fileName)
             return getSpeakFileAsMd5(fileName)
@@ -1178,6 +1183,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         // 未命中缓存才跑规则脚本：它决定「这段该不该念」和送引擎的文本
                         val speakText = applyTtsScripts(rawText, paragraphIndex = i)
                         if (speakText.matches(AppPattern.notReadAloudRegex)) {
+                            // 11-18：主播放循环同一处静音分支也补日志（上面 synthesizeSingle
+                            // 那处与之口径一致，两处都要，否则命中缓存的段仍无痕迹）。
+                            AppLog.put("纯符号段静音跳过: index=$i text=${rawText.trim().take(12)}")
                             val fileName = getFileNameHelper(chapterTitle, rawText, i)
                             if (!hasSpeakFile(fileName)) createSilentSound(fileName)
                             getSpeakFileAsMd5(fileName)
