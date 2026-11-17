@@ -31,9 +31,29 @@ jobs:
         with:
           packages: 'platforms;android-36 build-tools;36.0.0 platform-tools'
 
-      # Signing key (release-testkey.jks) and passwords are committed in-repo
-      # (gradle.properties), so no GitHub Secrets are needed.
-      # Only inject the SDK path into local.properties as a fallback.
+      # 签名密钥不入公开仓库（11-17 用户令）：从 GitHub Secrets 注入到
+      # ~/.gradle/gradle.properties，密钥库 base64 解码回 app/release-testkey.jks。
+      # Secrets 清单：ANDROID_SIGNING_KEY_BASE64 / RELEASE_STORE_FILE /
+      # RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD
+      - name: Restore signing config from Secrets
+        env:
+          SIGNING_KEY_B64: ${{ secrets.ANDROID_SIGNING_KEY_BASE64 }}
+          RELEASE_STORE_FILE: ${{ secrets.RELEASE_STORE_FILE }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_KEY_B64" ]; then
+            echo "::error::Secret ANDROID_SIGNING_KEY_BASE64 未配置，无法签名"
+            exit 1
+          fi
+          {
+            echo "RELEASE_STORE_FILE=$RELEASE_STORE_FILE"
+            echo "RELEASE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD"
+            echo "RELEASE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
+            echo "RELEASE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
+          } >> ~/.gradle/gradle.properties
+          echo "$SIGNING_KEY_B64" | base64 -d > app/"$RELEASE_STORE_FILE"
       - name: Init local.properties
         run: |
           touch local.properties

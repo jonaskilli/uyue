@@ -85,3 +85,6 @@ build_ai_locate*.log
 /build_bili_source.js
 /qwen_image_generator.html
 /speaker_icon_*.svg
+# 签名密钥与口令不入库（11-17 用户令）：本地备份在《流程/签名密钥-勿入库/》，CI 走 GitHub Secrets
+app/*.jks
+app/*.keystore
