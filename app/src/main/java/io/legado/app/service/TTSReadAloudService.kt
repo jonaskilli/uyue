@@ -100,14 +100,22 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 但慢链路会冤枉——规则姓名分析 31.2s + UTTS 内部排队 3s，UTTS 实际已在
          * 处理（内部 onSynthesizeStart 有记录），系统 onStart 却没在窗口内到达。
          *
-         * 11-17 三调（用户令「人家原设计 120 秒，我用 20 秒已缩很多，你用 8 秒不合适」）：
-         * 固定值都不对——用户可把总超时设到 20s，8s 占一半太激进，30s 又会顶穿总超时。
-         * 改为**跟随总超时联动**：`min(总超时, 30s)`，且不低于 8s。实际取值：
-         *   总超时 ≥30s（默认 120）→ 看门狗 **30s**（覆盖慢分析 31s 场景，差 1s 可接受，
-         *     且 onStart 之后还有完整总超时等结果）；
-         *   总超时 20s → **20s**（= 总超时本身，不顶穿，慢请求由它兜底）；
-         *   总超时 10s → **10s**；≤8s → **8s**（保底）。
-         * 总超时本身就是用户显式设的「最多等多久」，看门狗只该是它的前置快筛。
+         * 11-17 三调：改为**跟随总超时联动**，但不低于 8s。
+         *
+         * 11-18 五调（用户令「这个 30s 是你觉得合理的时间」+「不要等太久」）：
+         * **去掉 30 秒硬上限**。旧公式 `min(总超时, 30s)` 里的 30s 是拍脑袋写的，
+         * 与用户任何设置都无关——用户把总超时设成 120s，看门狗照样 30s 就判死，
+         * 于是「慢但还能成」的请求被清引擎重来（实测：规则姓名分析 31.2s +
+         * UTTS 排队，onStart 必然晚于 30s；02:26:38 Legado53 首回调超时即此形态）。
+         *
+         * 新公式：**总超时的 80%**，下限 8s、上限留 1s 给总超时兜底。实际取值：
+         *   总超时 120s（默认）→ 看门狗 **96s**；
+         *   总超时 60s → **48s**；20s → **16s**；10s → **8s**（撞下限）。
+         * 语义不变：看门狗只是总超时的**前置快筛**——占总超时的大头，
+         * 留一点尾巴给总超时本身（onStart 到了之后还有完整总超时等结果）。
+         *
+         * 代价（如实记）：总超时设得越大，真·死引擎被发现得越晚。
+         * 用户当前按「不想等太久」方向调总超时，本公式会跟着收敛，不会反向拖长。
          *
          * 11-17 四调（用户问「要不要专门设个键」）：**不设键**。理由——
          * ① 它是内部快筛，不承载用户意图；用户真正想调的是「最多等多久」＝总超时，
@@ -116,8 +124,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * ③ 实际需要调的场景已有出口：想让它更宽容 → 调大总超时。
          */
         private val firstCallbackTimeoutMs: Long
-            get() = (AppConfig.sysTtsSynthesizeTimeout * 1000L).coerceAtMost(30_000L)
-                .coerceAtLeast(8_000L)
+            get() {
+                val total = AppConfig.sysTtsSynthesizeTimeout * 1000L
+                // 80% 给看门狗；至少留 1s 给总超时兜底（用户设得极小时也不例外）
+                val cap = (total - 1_000L).coerceAtLeast(1_000L)
+                // 原 8s 保底保留，但不能顶穿 cap（用户设 5s 时 8s 会比总超时还长）
+                val floor = 8_000L.coerceAtMost(cap)
+                return (total * 4 / 5).coerceIn(floor, cap)
+            }
 
         /** 11-16：播放推进到本段之后才允许后台预热（用户令「开头不预热」）。 */
         private const val PRELOAD_START_AFTER = 3
