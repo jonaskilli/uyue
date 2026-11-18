@@ -1224,6 +1224,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 抢同一插件引擎，撞上「请等待当前请求完成」后进入 6 分钟重试链（06:40:18–06:46:07），
         // 期间日志页一行不显示，表现为「点了很久没声音」。
         // 预热改由合成循环里的**滚动补货**触发，且加播放门槛（见下方 preloadAllowedNow）。
+        // v1.7.43 U阅侧（11-18 22:4x 定位）：切章/翻页重建引擎（TtsEngineActivator / initTts /
+        // clearTTS）时 UTTS 合成通道被 close，已提交的在途请求从此**不再回调**（onStart/onDone/
+        // onError 全无），只能各自等满首回调看门狗（默认 96s）才判死——22:09:44 段22播完到
+        // 22:10:19 的 35s 静默就是这么来的。这里在进入合成循环前主动对在途 synthesisCompleters
+        // 全部 complete(null)：通道若已被重建、这些请求本就收不到回调，主动了结让失败路径
+        // 立刻走「失败→重试」，不再白等看门狗。安全性同 clearTTS()：只有「引擎实例要换」才走
+        // play() 重建路径，正常排队（通道未断）不影响；误了结也只触发一次无害重试。
+        val pendingPre = synthesisCompleters.values.toList()
+        pendingPre.forEach { d -> runCatching { d.complete(null) } }
+        synthesisCompleters.clear()
 
         synthesisTask = lifecycleScope.launch(Dispatchers.IO) {
             var needPreload = false
