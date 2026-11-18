@@ -155,6 +155,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          */
         private const val PRELOAD_SEGMENT_TIMEOUT_MS = 15_000L
         /**
+         * 11-18：预热让路判据——播放请求提交后超过这么久还没收尾，就判定上游慢/卡，
+         * 本轮预热链直接放弃，不再逐段各干等 15 秒。
+         *
+         * 为什么需要（14:26 那轮实测）：播放段撞云之声慢上游，连吃 3 次 20 秒超时、
+         * 共 68 秒才换钥成功。这段时间系统 TTS 的合成队列被播放请求占死，UTTS 连
+         * `onSynthesizeText` 都没被调到（debug.log 里连「预热让路」这行都没有），
+         * U阅 这边 5 段预热逐段等满 15 秒判负：链空转 76 秒、5 段全废，
+         * 请求还一直堆在队列里。判据只看「播放请求在飞且已慢」，
+         * 正常 1~3 秒的合成完全不受影响。
+         */
+        private const val PRELOAD_YIELD_PLAYBACK_STUCK_MS = 6_000L
+        /**
          * 11-17：慢重试总预算——「永不跳句」模式下给失败段原地重来的总时长。
          *
          * 为什么要有上限：用户原话「只能满足一定的条件它才跳，不然一直等着一个不会合成的
@@ -357,6 +369,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private var synthesisTask: Job? = null
     /** 跨章预加载协程 */
     private var preloadJob: Job? = null
+
+    /**
+     * 11-18：播放请求最近一次**提交**引擎、最近一次**收尾**（成功/失败/取消都算）的时刻。
+     * 只服务「预热让路」一个判断，不参与播放逻辑：
+     * 提交后超过 [PRELOAD_YIELD_PLAYBACK_STUCK_MS] 仍未收尾 ⇒ 上游慢，预热本轮放弃。
+     */
+    @Volatile private var playbackSubmitAt = 0L
+    @Volatile private var playbackSettledAt = 0L
 
     // ====== 字幕同步 ======
     private var subtitleSyncJob: Job? = null
@@ -618,6 +638,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
         // 【诊断日志】真正提交引擎的一笔（10-12 加，只记录不改逻辑）
         AppLog.putDebug("TTS提交引擎 index=$index id=$utteranceId text=${text.take(20)}")
+        // 11-18：给预热让路判断记下这笔播放请求的提交时刻
+        playbackSubmitAt = SystemClock.elapsedRealtime()
         // 11-14：合成前沿上报（UTTS 进度行「多合几段/正在合第几段」的数据源）。
         // 每提交一笔就刷新前沿；幂等由 ReadProgressFile 内部处理。失败静默。
         io.legado.app.help.ReadProgressFile.reportSynthFront(
@@ -650,6 +672,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     canceledAt[cacheKey] = System.currentTimeMillis()
                     inFlightSyntheses.remove(cacheKey)
                     mine.completeExceptionally(e)
+                    // 11-18：取消也算收尾，别让预热把「已取消的慢请求」当成还在卡
+                    playbackSettledAt = SystemClock.elapsedRealtime()
                     throw e
                 } catch (e: Exception) {
                     AppLog.put("TTS合成异常\n${e.localizedMessage}", e)
@@ -659,6 +683,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // 正常出结果（成功或失败）就清掉冷却，免得 1.2 秒内重播被误挡
                 canceledAt.remove(cacheKey)
                 mine.complete(result)
+                // 11-18：播放请求已收尾，预热让路判断清零
+                playbackSettledAt = SystemClock.elapsedRealtime()
             }
         }
         // 持有者（即提交这一笔的人）可被取消，发给引擎的那笔请求照旧跑完并落缓存
@@ -930,6 +956,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 for (i in start until limit) {
                     if (!isActive) break
                     ensureActive()
+                    // 11-18：播放请求在飞且已慢 → 上游卡住，系统 TTS 队列多半被它占着，
+                    // 这时发预热只会「排队 15 秒 × 每段」空转（实测 5 段 76 秒全废）。
+                    // 本轮直接放弃，等下一轮滚动补货再试。
+                    val playbackPending = playbackSubmitAt > playbackSettledAt
+                    val playbackStuckMs = SystemClock.elapsedRealtime() - playbackSubmitAt
+                    if (playbackPending && playbackStuckMs >= PRELOAD_YIELD_PLAYBACK_STUCK_MS) {
+                        AppLog.putDebug(
+                            "预热让路：播放请求已等 ${playbackStuckMs / 1000} 秒未返回，" +
+                                "本轮预热放弃（起点 $start，已备 $okCount 段）"
+                        )
+                        break
+                    }
                     val raw = getRawText(i)
                     if (raw.isBlank()) continue
                     // 已有 U阅 自己的缓存，不必再花一次请求
