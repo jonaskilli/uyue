@@ -998,14 +998,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         //              不写占位、不漏内容，用户手动继续后会重新合成。
         val slowRetryDeadline = SystemClock.elapsedRealtime() + SLOW_RETRY_BUDGET_MS
         var attemptRound = 0
-        // 11-17：进慢重试前先留一行「要开始慢重试了」——用户令「日志上得有重试记录，
-        // 不然搞不清楚为啥停顿」。开头这一行 + 每轮一行 + 结局一行，三处构成完整证据链。
-        AppLog.put(
-            "[阅读→引擎] 开始慢重试：快重试已耗尽，" +
-                (if (AppConfig.ttsRetrySkipOnFail) "开关已开启 → 走静音占位跳过"
-                else "开关已关闭 → 每 10 秒重来一轮，总预算 ${SLOW_RETRY_BUDGET_MS / 1000} 秒") +
-                "（第 ${index + 1} 段，文本：${text.take(20)}）"
-        )
+        // 11-18 全量核对实锤：这行原本无条件打在 while 之前，于是**每段**都先冒一条
+        // 「开始慢重试」，哪怕第一次提交就成功（99 条慢重试行对 99 条提交行，98 条
+        // 在 0.16 秒内 attempt=0 SUCCESS）——日志在说谎，看起来像全程在重试。
+        // 现在挪到**第一次合成真返回 null 之后**才打：那时确实「快重试已耗尽」。
+        // 证据链仍是「开始 + 每轮 + 结局」三处，只是开始行不再预告不存在的事。
+        var slowRetryAnnounced = false
         while (true) {
             val result = synthesizeText(text, utteranceId, index, chapterTitle, rawText)
             if (result != null) {
@@ -1013,6 +1011,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     AppLog.put("[阅读→引擎] 慢重试成功：第 $attemptRound 轮后拿到音频（第 ${index + 1} 段）")
                 }
                 return result
+            }
+            if (!slowRetryAnnounced) {
+                slowRetryAnnounced = true
+                AppLog.put(
+                    "[阅读→引擎] 开始慢重试：快重试已耗尽，" +
+                        (if (AppConfig.ttsRetrySkipOnFail) "开关已开启 → 走静音占位跳过"
+                        else "开关已关闭 → 每 10 秒重来一轮，总预算 ${SLOW_RETRY_BUDGET_MS / 1000} 秒") +
+                        "（第 ${index + 1} 段，文本：${text.take(20)}）"
+                )
             }
             attemptRound++
             val overBudget = SystemClock.elapsedRealtime() >= slowRetryDeadline
@@ -1168,7 +1175,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     val cacheHit = cachedFile.exists() &&
                         cachedFile.length() > 0 && isValidAudioFile(cachedFile)
                     if (cacheHit) {
-                        AppLog.putDebug("TTS缓存命中: ${cachedFile.name}")
+                        // 11-18 全量核对实锤：命中行不带段号，导致「段序缺号」无法对冲——
+                        // 29 章有 47/53~55/70~85/89 等 86 段在日志里既无提交行也无命中行，
+                        // 只能靠文件名 hash 反推，等于查不了。补 index 后才能直接对账：
+                        // 缺号数 == 命中数即可判定「不是缺失，是秒回」。
+                        AppLog.putDebug("TTS缓存命中: index=$i ${cachedFile.name}")
                         cachedFile
                     } else {
                         // ===== 11-15：往后备货前等一次静默期（只等一次）=====
