@@ -468,6 +468,25 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         textToSpeech = null
         ttsInitFinish = false
         pendingPlay = false
+        // 11-18 用户报障修复（15:09 实锤卡 96 秒）：清实例时**顺手了结所有在途请求**。
+        //
+        // 为什么必须做：系统 TTS 引擎一旦 shutdown，已提交的那几笔就**再也不会回调**
+        //（onStart/onDone/onError 全无）。以前只把实例置空，于是每一笔只能各自等满
+        // 「首回调看门狗」（默认 96 秒 = 总超时 80%）：
+        //   15:08:00 提交 Legado54 → 15:08:02 用户点播放、跳过该段 → 请求悬挂
+        //   15:09:36 提交 Legado75（正常段）
+        //   15:09:36 Legado54 看门狗到点 → clearTTS() → 把刚提交 750ms 的 Legado75 一起作废
+        //   15:11:12 Legado75 也等满 96 秒 → 重试 0.8 秒成功
+        // 用户听到的就是中间那 98 秒空白（UTTS 侧一行日志都没有：请求根本没到）。
+        //
+        // 现在：清实例的同时把这些请求全部 complete(null) ⇒ 立刻走「失败→重试」，
+        // 由重建后的引擎重新合成，不再白等看门狗。
+        // 安全性：clearTTS 的每个调用点都意味着「这个引擎实例不要了」，在途请求本就收不到
+        // 回调，主动了结只是让失败路径提前，不会误杀仍然有效的请求。
+        val pending = synthesisCompleters.values.toList()
+        synthesisCompleters.clear()
+        synthesisTargetFiles.clear()
+        pending.forEach { d -> runCatching { d.complete(null) } }
     }
 
     override fun onInit(status: Int) {
