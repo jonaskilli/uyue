@@ -183,8 +183,8 @@ function _scanBelowDialogs(belowText) {
 }
 
 /**
- * 与内置朗读脚本 Z3.4 的 generateBatchSeqContent 完全同口径：
- * 当前段原文（保留引号外旁白，不再用 dialogs 重建）+ 下文 1000 字「原文」（保留叙述、动作、"XX说道"等提示词），
+ * 与内置朗读脚本 Z3.3 的 generateBatchSeqContent 完全同口径：
+ * 当前段对话重包引号 + 下文 1000 字「原文」（保留叙述、动作、"XX说道"等提示词），
  * 补右引号后只给前 80% 的左引号编号，尾部留作只供参考的上下文。
  * 返回的 pairs 仍带 isCurrent / sourceOffset，供 Kotlin 定位章节缓存。
  */
@@ -192,14 +192,13 @@ function _buildSeqContent(t) {
     var currentDialogs = _isArray(t.dialogs) ? t.dialogs : [];
     var below = String(t.below || "");
 
-    // 与 Z3.4 同口径：先修补畸形引号“X“Y → “X”“Y”
-    var paragraph = String(t.paragraph || "").replace(/(“[^“”\n]*)(“)/g, "$1”$2");
-    // 保留当前段原文（含引号外旁白），只在左引号前插序号；旧版用 dialogs 重建丢掉了旁白
-    var cleanedCurrent = paragraph.replace(/【\d{1,4}】/g, "");
+    var cleanedDialogues = "";
+    for (var i = 0; i < currentDialogs.length; i++) {
+        var dialogText = String(currentDialogs[i].text || "").replace(/^【\d+】/, "");
+        cleanedDialogues += "“" + dialogText + "”" + NL;
+    }
     var cleanedBelow = below.replace(/【\d+】/g, "");
-    var fullRawText = cleanedCurrent + NL + cleanedBelow;
-    // 当前段实际对话数按原文左引号计，可能与 dialogs.length 不一致，pairs 划分改用它
-    var currentDialogCount = (cleanedCurrent.match(/“/g) || []).length;
+    var fullRawText = cleanedDialogues + cleanedBelow;
     fullRawText = fullRawText.replace(/(“[^“”\n]*)(\n[^“”]+)($|“)/g, "$1”$2$3");
     fullRawText = fullRawText.replace(/(“[^“”\n]*)($|“)/g, "$1”$2");
     fullRawText = fullRawText.replace(/【\d{1,4}】/g, "");
@@ -211,7 +210,7 @@ function _buildSeqContent(t) {
         ? totalQuoteCount
         : Math.max(Math.floor(totalQuoteCount * 0.8), 1);
     // 80% 截断只给下文尾部留缓冲，当前段对话必须全部编号
-    if (stopAddIndex < currentDialogCount) stopAddIndex = currentDialogCount;
+    if (stopAddIndex < currentDialogs.length) stopAddIndex = currentDialogs.length;
     var seqCounter = 0;
     var seqContent = fullRawText.replace(/“/g, function (match) {
         seqCounter++;
@@ -224,10 +223,10 @@ function _buildSeqContent(t) {
     var seqReg = /【(\d{1,4})】“([^”]*)”/g;
     var m, k = 0;
     while ((m = seqReg.exec(seqContent)) !== null) {
-        var isCurrent = k < currentDialogCount;
+        var isCurrent = k < currentDialogs.length;
         var sourceOffset = 0;
         if (!isCurrent) {
-            var bd = belowDialogs[k - currentDialogCount];
+            var bd = belowDialogs[k - currentDialogs.length];
             sourceOffset = bd ? bd.sourceOffset : 0;
         }
         pairs.push({
@@ -331,73 +330,24 @@ function _unknownFromBatch(records, batchNames) {
     return out;
 }
 function _existingRolesList(records, limit) {
-    var names = [], seen = {}, aliasToMainMap = {}, usedRecords = 0;
-    for (var i = 0; i < records.length; i++) {
+    var list = [], seen = {}, aliasToMainMap = {}, usedRecords = 0;
+    for (var i = 0; i < records.length && usedRecords < limit; i++) {
         var r = records[i];
+        usedRecords++;
         if (!r || !r.name) continue;
         var mainName = String(r.name).trim();
-        if (!mainName) continue;
-        // 别名→主名映射覆盖全量记录：模糊补充可能把第100条之后的名字发给 AI，
-        // AI 返回后要能找回主名；names 仍只取前 limit 条记录。
+        if (!mainName || seen[mainName]) continue;
+        seen[mainName] = true;
+        var roleObj = { name: mainName };
+        if (r.aliases && String(r.aliases).trim()) roleObj.aliases = String(r.aliases).trim();
+        list.push(roleObj);
         var aliases = String(r.aliases || "").split("|");
         for (var j = 0; j < aliases.length; j++) {
             var alias = String(aliases[j] || "").trim();
             if (alias && alias !== mainName) aliasToMainMap[alias] = mainName;
         }
-        if (usedRecords >= limit) continue;
-        usedRecords++;
-        if (!seen[mainName]) { seen[mainName] = true; names.push(mainName); }
-        for (var k = 0; k < aliases.length; k++) {
-            var alias2 = String(aliases[k] || "").trim();
-            if (alias2 && alias2 !== mainName && !seen[alias2]) { seen[alias2] = true; names.push(alias2); }
-        }
     }
-    return { names: names, aliasToMainMap: aliasToMainMap };
-}
-
-// 模糊补充候选：从待确认名字（2~5字）按位置取所有有序两字组合，到 records[startIndex..] 的
-// 主名+别名里找同时含这两个字的名字。保序优先、逆序延后，全局「所有保序在前、所有逆序在后」，
-// 各自按记录顺序，合计最多 limit 个。命中别名的就放别名本身。
-function buildFuzzySupplement(records, pendingNames, startIndex, limit) {
-    var forward = [], reverse = [], nameSeen = {};
-    for (var ri = startIndex; ri < records.length; ri++) {
-        var rec = records[ri];
-        if (!rec || !rec.name) continue;
-        var mainName = String(rec.name).trim();
-        var pool = [mainName];
-        if (rec.aliases && String(rec.aliases).trim()) {
-            var aa = String(rec.aliases).split("|");
-            for (var ax = 0; ax < aa.length; ax++) {
-                var av = String(aa[ax] || "").trim();
-                if (av && av !== mainName) pool.push(av);
-            }
-        }
-        for (var pi = 0; pi < pool.length; pi++) {
-            var cand = pool[pi];
-            if (!cand || nameSeen[cand]) continue;
-            var hitForward = false, hitReverse = false;
-            for (var ni = 0; ni < pendingNames.length; ni++) {
-                var pn = String(pendingNames[ni] || "").trim();
-                if (pn.length < 2 || pn.length > 5) continue;
-                for (var ci = 0; ci < pn.length - 1; ci++) {
-                    for (var cj = ci + 1; cj < pn.length; cj++) {
-                        var c1 = pn.charAt(ci), c2 = pn.charAt(cj);
-                        var p1 = cand.indexOf(c1), p2 = cand.indexOf(c2);
-                        if (p1 < 0 || p2 < 0) continue;
-                        if (c1 === c2 || p1 < p2) hitForward = true;
-                        else if (p1 > p2) hitReverse = true;
-                    }
-                }
-            }
-            if (!hitForward && !hitReverse) continue;
-            (hitForward ? forward : reverse).push(cand);
-            nameSeen[cand] = true;
-        }
-    }
-    var out = [];
-    for (var f = 0; f < forward.length && out.length < limit; f++) out.push(forward[f]);
-    for (var r = 0; r < reverse.length && out.length < limit; r++) out.push(reverse[r]);
-    return out;
+    return { list: list, aliasToMainMap: aliasToMainMap };
 }
 
 function _reorderByBatch(records, batchNames) {
@@ -468,22 +418,10 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
                 unknown.push(two[ti]);
             }
         }
-    }
-    var candidates = _existingRolesList(records, 100);
-    var existingNames = candidates.names;
+    }    var candidates = _existingRolesList(records, 50);
+    var existingRolesList = candidates.list;
     var requests = [];
     if (unknown.length > 0) {
-        // 前100条之外，按两字相似度补充候选（保序优先、逆序延后，最多50个），只发补充进来的名字
-        if (records.length > 100) {
-            var pendingNames = [];
-            for (var ui = 0; ui < unknown.length; ui++) pendingNames.push(String(unknown[ui].name || "").trim());
-            var fuzzy = buildFuzzySupplement(records, pendingNames, 100, 50);
-            var nameSeenF = {};
-            for (var ei = 0; ei < existingNames.length; ei++) nameSeenF[existingNames[ei]] = true;
-            for (var fi = 0; fi < fuzzy.length; fi++) {
-                if (!nameSeenF[fuzzy[fi]]) { nameSeenF[fuzzy[fi]] = true; existingNames.push(fuzzy[fi]); }
-            }
-        }
         var nameSeqText = "";
         for (var i = 0; i < unknown.length; i++) nameSeqText += "【" + padZero(i + 1, 2) + "】" + unknown[i].name + NL;
         var ctxText = (
@@ -492,18 +430,16 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
             String(t.paragraph || "") + NL +
             String(t.below || "")
         ).slice(0, 3000);
-        var prompt = "你是专业的小说人物同名判定AI。请判断【待确认名字列表】中每个名字，是否与【已有名字列表】中的某个名字指向同一人物（同一人的不同称呼，如字号、绰号、昵称、不同译名等）。注意：两个名字地位平等——可能是列表中的名字为主名、待确认名字为别名，也可能是待确认名字为主名、列表中的名字为别名，两种情况都算匹配。" + NL + NL +
+        var prompt = "你是专业的小说人物别名识别AI。请判断【待确认名字列表】中每个名字是否为【已有角色列表】中某个角色的别名（字号、绰号、昵称、不同称呼等）。" + NL + NL +
             "【核心原则】" + NL +
-            "1. 只判断两个名字是否指向同一人物，不区分谁是主名、谁是别名" + NL +
-            "2. 不要仅凭字面相似度推断，需结合上下文合理关联" + NL +
-            "3. 不确定的默认判定为不匹配" + NL +
-            "4. 全新角色（从未出现过）判定为不匹配" + NL +
-            "5. 若列表中有多个名字都可匹配，只选最可能（概率最大）的那一个即可" + NL + NL +
-            (ctxText ? "【小说上下文片段】（每句前的 [某某] 是之前自动识别的说话人，仅供参考、可能有误）" + NL + ctxText + NL + NL : "") +
-            "【已有名字列表】" + NL + existingNames.join(NL) + NL + NL +
+            "1. 别名必须是同一人物的不同称呼" + NL +
+            "2. 不要仅凭字面相似度推断，需要合理关联" + NL +
+            "3. 不确定的默认判定为非别名" + NL +
+            "4. 全新角色（从未出现过）判定为非别名" + NL + NL +
+            (ctxText ? "【小说上下文片段】（每句前的 [某某] 是之前自动识别的说话人，仅供参考、可能有误；本片段不带对话序号）" + NL + ctxText + NL + NL : "") +            "【已有角色列表】" + NL + JSON.stringify(existingRolesList) + NL + NL +
             "【待确认名字列表】" + NL + nameSeqText + NL + NL +
             "【输出要求】" + NL +
-            "输出严格JSON格式，键为序号（如" + Q + "01" + Q + "），值为 {isAlias: true/false, mainName: " + Q + "从【已有名字列表】中选出的、与待确认名字指向同一人物的那个名字；不匹配则为null" + Q + "}。" + NL +
+            "输出严格JSON格式，键为序号（如" + Q + "01" + Q + "），值为 {isAlias: true/false, mainName: " + Q + "匹配的主名或null" + Q + "}。" + NL +
             "必须覆盖所有序号。";
         var aliasExpectedKeys = [];
         for (var aki = 0; aki < unknown.length; aki++) aliasExpectedKeys.push(padZero(aki + 1, 2));
@@ -514,9 +450,8 @@ function prepareAliasRequest(taskJson, recordsJson, nameResultJson) {
         unknownNames: unknown,
         batchNames: batchNames,
         aliasToMainMap: candidates.aliasToMainMap,
-        candidateCount: existingNames.length,
-        pairs: pairs
-    });
+        candidateCount: existingRolesList.length,
+        pairs: pairs    });
 }
 
 function _parseAliasResult(body) {
@@ -746,7 +681,7 @@ function parseAliasResponse(taskJson, body, recordsJson, nameResultJson, aliasMe
         }
         // 本批姓名AI识别出来的角色统一置顶：
         // 已有角色、合并到主名的别名、新建角色都按本批出现顺序排到最前面。
-        // 这样后续别名识别取前100条角色记录时，最近活跃角色不会被挤到后面。
+        // 这样后续别名识别取前50条角色记录时，最近活跃角色不会被挤到后面。
         records = _reorderByBatch(records, batchNames);
         while (records.length > MAX_CHARACTER) records.pop();
         return JSON.stringify(records);
