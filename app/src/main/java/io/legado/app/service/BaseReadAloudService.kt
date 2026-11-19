@@ -2251,16 +2251,21 @@ abstract class BaseReadAloudService : BaseService(),
                     // 改为落点计算后由跳段判断处统一消费并复位（见 1825 行附近）。
                     readAloudNumber = textChapter.getLastParagraphPosition()
                     nowSpeak = (contentList.lastIndex - 1).coerceAtLeast(0)
-                    // ⚠️ 11-14 备注：下面这行仍用 page.paragraphs/page.chapterPosition，
-                    // 与上文刚修的「半截段」是同一类隐患（跨页段时页起点在段内部）。
-                    // 但不改：这是 11-13 为「ma末页只有一段」修的，触发条件极窄
-                    //（toLast + 末页恰好单段），真机日志从未触发；改动面大、
-                    // 收益低，保持现状。若将来用户在「回退上一章末段」场景报高亮错，
-                    // 再按上文同样的段表累加方式重写此处。
-                    if (page.paragraphs.size == 1) {
-                        pos = page.chapterPosition -
-                                textChapter.paragraphs[nowSpeak].chapterPosition
-                    }
+                    // 11-20 晚修（用户实报「点上一段跨回上一章，从末段半截开始读，
+                    // 应从段首整读」——02:22:27 实锤，页43/段207，念出「不多二十三年前。"」）：
+                    // 删除旧覆盖 `if (page.paragraphs.size == 1)
+                    //     pos = page.chapterPosition - paragraphs[nowSpeak].chapterPosition`。
+                    // 它是 11-13 为「ma末页只有一段」修的，意图是末页单段时从**页首**续读；
+                    // 但纯尾巴页（末页单段且页起点落在末段内部）时 pos=页起点−段起点>0，
+                    // paragraphStartPos 被推到段中，getRawText 从半截截取——正是 11-14 备注
+                    // 预言的「跨页段页起点在段内部」隐患，当时判「触发条件极窄从未触发」
+                    // 保留现状；11-20 规则2 落地后「回退上一章末段」场景首次踩中。
+                    // 现口径（与规则2「回退落章末段首整读」、段首对齐块、syncToParagraph
+                    // 完全一致）：readAloudNumber 已是段表末段真实起点
+                    //（getLastParagraphPosition，02:19:18 实测 7901 与段表累加值相等），
+                    // pos 保持 startPos（回退重播恒为 0）→ paragraphStartPos=0 整段读。
+                    // 行为变化仅落在「末页单段且半截」这一种情形；末页单段非半截（pos 原
+                    // 本就是 0）与末页多段（旧代码不进覆盖）均不受影响。
                 }
                 paragraphStartPos = pos
             }
