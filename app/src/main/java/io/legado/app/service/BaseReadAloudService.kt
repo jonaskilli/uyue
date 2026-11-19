@@ -708,6 +708,39 @@ abstract class BaseReadAloudService : BaseService(),
         BitmapFactory.decodeResource(appCtx.resources, R.drawable.icon_read_book)
     var pageChanged = false
     private var toLast = false
+
+    /**
+     * 11-20 尾巴页规则的一次性标志：「本次落点是从后往前到达的」。
+     *
+     * 用户两条规则（2026-11-20 定稿）：
+     * 1. 正向（点朗读/翻页跟随/续读）落在「纯尾巴页」（本页只有章末半截段）→
+     *    不读这半截，直接跳下一章；
+     * 2. 从后往前到达（第二章向前翻落章末、朗读中点「前一段」跨章）→ 读章末
+     *    半截段的**段首**（现状行为），不能被规则1误伤。
+     *
+     * 置位点：ReadBook.curPageChanged 消费（moveToPrevChapter 跨章向前翻落章末）。
+     * 消费点：newReadAloud 纯尾巴页判定处，读后即清。
+     */
+    @Volatile
+    var reverseTailArrival = false
+        private set
+
+    /** 供 ReadBook 置位（跨章向前翻落章末 = 从后往前到达） */
+    fun markReverseTailArrival() {
+        reverseTailArrival = true
+    }
+
+    /** 仅供服务内部清除（newReadAloud 消费后） */
+    private fun clearReverseTailArrival() {
+        reverseTailArrival = false
+    }
+
+    /**
+     * 11-20 规则1：正向落到「纯尾巴页」（本页只有章末半截段的下半截）。
+     * newReadAloud IO 协程里置位，主线程落点处消费 → nextChapter() 跳下一章。
+     */
+    @Volatile
+    private var skipToNextChapter = false
     var paragraphStartPos = 0
     var readAloudByPage = false
         private set
@@ -2137,7 +2170,8 @@ abstract class BaseReadAloudService : BaseService(),
             // 翻页跟随也要跳，是因为它就是"你翻到哪页"的入口：翻到这页就从这页读，
             // 页首那条半截段的尾巴不再回翻去补。
             // 排除项只有：单段模式/长按小喇叭（用户明确点选那一段）、toLast（回退末段）。
-            if (startPos == 0 && !toLast
+            // 11-20 追加排除：reverseTailArrival（从后往前到达，见下方纯尾巴页分支）。
+            if (startPos == 0 && !toLast && !reverseTailArrival
                 && !singleParagraphMode && !continueFromParagraph
             ) {
                 val paraStartAbs = paragraphStartPosOf(nowSpeak)
@@ -2153,6 +2187,27 @@ abstract class BaseReadAloudService : BaseService(),
                             "（页首段从上一页延续，跳过它、从本页下一段念）"
                     )
                     nowSpeak++
+                } else if (isHalfCut && !canAdvance && pageOnlyOneParagraph(page)) {
+                    // ===== 11-20 用户规则1：正向落到「纯尾巴页」→ 跳下一章 =====
+                    //
+                    // 场景：章末段被分页切成两半，最后一页只装着它的**下半截**（本页
+                    // 除它之外没有别的段）。正向到达（点朗读/翻页跟随）时，11-14 的
+                    // 「半截段跳过」本想跳到下一段接着念，可这里 nowSpeak 已是末段、
+                    // canAdvance=false——旧代码什么都不做，结果从半句起念这半截尾巴。
+                    //
+                    // 用户定稿（2026-11-20）：这半截不念，**直接跳下一章**。上半截在
+                    // 上一页已经读过（自然推进读到页尾时本页内容已被念完），再回读
+                    // 反而重复。反向到达（向前翻/前一段）不进此分支——上面已排除
+                    // reverseTailArrival，toLast 路径本来就落段首整读。
+                    //
+                    // 实现：置 skipToNextChapter 标志，主线程落点处统一消费——复用
+                    // nextChapter() 整条切章链路（子类清队列/合并音频/事件/保护窗口
+                    // 都齐全），随后补发 play 从新章第 1 段开始。
+                    AppLog.putDebug(
+                        "纯尾巴页跳章: 页=$pageIndex 仅含末段${nowSpeak}的下半截 " +
+                            "段起点=$paraStartAbs 页起点=$pageStartAbs，正向到达，跳下一章"
+                    )
+                    skipToNextChapter = true
                 }
             }
             // 11-14 晚：点朗读/续读（startPos==0 且非翻页跟随）落点是半截段时，
@@ -2164,7 +2219,7 @@ abstract class BaseReadAloudService : BaseService(),
             // 「从段首读」打架。故这里统一对齐到**段表真实起点**（与纠偏块、
             // syncToParagraph 同一口径）。唯一的例外是 toLast——回退上一章末段，
             // 下面分支自己会重算落点。
-            if (startPos == 0 && !toLast) {
+            if (startPos == 0 && !toLast && !skipToNextChapter) {
                 val acc = paragraphStartPosOf(nowSpeak)
                 if (acc != readAloudNumber) {
                     AppLog.putDebug(
@@ -2216,9 +2271,32 @@ abstract class BaseReadAloudService : BaseService(),
                 paragraphStartPos = 0
                 pendingGengxinResumeIndex = -1
             }
+            // 11-20 规则2 标志消费：本次 newReadAloud 已用完「从后往前到达」信息
+            //（上面半截段块据此放行章末半截段），读后即清，不影响下一次播放。
+            if (reverseTailArrival) {
+                clearReverseTailArrival()
+                AppLog.putDebug("reverseTailArrival 已消费清除（本次落点从章末段首整读）")
+            }
             launch(Dispatchers.Main) {
+                // 11-20 边界：play=false（暂停态翻页跟随）时跳章标志不消费，
+                // 就地清除——否则残留到之后某次播放会意外跳章。此时用户只是
+                // 翻页看看，没要播；恢复播放走的是 resume，不重算落点。
+                if (!play) skipToNextChapter = false
                 if (play) {
                     LogUtils.d(TAG, "nowSpeak=$nowSpeak")
+                    // ===== 11-20 规则1 消费点：纯尾巴页 → 跳下一章 =====
+                    // 在 toLast 复位之前拦截：此时落点计算已无意义，直接走
+                    // nextChapter() 整条切章链路（含子类清队列/合并音频/事件），
+                    // 切完补发 play 从新章第 1 段开始。本函数剩余落点/翻页/播放
+                    // 全部跳过（return@launch）。
+                    if (skipToNextChapter) {
+                        skipToNextChapter = false
+                        toLast = false
+                        AppLog.putDebug("纯尾巴页跳章: 消费标志，调用 nextChapter()")
+                        nextChapter()
+                        ReadAloud.play(appCtx, play = true, pageIndex = 0, startPos = 0)
+                        return@launch
+                    }
                     // 11-13 晚 用户纠正：**不做任何跳段**，点「朗读」恒从当前落点段读。
                     //
                     // 历史：这个「nowSpeak != 0 就跳下一段」的分支是当年为绕开
@@ -2385,6 +2463,18 @@ abstract class BaseReadAloudService : BaseService(),
             acc += contentList[i].length + 1
         }
         return acc
+    }
+
+    /**
+     * 11-20 规则1 判据：这一页是否**只装着一个段**（无其他段）。
+     *
+     * 「纯尾巴页」= 本页唯一的段又是章末段且页起点落在段内部（上半截在上一页）。
+     * 段归属用 page.lines 的 paragraphNum（章内连续号，TextPage.paragraphs 的 num
+     * 是页内重编号不能用）判，与 2080 行纠偏块同口径。
+     */
+    private fun pageOnlyOneParagraph(page: io.legado.app.ui.book.read.page.entities.TextPage): Boolean {
+        val nums = page.lines.mapNotNull { if (it.paragraphNum > 0) it.paragraphNum else null }.toSet()
+        return nums.size <= 1
     }
 
     /**

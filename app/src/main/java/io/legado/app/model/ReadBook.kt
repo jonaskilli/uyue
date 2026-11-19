@@ -517,6 +517,13 @@ object ReadBook : CoroutineScope by MainScope() {
         upContentInPlace: Boolean = true
     ): Boolean {
         if (durChapterIndex > 0) {
+            // 11-20 尾巴页规则2：向前跨章 = 从后往前到达。落点由 toLast 决定：
+            // toLast=true 落上一章末尾（章末半截段，须整读段首，不许被规则1跳章），
+            // 置一次性标志让服务端 newReadAloud 放行；toLast=false 落章头，不涉及。
+            // 服务未运行（instance=null）时标志无人消费，无害。
+            if (toLast) {
+                BaseReadAloudService.instance?.markReverseTailArrival()
+            }
             durChapterPos = if (toLast) prevTextChapter?.lastReadLength ?: Int.MAX_VALUE else 0
             durChapterIndex--
             rescheduleAiChapterFix()
