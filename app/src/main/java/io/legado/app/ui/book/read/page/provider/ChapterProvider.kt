@@ -1052,8 +1052,9 @@ object ChapterProvider {
         val offsetPx = AppConfig.roleAnnotationOffset.dpToPx().toFloat()
         val annotationTop = -fm.descent - offsetPx + fm.ascent
         val needed = -annotationTop
-        // 防字号异常时把上边距抬得没边，最多到一行正文高度
-        val limit = if (contentPaintTextHeight > needed) contentPaintTextHeight else needed
+        // 标注是 0.55 倍正文号，字形高恒小于一行正文高；取正文行高兜底，
+        // 防止字号/偏移被设成极端值时把上边距抬得没边。
+        val limit = if (contentPaintTextHeight > base) contentPaintTextHeight else Float.MAX_VALUE
         return needed.coerceIn(base, limit)
     }
 
