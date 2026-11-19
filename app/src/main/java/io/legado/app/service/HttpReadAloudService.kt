@@ -2511,6 +2511,12 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         val currentChapter = textChapter?.chapter
         val currentChapterIndex = ReadBook.durChapterIndex
 
+        // 11-19 21:4x：与 TTSReadAloudService 对齐——切章前清空旧章残留队列。
+        // 旧章末尾那个 " "（章末占位）若在切章后才播完，会再判一次章末 → 连跳两章。
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        playIndexJob?.cancel()
+
         // 切换章节前重置AI生图状态，新章节 sceneIndex 从0开始，避免跨章 sceneIndex 错位导致缓存/保存错乱
         resetAiImageState()
 

@@ -1772,6 +1772,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         val currentChapter = textChapter?.chapter
         val currentChapterIndex = ReadBook.durChapterIndex
 
+        // 11-19 21:4x 加：切章前**清空播放队列里的旧章残留**。
+        //
+        // 背景（真机 18:21:30 / 20:15 反复复现）：切章是「先播完末段→STATE_ENDED→
+        // updateNextPos→nextChapter」，而 ExoPlayer 队列里往往还排着旧章末尾那个
+        // " "（章末静音占位符）。它一旦在切章之后才被播出去，就再触发一次
+        // STATE_ENDED → 又判一次章末 → 连跳两章。
+        // 旧章的东西已经不该再出声，这里直接停播+清队列，让「旧章尾巴」根本播不到。
+        //
+        // 为什么放在 moveToNextChapter 之前：那时段表还是旧章（contentList 未重建），
+        // 清掉不会伤到新章任何音频；新章的合成与入队由随后的 newReadAloud 从头来。
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        playIndexJob?.cancel()
+        silentPlayCheckJob?.cancel()
+
         // 切换章节前重置AI生图状态，新章节 sceneIndex 从0开始，避免跨章 sceneIndex 错位导致缓存/保存错乱
         resetAiImageState()
         // 先切换章节，再触发朗读，避免 resumeReadAloud 时 contentList 还是旧章节内容
