@@ -718,6 +718,14 @@ object ReadBook : CoroutineScope by MainScope() {
             loadContent(durChapterIndex)
         } else {
             callBack?.upContent()
+            // 11-20（角色标注补挂）：同一本书重新打开且章节已排好版时，不会走
+            // loadContent ⇒ contentLoadFinish 里的 loadRoleAnnotations 不触发。
+            // 而角色缓存是朗读过程中由脚本逐段写盘的——读的那一章在「上次排版」
+            // 之后又有了新缓存，重进却什么都不挂，用户看到的就是「退出重进没有
+            // 标注，要重启才有」（重启会清 TextChapter 强制重排版，挂载才跑）。
+            // 这里排版复用，但标注挂载是独立于排版的轻量操作（读一个小 json +
+            // 遍历行列），补挂一次即可，与 538a625 整页绘制的兼容性无关。
+            loadRoleAnnotations(curTextChapter)
             // 同一本书重新打开（upData 路径）且内容已就绪时，不会走 loadContent，
             // 因此这里主动通知内容加载完成，确保 ReadBookActivity.contentLoadFinish()
             // 能消费 readAloud 等 extra

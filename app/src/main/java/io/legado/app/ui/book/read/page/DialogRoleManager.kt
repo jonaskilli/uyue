@@ -3,10 +3,18 @@ package io.legado.app.ui.book.read.page
 import android.text.TextPaint
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
+import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.read.page.provider.ChapterProvider
 import io.legado.app.ui.book.toc.AiCacheFileUtil
 import io.legado.app.utils.dpToPx
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
@@ -36,6 +44,36 @@ object DialogRoleManager {
     private val memoryCache = hashMapOf<String, Map<Int, RoleInfo>>()
 
     fun getCacheRoot(): String = CACHE_ROOT
+
+    // ===== 11-20（角色标注写完即显）：脚本写缓存 → 防抖重挂 =====
+    //
+    // 背景：标注只在「排版完成/切章/翻页」这几个时刻挂载，而角色缓存是朗读
+    // 过程中由脚本逐段写盘的。首次朗读一章时缓存是空的，挂载落空；脚本写完
+    // 盘后没有通知机制，只能等下次翻页碰运气，或重启（强制重排版）。
+    // 信号点在 JsExtensions.writeExternalFile（脚本写文件的唯一 Kotlin 出口，
+    // 命中角色缓存路径时调 [notifyCacheWritten]）。
+    //
+    // 防抖 300ms：合成是逐段提交的，同一章几秒内会连写多次；每次都挂会
+    // 重复重绘。防抖把一批写收敛成「最后写完那次」挂载，体验是「这段的
+    // AI 结果一到，标注整批出现」。挂载失败（排版未完成/无回调）静默：
+    // 下一次写或翻页仍会触发，不会丢。
+    private var pendingReattachJob: Job? = null
+    private val reattachScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    fun notifyCacheWritten() {
+        if (pendingReattachJob?.isActive == true) return
+        pendingReattachJob = reattachScope.launch {
+            delay(300)
+            val bookName = ReadBook.book?.name ?: return@launch
+            // 只重挂当前正在阅读的那一章；其他章的缓存写入等切章时自然挂上
+            val textChapter = ReadBook.curTextChapter ?: return@launch
+            clearChapterCache(bookName, textChapter.title)
+            attachAnnotations(textChapter, bookName)
+            withContext(Dispatchers.Main) {
+                ReadBook.callBack?.upContent()
+            }
+        }
+    }
 
     /**
      * 章节名清洗规则。

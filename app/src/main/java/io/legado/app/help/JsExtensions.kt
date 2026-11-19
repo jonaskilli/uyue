@@ -14,6 +14,7 @@ import io.legado.app.constant.AppPattern
 import io.legado.app.data.entities.BaseSource
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.config.AppConfig
+import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.help.http.BackstageWebView
 import io.legado.app.help.http.CookieManager.cookieJarHeader
 import io.legado.app.help.http.CookieStore
@@ -1236,6 +1237,21 @@ private fun saveResponseHeaders(
         return try {
             file.parentFile?.mkdirs()
             file.writeText(content)
+            // 11-20（角色标注写完即显）：朗读脚本把当前章的角色缓存写盘后，
+            // 此前没有任何通知让阅读页补挂标注——标注只在「排版完成/切章/翻页」
+            // 这几个时刻挂载，于是首次朗读一章时整章都看不到角色名，要等
+            // 翻页（碰运气）或重启（强制重排版）。脚本在朗读服务进程里执行
+            //（applyTtsScripts），但 writeExternalFile 落在本进程 Kotlin 侧，
+            // 正好是「缓存已就绪」的精确信号点：命中当前书的角色缓存文件就
+            // 防抖 300ms 重挂一次（合成是逐段提交的，同章高频写，防抖把
+            // N 次写收敛成最后一次挂载；挂载本身毫秒级）。切书/错路径自然
+            // 不命中，零成本旁路。
+            if (realPath.startsWith(DialogRoleManager.getCacheRoot())
+                && realPath.endsWith(".json")
+                && AppConfig.showRoleAnnotation
+            ) {
+                DialogRoleManager.notifyCacheWritten()
+            }
             true
         } catch (e: Exception) {
             AppLog.put("writeExternalFile error", e)

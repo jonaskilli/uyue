@@ -160,6 +160,9 @@ class App : Application() {
             initDefaultAiProfileTemplate()
             //激活转发器对应的TTS引擎
             TtsEngineActivator.activateOnAppInit()
+            // 11-20：UTTS 日志栏喇叭的接收端——监听 chajian/<ruleId>/readCommand.json，
+            // 收到即「从这段开始读 / 重新合成该段」。幂等，启动一次即可。
+            io.legado.app.help.ReadCommandWatcher.start()
         }
     }
 
