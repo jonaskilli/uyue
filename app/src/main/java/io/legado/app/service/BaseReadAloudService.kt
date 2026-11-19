@@ -731,6 +731,21 @@ abstract class BaseReadAloudService : BaseService(),
     @Volatile
     protected var chapterSwitchGuardUntilMs = 0L
 
+    /**
+     * 段表（contentList）**实际来自**哪一章（0 基；-1 = 还没建过）。
+     *
+     * 11-19 18:2x 真机复发后补：原判「段表是否旧」用的是 `textChapter`，
+     * 但 [newReadAloud] 是**先**把 `textChapter` 赋成新章，**后**（跨过
+     * saveTtsTextJson 的文件 IO）才重建 contentList。真机 18:21:30 实证：
+     * 第8章末尾的空标记播完 → STATE_ENDED → 此时 textChapter 已是第9章、
+     * contentList 还是第8章的 → isContentListStale() 判「段表没旧」→ 放行
+     * 章末判定 → 第9章整章被跳（30.005 跳9、30.727 又跳10，两次只隔 0.7s，
+     * 且「切章保护」一行都没打）。故改为记录「段表自己属于第几章」，
+     * 与 textChapter 解耦——段表真被换掉那一刻才更新。
+     */
+    @Volatile
+    protected var contentListChapterIndex = -1
+
     /** 切章保护内已重发的次数（仅用于日志，上限由时间窗控制） */
     @Volatile
     private var chapterSwitchRetryCount = 0
@@ -741,10 +756,11 @@ abstract class BaseReadAloudService : BaseService(),
 
     /** 段表所属章节是否**已经不是**当前正在读的章节（即 pg 表没跟上切章） */
     private fun isContentListStale(): Boolean {
-        val curIndex = textChapter?.chapter?.index ?: return false
-        val curDur = ReadBook.durChapterIndex
-        // textChapter 是段表的来源章节；它和当前 durChapter 不一致 = 段表是旧的
-        return curIndex != curDur
+        val built = contentListChapterIndex
+        if (built < 0) return false
+        // 必须用「段表建于第几章」，不能用 textChapter：后者在 newReadAloud 里
+        // 先于 contentList 更新，会把这个窗口误判成「段表已跟上」（18:21 真机实证）。
+        return built != ReadBook.durChapterIndex
     }
 
     /**
@@ -771,7 +787,7 @@ abstract class BaseReadAloudService : BaseService(),
         }
         chapterSwitchRetryCount++
         AppLog.putDebug(
-            "切章保护：段表仍属于第${(textChapter?.chapter?.index?.plus(1))}章" +
+            "切章保护：段表仍属于第${contentListChapterIndex + 1}章" +
                 "（当前第${ReadBook.durChapterIndex + 1}章），拦截本次章末判定，" +
                 "等段表跟上（第 $chapterSwitchRetryCount 次）"
         )
@@ -1932,6 +1948,9 @@ abstract class BaseReadAloudService : BaseService(),
                 .filter { it.isNotEmpty() }
                 .toMutableList()
                 .apply { add(" ") }
+            // 段表真正换成了新章的内容，才把「段表属于第几章」跟着更新
+            //（必须在赋值之后：isContentListStale 靠它区分「章节已换、段表没换」）
+            contentListChapterIndex = textChapter.chapter.index
             // 换了内容就作废上一轮的分析任务：段落索引已指向新内容，
             // 继续跑会把旧章节的结果写进新章节的记录文件
             clearAiEffectRuntime()
