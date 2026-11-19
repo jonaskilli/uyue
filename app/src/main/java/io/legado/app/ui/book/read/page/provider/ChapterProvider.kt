@@ -16,6 +16,7 @@ import io.legado.app.help.book.BookContent
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.model.ReadBook
+import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.utils.RealPathUtil
 import io.legado.app.utils.buildMainHandler
@@ -26,6 +27,7 @@ import io.legado.app.utils.postEvent
 import io.legado.app.utils.spToPx
 import io.legado.app.utils.textHeight
 import kotlinx.coroutines.CoroutineScope
+import kotlin.math.max
 import splitties.init.appCtx
 
 /**
@@ -1002,7 +1004,12 @@ object ChapterProvider {
         }
 
         paddingLeft = ReadBookConfig.paddingLeft.dpToPx()
-        paddingTop = ReadBookConfig.paddingTop.dpToPx()
+        // 段首行的角色标注整块画在**行顶上方**（见 ContentTextView.drawRoleAnnotations）。
+        // 上边距小于标注高度时，第一行的名字会被页面上沿裁掉大半（11-19 用户实拍
+        // 「第一行标注只显示一半」）。空间够就原样保留、不改版式；不够才补足差额。
+        val userPaddingTop = ReadBookConfig.paddingTop.dpToPx()
+        val annotationHeight = if (AppConfig.showRoleAnnotation) topOverflowPx() else 0f
+        paddingTop = max(userPaddingTop, annotationHeight.toInt())
         paddingRight = ReadBookConfig.paddingRight.dpToPx()
         paddingBottom = ReadBookConfig.paddingBottom.dpToPx()
         visibleWidth = if (doublePage) {
@@ -1027,6 +1034,27 @@ object ChapterProvider {
             visibleBottom.toFloat() + 10f.dpToPx() //下划线最远10dp
         )
 
+    }
+
+    /**
+     * 角色标注完整显示所需、位于行顶上方的高度（px）。
+     *
+     * 标注画在行顶上方：`textY = lineTop - fm.descent - offset`，
+     * 字形顶到行顶的距离约为 `-fm.descent + fm.ascent`（以 0.55 倍正文字号测量）。
+     * 默认上边距只有 6dp，远小于这个高度；不补足的话页面第一行的标注会被裁掉。
+     */
+    fun topOverflowPx(): Float {
+        val base = 10f
+        if (!AppConfig.showRoleAnnotation) return base
+        val paint = DialogRoleManager.annotationPaint
+        paint.textSize = contentPaint.textSize * 0.55f
+        val fm = paint.fontMetrics
+        val offsetPx = AppConfig.roleAnnotationOffset.dpToPx().toFloat()
+        val annotationTop = -fm.descent - offsetPx + fm.ascent
+        val needed = -annotationTop
+        // 防字号异常时把上边距抬得没边，最多到一行正文高度
+        val limit = if (contentPaintTextHeight > needed) contentPaintTextHeight else needed
+        return needed.coerceIn(base, limit)
     }
 
     private fun setFallbackLayout() {

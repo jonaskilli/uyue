@@ -184,26 +184,8 @@ data class TextLine(
             }
         }
 
-        // 绘制角色标注（在左双引号正上方行间距处）
-        if (AppConfig.showRoleAnnotation && !isTitle && !isImage && !isHtml) {
-            val snapshot = synchronized(roleAnnotations) { ArrayList(roleAnnotations) }
-            if (snapshot.isNotEmpty()) {
-                val paint = DialogRoleManager.annotationPaint
-                paint.textSize = ChapterProvider.contentPaint.textSize * 0.55f
-                paint.color = ReadBookConfig.textAccentColor
-                val fm = paint.fontMetrics
-                val offsetPx = AppConfig.roleAnnotationOffset.dpToPx()
-                val textY = -fm.descent - offsetPx
-                for (anno in snapshot) {
-                    canvas.drawText(
-                        anno.name,
-                        anno.labelStart,
-                        textY,
-                        paint
-                    )
-                }
-            }
-        }
+        // 角色标注不在这里画：它整块落在行顶上方，会被行画布（优化渲染时）
+        // 和页面上沿裁掉。改由 ContentTextView.drawRoleAnnotations() 统一绘制。
 
         // 绘制音频缓存标记（在行首缩进上方）
         // 检测缩进字符（全角空格），在缩进区域上方绘制删除图标。
@@ -308,21 +290,8 @@ data class TextLine(
                 canvas.drawRect(column.start, 0f, column.end, height, view.selectedPaint)
             }
         }
-        // 绘制角色标注（在左双引号正上方行间距处）
-        if (AppConfig.showRoleAnnotation && !isTitle && !isImage && !isHtml) {
-            val snapshot = synchronized(roleAnnotations) { ArrayList(roleAnnotations) }
-            if (snapshot.isNotEmpty()) {
-                val paint = DialogRoleManager.annotationPaint
-                paint.textSize = ChapterProvider.contentPaint.textSize * 0.55f
-                paint.color = ReadBookConfig.textAccentColor
-                val fm = paint.fontMetrics
-                val offsetPx = AppConfig.roleAnnotationOffset.dpToPx()
-                val textY = -fm.descent - offsetPx
-                for (anno in snapshot) {
-                    canvas.drawText(anno.name, anno.labelStart, textY, paint)
-                }
-            }
-        }
+        // 角色标注不在这里画：它整块落在行顶上方，会被行画布（优化渲染时）
+        // 和页面上沿裁掉。改由 ContentTextView.drawRoleAnnotations() 统一绘制。
 
         // 绘制音频缓存标记（在行首缩进上方）
         if (AppConfig.showAudioCacheIndicator

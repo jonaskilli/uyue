@@ -10,6 +10,7 @@ import io.legado.app.R
 import io.legado.app.data.entities.Bookmark
 import io.legado.app.help.book.isOnLineTxt
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.association.OpenUrlConfirmActivity
@@ -111,8 +112,54 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
             canvas.translate(0f, scrollY.toFloat())
         }
         check(!visibleRect.isEmpty) { "visibleRect 为空" }
+        // clipRect 之后裁剪范围无法再扩回，所以正文裁剪用 save/restore 包住，
+        // 标注补画在外面单独设裁剪（见 drawRoleAnnotations）。
+        canvas.save()
         canvas.clipRect(visibleRect)
         drawPage(canvas)
+        canvas.restore()
+        drawRoleAnnotations(canvas)
+    }
+
+    /**
+     * 绘制角色标注（正文左双引号正上方）。
+     *
+     * 标注整块在**行顶上方**，行画布（TextLine.draw 的 canvasRecorder）按行高录制，
+     * 顶部装不下这部分；所以从行绘制里挪出来，在整页画布上统一画一遍。
+     * 页面上沿所需空间由 ChapterProvider.topOverflowPx() 计出（不足时已补进 paddingTop），
+     * 这里把裁剪上沿再放宽同样的量，兼容边距/字号的各种组合。
+     */
+    private fun drawRoleAnnotations(canvas: Canvas) {
+        if (!AppConfig.showRoleAnnotation) return
+        val pageCount = if (callBack.isScroll && pageFactory.hasNext()) 2 else 1
+        canvas.save()
+        canvas.clipRect(
+            max(visibleRect.left, 0f),
+            max(visibleRect.top - ChapterProvider.topOverflowPx(), 0f),
+            min(visibleRect.right, width.toFloat()),
+            visibleRect.bottom
+        )
+        for (relativePos in 0 until pageCount) {
+            val textPage = relativePage(relativePos)
+            val relativeOffset = relativeOffset(relativePos)
+            for (textLine in textPage.lines) {
+                if (textLine.isTitle || textLine.isImage || textLine.isHtml) continue
+                val snapshot = synchronized(textLine.roleAnnotations) {
+                    ArrayList(textLine.roleAnnotations)
+                }
+                if (snapshot.isEmpty()) continue
+                val paint = DialogRoleManager.annotationPaint
+                paint.textSize = ChapterProvider.contentPaint.textSize * 0.55f
+                paint.color = ReadBookConfig.textAccentColor
+                val fm = paint.fontMetrics
+                val offsetPx = AppConfig.roleAnnotationOffset.dpToPx()
+                val textY = textLine.lineTop + relativeOffset - fm.descent - offsetPx
+                for (anno in snapshot) {
+                    canvas.drawText(anno.name, anno.labelStart, textY, paint)
+                }
+            }
+        }
+        canvas.restore()
     }
 
     /**
@@ -350,7 +397,11 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
      */
     private fun checkRoleAnnotationClick(x: Float, y: Float): Boolean {
         if (!AppConfig.showRoleAnnotation) return false
-        if (!visibleRect.contains(x, y)) return false
+        // 标注被补画到 visibleRect 上沿之外（见 drawRoleAnnotations），点击范围同步放宽，
+        // 否则第一行的名字看得见却点不到。
+        val annotationTop = visibleRect.top - ChapterProvider.topOverflowPx()
+        if (x < visibleRect.left || x > visibleRect.right) return false
+        if (y < annotationTop || y > visibleRect.bottom) return false
         var relativeOffset: Float
         for (relativePos in 0..2) {
             relativeOffset = relativeOffset(relativePos)
