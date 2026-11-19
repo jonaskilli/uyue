@@ -1554,6 +1554,7 @@
     <string name="replace_domain_done">已替换 %1$d 处，确认无误后点右上角保存</string>
     <string name="pt_source_toast">书源提示（java.toast）</string>
     <string name="ps_source_toast">书源规则里 java.toast 弹的提示（形如「源名: 正在加载第N集」）。关掉后只写日志，不再弹窗</string>
+    <string name="disable_source_toast">禁止书源提示</string>
 
     <!-- TTS 引擎插件：插件代码编辑器 -->
     <string name="undo">撤销</string>

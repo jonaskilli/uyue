@@ -147,7 +147,7 @@
     <item
         android:id="@+id/menu_source_toast"
         android:checkable="true"
-        android:title="@string/pt_source_toast"
+        android:title="@string/disable_source_toast"
         app:showAsAction="never" />
 
     <item

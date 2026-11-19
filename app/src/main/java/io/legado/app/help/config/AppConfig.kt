@@ -106,11 +106,11 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
      * 书源规则里的 `java.toast` / `java.longToast` 是否真的弹提示。
      *
      * 用 getter 而不是初始化时求值：object 的属性只会算一次，写成 `var x = getPrefBoolean()`
-     * 在设置页改完开关后这里仍是旧值。默认 false——不少视频源在正文规则里 toast
-     * "正在加载第N集"，播放/切集时反复弹窗很碍眼，关掉后只写日志。
+     * 在设置页改完开关后这里仍是旧值。默认 true（摘自上游 c171289）——未落盘过时默认
+     * 弹出提示；老用户已落盘的值照常读取，不受影响。
      */
     var sourceToast: Boolean
-        get() = appCtx.getPrefBoolean(PreferKey.sourceToast, false)
+        get() = appCtx.getPrefBoolean(PreferKey.sourceToast, true)
         set(value) {
             appCtx.putPrefBoolean(PreferKey.sourceToast, value)
         }

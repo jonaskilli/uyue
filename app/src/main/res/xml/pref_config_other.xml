@@ -263,7 +263,7 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.SwitchPreference
-            android:defaultValue="false"
+            android:defaultValue="true"
             android:key="sourceToast"
             android:summary="@string/ps_source_toast"
             android:title="@string/pt_source_toast"

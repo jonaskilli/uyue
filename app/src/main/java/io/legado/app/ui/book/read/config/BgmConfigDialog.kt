@@ -5,7 +5,6 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.SeekBar
@@ -80,8 +79,22 @@ class BgmConfigDialog : BaseDialogFragment(R.layout.dialog_bgm_config) {
             // 设置透明背景，以支持 XML 中定义的圆角
             setBackgroundDrawableResource(R.color.transparent)
             
-            // 【修改】居中弹窗宽度不建议 MATCH_PARENT，改为屏幕宽度的 90%
-            setLayout(0.9f, ViewGroup.LayoutParams.WRAP_CONTENT)
+            // 宽度 90% 屏幕。高度动态取 min(内容实际高度, 屏幕高度的 85%)：
+            // 内容没超过上限时弹窗贴合内容（不留白边、也不滚动）；
+            // 内容超出上限（例如系统字体调大）时才固定到上限，由 ScrollView 提供滚动。
+            // （摘自上游 1a5b531）
+            val maxHeight = (resources.displayMetrics.heightPixels * 0.85f).toInt()
+            setLayout(0.9f, maxHeight)
+            // 布局完成后按内容实际高度收窄弹窗
+            binding.root.post {
+                if (!isAdded) return@post
+                val contentHeight = binding.rootView.measuredHeight
+                val finalHeight = minOf(contentHeight, maxHeight)
+                dialog?.window?.setLayout(
+                    (resources.displayMetrics.widthPixels * 0.9f).toInt(),
+                    finalHeight
+                )
+            }
 
             // 内容收紧后整体再略微上移，底部四个按钮不用够着屏幕最下方点
             val offset = (24 * resources.displayMetrics.density).toInt()

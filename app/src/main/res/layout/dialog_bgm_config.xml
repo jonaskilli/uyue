@@ -3,18 +3,25 @@
      版式：顶部一排功能总开关（各自带文字说明，保持不动）；
      之后按「音效设置 / 背景音乐设置 / AI生图」三段分区，分隔线 + 主题色小标题
      让人一眼看出每段在设置什么。控件 id 与旧版一一对应，逻辑层零改动。 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
-    android:id="@+id/root_view"
+    android:id="@+id/scroll_view"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="@color/background_menu"
-    android:orientation="vertical"
-    android:paddingLeft="16dp"
-    android:paddingTop="8dp"
-    android:paddingRight="16dp"
-    android:paddingBottom="8dp">
+    android:fillViewport="false"
+    android:scrollbars="vertical">
+
+    <LinearLayout
+        android:id="@+id/root_view"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/background_menu"
+        android:orientation="vertical"
+        android:paddingLeft="16dp"
+        android:paddingTop="8dp"
+        android:paddingRight="16dp"
+        android:paddingBottom="8dp">
 
     <!-- ===== 总开关区（功能文字自明，保持平铺） ===== -->
     <LinearLayout
@@ -611,3 +618,5 @@
     </LinearLayout>
 
 </LinearLayout>
+
+</ScrollView>
