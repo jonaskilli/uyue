@@ -2232,28 +2232,32 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
                 if (segments.isEmpty()) continue
 
+                // 11-20（用户令「日志只显示正在读的章」·方案 A）：跨章预加载改走
+                // preloadOneSegment（带 batch_json）。此前这里裸调 synthesizeToFile，
+                // UTTS 判不出是预热（isPreload 只认 batch_json）→ 每段照落
+                // 「请求音频：第N章」卡，跨章时日志插进后几章的章名，用户看到
+                // 「第2章标题→读几段又出现第3章」（真机 11-19 23:34:15.514 实锤）。
+                // batch_json 路径 UTTS 只写自己的合成缓存、不落日志页；
+                // 播放到该段时命中 UTTS 缓存秒回（23:34 现场验证命中链是通的）。
+                // 代价：不再写 U阅 本地缓存文件——该文件本来只服务「跳段秒回」，
+                // UTTS 缓存命中同样秒回，功能等价。
+                val tts = textToSpeech ?: return@launch
+                if (!ttsInitFinish) return@launch
                 for (i in segments.indices) {
                     ensureActive()
                     val rawText = segments[i]
-                    val text = applyTtsScripts(
-                        rawText,
-                        paragraphIndex = i,
-                        chapterTitle = segmentTitle,
-                        chapterParagraphs = segments
-                    )
-                    if (text.matches(AppPattern.notReadAloudRegex)) continue
-
+                    // 传【原始文本】：batch_json 路径 UTTS 自己跑规则（多音色角色分配在
+                    // UTTS 侧做），U阅 侧不预跑脚本——与 launchPreloadBatch 完全同口径
+                    //（它传的就是 rawText，见 1006 行）。双跑只会浪费一次 Rhino 执行。
                     val cacheFile = getCacheFileForText(rawText, i, segmentTitle)
                     if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) continue
 
-                    val utteranceId = "PRELOAD_${AppConst.APP_TAG}_${System.currentTimeMillis()}_${offset}_$i"
-                    // 11-14：预加载跨章，显式报自己的章序/总段数——不传的话
-                    // 上报会退回播放章的值，进度行「第六章 3/25」会张冠李戴。
-                    synthesizeText(
-                        text, utteranceId, i, segmentTitle, rawText,
-                        synthChapterIdx = currentIdx + offset,
-                        synthTotalSegs = segments.size,
-                    )
+                    // 串行逐段备货（与 launchPreloadBatch 同一口径）：成功再下一段，
+                    // 失败跳过（该段播放时现场合成，约 1.3s，无功能损失）
+                    val ok = preloadOneSegment(i, rawText, tts)
+                    if (!ok) {
+                        AppLog.putDebug("跨章预加载第 ${i + 1} 段失败，跳过继续（${segmentTitle.take(10)}）")
+                    }
                 }
             }
         }
