@@ -289,7 +289,7 @@ object ContentHelp {
             val inQuote = depths[i] == 1
             if ((depths[i] == 0 || inQuote) && match(MARK_SENTENCES_END, line[i])) {                var end = i + 1
                 while (end < line.length &&
-                    (match(MARK_SENTENCES_END, line[end]) || line[end] == '”' || line[end] == '"')
+                    (match(MARK_SENTENCES_END, line[end]) || match(QUOTE_CLOSERS, line[end]))
                 ) {
                     end++
                 }
@@ -319,7 +319,20 @@ object ContentHelp {
         if (pos <= 0 || pos >= line.length) return
         if (depths[pos] > 1) return
         if (match(MARK_SENTENCES_END, line[pos])) return
-        if (!out.contains(pos)) out.add(pos)
+        // 11-19 用户实报：换行落在收引号**之前**，下一段以孤立的 `’`/`”` 开头
+        //   `…我现在要见他。` ／ `’这时已经太迟了。`
+        // 挑出来那段的最后一个字是句末标点、切口也合法，问题只是收引号没跟上一段走。
+        // 收引号在语义上属于它收束的那句话，必须留在同一段里 ⇒ 切点顺延到收引号之后。
+        //
+        // 只顺延**收引号**，不顺延起引号：以 `“` 开头的段很常见（整段引语，
+        // 实测四本书 103+19 例），那些是正常分段；而以收引号开头的段一本都没有
+        // 正常来源（实测只剩 `）` 与它同源，见 QUOTE_CLOSERS）。紧跟在收引号后面
+        // 的又若是句末标点（`。”` 这种连续符），说明落在两符之间同样不合法，交回上游并入。
+        var p = pos
+        while (p < line.length && match(QUOTE_CLOSERS, line[p])) p++
+        if (p <= 0 || p >= line.length) return
+        if (match(MARK_SENTENCES_END, line[p])) return
+        if (!out.contains(p)) out.add(p)
     }
 
     /**
@@ -906,6 +919,18 @@ object ContentHelp {
 
     //  其后的引号按反引号处理（用于判定只有一个引号时的引号方向）
     private const val MARK_QUOTE_AFTER_CLOSE = "。？！~…,，、;；:："
+
+    //  收引号（收尾符）。长段拆分的切点遇到它要顺延到它之后——见 addCut。
+    //
+    //  11-19 实测（五本书逐段跑切分、统计切出来的每一段首字）：
+    //    · 包住句末标点再切割的，只有 `”` `"` 两种，`’` `』` `」` `）》】〉]` 全漏；
+    //    · 真正以收尾符开头的段只剩两类：`’`（呼啸山庄 26 例、我的前半生 1 例）
+    //      和 `）`（2 例，与前者同源，段评 `）<img …` 被切在括号后面）。
+    //  所以这里按「所有收尾符」一次收齐，不只补用户报的那一个。
+    //  不进这个集合的两个不是收尾符，各自有正常来源、不能顺延：
+    //    · `“`（起引号）——整段引语本来就以它开头，实测 122 例，顺延会把它吞进上一段；
+    //    · `—`（破折号）——对话被打断的停顿，实测 7 例，收尾符集合里本来就没有它。
+    private const val QUOTE_CLOSERS = "”’」』）》】〉]"
 
     private fun match(rule: String, chr: Char): Boolean {
         return rule.indexOf(chr) != -1
