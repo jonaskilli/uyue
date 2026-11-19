@@ -959,6 +959,27 @@ abstract class BaseReadAloudService : BaseService(),
             .toString()
     }
 
+    /**
+     * 11-19：段表是否**只剩章名**（+末尾空标记），也就是正文一段都没进来。
+     *
+     * 用于 [TTSReadAloudService.updateNextPos] 的章末判定——那种形态下
+     * 「nowSpeak 到末尾」不代表本章读完，只代表正文还没就位。
+     */
+    protected fun isContentListTitleOnly(): Boolean {
+        // 末尾那个 " " 是每章固定的章末标记（newReadAloud 里 add(" ")）
+        val body = if (contentList.isNotEmpty() && contentList.last().isBlank()) {
+            contentList.dropLast(1)
+        } else contentList
+        if (body.isEmpty()) return true
+        if (body.size > 1) return false
+        // 只剩 1 项：它得**确实像章名**才算「只有标题」。否则那是正常的极短章
+        //（有些书一章就一段，不能把它也拦成「未就绪」）。
+        val only = body.first().trim()
+        if (only.isEmpty()) return true
+        val title = textChapter?.title ?: textChapter?.chapter?.title ?: ""
+        return isLikelyChapterTitleLine(only, title)
+    }
+
     private fun isLikelyChapterTitleLine(line: String, title: String): Boolean {
         val s = line.trim()
         if (s.isEmpty()) return false

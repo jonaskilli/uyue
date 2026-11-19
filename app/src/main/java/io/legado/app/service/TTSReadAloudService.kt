@@ -227,6 +227,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     /** 11-16：STATE_ENDED 后重新拉起合成时的重入守卫（见该分支注释）。 */
     private var resumeGuardAfterEnded = false
 
+    /**
+     * 11-19：章末判定拦下后的自愈重播计数。
+     *
+     * 「段表只有章名」时不能跳章（否则整章被吞），也不能就此停住（用户听感是
+     * 「突然没声了」）。这里安排一次延迟重播：重新走 play() 会重建 contentList，
+     * 正文若已就位就能正常接着念。计数防死循环——连续 [TITLE_ONLY_RETRY_MAX] 次
+     * 仍只有章名，说明这本源真的给不出正文，打日志停手，不再空转。
+     * 正常开播成功（走到合成循环并产出段落）时清零。
+     */
+    private var titleOnlyRetryCount = 0
+    private val TITLE_ONLY_RETRY_MAX = 5
+    private val TITLE_ONLY_RETRY_DELAY_MS = 800L
+
     /** 11-16：首回调看门狗超时的内部信号（不走 Exception 抛给上层，仅用于跳出等待）。 */
     private class SynthesisFirstCallbackTimeout : Exception("first callback timeout")
     private var playErrorNo = 0
@@ -1237,6 +1250,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         synthesisTask = lifecycleScope.launch(Dispatchers.IO) {
             var needPreload = false
+            // 11-19：正常开播（段表已重建）时清零「只有章名」的重播计数，
+            // 否则计数会跨章累积，遇到下一章偶发未就绪就直接判死不再自愈。
+            titleOnlyRetryCount = 0
             // 首段=用户正要听的那段，立即做；其余是「往后备货」，见下方
             // forwardSynthQuietMs 处的等待（**只等一次、且只在真要花钱时等**）。
             var firstIteration = true
@@ -1689,6 +1705,46 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             checkAiImageTrigger(advancedLen)
             maybePreloadFromPlayback()
         } else {
+            // ===== 11-19（真机 13:18:36 / 13:23:15 两连）：章末判定必须确认「真读完了」 =====
+            //
+            // 现场：切章后 contentList 只有 [章名, " "]（正文一段都没进来），
+            // 末尾 " " 是章末标记 → 第一段音频播完 STATE_ENDED → 走到这里 →
+            // nextChapter()，整章一个字没念就被跳过（两次分别只用了 255ms / 600ms）。
+            // 日志铁证：那两次 newReadAloud 都打出 `readAloudNumber=2→0`
+            //（段表只有 2 字的章名一项），且 `排版未完成` 一次都没打
+            // ——说明不是排版慢，是段表就那样被建出来了。
+            //
+            // 修法：段表只剩章名时不认章末，**按未就绪处理**——不跳章、不清队列，
+            // 等下一轮 play（翻页/重进/自动重试都会重新构建内容）再来。
+            // 宁可少念一次，也不能把整章吞掉：用户要的是「正文什么样就读成什么样」。
+            if (isContentListTitleOnly()) {
+                val size = contentList.size
+                AppLog.putDebug(
+                    "章末判定拦下：段表只有章名（contentList=$size，" +
+                        "首段=${contentList.firstOrNull()?.take(12)}），不跳章，等正文就位"
+                )
+                // 队列已空：停止播放等重来，避免空转刷屏
+                playIndexJob?.cancel()
+                // 自愈：延迟重播一次。play() 会重新读 curTextChapter 重建 contentList，
+                // 正文一旦就位就能正常念；有上限，防止源站真给不出正文时无限空转。
+                if (titleOnlyRetryCount < TITLE_ONLY_RETRY_MAX) {
+                    titleOnlyRetryCount++
+                    val attempt = titleOnlyRetryCount
+                    AppLog.putDebug(
+                        "章末判定拦下后 ${TITLE_ONLY_RETRY_DELAY_MS}ms 重播" +
+                            "（第 $attempt/$TITLE_ONLY_RETRY_MAX 次）"
+                    )
+                    lifecycleScope.launch(Dispatchers.Main) {
+                        delay(TITLE_ONLY_RETRY_DELAY_MS)
+                        play(affectBgm = false)
+                    }
+                } else {
+                    titleOnlyRetryCount = 0
+                    AppLog.put("章末判定连续 $TITLE_ONLY_RETRY_MAX 次只拿到章名，停止自动重播" +
+                        "（本章内容可能源站未返回，请手动翻页或换源）")
+                }
+                return
+            }
             nextChapter()
             return
         }
