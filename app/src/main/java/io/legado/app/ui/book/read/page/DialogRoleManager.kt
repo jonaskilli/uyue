@@ -356,7 +356,9 @@ object DialogRoleManager {
                         val role = cache[globalSeq] ?: return@forEachIndexed
                         if (role.name.isBlank()) return@forEachIndexed
 
-                        val label = role.name.take(5)
+                        // 不限字数：名字多长就显示多长（11-20 用户令，原 take(5) 会把
+                        // 「洛克乌德先生」截成「洛克乌德先」）。宽度实时测量，点击区域随之变宽。
+                        val label = role.name
                         val paint = annotationPaint
                         paint.textSize = ChapterProvider.contentPaint.textSize * 0.55f
                         val labelWidth = paint.measureText(label)

@@ -453,7 +453,7 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
                                 synchronized(textLine.roleAnnotations) {
                                     val idx = textLine.roleAnnotations.indexOf(anno)
                                     if (idx >= 0) {
-                                        val label = newName.take(5)
+                                        val label = newName // 不限字数，与 DialogRoleManager 口径一致
                                         val paint = DialogRoleManager.annotationPaint
                                         paint.textSize = ChapterProvider.contentPaint.textSize * 0.55f
                                         val labelWidth = paint.measureText(label)
