@@ -1745,6 +1745,23 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 }
                 return
             }
+            // ===== 11-19 追加（真机 13:18:36 / 13:23:15 的真根因，凌驾于上面那条拦截） =====
+            //
+            // 上面那段只拦「段表只剩章名」。但日志显示吞章的**第一跳**根本不是那个形态：
+            // 13:18:36.144 第3章播完 → nextChapter() 切到第4章并 resumeReadAloud()，
+            // 而 resumeReadAloud() **只发状态、不重建 contentList**——重建要等
+            // IntentAction.play → newReadAloud()。于是 36.397 那次「章节末尾静音占位符」
+            // 播的是**第3章段表末尾的 " "**（此时章节已是第4章），占位符播完
+            // STATE_ENDED → 又判章末 → 36.652 再跳第5章。整章被吞就是这么来的。
+            //
+            // 修法：切章保护窗口内走到末段，先看段表是否还属于旧章；是则**不跳章**，
+            // 主动重建段表再接着念（tryRebuildAfterChapterSwitch 内部有 5s 上限，
+            // 超时落回原逻辑，不会死循环）。
+            if (tryRebuildAfterChapterSwitch()) {
+                // 不 cancel playIndexJob：那一轮已经播完（走到末段才会来这儿），
+                // 取消只会误伤 400ms 后补发的那次
+                return
+            }
             nextChapter()
             return
         }
@@ -1774,7 +1791,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         if (hasNext) {
             // 切章时的「取消旧分析 + 按新章号重新排期」已由 ReadBook 的统一钩子完成。
             // 这里不能再取消：moveToNextChapter 内部已经同步启动新一轮分析，
-            // 在此取消会把刚排出来的新任务杀掉，朗读自动换章就永远处理不了后续章节。            // 自动切章：下一章通常已排版好，不会走 newReadAloud / contentLoadFinish，
+            // 在此取消会把刚排出来的新任务杀掉，朗读自动换章就永远处理不了后续章节。
+            //
+            // 11-19：开保护窗口。resumeReadAloud() 只发状态不重建段表，从这一刻到
+            // 下一次 newReadAloud 之间，末尾那个 " "（旧章的章末标记）若被播放就会
+            // 触发「再跳一章」。窗口内由 updateNextPos → tryRebuildAfterChapterSwitch
+            // 判定并自愈（见该函数注释与 13:18:36 日志）。
+            beginChapterSwitchGuard()
+            // 自动切章：下一章通常已排版好，不会走 newReadAloud / contentLoadFinish，
             // 必须在恢复合成前同步重落盘 data.json，保证朗读脚本读到的是新窗口内容
             ReadBook.saveTtsTextJson(force = true)
             // 跨章接续：上一章放到一半的歌，本章接着放后半段

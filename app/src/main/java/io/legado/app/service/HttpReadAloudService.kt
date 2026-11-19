@@ -720,6 +720,11 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
             // 段落推进后检查是否触发AI生图切换
             checkAiImageTrigger(advancedLen)
         } else {
+            // 11-19：切章保护窗口内段表仍属旧章时不跳章，先重建段表
+            //（真机 13:18:36 吞章的真根因见 BaseReadAloudService 里该字段的注释）
+            if (tryRebuildAfterChapterSwitch()) {
+                return
+            }
             nextChapter()
             return
         }
@@ -2513,6 +2518,8 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
         ReadBook.upReadTime()
         AppLog.putDebug("${currentChapter?.title} 朗读结束跳转下一章并朗读")
         isAutoSwitchingChapter = true
+        // 11-19：与其他 Service 对齐，切章即开保护窗口（resume 不重建段表）
+        beginChapterSwitchGuard()
         val hasNext = ReadBook.moveToNextChapter(true)
 
         // 发送章节变化事件

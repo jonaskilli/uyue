@@ -101,6 +101,12 @@ abstract class BaseReadAloudService : BaseService(),
         /** 音效文件（JSON）存放目录，音效规则管理界面也往这里写入 */
         const val SOUND_EFFECT_DIR = "/storage/emulated/0/Download/chajian/bendiyinxiao2"
 
+        /** 11-19：自动切章后等「段表跟上」的上限，超时即恢复原判章末逻辑 */
+        private const val CHAPTER_SWITCH_GUARD_MAX_WAIT_MS = 5000L
+
+        /** 11-19：确认段表没跟上之后，补发重播的等待时间（先让 UI 自己那次 play 跑完） */
+        private const val CHAPTER_SWITCH_GUARD_RETRY_MS = 400L
+
         @JvmStatic
         var isRun = false
             private set
@@ -706,6 +712,91 @@ abstract class BaseReadAloudService : BaseService(),
     var readAloudByPage = false
         private set
     protected var isAutoSwitchingChapter = false
+
+    /**
+     * 11-19（真机 13:18:36 / 13:23:15 两连跳章的真根因）：自动切章保护窗口。
+     *
+     * 现场：`nextChapter()` 切章后调 `resumeReadAloud()`——它只发状态、**不重建
+     * contentList**。真正重建段表的路径是 `IntentAction.play → newReadAloud()`。
+     * 于是切章后存在一个窗口：章节已换、段表还是**上一章的**，而上一章段表末尾
+     * 那个 `" "` 是章末标记 → 它一播完就 STATE_ENDED → `updateNextPos` 又判章末
+     * → 再跳一章。日志铁证：13:18:36.144 跳第4章，36.397 打出「章节末尾静音占位符」
+     * 那次播的正是**上一章的空标记**（该时刻并未重建段表），36.652 又跳第5章。
+     *
+     * 修法（方案 A）：切章期间置 true；`updateNextPos` 走到末段时若仍在窗口内，
+     * 不判章末、不跳章，而是**主动重建段表**（把 play 意图发给自己）再接着念。
+     * 保护期有上限（[CHAPTER_SWITCH_GUARD_MAX_WAIT_MS]），源站真给不出正文时
+     * 不无限空转。
+     */
+    @Volatile
+    protected var chapterSwitchGuardUntilMs = 0L
+
+    /** 切章保护内已重发的次数（仅用于日志，上限由时间窗控制） */
+    @Volatile
+    private var chapterSwitchRetryCount = 0
+
+    protected fun beginChapterSwitchGuard() {
+        chapterSwitchGuardUntilMs = System.currentTimeMillis() + CHAPTER_SWITCH_GUARD_MAX_WAIT_MS
+    }
+
+    /** 段表所属章节是否**已经不是**当前正在读的章节（即 pg 表没跟上切章） */
+    private fun isContentListStale(): Boolean {
+        val curIndex = textChapter?.chapter?.index ?: return false
+        val curDur = ReadBook.durChapterIndex
+        // textChapter 是段表的来源章节；它和当前 durChapter 不一致 = 段表是旧的
+        return curIndex != curDur
+    }
+
+    /**
+     * 切章窗口内的自愈：段表没跟上就重建（发 play 意图走 newReadAloud）。
+     *
+     * 为什么不用 `ReadBook.readAloud()`：它有一道 `textChapter.isCompleted` 门槛，
+     * 新章还在排版时**静默不播**——那样窗口内没人再触发，会卡成无声。
+     * 这里直接发 play 意图，`newReadAloud` 自己能处理「排版未完成」：
+     * pages 为空就等、已排好一部分就先用着，播出后再走正常流程。
+     */
+    protected fun tryRebuildAfterChapterSwitch(): Boolean {
+        if (chapterSwitchGuardUntilMs <= 0L) return false
+        if (System.currentTimeMillis() > chapterSwitchGuardUntilMs) {
+            chapterSwitchGuardUntilMs = 0L
+            chapterSwitchRetryCount = 0
+            AppLog.putDebug("切章保护超时，段表仍未跟上，按原逻辑判章末")
+            return false
+        }
+        if (!isContentListStale()) {
+            // 段表已跟上（newReadAloud 跑过了），解除保护，正常继续
+            chapterSwitchGuardUntilMs = 0L
+            chapterSwitchRetryCount = 0
+            return false
+        }
+        chapterSwitchRetryCount++
+        AppLog.putDebug(
+            "切章保护：段表仍属于第${(textChapter?.chapter?.index?.plus(1))}章" +
+                "（当前第${ReadBook.durChapterIndex + 1}章），拦截本次章末判定，" +
+                "等段表跟上（第 $chapterSwitchRetryCount 次）"
+        )
+        // 不立刻补发 play：切章时 UI 的 curPageChanged 往往已经发过一次 play，
+        // newReadAloud 跑在 IO 协程里、比这边慢一点点。此刻再发一次会与它互相
+        // 取消（play 一进来就 cancel synthesisTask / playIndexJob），既可能重复
+        // 合成也可能两边都没播成。故先等一拍，确认仍没跟上再补发。
+        lifecycleScope.launch(Dispatchers.Main) {
+            delay(400L)
+            if (chapterSwitchGuardUntilMs > 0L &&
+                System.currentTimeMillis() <= chapterSwitchGuardUntilMs &&
+                isContentListStale()
+            ) {
+                AppLog.putDebug(
+                    "切章保护：${CHAPTER_SWITCH_GUARD_RETRY_MS}ms 后段表仍未跟上，补发重播"
+                )
+                // 直接发 play 意图：绕过 ReadBook.readAloud 的 isCompleted 门槛，
+                // 落点=新章首页段 0（newReadAloud 自己能等 pages 就位）
+                ReadAloud.play(appCtx, play = true, pageIndex = 0, startPos = 0)
+            } else if (!isContentListStale()) {
+                AppLog.putDebug("切章保护：段表已跟上，恢复正常播放")
+            }
+        }
+        return true
+    }
 
     // AI预分析下一首BGM
     internal var pendingNextBgmIndex: Int = -1
@@ -3981,6 +4072,9 @@ abstract class BaseReadAloudService : BaseService(),
 
     open fun nextChapter() {
         ReadBook.upReadTime()
+        // 11-19：与其他两个 Service 对齐——切章即开保护窗口（Http/Base 这条路径
+        // 同样存在「resume 不重建段表」的窗口，只是机制见各自实现）
+        beginChapterSwitchGuard()
         AppLog.putDebug("${ReadBook.curTextChapter?.chapter?.title} 朗读结束跳转下一章并朗读")
         isAutoSwitchingChapter = true
         // 切换章节时重置AI生图状态，新章节从头开始计数
