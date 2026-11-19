@@ -772,17 +772,33 @@ abstract class BaseReadAloudService : BaseService(),
      * pages 为空就等、已排好一部分就先用着，播出后再走正常流程。
      */
     protected fun tryRebuildAfterChapterSwitch(): Boolean {
-        if (chapterSwitchGuardUntilMs <= 0L) return false
-        if (System.currentTimeMillis() > chapterSwitchGuardUntilMs) {
-            chapterSwitchGuardUntilMs = 0L
-            chapterSwitchRetryCount = 0
-            AppLog.putDebug("切章保护超时，段表仍未跟上，按原逻辑判章末")
-            return false
-        }
+        // 11-19 20:5x 关键修正：**先判段表，再看窗口**。
+        //
+        // 旧顺序是「窗口没开直接 return false」，而窗口由 nextChapter() 的
+        // beginChapterSwitchGuard() 打开——那是**在 updateNextPos() 之后**才跑的。
+        // 于是末段判定这一次必然在窗口外返回 false，判据从未执行过：
+        // 真机 20:12~20:20 全程只见过「切章保护超时」，一行「段表仍属于第N章」都没有。
+        //
+        // 现在改成：只要「段表章号 ≠ durChapterIndex」就认为需要保护，
+        // 窗口没开就自己开一个（跨章场景本就该由这里开），窗口只负责**上限**。
         if (!isContentListStale()) {
             // 段表已跟上（newReadAloud 跑过了），解除保护，正常继续
             chapterSwitchGuardUntilMs = 0L
             chapterSwitchRetryCount = 0
+            return false
+        }
+        if (chapterSwitchGuardUntilMs <= 0L) {
+            // 段表是旧章、窗口却没人开：这就是「自动切章」该有的形态，就地开窗
+            beginChapterSwitchGuard()
+            AppLog.putDebug(
+                "切章保护：检测到段表属于第${contentListChapterIndex + 1}章" +
+                    "（当前第${ReadBook.durChapterIndex + 1}章），就地开窗保护"
+            )
+        }
+        if (System.currentTimeMillis() > chapterSwitchGuardUntilMs) {
+            chapterSwitchGuardUntilMs = 0L
+            chapterSwitchRetryCount = 0
+            AppLog.putDebug("切章保护超时，段表仍未跟上，按原逻辑判章末")
             return false
         }
         chapterSwitchRetryCount++
@@ -1900,7 +1916,37 @@ abstract class BaseReadAloudService : BaseService(),
 
     private fun newReadAloud(play: Boolean, pageIndex: Int, startPos: Int, fromPageTurn: Boolean = false) {
         execute(executeContext = Dispatchers.IO) {
-            val textChapter = ReadBook.curTextChapter ?: return@execute
+            var textChapter = ReadBook.curTextChapter ?: return@execute
+            // 11-19 20:5x 加：段表必须与「当前章」同源，否则不建。
+            // 真机 20:17:00 现场：目录点了第11章（durChapterIndex=10），
+            // 但 curTextChapter 还是第8章（TOC 跳章后按 index 走 loadContent，
+            // 在新章排版完成前旧对象一直留在 curTextChapter），于是拿第8章建段表、
+            // 章末又按第8章判 → 跳章日志写「第8章」，而窗口已经是第11章。
+            // 处理：等排版跟上（最多 1 秒），跟上就用新章继续，仍不一致才放弃这次建表。
+            if (textChapter.chapter.index != ReadBook.durChapterIndex) {
+                var alignWait = 0
+                var aligned = ReadBook.curTextChapter
+                while (alignWait < 20 &&
+                    (aligned == null || aligned.chapter.index != ReadBook.durChapterIndex)
+                ) {
+                    delay(50)
+                    alignWait++
+                    aligned = ReadBook.curTextChapter
+                }
+                if (aligned == null || aligned.chapter.index != ReadBook.durChapterIndex) {
+                    AppLog.putDebug(
+                        "newReadAloud章号不一致: 段表章=${textChapter.chapter.index + 1} " +
+                            "当前章=${ReadBook.durChapterIndex + 1}，已等${alignWait * 50}ms，" +
+                            "放弃本次建表（等排版跟上后重新 play）"
+                    )
+                    return@execute
+                }
+                AppLog.putDebug(
+                    "newReadAloud章号对齐: 等${alignWait * 50}ms 后 curTextChapter " +
+                        "已切到第${aligned.chapter.index + 1}章"
+                )
+                textChapter = aligned
+            }
             if (!textChapter.isCompleted) {
                 if (textChapter.pages.isEmpty()) {
                     AppLog.putDebug("newReadAloud: TextChapter 排版未完成且 pages 为空，等待排版完成")
