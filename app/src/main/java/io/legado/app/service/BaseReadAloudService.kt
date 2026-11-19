@@ -2249,23 +2249,22 @@ abstract class BaseReadAloudService : BaseService(),
                     // 此前过早复位：往回翻到末页只有一段时（nowSpeak=末段≠0），
                     // 保护已失效，唯一段落被跳过 → 整页不读直接切下一章（真机实锤）。
                     // 改为落点计算后由跳段判断处统一消费并复位（见 1825 行附近）。
-                    readAloudNumber = textChapter.getLastParagraphPosition()
                     nowSpeak = (contentList.lastIndex - 1).coerceAtLeast(0)
-                    // 11-20 晚修（用户实报「点上一段跨回上一章，从末段半截开始读，
-                    // 应从段首整读」——02:22:27 实锤，页43/段207，念出「不多二十三年前。"」）：
-                    // 删除旧覆盖 `if (page.paragraphs.size == 1)
-                    //     pos = page.chapterPosition - paragraphs[nowSpeak].chapterPosition`。
-                    // 它是 11-13 为「ma末页只有一段」修的，意图是末页单段时从**页首**续读；
-                    // 但纯尾巴页（末页单段且页起点落在末段内部）时 pos=页起点−段起点>0，
-                    // paragraphStartPos 被推到段中，getRawText 从半截截取——正是 11-14 备注
-                    // 预言的「跨页段页起点在段内部」隐患，当时判「触发条件极窄从未触发」
-                    // 保留现状；11-20 规则2 落地后「回退上一章末段」场景首次踩中。
-                    // 现口径（与规则2「回退落章末段首整读」、段首对齐块、syncToParagraph
-                    // 完全一致）：readAloudNumber 已是段表末段真实起点
-                    //（getLastParagraphPosition，02:19:18 实测 7901 与段表累加值相等），
-                    // pos 保持 startPos（回退重播恒为 0）→ paragraphStartPos=0 整段读。
-                    // 行为变化仅落在「末页单段且半截」这一种情形；末页单段非半截（pos 原
-                    // 本就是 0）与末页多段（旧代码不进覆盖）均不受影响。
+                    // 11-20 晚二次修（03:18:05 实锤：方案B readAloudNumber=7944 当前页=0 →
+                    // 段首页=43——声音对了、页面翻到「末段尾页」没到段首那页）：
+                    // 旧写法 readAloudNumber = getLastParagraphPosition() 返回的是
+                    // **分页单元**（pageParagraphs.last()，末页行块）的 chapterPosition——
+                    // 跨页末段时它=末页页起点（段中 7944），不是段表起点（7901）。
+                    // 昨晚 02:19:18 那次能对是另一次 newReadAloud 的「段首对齐」块
+                    // 把 7944→7901 纠回（日志原文），本路径（单次 newReadAloud、
+                    // 纠偏块被 toLast 豁免）没这层保险，7944 一路走到方案B 翻错页。
+                    // 改用段表累加（与段首对齐块/syncToParagraph/prevP 同口径）：
+                    // 先置 nowSpeak 再累加，恒得末段真实段首。
+                    readAloudNumber = paragraphStartPosOf(nowSpeak)
+                    // （03:18 同轮已删 11-13 遗留的 pos 覆盖
+                    //  `if (page.paragraphs.size == 1) pos = 页起点−段起点`——纯尾巴页时
+                    //  它把 paragraphStartPos 推到段中，念出半截「不多二十三年前。"」。
+                    //  两修叠加后：声音从段首整读 + 页面翻到段首页，缺一不可。）
                 }
                 paragraphStartPos = pos
             }
