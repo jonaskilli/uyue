@@ -741,6 +741,13 @@ abstract class BaseReadAloudService : BaseService(),
      */
     @Volatile
     private var skipToNextChapter = false
+    // 11-20 晚（装机 04:4x 实锤，用户报「中间有几段没读出来」）：服务本次存活期的**首次
+    // newReadAloud 落点判定**前为真。恢复/续播首播时 durPageIndex 可能停在「纯尾巴页」
+    //（停读时方案B 把页面翻到了末段尾巴页，页里只有末段下半截），此刻规则1 会把它跳掉
+    // ——但恢复场景页里前置内容根本没读过（停读位置可能在章中部），跳章=整块丢失。
+    // 恢复首播改走「段首对齐整读」（与跨章回退同语义）；播放中的正向触发不受影响，
+    // 规则1 照常生效（上半截确已读过）。
+    private var firstPlaySinceServiceStart = true
     var paragraphStartPos = 0
     var readAloudByPage = false
         private set
@@ -2187,7 +2194,11 @@ abstract class BaseReadAloudService : BaseService(),
                             "（页首段从上一页延续，跳过它、从本页下一段念）"
                     )
                     nowSpeak++
-                } else if (isHalfCut && !canAdvance && pageOnlyOneParagraph(page)) {
+                } else if (isHalfCut && !canAdvance && pageOnlyOneParagraph(page)
+                    // 11-20 晚：恢复/续播首播豁免——落点页是停读时翻到的尾巴页，
+                    // 前置内容未读过，跳章会整块丢段；改走下方段首对齐整读。
+                    && !firstPlaySinceServiceStart
+                ) {
                     // ===== 11-20 用户规则1：正向落到「纯尾巴页」→ 跳下一章 =====
                     //
                     // 场景：章末段被分页切成两半，最后一页只装着它的**下半截**（本页
@@ -2280,6 +2291,11 @@ abstract class BaseReadAloudService : BaseService(),
             if (reverseTailArrival) {
                 clearReverseTailArrival()
                 AppLog.putDebug("reverseTailArrival 已消费清除（本次落点从章末段首整读）")
+            }
+            // 11-20 晚：首次落点判定完成即摘「恢复首播」帽——之后的正向触发照常走规则1
+            if (firstPlaySinceServiceStart && play) {
+                firstPlaySinceServiceStart = false
+                AppLog.putDebug("恢复首播落点判定完成（本次豁免规则1），后续正向触发恢复跳章")
             }
             launch(Dispatchers.Main) {
                 // 11-20 边界：play=false（暂停态翻页跟随）时跳章标志不消费，
