@@ -61,3 +61,12 @@ jobs:
           ./gradlew :app:compileAppReleaseKotlin :app:processAppReleaseResources \
             --build-cache --parallel --daemon --warning-mode all
 
+      # 11-21 加：本地 JVM 单测（proot 环境跑不了 testAppDebugUnitTest 的资源合并，
+      # AAPT2 守护进程起不来；桌面 runner 无此限制）。当前覆盖标注缓存重排
+      # DialogCacheRealignment（符号改动/引号增删/重复台词/无变化四类用例）。
+      - name: Unit tests (JVM)
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testAppDebugUnitTest --build-cache --parallel --daemon \
+            --warning-mode all
+
