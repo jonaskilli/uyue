@@ -408,6 +408,14 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.SwitchPreference
+            android:defaultValue="true"
+            android:title="@string/role_annotation_realignment"
+            android:summary="@string/role_annotation_realignment_summary"
+            android:key="roleAnnotationRealignment"
+            android:dependency="showRoleAnnotation"
+            app:iconSpaceReserved="false" />
+
+        <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="false"
             android:title="@string/show_audio_cache_indicator"
             android:summary="@string/show_audio_cache_indicator_summary"

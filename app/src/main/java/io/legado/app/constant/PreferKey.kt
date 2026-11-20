@@ -345,6 +345,9 @@ object PreferKey {
     const val showRoleAnnotation = "showRoleAnnotation"
     const val roleAnnotationOffset = "roleAnnotationOffset"
 
+    // 角色缓存自动重排（11-21）：替换规则改正文后，把旧分析结果搬到新序号上
+    const val roleAnnotationRealignment = "roleAnnotationRealignment"
+
     // 切章自动补全角色档案（用上一章正文与已标注姓名，无立绘的角色自动生成）
     const val autoProfileOnChapterSwitch = "autoProfileOnChapterSwitch"
 

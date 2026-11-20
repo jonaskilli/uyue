@@ -1233,6 +1233,8 @@
     <string name="show_role_annotation_summary">在正文左双引号上方显示AI识别出的角色名字，点击可编辑</string>
     <string name="role_annotation_offset">角色标注上下偏移</string>
     <string name="role_annotation_offset_summary">调整角色名字显示位置的上下偏移量（dp）。正数向上，负数向下</string>
+    <string name="role_annotation_realignment">标注缓存自动重排</string>
+    <string name="role_annotation_realignment_summary">替换规则改正文后自动把角色分析结果对到新位置，不用重新分析。标注挂错人时关掉此项即回到旧行为</string>
     <string name="show_audio_cache_indicator">显示音频缓存标记</string>
     <string name="show_audio_cache_indicator_summary">在段落开头缩进处显示半透明圆点，点击可删除该段音频缓存</string>
     <string name="change_search_scope">Toggle search scope</string>

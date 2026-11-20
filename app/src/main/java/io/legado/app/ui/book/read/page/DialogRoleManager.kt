@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import io.legado.app.constant.AppLog
 
 object DialogRoleManager {
 
@@ -184,6 +185,84 @@ object DialogRoleManager {
     fun clearChapterCache(bookName: String, chapterTitle: String) {
         memoryCache.remove("$bookName|$chapterTitle")
     }
+
+    // ===== 11-21（缓存重排）：替换规则改正文后，旧分析结果搬到新序号上 =====
+    //
+    // 用户边读边加「阅读替换净化」规则（如「非对话双引号改单引号」），正文变了，
+    // 缓存还按旧引号个数编号 → 页面标注挂错人（序号整体平移）。台词文字没变或
+    // 只变了符号，不必重花 AI 分析：本地把旧条目对齐到新序号即可。
+    //
+    // 挂载点选在 attachAnnotations 入口（排版完成后、IO 线程）：
+    // · 只在「当前正文引号台词与缓存对不上」时才写盘（DialogCacheRealignment 先检测）；
+    // · 写盘前先备份 .bak（防呆），对齐失败的条目进 orphan 不删；
+    // · RealignmentStatus.realignFailed / 开关关闭：静默跳过，行为与旧版完全一致；
+    // · 全程在本函数已有的 IO 线程里执行，毫秒级，不碰朗读链路。
+    private fun realignCacheIfNeeded(textChapter: TextChapter, bookName: String) {
+        if (!AppConfig.roleAnnotationRealignment) return
+        val chapterTitle = textChapter.title
+        if (chapterTitle.isBlank()) return
+        val cacheKey = "$bookName|$chapterTitle"
+        val cache = loadChapterCache(bookName, chapterTitle)
+        if (cache.isEmpty()) return
+
+        val content = textChapter.getContent()
+        if (content.isBlank()) return
+
+        // 快检：台词文字与条数都一致就返回（绝大多数情况），零写盘
+        val quotes = DialogCacheRealignment.extractQuotes(content)
+        if (quotes.isEmpty()) return
+        val cacheNorm = cache.toSortedMap().values.mapNotNull {
+            DialogCacheRealignment.normalize(it.dialogText ?: "").takeIf { n -> n.isNotEmpty() }
+        }
+        val contentNorm = quotes.map { DialogCacheRealignment.normalize(it.second) }
+        if (cacheNorm == contentNorm) return
+
+        // 对不上 → 重排：读原始 results，纯函数对齐，备份后写盘
+        val file = getCacheFile(bookName, chapterTitle)
+        val json = try {
+            JSONObject(file.readText())
+        } catch (e: Exception) {
+            return
+        }
+        val oldResults = json.optJSONObject("results") ?: return
+        val t0 = System.currentTimeMillis()
+        val realigned = DialogCacheRealignment.buildRealignedResults(content, oldResults)
+            ?: return
+        val elapsedMs = System.currentTimeMillis() - t0
+        // 重排产出的映射必须真的改变了什么才写盘（完全相同则不动）
+        var changed = false
+        val oldKeys = sortedSetOf<Int>()
+        oldResults.keys().forEach { it.toIntOrNull()?.let { s -> oldKeys.add(s) } }
+        val newKeys = sortedSetOf<Int>()
+        realigned.results.keys().forEach { it.toIntOrNull()?.let { s -> newKeys.add(s) } }
+        if (oldKeys != newKeys) changed = true
+        else {
+            for (k in newKeys) {
+                val oldObj = oldResults.optJSONObject(k.toString())
+                val newObj = realigned.results.optJSONObject(k.toString())
+                if (oldObj?.optString("name") != newObj?.optString("name")
+                    || oldObj?.optString("dialogText") != newObj?.optString("dialogText")
+                ) { changed = true; break }
+            }
+        }
+        if (!changed) return
+
+        try {
+            val bak = File(file.parentFile, file.name + ".bak")
+            if (!bak.exists()) runCatching { file.copyTo(bak, overwrite = false) }
+            json.put("results", realigned.results)
+            file.writeText(json.toString(2))
+            AppLog.put("缓存重排: 《${bookName}》${chapterTitle.take(12)} → 新${realigned.mappedCount}条"
+                + (if (realigned.orphans.isNotEmpty()) "（孤儿${realigned.orphans.size}条:${realigned.orphans.take(5)}）" else "")
+                + "，耗时${elapsedMs}ms")
+        } catch (e: Exception) {
+            AppLog.put("缓存重排失败（保留原缓存）: ${e.localizedMessage}", e)
+            return
+        }
+        // 内存缓存作废，本函数返回后 attachAnnotations 会重新 load 拿到新序号
+        memoryCache.remove(cacheKey)
+    }
+
 
     /**
      * 将当前章节 JSON 中所有名为 [oldName] 的角色（姓名/性别/年龄）替换为新值。
@@ -379,6 +458,7 @@ object DialogRoleManager {
     fun attachAnnotations(textChapter: TextChapter, bookName: String) {
         if (!AppConfig.showRoleAnnotation) return
         if (bookName.isBlank()) return
+        realignCacheIfNeeded(textChapter, bookName)
         val cache = loadChapterCache(bookName, textChapter.title)
         if (cache.isEmpty()) return
 

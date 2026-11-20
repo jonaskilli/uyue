@@ -1683,6 +1683,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefBoolean(PreferKey.showRoleAnnotation, true)
         set(value) = appCtx.putPrefBoolean(PreferKey.showRoleAnnotation, value)
 
+    // 16.1 角色缓存自动重排（11-21）：替换规则改正文导致引号序号平移时，
+    // 把旧分析结果本地对齐到新序号（不花 AI）。默认开；发现不对可关，关=完全回到旧行为。
+    var roleAnnotationRealignment: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.roleAnnotationRealignment, true)
+        set(value) = appCtx.putPrefBoolean(PreferKey.roleAnnotationRealignment, value)
+
     // 17. 角色标注上下偏移量（dp），默认0。正数向上偏移，负数向下偏移
     // 注意：必须用 String 存储，因为 EditTextPreference 底层调用 getString()
     var roleAnnotationOffset: Int
