@@ -168,6 +168,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private const val PRELOAD_CHAPTER_RETRY_MS = 15_000L
 
         /**
+         * 11-20：单段预加载失败后的退避时长（毫秒）。
+         *
+         * 边播边预加载时失败多半是「被播放请求掐掉」——不是真失败，退避一下就能补上。
+         * 太短会连续撞播放请求，太长会拖慢覆盖。
+         */
+        private const val PRELOAD_SEGMENT_RETRY_MS = 800L
+
+        /** 单段连续失败多少次才放弃（跳过它继续下一段），防死磕合不出的段 */
+        private const val PRELOAD_SEGMENT_MAX_FAILS = 3
+
+        /**
          * 11-20：跨章预加载最多向后备几章（硬上限）。
          *
          * 为什么封 5：`audioPreDownloadNum` 同时被 `saveTtsTextJson` 当上下文窗口用
@@ -430,6 +441,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
     /** 章索引 → 正文未就绪时的下次重试时刻（毫秒），避免每轮重复解析/刷日志 */
     private val preloadChapterRetryAt = HashMap<Int, Long>()
+
+    /**
+     * 11-20：单段失败计数（key = "章索引|段号"）。
+     *
+     * 为什么需要：边播边预加载时，**播放请求会把正在跑的预加载那一笔掐掉**
+     *（UTTS 的「播放优先、预热让路」，原设计如此）。被掐掉的那段如果也算「已处理」，
+     * 就永久漏备——预加载跑得越快、被掐得越频繁，漏得越多。
+     * 现在的口径：失败**不推进进度**，退避后重试同一段；连续失败 3 次才跳过
+     * （真正合不出来的段不能无限占着后台）。
+     */
+    private val preloadSegmentFailCount = HashMap<String, Int>()
 
     private data class PreloadedChapter(
         val title: String,
@@ -2326,6 +2348,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             preloadChapterProgress.remove(it)
             preloadChapterCache.remove(it)
             preloadChapterRetryAt.remove(it)
+            preloadSegmentFailCount.keys.filter { k -> k.startsWith("$it|") }.forEach {
+                preloadSegmentFailCount.remove(it)
+            }
         }
         // 让路判据（与同章预热同一口径）：播放请求在飞且已慢 ⇒ 上游卡住，
         // 这时提交预热只会排队空转，本轮直接放弃，等下一轮。
@@ -2419,15 +2444,31 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     false
                 }
             }
-            preloadChapterProgress[idx] = from + 1
             if (ok) {
+                preloadChapterProgress[idx] = from + 1
+                preloadSegmentFailCount.remove("$idx|$from")
                 AppLog.putDebug(
                     "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                 )
             } else {
-                AppLog.putDebug(
-                    "跨章预加载第 ${from + 1} 段失败，跳过继续（${preloaded.title.take(12)}）"
-                )
+                // 失败**不推进进度**：边播边预加载时，最常见失败就是「被播放请求掐掉」，
+                // 那段其实没备上，必须补。但也不能立刻重试（会再撞上下一个播放请求），
+                // 所以退避一会儿再试同一段；连续 3 次真失败才跳过，避免死磕合不出的段。
+                val failKey = "$idx|$from"
+                val fails = (preloadSegmentFailCount[failKey] ?: 0) + 1
+                if (fails >= PRELOAD_SEGMENT_MAX_FAILS) {
+                    preloadSegmentFailCount.remove(failKey)
+                    preloadChapterProgress[idx] = from + 1
+                    AppLog.putDebug(
+                        "跨章预加载第 ${from + 1} 段连续失败 ${fails} 次，跳过（${preloaded.title.take(12)}）"
+                    )
+                } else {
+                    preloadSegmentFailCount[failKey] = fails
+                    preloadChapterRetryAt[idx] = SystemClock.elapsedRealtime() + PRELOAD_SEGMENT_RETRY_MS
+                    AppLog.putDebug(
+                        "跨章预加载第 ${from + 1} 段未备上（第 $fails 次），稍后重试（${preloaded.title.take(12)}）"
+                    )
+                }
             }
             postPreloadState(summarizePreloadState(currentIdx, limitChapter))
             return true
