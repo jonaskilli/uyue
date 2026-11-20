@@ -2392,9 +2392,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         for (offset in 1..limitChapter) {
             val idx = currentIdx + offset
             if ((preloadChapterRetryAt[idx] ?: 0L) > now) continue
-            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: continue
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: run {
+                AppLog.put("跨章预加载诊断: 第${idx + 1}章 getChapter=null")
+                continue
+            }
             val preloaded = preloadChapterCache[idx] ?: run {
+                AppLog.put("跨章预加载诊断: 第${idx + 1}章 开始构建段表")
                 val built = buildPreloadSegments(book, chapter)
+                AppLog.put(
+                    "跨章预加载诊断: 第${idx + 1}章 段表构建完成 结果=${built?.segments?.size ?: "null"}章"
+                )
                 if (built == null) {
                     // 正文没下载到本地（预下载还没轮到 / 排版不可用）：记重试时刻，稍后再来
                     preloadChapterRetryAt[idx] = now + PRELOAD_CHAPTER_RETRY_MS
@@ -2433,6 +2440,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 引擎重建）；也不逐段出「请求音频」卡（用户 1f4b863 时已知情同意）。
             // 传【原始文本】：UTTS 自己跑规则，不双跑脚本（bcea7a8 原判）。
             val tts = textToSpeech ?: return false
+            AppLog.put(
+                "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 提交batch_json前（文本=${rawText.take(10)}）"
+            )
             var ok = false
             var interruptedByPlayback = false
             // 播放打断判据：play() 会自增 abortGeneration（见 doSynthesizeText）。
@@ -2463,18 +2473,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 ok -> {
                     preloadChapterProgress[idx] = from + 1
                     preloadSegmentFailCount.remove("$idx|$from")
-                    AppLog.putDebug(
+                    AppLog.put(
                         "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                     )
                 }
                 interruptedByPlayback -> {
                     // 播放优先是设计内行为：不推进、不计数，下轮立刻重试同一段。
                     // 那段确实没备上，必须补；但也不留任何「失败」痕迹。
-                    AppLog.putDebug(
-                        "跨章预加载第 ${from + 1} 段被播放打断，立即重试（${preloaded.title.take(12)}）"
+                    AppLog.put(
+                        "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 被播放打断"
                     )
                 }
                 else -> {
+                    AppLog.put("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 合成返回失败")
                     // 真失败**不推进进度**，退避后重试同一段；
                     // 连续 3 次仍失败才跳过，避免死磕合不出的段。
                     val failKey = "$idx|$from"
