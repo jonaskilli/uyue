@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.LifecycleOwner
 import io.legado.app.R
+import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.help.audiobook.JReadVoiceEngine
 import io.legado.app.model.ReadAloud
@@ -161,9 +162,36 @@ object CharacterVoiceHelper {
                 }
                 saveRecords.put(record)
             }
-            writeTxtFile("gengxin.json", saveRecords.toString())
+            writeGengxinEnvelope(saveRecords)
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    /**
+     * 写邮筒 `gengxin.json`——**统一走信封格式**（串书根治第三步，11-20）。
+     *
+     * UTTS 侧 `CharacterRecordsFile.writeGengxinEnvelope` 早已信封化（`{"book":…,"records":[…]}`，
+     * 消费端规则 v1.7.53+ 的 `_openGengxinEnvelope` 验章），但 U阅 这两处写点一直是裸数组——
+     * 一写就把信封盖掉，消费端只能降级走语料核验，等于「抓写方」能力失效（03:30:40 剔 6 人
+     * 却查不到谁写的就是这个原因）。此处补齐，与 UTTS 同格式、同口径。
+     *
+     * 章取**写这一刻**的 `cunfang.txt`（不是调用方传入的 bookName）——与 UTTS 保持一致：
+     * 邮筒装的是「按写这一科内存态导出的表」，章必须反映写这一刻的归属。
+     * 本函数只有「当前书 == cunfang」时才被调用（见 saveCharacterVoice 的分支），故章==本书。
+     */
+    private fun writeGengxinEnvelope(records: JSONArray) {
+        try {
+            val book = readTxtFile("cunfang.txt").trim()
+            val envelope = JSONObject().apply {
+                put("book", book)
+                put("records", records)
+            }
+            writeTxtFile("gengxin.json", envelope.toString())
+            // 留痕：AppLog 落 appLog-*.txt（与 UTTS 的 debug.log 留痕同一目的一写入方便可查）
+            AppLog.put("gengxin 写入(book=$book, n=${records.length()}) 信封盖章")
+        } catch (e: Exception) {
+            AppLog.put("gengxin 信封写入失败: ${e.localizedMessage}", e)
         }
     }
 

@@ -21,6 +21,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.textfield.TextInputEditText
 import io.legado.app.R
+import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.help.MiyueKeyManager
 import io.legado.app.model.ReadBook
@@ -808,9 +809,33 @@ class CharacterManagerDialog : DialogFragment() {
                 }
                 saveRecords.put(record)
             }
-            writeTxtFile("gengxin.json", saveRecords.toString())
+            writeGengxinEnvelope(saveRecords)
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    /**
+     * 写邮筒 `gengxin.json`——**统一走信封格式**（串书根治第三步，11-20）。
+     *
+     * 与 [io.legado.app.ui.book.read.config.CharacterVoiceHelper] 里的同名函数同格式同口径：
+     * UTTS 侧早已信封化（`{"book":…,"records":[…]}`），消费端规则 v1.7.53+ 验章；
+     * U阅 侧此前写裸数组，一写就把信封盖掉，消费端只能降级走语料核验，「抓写方」能力失效。
+     *
+     * 章取**写这一刻**的 `cunfang.txt`。本处调用方（saveCurrentBookBeforeSwitch / saveCharacters）
+     * 都在「主表归属 == cunfang」前提下写，故章==当前书。
+     */
+    private fun writeGengxinEnvelope(records: JSONArray) {
+        try {
+            val book = readTxtFile("cunfang.txt").trim()
+            val envelope = JSONObject().apply {
+                put("book", book)
+                put("records", records)
+            }
+            writeTxtFile("gengxin.json", envelope.toString())
+            AppLog.put("gengxin 写入(book=$book, n=${records.length()}) 信封盖章")
+        } catch (e: Exception) {
+            AppLog.put("gengxin 信封写入失败: ${e.localizedMessage}", e)
         }
     }
 
