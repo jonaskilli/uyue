@@ -35,6 +35,7 @@ import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.searchContent.SearchResult
 import io.legado.app.utils.DocumentUtils
 import io.legado.app.utils.FileUtils
+import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.mapParallelSafe
 import io.legado.app.utils.postEvent
@@ -579,7 +580,16 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        if (BaseReadAloudService.isRun && BaseReadAloudService.pause) {
+        // 11-21 用户报「暂停后返回阅读页就变成停止了」：上游逻辑是暂停状态离开
+        // 阅读页即强制 stop——与「朗读返回后台」开关（readAloudBackToBackground，
+        // 默认开）的语义冲突：开关开=明确允许朗读留在后台，用户暂停后退出想
+        // 干别的、回来点播放即续，结果被这里连根杀掉（service onDestroy，
+        // 连带跨章预加载协程一起死，「暂停备货」失效）。
+        // 修法：尊重开关——允许后台播就不 stop（service 带暂停态存活）；
+        // 开关关（用户不想后台播）才维持上游旧行为。
+        if (BaseReadAloudService.isRun && BaseReadAloudService.pause &&
+            !context.getPrefBoolean(io.legado.app.constant.PreferKey.readAloudBackToBackground, true)
+        ) {
             ReadAloud.stop(context)
         }
     }
