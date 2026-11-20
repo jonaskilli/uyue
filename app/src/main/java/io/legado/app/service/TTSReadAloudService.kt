@@ -673,9 +673,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 跨章预加载路径必须显式传自己的章序与段数，否则前沿章/段全是播放章的值）。
         synthChapterIdx: Int? = null,
         synthTotalSegs: Int? = null,
-        // 11-20：本笔是「后台预加载」。与同章滚动预热的 batch_json 不同：
-        // 这里要**真实音频**（U阅 自己落本地缓存，和播放同一个池子），
-        // 但同样不该落日志页、不破窗、不占播放槽位。标记透传给 UTTS。
+        // 11-20：本笔是「后台预加载」，标记只用于让 UTTS **别破窗**、别占播放槽位。
+        // 其余一律同正常播放：真实音频、落 U阅 本地缓存、日志页照常。
         preloadOnly: Boolean = false,
     ): File? {
         val cacheFile = getCacheFileForText(rawText, index, chapterTitle)
@@ -2381,8 +2380,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 跑 U阅 自己的规则脚本 → synthesizeText → 音频落进 U阅 本地缓存
             //（systemTTS/*.wav，与播放同一个池子、同一套文件名算法）。
             // 于是：段前小喇叭亮、播放像命中一样秒回、日志页显示成正常加载。
-            // 只多带一个 preloadOnly 标记，让 UTTS 知道「这是后台预加载」：
-            // 不落日志页、不破窗、不占播放槽位（可被播放掐），但仍出真实音频。
+            // 只多带一个 preloadOnly 标记，而它**只表达一件事：别破窗**。
+            // 产出与日志与正常播放完全一致——真实音频、请求卡与命中行照常落日志页
+            // （用户原话「就当我是正在播放嘛」）。
+            // bcea7a8 当初为「别让下一章的行混进日志」把整条链改成静默预热，是错的：
+            // 用户要的正是「缓存了哪些段，日志里就能看到」。
             // 与同章滚动预热（batch_json，只写 UTTS 缓存）分工不同，两者共用串行门。
             val ok = preloadGate.withLock {
                 runCatching {
