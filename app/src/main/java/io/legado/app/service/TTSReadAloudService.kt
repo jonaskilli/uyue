@@ -2307,7 +2307,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             postPreloadState("")
             return
         }
+        // 11-21 03:5x 诊断：真机 03:54 场次（7c48e1a 包）调度器零日志、UTTS 零
+        // batch_json 请求——play() 与章末两处都该唤醒它却毫无痕迹。四个疑点
+        // （设置值/引擎null/让路/排版挂死）代码层面都排不掉，加两行一次性
+        // 诊断日志：入口必打（确认函数有没有被调到、limitChapter 实际值），
+        // 协程启动必打（确认 launch 有没有执行）；轮函数内的静默 return
+        // 再各打一行，复现一次就能锁死卡点。
+        AppLog.put(
+            "跨章预加载诊断: ensureChapterPreload 被调用, limitChapter=${AppConfig.audioPreDownloadNum}, " +
+                "已有协程=${preloadJob?.isActive == true}, textToSpeech=${textToSpeech != null}, ttsInitFinish=$ttsInitFinish"
+        )
         if (preloadJob?.isActive == true) return
+        AppLog.put("跨章预加载诊断: 启动调度协程")
         preloadJob = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
                 val worked = try {
@@ -2332,9 +2343,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 同时保证「进度始终连续推进」——用户随时看都能看到前沿往前走。
      */
     private suspend fun runChapterPreloadRound(): Boolean {
-        val book = ReadBook.book ?: return false
-        if (textToSpeech == null) return false
-        if (!ttsInitFinish) return false
+        val book = ReadBook.book ?: run {
+            AppLog.put("跨章预加载诊断: 轮次退出 book=null")
+            return false
+        }
+        if (textToSpeech == null) {
+            AppLog.put("跨章预加载诊断: 轮次退出 textToSpeech=null")
+            return false
+        }
+        if (!ttsInitFinish) {
+            AppLog.put("跨章预加载诊断: 轮次退出 引擎未就绪")
+            return false
+        }
         // 用户设置「听书预加载数量(章节)」多少就备多少章——**不加人为上限**。
         // 用户 11-20 明确：有人会填 100 章，希望真的能加载 100 章；
         // 「每个人按自己的情况设置」是他对这个键的定义。
@@ -2359,6 +2379,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         if (playbackSubmitAt > playbackSettledAt &&
             SystemClock.elapsedRealtime() - playbackSubmitAt >= PRELOAD_YIELD_PLAYBACK_STUCK_MS
         ) {
+            AppLog.put(
+                "跨章预加载诊断: 让路放弃（播放请求已飞 ${ (SystemClock.elapsedRealtime() - playbackSubmitAt) / 1000 }s）"
+            )
             return false
         }
         val now = SystemClock.elapsedRealtime()
@@ -2477,6 +2500,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
         // 走完一圈：全部章都备完了
         preloadActiveChapter = -1
+        AppLog.put("跨章预加载诊断: 一圈走完全部已备（currentIdx=$currentIdx, limit=$limitChapter）")
         postPreloadState(summarizePreloadState(currentIdx, limitChapter))
         return false
     }
