@@ -213,43 +213,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private val slowRetryBudgetMs: Long
             get() = AppConfig.sysTtsSynthesizeTimeout * 1000L
 
-        /**
-         * 11-20：跨章预加载**已备段清单**，供阅读页段前「已有音频」标记使用。
-         *
-         * 为什么需要这份清单（这是「预加载不显示」的另一半）：跨章预热走 batch_json，
-         * UTTS 只写它自己的 synth_cache 目录（.pcm 文件），U阅 的 systemTTS 目录里**没有文件**；
-         * 而段前小喇叭只扫本地文件（AudioCacheIndicatorManager）⇒ 翻到已预热的章，
-         * 标记永远不亮，用户看到的就是「开了预加载却毫无变化」。
-         * 这里把预加载成果单独记一份，扫描时与本地文件合并。
-         *
-         * key = "bookUrl|chapterIndex"，value = 段索引集合（与 contentList 同口径）。
-         * 只存内存：进程重启后清单丢失（UTTS 缓存仍在，重读命中照样秒回，只是标记不亮）。
-         * 刻意不做持久化——UTTS 侧清缓存后无法回调本 App，持久化只会让标记失真。
-         */
-        private val preloadedSegmentMap =
-            java.util.concurrent.ConcurrentHashMap<String, MutableSet<Int>>()
-
-        private fun preloadKey(bookUrl: String, chapterIndex: Int) = "$bookUrl|$chapterIndex"
-
-        /** 记录一段「已由跨章预加载备进 UTTS 缓存」 */
-        fun markPreloadedSegment(bookUrl: String, chapterIndex: Int, segIndex: Int) {
-            preloadedSegmentMap.getOrPut(preloadKey(bookUrl, chapterIndex)) {
-                java.util.Collections.synchronizedSet(mutableSetOf())
-            }.add(segIndex)
-        }
-
-        fun isPreloadedSegment(bookUrl: String?, chapterIndex: Int, segIndex: Int): Boolean {
-            if (bookUrl.isNullOrBlank()) return false
-            return preloadedSegmentMap[preloadKey(bookUrl, chapterIndex)]?.contains(segIndex) == true
-        }
-
-        /** 用户离开某章后清掉它的「已备」标记，避免清单无限增长（每章几十段） */
-        fun clearPreloadedSegmentChapter(bookUrl: String?, chapterIndex: Int) {
-            if (bookUrl.isNullOrBlank()) return
-            preloadedSegmentMap.remove(preloadKey(bookUrl, chapterIndex))
-        }
-
-        fun clearPreloadedSegments() = preloadedSegmentMap.clear()
     }
 
     // ====== TTS 核心 ======
@@ -709,7 +672,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 上报时退回 ReadBook.durChapterIndex/contentList.size（主播放路径恒正确；
         // 跨章预加载路径必须显式传自己的章序与段数，否则前沿章/段全是播放章的值）。
         synthChapterIdx: Int? = null,
-        synthTotalSegs: Int? = null,    ): File? {
+        synthTotalSegs: Int? = null,
+        // 11-20：本笔是「后台预加载」。与同章滚动预热的 batch_json 不同：
+        // 这里要**真实音频**（U阅 自己落本地缓存，和播放同一个池子），
+        // 但同样不该落日志页、不破窗、不占播放槽位。标记透传给 UTTS。
+        preloadOnly: Boolean = false,
+    ): File? {
         val cacheFile = getCacheFileForText(rawText, index, chapterTitle)
         if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
             // B 方案 + 判定以文字为准（11-16 用户定稿）：**段里有文字**（汉字/英文字母/
@@ -797,7 +765,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // （真机日志：stop → onDestroy → 「TTS合成异常 Job was cancelled」→ 静音占位）。
                 // 取消必须原样抛出，让调用方走取消分支而不是失败分支。
                 val result = try {
-                    doSynthesizeText(text, utteranceId, index, chapterTitle, rawText)
+                    doSynthesizeText(
+                        text, utteranceId, index, chapterTitle, rawText, preloadOnly
+                    )
                 } catch (e: CancellationException) {
                     // 11-14（方案 A）：取消不立即销账——留一个冷却记录，让紧接着的
                     // 同 key 调用方先复查缓存再决定，避免「掐掉→重提→再掐」空转。
@@ -839,7 +809,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         utteranceId: String,
         index: Int = -1,
         chapterTitle: String = "",
-        rawText: String = text
+        rawText: String = text,
+        preloadOnly: Boolean = false
     ): File? {
         val cacheFile = getCacheFileForText(rawText, index, chapterTitle)
         if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
@@ -905,6 +876,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     putInt("para_index", index)
                     putInt("para_total", contentList.size)
                 }
+                // 11-20：后台预加载标记（UTTS 侧据此不落日志页、不破窗、不占播放槽位，
+                // 但仍走正常单段合成出真实音频）。
+                if (preloadOnly) putBoolean("preload_only", true)
             }
 
             val result = tts.runCatching {
@@ -2336,7 +2310,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      */
     private suspend fun runChapterPreloadRound(): Boolean {
         val book = ReadBook.book ?: return false
-        val tts = textToSpeech ?: return false
+        if (textToSpeech == null) return false
         if (!ttsInitFinish) return false
         // 上限 5 章：audioPreDownloadNum 同时喂给 data.json 上下文窗口，那边有 +2 章，
         // 允许填很大时整章预合成会变成「几十章 × 几十段」的无限后台开销，这里封死。
@@ -2353,7 +2327,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             preloadChapterProgress.remove(it)
             preloadChapterCache.remove(it)
             preloadChapterRetryAt.remove(it)
-            clearPreloadedSegmentChapter(book.bookUrl, it)
         }
         // 让路判据（与同章预热同一口径）：播放请求在飞且已慢 ⇒ 上游卡住，
         // 这时提交预热只会排队空转，本轮直接放弃，等下一轮。
@@ -2404,10 +2377,48 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadChapterProgress[idx] = from + 1
                 return true
             }
-            val ok = preloadOneSegment(from, rawText, tts)
+            // 11-20（用户口径校正）：这里恢复成**和正常播放完全相同**的合成路径——
+            // 跑 U阅 自己的规则脚本 → synthesizeText → 音频落进 U阅 本地缓存
+            //（systemTTS/*.wav，与播放同一个池子、同一套文件名算法）。
+            // 于是：段前小喇叭亮、播放像命中一样秒回、日志页显示成正常加载。
+            // 只多带一个 preloadOnly 标记，让 UTTS 知道「这是后台预加载」：
+            // 不落日志页、不破窗、不占播放槽位（可被播放掐），但仍出真实音频。
+            // 与同章滚动预热（batch_json，只写 UTTS 缓存）分工不同，两者共用串行门。
+            val ok = preloadGate.withLock {
+                runCatching {
+                    val speakText = applyTtsScripts(
+                        rawText,
+                        paragraphIndex = from,
+                        chapterTitle = preloaded.title,
+                        chapterParagraphs = preloaded.segments
+                    )
+                    if (speakText.matches(AppPattern.notReadAloudRegex)) {
+                        // 纯符号段与播放同口径：写静音占位文件（缓存里有它，标记才一致）
+                        val silentName = getFileNameHelper(preloaded.title, rawText, from)
+                        if (!hasSpeakFile(silentName)) createSilentSound(silentName)
+                        true
+                    } else {
+                        val utteranceId =
+                            "PRELOAD_${idx}_${from}_${System.currentTimeMillis()}"
+                        synthesizeText(
+                            speakText,
+                            utteranceId,
+                            from,
+                            preloaded.title,
+                            rawText,
+                            synthChapterIdx = idx,
+                            synthTotalSegs = total,
+                            preloadOnly = true
+                        ) != null
+                    }
+                }.getOrElse { e ->
+                    if (e is CancellationException) throw e
+                    AppLog.putDebug("跨章预加载合成异常: ${e.localizedMessage}")
+                    false
+                }
+            }
             preloadChapterProgress[idx] = from + 1
             if (ok) {
-                markPreloadedSegment(book.bookUrl, idx, from)
                 AppLog.putDebug(
                     "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                 )

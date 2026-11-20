@@ -2,8 +2,6 @@ package io.legado.app.ui.book.read.page
 
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.ReadAloud
-import io.legado.app.model.ReadBook
-import io.legado.app.service.TTSReadAloudService
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.StringUtils
@@ -22,13 +20,6 @@ object AudioCacheIndicatorManager {
     // paragraphNum -> 缓存文件
     private val cachedParagraphMap = mutableMapOf<Int, File>()
 
-    /**
-     * 11-20：跨章预加载备好的段（UTTS 缓存里，U阅 本地无文件）。
-     *
-     * 单独一套集合而不是塞进 [cachedParagraphMap]：那个 Map 的值是「可删除的本地文件」，
-     * 预加载段没有本地文件可删——混进去会让「删除缓存」这个功能点出假响应。
-     */
-    private val preloadedParagraphSet = mutableSetOf<Int>()
 
     private val httpTtsFolderPath: String by lazy {
         val baseDir = appCtx.getExternalFilesDir(null) ?: appCtx.filesDir
@@ -57,7 +48,6 @@ object AudioCacheIndicatorManager {
     /** 扫描当前章节各段落的缓存状态 */
     fun scanChapter(textChapter: TextChapter) {
         cachedParagraphMap.clear()
-        preloadedParagraphSet.clear()
         if (textChapter.pages.isEmpty()) return
 
         val paragraphs = textChapter.getParagraphs(false)
@@ -84,13 +74,7 @@ object AudioCacheIndicatorManager {
             prepareParagraphText(it.text).trim().isNotEmpty()
         }
 
-        val bookUrl = ReadBook.book?.bookUrl
         nonEmptyParagraphs.forEachIndexed { index, paragraph ->
-            // 0) 跨章预加载已备（UTTS 缓存，本地无文件）→ 标记也要亮
-            if (TTSReadAloudService.isPreloadedSegment(bookUrl, textChapter.chapter.index, index)) {
-                preloadedParagraphSet.add(paragraph.num)
-                return@forEachIndexed
-            }
             val rawText = prepareParagraphText(paragraph.text)
             val indexPart = "|$index"
 
@@ -115,8 +99,7 @@ object AudioCacheIndicatorManager {
         }
     }
 
-    fun hasCache(paragraphNum: Int): Boolean =
-        cachedParagraphMap.containsKey(paragraphNum) || preloadedParagraphSet.contains(paragraphNum)
+    fun hasCache(paragraphNum: Int): Boolean = cachedParagraphMap.containsKey(paragraphNum)
 
     /**
      * 删除指定段落的音频缓存，不用确认框，直接删除。
@@ -176,6 +159,5 @@ object AudioCacheIndicatorManager {
 
     fun clearChapterState() {
         cachedParagraphMap.clear()
-        preloadedParagraphSet.clear()
     }
 }
