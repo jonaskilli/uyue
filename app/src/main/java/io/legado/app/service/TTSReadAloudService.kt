@@ -1300,6 +1300,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 旧版在这里 cancel 整条链，而链只在「本章合成完」时启动一次 ⇒ 每次翻章都把
         // 已备进度连根拔掉，后两个目标章永远轮不到（11-20 日志实锤 20:06:00 / 20:07:08）。
         // 已提交给 TTS 引擎的那一笔仍会跑完并写 UTTS 缓存；进度按章保留，翻章后继续推。
+        // 11-21 03:4x 旧口径恢复：常驻调度器保留，但只备后面整章（见 ensureChapterPreload）；
+        // 翻章后旧章落出 validRange，进度自动清理，不会拿旧章空转。
         ensureChapterPreload()
         // 11-13：翻页/重新定位时同步掐掉引擎在途请求。
         // 此前只 cancel 协程，撤不掉已提交给 TTS 引擎的那笔——UTTS 的
@@ -1767,12 +1769,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 触发频率与旧的合成循环口径一致（每 4 段一批），只是驱动源换了。
      */
     private fun maybePreloadFromPlayback() {
-        // 11-21：跨章预加载（听书预加载数量>0）开启时，滚动补货**停用**。
-        // 一条连续加载流已经从「当前播放位置之后」备到 +N 章末，当前章剩余
-        // 它自己就覆盖了；滚动补货再跑就是同一段两路都备（batch_json 一遍、
-        // 正常合成一遍），白付云端请求还抢串行门。设 0（=关跨章）时这里恢复，
-        // 老行为不丢。
-        if (AppConfig.audioPreDownloadNum > 0) return
+        // 11-21 03:4x 旧口径恢复：滚动补货**恒启用**（preloadSpan>0 即工作），
+        // 不再被跨章预加载停用——旧版分工是「滚动补货管当前章剩余、跨章管后面
+        // 整章」，两路范围不相交（跨章 offset 从 1 起），不存在两路备同一段。
+        // 2852b91 的「连续流吃掉当前章」口径随旧版一并作废。
         if (AppConfig.preloadSpan <= 0) return
         if (singleParagraphMode) return
         if (nowSpeak < PRELOAD_START_AFTER) return
@@ -2283,41 +2283,26 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     /**
      * 唤醒跨章预加载调度器（幂等）。
      *
-     * 与旧版 `preloadNextChapter()` 的关键差异：**这里不取消任何在跑的链**。
-     * 翻章/重定位只改变「目标章集合」，由调度器每轮自己重算；旧版 cancel 掉的
-     * 是整条链（含已完成进度），这就是「永远只备到第 1 章」的直接原因。
-     */
-    /**
-     * 唤醒跨章预加载调度器（幂等）。
-     *
-     * 语义（11-21 终版口径）：**一条连续的加载流**——从「当前播放位置之后」起，
-     * 像播放一样一段一段往后合成：当前章剩余 → +1 章 → … → +N 章末停
-     * （N = 听书预加载数量）。日志从第一段起连续可见，中途不隔空白。
-     * 用户原话：「我希望的只是从当前位置开始，一直能够顺畅地读下去，
-     * 这才叫做加载，加载的终点就是我设置的章节数量。」
+     * 语义（11-21 03:4x 旧口径恢复，用户终裁）：**旧式章末跨章备货**——只备
+     * 「当前章 +1 .. +N」的**整章**，当前章剩余归滚动补货（preloadSpan）。
+     * 常驻调度器形态保留（不取消在跑链，翻章由 validRange 清理旧章），
+     * 但范围与 2852b91「从当前位置连续流」已彻底切割：后者是互掐翻车根因。
+     * 合成动作走 batch_json（UTTS 后院备货），与播放零引擎冲突。
      * **暂停朗读时照备**（暂停不掐调度器，只掐播放）。
      *
-     * 与滚动补货（preloadSpan）的互斥：本流开启时滚动补货**停用**（见
-     * maybePreloadFromPlayback）——否则当前章剩余两路都备，一段两套落点
-     * 白付云端请求；跨章预加载设 0 时滚动补货恢复，老行为不丢。
-     *
-     * 与旧版 `preloadNextChapter()` 的关键差异：这里不取消任何在跑的链。
-     * 翻章/重定位只改变「起点与范围」，由调度器每轮自己重算；旧版 cancel 掉的是
-     * 整条链（含已完成进度），这就是「永远只备到第 1 章」的直接原因。
+     * 分工（旧版口径）：滚动补货管当前章剩余、跨章管后面整章，两路范围
+     * 不相交，互斥守卫不再需要（maybePreloadFromPlayback 恒启用）。
      */
     private fun ensureChapterPreload() {
-        // 11-21 03:2x（用户拍板「还是照以前的方法吧」）：**跨章预加载整体停用**。
-        // 用户口径：「我在改这个 utts 预加热之前都是好好的」——即回到只有
-        // 同章滚动预热（preloadSpan）的形态：日志页只有播放、设几章备几章的
-        // 语义只保留给正文预下载（HttpTTS preDownloadAudios）与规则窗口
-        //（ReadBook data.json 值+2 章，这两路不动）。
-        // 历史教训两条都记住了：与播放同路径必互掐（2852b91，8 分钟 146 次
-        // 引擎重建）；batch_json 路径不出卡用户又不认（1f4b863）。两难无解，
-        // 且用户原始诉求「从当前位置顺畅读到 +N 章末」滚动补货+正文预下载
-        // 实际已覆盖大半——按用户令先回到确定好的状态，此功能不再擅自复活。
-        // 设置键保留原义：>0 只影响预下载/窗口；本调度器不再启动。
-        postPreloadState("")
-        return
+        // 11-21 03:4x（用户拍板「现在就一起恢复」）：恢复**旧式章末跨章预加载**——
+        // 用户「当时」（预加热5段+并发2时期）顺畅的完整配方 = UTTS预取并发2（一直在）
+        // + 同章滚动补货5段（28cbf1d 已恢复）+ 旧式跨章预加载（本函数）。
+        // 与翻车的 2852b91「连续流」两个决定性差异：
+        //  · 范围：只备**后面整章**（offset 1..N）——当前章剩余归滚动补货，两路不抢同一段；
+        //  · 时机：章末（合成循环 needPreload，剩 5 段时）唤醒，常驻调度器自然只在
+        //    备货期活动，平时不与播放抢引擎；合成动作走 batch_json（UTTS 后院备货），
+        //    引擎槽不冲突（1f4b863 已实证 batch_json 路径本身无互掐）。
+        // 28cbf1d 的停用 return 撤销；2852b91 的「从当前位置连续流」不再恢复。
         if (AppConfig.audioPreDownloadNum <= 0) {
             postPreloadState("")
             return
@@ -2359,7 +2344,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return false
         }
         val currentIdx = ReadBook.durChapterIndex
-        val nowSpeak = this.nowSpeak
         val validRange = currentIdx..(currentIdx + limitChapter)
         // 落在目标范围外的章不再需要：进度、段表、重试时刻一起丢掉
         preloadChapterProgress.keys.filter { it !in validRange }.forEach {
@@ -2378,9 +2362,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return false
         }
         val now = SystemClock.elapsedRealtime()
-        // 近到远：offset=0 是当前章剩余（从正在播的段之后起），1..N 是后面各章整章。
-        // 一条流从头备到尾，日志连续不断档。
-        for (offset in 0..limitChapter) {
+        // 11-21 03:4x 旧口径恢复：只备**后面的整章**（offset 1..N），当前章剩余
+        // 归滚动补货（maybePreloadFromPlayback）——两路各管各的，不抢同一段。
+        // 一章从头备到尾再下一章（不再「每轮 1 段轮转」）：章末触发场景下
+        // 播放还有 5 段余量，整章顺序备完正是旧版顺畅的节奏。
+        for (offset in 1..limitChapter) {
             val idx = currentIdx + offset
             if ((preloadChapterRetryAt[idx] ?: 0L) > now) continue
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: continue
@@ -2399,10 +2385,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             }
             val total = preloaded.segments.size
             if (total <= 0) continue
-            // 起点：当前章从「正在播的这一段之后」起（已播过的不必再备）；
-            // 后续整章从第 0 段起。已备过的段命中本地缓存直接跳过，不重付。
-            val minStart = if (offset == 0) (nowSpeak + 1).coerceAtLeast(0) else 0
-            val from = maxOf(preloadChapterProgress[idx] ?: 0, minStart)
+            // 整章从第 0 段起。已备过的段命中本地缓存直接跳过，不重付。
+            val from = preloadChapterProgress[idx] ?: 0
             if (from >= total) {
                 // 这章备完了，继续看下一章
                 preloadChapterProgress[idx] = total
@@ -2420,20 +2404,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadChapterProgress[idx] = from + 1
                 return true
             }
-            // 11-21（方案 B，用户拍板）：回退 batch_json 预热口径——跨章预加载不再
-            // 走「与播放完全相同」的合成路径。真机 11-21 02:36~02:44 实锤两链互掐：
-            // 同一段文本两条链共用缓存文件名，tryOnce 开头互删对方在途 .tmp
-            //（onDone 回调到了、目标文件没了，onError 全程 0 次）；失败又各自
-            // clearTTS() 重建引擎殃及对方在途合成，8 分钟重建 146 次、预加载
-            // 0 段自主合成成功、播放段反被拖进慢重试——比不预加载还差。
-            // batch_json 路径（preloadOneSegment，与章内滚动预热同款）：UTTS 收包
-            // 后自己合成、写自己的 synth_cache、只回静音——引擎槽瞬间让出、不写
-            // U阅 本地缓存、不与播放抢同一文件；播放到该段时命中 UTTS 缓存秒回
-            // （路 C 已验证机制，P2「缓存命中」的验收本来按它写的）。
-            // 代价（用户知情拍板）：日志页不再逐段出「请求音频」卡；进度看
-            // 通知栏「预加载 第N章 x/y 段」+ AppLog「跨章预加载已备」行。
-            // 传【原始文本】：UTTS 自己跑规则（角色多音色在 UTTS 侧分配），
-            // 与章内预热完全同口径，不双跑脚本（bcea7a8 原判）。
+            // 11-21 03:4x（用户终裁）：合成动作走 batch_json（preloadOneSegment，
+            // 与章内滚动预热同款）——UTTS 收包后自己合成、写自己的 synth_cache、
+            // 只回静音。不走播放同款路径（2852b91 实锤两链互删在途 .tmp + 互触发
+            // 引擎重建）；也不逐段出「请求音频」卡（用户 1f4b863 时已知情同意）。
+            // 传【原始文本】：UTTS 自己跑规则，不双跑脚本（bcea7a8 原判）。
             val tts = textToSpeech ?: return false
             var ok = false
             var interruptedByPlayback = false
@@ -2523,7 +2498,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (total > 0 && done >= total) laterDone++
         }
         var report: String? = null
-        for (offset in 0..limitChapter) {
+        // 11-21 03:4x 旧口径：跨章只管后面整章，报告也从 1 起（当前章归滚动补货）
+        for (offset in 1..limitChapter) {
             val idx = currentIdx + offset
             val cached = preloadChapterCache[idx]
             val total = cached?.segments?.size ?: 0
