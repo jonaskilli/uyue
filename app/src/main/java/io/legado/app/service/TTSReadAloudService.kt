@@ -166,6 +166,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 预加载跑到时可能还没下完——不能永久放弃，也不能每轮都重解析刷日志。
          */
         private const val PRELOAD_CHAPTER_RETRY_MS = 15_000L
+
+        /**
+         * 11-20：跨章预加载最多向后备几章（硬上限）。
+         *
+         * 为什么封 5：`audioPreDownloadNum` 同时被 `saveTtsTextJson` 当上下文窗口用
+         * （那里再 +2 章），用户把它填很大时，整章预合成会变成「几十章 × 几十段」的
+         * 无限后台开销。5 章足够覆盖「当前章 + 后面 3 章」的常规用法。
+         */
+        private const val PRELOAD_MAX_CHAPTERS = 5
         /**
          * 11-18：预热让路判据——播放请求提交后超过这么久还没收尾，就判定上游慢/卡，
          * 本轮预热链直接放弃，不再逐段各干等 15 秒。
@@ -232,6 +241,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         fun isPreloadedSegment(bookUrl: String?, chapterIndex: Int, segIndex: Int): Boolean {
             if (bookUrl.isNullOrBlank()) return false
             return preloadedSegmentMap[preloadKey(bookUrl, chapterIndex)]?.contains(segIndex) == true
+        }
+
+        /** 用户离开某章后清掉它的「已备」标记，避免清单无限增长（每章几十段） */
+        fun clearPreloadedSegmentChapter(bookUrl: String?, chapterIndex: Int) {
+            if (bookUrl.isNullOrBlank()) return
+            preloadedSegmentMap.remove(preloadKey(bookUrl, chapterIndex))
         }
 
         fun clearPreloadedSegments() = preloadedSegmentMap.clear()
@@ -2279,8 +2294,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 翻章/重定位只改变「目标章集合」，由调度器每轮自己重算；旧版 cancel 掉的
      * 是整条链（含已完成进度），这就是「永远只备到第 1 章」的直接原因。
      */
+    /**
+     * 唤醒跨章预加载调度器（幂等）。
+     *
+     * 语义（11-20 用户口径校准）：**以当前播放位置为起点，往后一直备到「当前章 +N」
+     * 的末尾**（N = 听书预加载数量，用户设 3）。也就是「当前章剩余 + 后面 3 章整章」
+     * 全部预先合成好；**暂停朗读时照备**（暂停不掐调度器，只掐播放）。
+     *
+     * 与旧版 `preloadNextChapter()` 的关键差异：这里不取消任何在跑的链。
+     * 翻章/重定位只改变「起点与范围」，由调度器每轮自己重算；旧版 cancel 掉的是
+     * 整条链（含已完成进度），这就是「永远只备到第 1 章」的直接原因。
+     */
     private fun ensureChapterPreload() {
-        if (AppConfig.preloadChapterSpan <= 0 || AppConfig.audioPreDownloadNum <= 0) {
+        if (AppConfig.audioPreDownloadNum <= 0) {
             postPreloadState("")
             return
         }
@@ -2295,36 +2321,39 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     AppLog.putDebug("跨章预加载轮次异常: ${e.localizedMessage}")
                     false
                 }
-                // 有活就立刻继续（进度最小者优先，天然轮转）；没活就歇一会儿再看。
-                // 歇着也要轮询：用户翻章后目标集合会变，不能只靠外部事件唤醒（会漏）。
-                if (!worked) delay(if (isPlay()) 1_500L else 3_000L)
+                // 有活立刻继续（按「近到远」一段接一段）；没活才歇一会儿再查。
+                // 歇着也要轮询：暂停/跳段后起点会变，不能只靠外部事件唤醒（会漏）。
+                if (!worked) delay(if (isPlay()) 1_500L else 2_500L)
             }
         }
     }
 
     /**
-     * 跑一轮跨章预加载：挑一个目标章，往后备 **1 段**，返回是否真的做了工作。
+     * 跑一轮：按「近到远」找第一个还没备完的章，往后备 **1 段**，返回是否做了工作。
      *
-     * 为什么每轮只备 1 段：①让路粒度——播放请求一来，最多只损失一段的在途时间；
-     * ②轮转公平——三章按「进度最小者优先」轮流推进，不会第一章吃满几分钟。
+     * 为什么每轮只备 1 段：播放请求一来，最多只损失一段的在途时间（让路粒度）；
+     * 同时保证「进度始终连续推进」——用户随时看都能看到前沿往前走。
      */
     private suspend fun runChapterPreloadRound(): Boolean {
         val book = ReadBook.book ?: return false
         val tts = textToSpeech ?: return false
         if (!ttsInitFinish) return false
-        val limitChapter = AppConfig.audioPreDownloadNum
-        val perChapter = AppConfig.preloadChapterSpan
-        if (limitChapter <= 0 || perChapter <= 0) {
+        // 上限 5 章：audioPreDownloadNum 同时喂给 data.json 上下文窗口，那边有 +2 章，
+        // 允许填很大时整章预合成会变成「几十章 × 几十段」的无限后台开销，这里封死。
+        val limitChapter = AppConfig.audioPreDownloadNum.coerceIn(0, PRELOAD_MAX_CHAPTERS)
+        if (limitChapter <= 0) {
             postPreloadState("")
             return false
         }
         val currentIdx = ReadBook.durChapterIndex
-        val validRange = (currentIdx + 1)..(currentIdx + limitChapter)
-        // 用户前进/后退后，落在目标范围外的章不再需要：进度、段表、重试时刻一起丢掉
+        val nowSpeak = this.nowSpeak
+        val validRange = currentIdx..(currentIdx + limitChapter)
+        // 落在目标范围外的章不再需要：进度、段表、重试时刻一起丢掉
         preloadChapterProgress.keys.filter { it !in validRange }.forEach {
             preloadChapterProgress.remove(it)
             preloadChapterCache.remove(it)
             preloadChapterRetryAt.remove(it)
+            clearPreloadedSegmentChapter(book.bookUrl, it)
         }
         // 让路判据（与同章预热同一口径）：播放请求在飞且已慢 ⇒ 上游卡住，
         // 这时提交预热只会排队空转，本轮直接放弃，等下一轮。
@@ -2334,85 +2363,106 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return false
         }
         val now = SystemClock.elapsedRealtime()
-        val candidates = validRange.filter { idx ->
-            val progress = preloadChapterProgress[idx] ?: 0
-            progress < perChapter &&
-                (preloadChapterRetryAt[idx] ?: 0L) <= now
-        }
-        if (candidates.isEmpty()) {
-            preloadActiveChapter = -1
-            postPreloadState(summarizePreloadState(currentIdx, limitChapter, perChapter))
-            return false
-        }
-        // 进度最小者优先（并列取章号小的）：三章轮流推进
-        val target = candidates.minWithOrNull(
-            compareBy({ preloadChapterProgress[it] ?: 0 }, { it })
-        ) ?: return false
-        val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, target) ?: return false
-        val preloaded = preloadChapterCache[target] ?: run {
-            val built = buildPreloadSegments(book, chapter)
-            if (built == null) {
-                // 正文没下载到本地（或排版不可用）：记一次重试时刻，别每轮空转刷日志
-                preloadChapterRetryAt[target] = now + PRELOAD_CHAPTER_RETRY_MS
-                AppLog.putDebug(
-                    "跨章预加载跳过: 第${target + 1}章正文未就绪（${chapter.title.take(12)}），稍后重试"
-                )
-                return false
+        // 近到远：offset=0 是当前章剩余，1..N 是后面各章整章
+        for (offset in 0..limitChapter) {
+            val idx = currentIdx + offset
+            if ((preloadChapterRetryAt[idx] ?: 0L) > now) continue
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: continue
+            val preloaded = preloadChapterCache[idx] ?: run {
+                val built = buildPreloadSegments(book, chapter)
+                if (built == null) {
+                    // 正文没下载到本地（预下载还没轮到 / 排版不可用）：记重试时刻，稍后再来
+                    preloadChapterRetryAt[idx] = now + PRELOAD_CHAPTER_RETRY_MS
+                    AppLog.putDebug(
+                        "跨章预加载跳过: 第${chapter.index + 1}章正文未就绪（${chapter.title.take(12)}），稍后重试"
+                    )
+                    return false
+                }
+                preloadChapterCache[idx] = built
+                built
             }
-            preloadChapterCache[target] = built
-            built
-        }
-        val span = minOf(perChapter, preloaded.segments.size)
-        val from = preloadChapterProgress[target] ?: 0
-        if (from >= span) return false
-        val rawText = preloaded.segments[from]
-        preloadActiveChapter = target
-        if (rawText.isBlank()) {
-            preloadChapterProgress[target] = from + 1
+            val total = preloaded.segments.size
+            if (total <= 0) continue
+            // 起点：当前章从「正在播的这一段之后」开始（已播过的不必再备）；
+            // 后续整章从第 0 段开始。
+            val minStart = if (offset == 0) (nowSpeak + 1).coerceAtLeast(0) else 0
+            val from = maxOf(preloadChapterProgress[idx] ?: 0, minStart)
+            if (from >= total) {
+                // 这章备完了，继续看下一章
+                preloadChapterProgress[idx] = total
+                continue
+            }
+            preloadActiveChapter = idx
+            val rawText = preloaded.segments[from]
+            if (rawText.isBlank()) {
+                preloadChapterProgress[idx] = from + 1
+                return true
+            }
+            // 已有 U阅 本地缓存就跳过（该段已被播放或同章滚动预热备过）
+            val cacheFile = getCacheFileForText(rawText, from, preloaded.title)
+            if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
+                preloadChapterProgress[idx] = from + 1
+                return true
+            }
+            val ok = preloadOneSegment(from, rawText, tts)
+            preloadChapterProgress[idx] = from + 1
+            if (ok) {
+                markPreloadedSegment(book.bookUrl, idx, from)
+                AppLog.putDebug(
+                    "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
+                )
+            } else {
+                AppLog.putDebug(
+                    "跨章预加载第 ${from + 1} 段失败，跳过继续（${preloaded.title.take(12)}）"
+                )
+            }
+            postPreloadState(summarizePreloadState(currentIdx, limitChapter))
             return true
         }
-        // 已有 U阅 本地缓存就跳过（该段之前被播放或同章预热备过）
-        val cacheFile = getCacheFileForText(rawText, from, preloaded.title)
-        if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
-            preloadChapterProgress[target] = from + 1
-            return true
-        }
-        val ok = preloadOneSegment(from, rawText, tts)
-        preloadChapterProgress[target] = from + 1
-        if (ok) {
-            markPreloadedSegment(book.bookUrl, target, from)
-            AppLog.putDebug(
-                "跨章预加载已备: 第${target + 1}章 第${from + 1}/$span 段（${preloaded.title.take(12)}）"
-            )
-        } else {
-            AppLog.putDebug(
-                "跨章预加载第 ${from + 1} 段失败，跳过继续（${preloaded.title.take(12)}）"
-            )
-        }
-        postPreloadState(summarizePreloadState(currentIdx, limitChapter, perChapter))
-        return true
+        // 走完一圈：全部章都备完了
+        preloadActiveChapter = -1
+        postPreloadState(summarizePreloadState(currentIdx, limitChapter))
+        return false
     }
 
     /**
-     * 生成给界面/通知栏看的一句话进度。
+     * 给界面/通知栏的一句话进度。
      *
-     * 只报「推进最慢的那一章」（也就是调度器此刻正在推的章），避免一行里塞三章看不清；
-     * 已完成的章数以括号附注。全部完成时给一句收口文案。
+     * 只看「第一处还没备完的位置」（那就是调度器此刻正在推的地方）：
+     *   · 当前章还没备完 → 报当前章 x/y 段
+     *   · 当前章备完、后面章在推 → 报那一章 x/y 段
+     * 另附「后面 N 章已完成几章」，让用户能一眼看到 3 章目标完成了多少。
      */
-    private fun summarizePreloadState(currentIdx: Int, limitChapter: Int, perChapter: Int): String {
-        val entries = ((currentIdx + 1)..(currentIdx + limitChapter)).map { idx ->
-            idx to (preloadChapterProgress[idx] ?: 0)
+    private fun summarizePreloadState(currentIdx: Int, limitChapter: Int): String {
+        // 「后续 N 章」的完成数（不含当前章：当前章是跟着播放走的，不构成目标）
+        var laterDone = 0
+        for (offset in 1..limitChapter) {
+            val idx = currentIdx + offset
+            val total = preloadChapterCache[idx]?.segments?.size ?: 0
+            val done = preloadChapterProgress[idx] ?: 0
+            if (total > 0 && done >= total) laterDone++
         }
-        if (entries.isEmpty()) return ""
-        val doneChapters = entries.count { it.second >= perChapter }
-        if (doneChapters >= entries.size) {
-            return "预加载已完成 ${entries.size} 章开头"
+        var report: String? = null
+        for (offset in 0..limitChapter) {
+            val idx = currentIdx + offset
+            val cached = preloadChapterCache[idx]
+            val total = cached?.segments?.size ?: 0
+            val done = preloadChapterProgress[idx] ?: 0
+            if (total > 0 && done >= total) continue
+            report = if (total > 0) {
+                val title = cached?.title?.take(10).orEmpty()
+                val titlePart = if (title.isNotBlank()) " · $title" else ""
+                "预加载 第${idx + 1}章 ${done}/$total 段$titlePart"
+            } else {
+                "预加载 准备中 · 第${idx + 1}章"
+            }
+            break
         }
-        val (idx, done) = entries.minByOrNull { it.second } ?: return ""
-        val title = appDb.bookChapterDao.getChapter(ReadBook.book?.bookUrl ?: "", idx)?.title ?: ""
-        val titlePart = if (title.isNotBlank()) " · ${title.take(10)}" else ""
-        val donePart = if (doneChapters > 0) "（已完成 $doneChapters 章）" else ""
-        return "预加载 第${idx + 1}章 ${done}/$perChapter 段$donePart$titlePart"
+        if (report == null) {
+            return if (limitChapter > 0) "预加载完成 · 后续 $laterDone/$limitChapter 章已备"
+            else "预加载完成"
+        }
+        return if (limitChapter > 0) "$report（后续 $laterDone/$limitChapter 章）" else report
     }
 
     /** 跨章预加载进度文案（给父类通知副标题用；空串=不显示） */
@@ -2443,13 +2493,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 预热就打在了另一个键上——播放照样现场合成，钱花了账没记上。
      *
      * 三条路径按优先级：
-     *  ① 已排版的相邻章（offset=1 的 nextTextChapter）→ 与主播放是同一个对象，零分叉；
+     *  ① 已排版的本章/下一章（curTextChapter / nextTextChapter）→ 与主播放同一个对象，零分叉；
      *  ② 自己排版（ChapterProvider.getTextChapterAsync）→ 与主播放同一条排版流水线；
      *  ③ 排版不可用（阅读页尺寸没初始化等）才降级正文直切，并打日志标明是降级口径。
      */
     private suspend fun buildPreloadSegments(book: Book, chapter: BookChapter): PreloadedChapter? {
-        if (chapter.index - ReadBook.durChapterIndex == 1) {
-            val tc = ReadBook.textChapter(1)
+        // ① 当前章 / 下一章通常已经排好版（ReadBook 常驻 curTextChapter 与 nextTextChapter），
+        // 直接复用它的段表：零排版成本、且与主播放是同一个对象，段文本逐字一致。
+        val offset = chapter.index - ReadBook.durChapterIndex
+        if (offset == 0 || offset == 1) {
+            val tc = ReadBook.textChapter(offset)
             if (tc != null && tc.chapter.index == chapter.index && tc.pages.isNotEmpty()) {
                 val segments = tc.getNeedReadAloud(0, false, 0).split("\n").filter { it.isNotEmpty() }
                 if (segments.isNotEmpty()) return PreloadedChapter(tc.title, segments)

@@ -1638,26 +1638,6 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             .coerceIn(0, 15)
         set(value) = appCtx.putPrefString(PreferKey.preloadSpan, value.toString())
 
-    /**
-     * 11-20：跨章预加载「每章备多少段」（0=关，默认 8，上限 60）。
-     *
-     * 为什么需要它：「听书预加载数量(章节)」=3 只说了「后面 3 章」，
-     * 没说每章备多少段。旧实现是**整章全备**（一�� 60~80 段），
-     * 实测 2.6 秒/段 ⇒ 备满一章要 2~3 分钟，且用户翻章前根本备不完，
-     * 于是永远只备得上第 1 章的头几段，后 2 章零覆盖。
-     * 改成「每章只备开头 N 段」后：翻到该章第一句就能秒回（真实收益），
-     * 3 章的总开销也可控。
-     *
-     * 与 [preloadSpan]（**同章内**滚动补货的段数）分工：
-     *   · preloadSpan：当前章往后备多少段（同一章内滚动触发）
-     *   · preloadChapterSpan：每个**未来章**开头备多少段（跨章，一次性）
-     * 两者都只对支持 batch_json 预热协议的引擎（U·TTS）有意义。
-     */
-    var preloadChapterSpan: Int
-        get() = (appCtx.getPrefString(PreferKey.preloadChapterSpan, "8")?.toIntOrNull() ?: 8)
-            .coerceIn(0, 60)
-        set(value) = appCtx.putPrefString(PreferKey.preloadChapterSpan, value.toString())
-
     // 12. 朗读封面跑马灯边框开关
     var readAloudCoverMarqueeEnabled: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.readAloudCoverMarqueeEnabled, false)
