@@ -2306,6 +2306,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 整条链（含已完成进度），这就是「永远只备到第 1 章」的直接原因。
      */
     private fun ensureChapterPreload() {
+        // 11-21 03:2x（用户拍板「还是照以前的方法吧」）：**跨章预加载整体停用**。
+        // 用户口径：「我在改这个 utts 预加热之前都是好好的」——即回到只有
+        // 同章滚动预热（preloadSpan）的形态：日志页只有播放、设几章备几章的
+        // 语义只保留给正文预下载（HttpTTS preDownloadAudios）与规则窗口
+        //（ReadBook data.json 值+2 章，这两路不动）。
+        // 历史教训两条都记住了：与播放同路径必互掐（2852b91，8 分钟 146 次
+        // 引擎重建）；batch_json 路径不出卡用户又不认（1f4b863）。两难无解，
+        // 且用户原始诉求「从当前位置顺畅读到 +N 章末」滚动补货+正文预下载
+        // 实际已覆盖大半——按用户令先回到确定好的状态，此功能不再擅自复活。
+        // 设置键保留原义：>0 只影响预下载/窗口；本调度器不再启动。
+        postPreloadState("")
+        return
         if (AppConfig.audioPreDownloadNum <= 0) {
             postPreloadState("")
             return
