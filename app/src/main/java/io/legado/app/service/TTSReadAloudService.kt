@@ -2322,7 +2322,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         preloadJob = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
                 val worked = try {
-                    runChapterPreloadRound()
+                    // 11-21 真机 05:13/05:21 两场次实锤：vivo 冻结（暂停+退后台）把
+                    // 协程冻在 preloadOneSegment 的 completer.await() 里，解冻后
+                    // 时钟坏掉 → withTimeoutOrNull(15s) 永不触发 → 协程变僵尸
+                    //（isActive=true 但永不干活），幂等守卫挡住一切后续调度——
+                    // 播放态也不动。自愈：每轮套 60s 总超时，卡死的挂起点被掐，
+                    // while 继续下一轮，轮函数内层已重试/让路的语义不受影响
+                    //（60s > 单段 15s×3 重试 + 段表构建的合理上限）。
+                    withTimeout(60_000L) {
+                        runChapterPreloadRound()
+                    }
+                } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                    AppLog.put("跨章预加载诊断: 轮次 60s 超时自愈重启")
+                    false
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
