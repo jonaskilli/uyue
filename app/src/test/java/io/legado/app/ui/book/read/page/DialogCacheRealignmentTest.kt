@@ -93,6 +93,7 @@ class DialogCacheRealignmentTest {
         val newContent = "强调“术语”开头，然后“你好。”和“再见。”"
         val r = DialogCacheRealignment.buildRealignedResults(newContent, old)
         assertNotNull(r)
+        assertTrue(r!! === r)
         assertEquals("角色1", r.results.getJSONObject("2").optString("name"))
         assertEquals("角色2", r.results.getJSONObject("3").optString("name"))
         assertTrue(r!!.results.optJSONObject("1") == null || r.results.getJSONObject("1").optString("name") != "角色1")
@@ -107,6 +108,7 @@ class DialogCacheRealignmentTest {
         val newContent = "“好！”“好！”最后“走吧。”"
         val r = DialogCacheRealignment.buildRealignedResults(newContent, old)
         assertNotNull(r)
+        assertTrue(r!! === r)
         assertEquals("角色1", r.results.getJSONObject("1").optString("name"))
         assertEquals("角色2", r.results.getJSONObject("2").optString("name"))
         assertEquals("角色3", r.results.getJSONObject("3").optString("name"))
@@ -121,6 +123,7 @@ class DialogCacheRealignmentTest {
         val newContent = "“第一句。”“换了内容的句子”“第三句。”"
         val r = DialogCacheRealignment.buildRealignedResults(newContent, old)
         assertNotNull(r)
+        assertTrue(r!! === r)
         assertEquals("角色1", r.results.getJSONObject("1").optString("name"))
         assertEquals("角色3", r.results.getJSONObject("3").optString("name"))
         // 旧2内插到新2（1、3之间唯一的空位）
