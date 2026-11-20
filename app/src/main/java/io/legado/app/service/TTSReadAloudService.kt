@@ -2408,59 +2408,46 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadChapterProgress[idx] = from + 1
                 return true
             }
-            // 11-20（用户口径校正）：这里恢复成**和正常播放完全相同**的合成路径——
-            // 跑 U阅 自己的规则脚本 → synthesizeText → 音频落进 U阅 本地缓存
-            //（systemTTS/*.wav，与播放同一个池子、同一套文件名算法）。
-            // 于是：段前小喇叭亮、播放像命中一样秒回、日志页显示成正常加载。
-            // 只多带一个 preloadOnly 标记，而它**只表达一件事：别破窗**。
-            // 产出与日志与正常播放完全一致——真实音频、请求卡与命中行照常落日志页
-            // （用户原话「就当我是正在播放嘛」）。
-            // bcea7a8 当初为「别让下一章的行混进日志」把整条链改成静默预热，是错的：
-            // 用户要的正是「缓存了哪些段，日志里就能看到」。
-            // 与同章滚动预热（batch_json，只写 UTTS 缓存）分工：滚动补货管当前章、
-            // 本调度器管后面整章；两者共用串行门，后台总并发恒为 1。
+            // 11-21（方案 B，用户拍板）：回退 batch_json 预热口径——跨章预加载不再
+            // 走「与播放完全相同」的合成路径。真机 11-21 02:36~02:44 实锤两链互掐：
+            // 同一段文本两条链共用缓存文件名，tryOnce 开头互删对方在途 .tmp
+            //（onDone 回调到了、目标文件没了，onError 全程 0 次）；失败又各自
+            // clearTTS() 重建引擎殃及对方在途合成，8 分钟重建 146 次、预加载
+            // 0 段自主合成成功、播放段反被拖进慢重试——比不预加载还差。
+            // batch_json 路径（preloadOneSegment，与章内滚动预热同款）：UTTS 收包
+            // 后自己合成、写自己的 synth_cache、只回静音——引擎槽瞬间让出、不写
+            // U阅 本地缓存、不与播放抢同一文件；播放到该段时命中 UTTS 缓存秒回
+            // （路 C 已验证机制，P2「缓存命中」的验收本来按它写的）。
+            // 代价（用户知情拍板）：日志页不再逐段出「请求音频」卡；进度看
+            // 通知栏「预加载 第N章 x/y 段」+ AppLog「跨章预加载已备」行。
+            // 传【原始文本】：UTTS 自己跑规则（角色多音色在 UTTS 侧分配），
+            // 与章内预热完全同口径，不双跑脚本（bcea7a8 原判）。
+            val tts = textToSpeech ?: return false
             var ok = false
-            var canceledByPlayback = false
+            var interruptedByPlayback = false
+            // 播放打断判据：play() 会自增 abortGeneration（见 doSynthesizeText）。
+            // batch_json 路径下播放打断表现为引擎 stop → onError 回 null（不是
+            // 协程取消），所以改用代次对比识别「这 15 秒里播放重置过」。
+            val genBefore = abortGeneration
             try {
                 ok = preloadGate.withLock {
-                    val speakText = applyTtsScripts(
-                        rawText,
-                        paragraphIndex = from,
-                        chapterTitle = preloaded.title,
-                        chapterParagraphs = preloaded.segments
-                    )
-                    if (speakText.matches(AppPattern.notReadAloudRegex)) {
-                        // 纯符号段与播放同口径：写静音占位文件（缓存里有它，标记才一致）
-                        val silentName = getFileNameHelper(preloaded.title, rawText, from)
-                        if (!hasSpeakFile(silentName)) createSilentSound(silentName)
-                        true
-                    } else {
-                        val utteranceId =
-                            "PRELOAD_${idx}_${from}_${System.currentTimeMillis()}"
-                        synthesizeText(
-                            speakText,
-                            utteranceId,
-                            from,
-                            preloaded.title,
-                            rawText,
-                            synthChapterIdx = idx,
-                            synthTotalSegs = total,
-                            preloadOnly = true
-                        ) != null
-                    }
+                    preloadOneSegment(from, rawText, tts)
                 }
             } catch (e: CancellationException) {
-                // 两种取消必须分开（11-20 二次定案）：
+                // 两种取消必须分开（沿用 11-20 二次定案）：
                 //  · 调度器自己被取消（onDestroy）→ 原样上抛，让协程正常结束；
-                //  · 播放触发的中断（play() 的 abortGeneration++ / textToSpeech.stop()
-                //    掐掉在途预加载）→ **不是失败**：不计失败、不退避，下一轮立刻重试
-                //    同一段。旧版把它当失败进退避+3次放弃，边播边预加载时表现为
-                //    进度一顿一顿、没备上的段还可能被永久跳过——「稳定」的反面。
+                //  · 播放触发的协程中断 → **不是失败**：不计失败、不退避，下一轮
+                //    立刻重试同一段。
                 //  判据：preloadJob 还活着 ⇒ 这个取消来自播放路径，不是我们自己。
                 if (preloadJob?.isActive != true) throw e
-                canceledByPlayback = true
+                interruptedByPlayback = true
             } catch (e: Exception) {
                 AppLog.putDebug("跨章预加载合成异常: ${e.localizedMessage}")
+            }
+            if (!ok && !interruptedByPlayback && abortGeneration != genBefore) {
+                // 等待期间播放重置过（play() 重提播放链会 stop 引擎，在途预热
+                // 被掐）→ 与协程中断同待遇：不计失败、不退避。
+                interruptedByPlayback = true
             }
             when {
                 ok -> {
@@ -2470,7 +2457,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                     )
                 }
-                canceledByPlayback -> {
+                interruptedByPlayback -> {
                     // 播放优先是设计内行为：不推进、不计数，下轮立刻重试同一段。
                     // 那段确实没备上，必须补；但也不留任何「失败」痕迹。
                     AppLog.putDebug(
