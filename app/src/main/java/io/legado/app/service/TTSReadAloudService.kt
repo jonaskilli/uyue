@@ -179,14 +179,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private const val PRELOAD_SEGMENT_MAX_FAILS = 3
 
         /**
-         * 11-20：跨章预加载最多向后备几章（硬上限）。
-         *
-         * 为什么封 5：`audioPreDownloadNum` 同时被 `saveTtsTextJson` 当上下文窗口用
-         * （那里再 +2 章），用户把它填很大时，整章预合成会变成「几十章 × 几十段」的
-         * 无限后台开销。5 章足够覆盖「当前章 + 后面 3 章」的常规用法。
-         */
-        private const val PRELOAD_MAX_CHAPTERS = 5
-        /**
          * 11-18：预热让路判据——播放请求提交后超过这么久还没收尾，就判定上游慢/卡，
          * 本轮预热链直接放弃，不再逐段各干等 15 秒。
          *
@@ -2333,9 +2325,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         val book = ReadBook.book ?: return false
         if (textToSpeech == null) return false
         if (!ttsInitFinish) return false
-        // 上限 5 章：audioPreDownloadNum 同时喂给 data.json 上下文窗口，那边有 +2 章，
-        // 允许填很大时整章预合成会变成「几十章 × 几十段」的无限后台开销，这里封死。
-        val limitChapter = AppConfig.audioPreDownloadNum.coerceIn(0, PRELOAD_MAX_CHAPTERS)
+        // 用户设置「听书预加载数量(章节)」多少就备多少章——**不加人为上限**。
+        // 用户 11-20 明确：有人会填 100 章，希望真的能加载 100 章；
+        // 「每个人按自己的情况设置」是他对这个键的定义。
+        val limitChapter = AppConfig.audioPreDownloadNum.coerceAtLeast(0)
         if (limitChapter <= 0) {
             postPreloadState("")
             return false
