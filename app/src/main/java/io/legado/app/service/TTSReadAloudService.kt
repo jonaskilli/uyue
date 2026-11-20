@@ -1767,6 +1767,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 触发频率与旧的合成循环口径一致（每 4 段一批），只是驱动源换了。
      */
     private fun maybePreloadFromPlayback() {
+        // 11-21：跨章预加载（听书预加载数量>0）开启时，滚动补货**停用**。
+        // 一条连续加载流已经从「当前播放位置之后」备到 +N 章末，当前章剩余
+        // 它自己就覆盖了；滚动补货再跑就是同一段两路都备（batch_json 一遍、
+        // 正常合成一遍），白付云端请求还抢串行门。设 0（=关跨章）时这里恢复，
+        // 老行为不丢。
+        if (AppConfig.audioPreDownloadNum > 0) return
         if (AppConfig.preloadSpan <= 0) return
         if (singleParagraphMode) return
         if (nowSpeak < PRELOAD_START_AFTER) return
@@ -2284,11 +2290,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     /**
      * 唤醒跨章预加载调度器（幂等）。
      *
-     * 语义（11-20 二次定案）：备「当前章 +1 .. +N」的**整章**（N = 听书预加载数量）。
-     * 当前章剩余**不归这里管**——它是「U·TTS预合成段数」（preloadSpan）滚动补货的
-     * 辖区。此前把当前章也塞进来，同一批段两路都备（一次 batch_json 写 UTTS 缓存、
-     * 一次正常合成写 U阅 本地缓存），白付一次云端请求，还共用串行门互相拖慢——
-     * 与用户要的「稳定快速」相反。**暂停朗读时照备**（暂停不掐调度器，只掐播放）。
+     * 语义（11-21 终版口径）：**一条连续的加载流**——从「当前播放位置之后」起，
+     * 像播放一样一段一段往后合成：当前章剩余 → +1 章 → … → +N 章末停
+     * （N = 听书预加载数量）。日志从第一段起连续可见，中途不隔空白。
+     * 用户原话：「我希望的只是从当前位置开始，一直能够顺畅地读下去，
+     * 这才叫做加载，加载的终点就是我设置的章节数量。」
+     * **暂停朗读时照备**（暂停不掐调度器，只掐播放）。
+     *
+     * 与滚动补货（preloadSpan）的互斥：本流开启时滚动补货**停用**（见
+     * maybePreloadFromPlayback）——否则当前章剩余两路都备，一段两套落点
+     * 白付云端请求；跨章预加载设 0 时滚动补货恢复，老行为不丢。
      *
      * 与旧版 `preloadNextChapter()` 的关键差异：这里不取消任何在跑的链。
      * 翻章/重定位只改变「起点与范围」，由调度器每轮自己重算；旧版 cancel 掉的是
@@ -2336,7 +2347,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return false
         }
         val currentIdx = ReadBook.durChapterIndex
-        val validRange = (currentIdx + 1)..(currentIdx + limitChapter)
+        val nowSpeak = this.nowSpeak
+        val validRange = currentIdx..(currentIdx + limitChapter)
         // 落在目标范围外的章不再需要：进度、段表、重试时刻一起丢掉
         preloadChapterProgress.keys.filter { it !in validRange }.forEach {
             preloadChapterProgress.remove(it)
@@ -2354,8 +2366,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             return false
         }
         val now = SystemClock.elapsedRealtime()
-        // 近到远：只备后面的整章（当前章剩余归 preloadSpan 滚动补货，见函数头注释）
-        for (offset in 1..limitChapter) {
+        // 近到远：offset=0 是当前章剩余（从正在播的段之后起），1..N 是后面各章整章。
+        // 一条流从头备到尾，日志连续不断档。
+        for (offset in 0..limitChapter) {
             val idx = currentIdx + offset
             if ((preloadChapterRetryAt[idx] ?: 0L) > now) continue
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: continue
@@ -2374,8 +2387,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             }
             val total = preloaded.segments.size
             if (total <= 0) continue
-            // 起点一律第 0 段：已备过的段命中本地缓存直接跳过，不重付
-            val from = preloadChapterProgress[idx] ?: 0
+            // 起点：当前章从「正在播的这一段之后」起（已播过的不必再备）；
+            // 后续整章从第 0 段起。已备过的段命中本地缓存直接跳过，不重付。
+            val minStart = if (offset == 0) (nowSpeak + 1).coerceAtLeast(0) else 0
+            val from = maxOf(preloadChapterProgress[idx] ?: 0, minStart)
             if (from >= total) {
                 // 这章备完了，继续看下一章
                 preloadChapterProgress[idx] = total
@@ -2495,8 +2510,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     /**
      * 给界面/通知栏的一句话进度。
      *
-     * 只看「后续章里第一处还没备完的位置」（那就是调度器此刻正在推的地方）：
-     * 报那一章 x/y 段，另附「N 章已完成几章」。当前章剩余归滚动补货，不在文案里。
+     * 只看「第一处还没备完的位置」（那就是这条流此刻推到的地方）：
+     * 当前章没备完就报当前章 x/y 段，备完则报后面正在推的那章；
+     * 另附「N 章已完成几章」。文案与日志一样连续。
      */
     private fun summarizePreloadState(currentIdx: Int, limitChapter: Int): String {
         // 「后续 N 章」的完成数（不含当前章：当前章是跟着播放走的，不构成目标）
@@ -2508,7 +2524,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (total > 0 && done >= total) laterDone++
         }
         var report: String? = null
-        for (offset in 1..limitChapter) {
+        for (offset in 0..limitChapter) {
             val idx = currentIdx + offset
             val cached = preloadChapterCache[idx]
             val total = cached?.segments?.size ?: 0
