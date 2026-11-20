@@ -34,6 +34,18 @@ object DialogCacheRealignment {
 
     enum class Status { UNCHANGED, REALIGNED, FAILED }
 
+    /** 旧 results 里「完整有效」条目数（有名字也有台词，参与对齐的口径） */
+    private fun countValidEntries(oldResults: JSONObject): Int {
+        var n = 0
+        val keys = oldResults.keys()
+        while (keys.hasNext()) {
+            val obj = oldResults.optJSONObject(keys.next()) ?: continue
+            if (obj.optString("name", "").trim().isNotEmpty()
+                && obj.optString("dialogText", obj.optString("dialogContent", "")).isNotEmpty()) n++
+        }
+        return n
+    }
+
     /**
      * 归一化：只留汉字/字母/数字。汉字区含扩展A/兼容区，够覆盖简繁书源文本。
      */
@@ -176,6 +188,25 @@ object DialogCacheRealignment {
             val copy = JSONObject(obj.toString())
             copy.put("dialogText", quotes.first { it.first == newSeq }.second)
             newResults.put(newSeq.toString(), copy)
+        }
+
+        // 无变化守卫：映射后的键集、名字、台词与旧 results 完全一致 → 返回 null，
+        // 调用方零写盘（「没坏就不修」）。正文没被规则改过时每次挂标注都走这里。
+        if (newResults.length() > 0 && newResults.length() == countValidEntries(oldResults)) {
+            var identical = true
+            val it = newResults.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                val n = newResults.optJSONObject(k)
+                val o = oldResults.optJSONObject(k)
+                if (n == null || o == null
+                    || n.optString("name") != o.optString("name")
+                    || n.optString("dialogText") != o.optString("dialogText")) {
+                    identical = false
+                    break
+                }
+            }
+            if (identical) return null
         }
 
         val mode = if (orphans.isEmpty() && oldSeqs.size == quotes.size) "exact"
