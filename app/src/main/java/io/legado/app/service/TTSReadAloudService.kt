@@ -2374,7 +2374,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadSegmentFailCount.remove(it)
             }
         }
-        // 让路判据（与同章预热同一口径）：播放请求在飞且已慢 ⇒ 上游卡住，
+        // 让路判据①（与同章预热同一口径）：播放请求在飞且已慢 ⇒ 上游卡住，
         // 这时提交预热只会排队空转，本轮直接放弃，等下一轮。
         if (playbackSubmitAt > playbackSettledAt &&
             SystemClock.elapsedRealtime() - playbackSubmitAt >= PRELOAD_YIELD_PLAYBACK_STUCK_MS
@@ -2382,6 +2382,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             AppLog.put(
                 "跨章预加载诊断: 让路放弃（播放请求已飞 ${ (SystemClock.elapsedRealtime() - playbackSubmitAt) / 1000 }s）"
             )
+            return false
+        }
+        // 让路判据②（11-21 真机实锤 04:58 卡死）：滚动补货链正在跑 ⇒ 它的段正
+        // 占着 UTTS onSynthesizeText 串行队列（每笔 2.7s×N）。跨章那笔此时走
+        // synthesizeToFile 是【无超时的 binder 同步提交】，会排在队尾堵死——
+        // 15s 的 completer 超时管不到提交阶段，轮函数整个挂死、零日志。
+        // 同门互让：滚动链跑完本轮再来，两链本就共用 preloadGate 串行门，
+        // 只是把「等锁」提前到「本轮放弃」，避免无超时 binder 阻塞。
+        if (preloadChainJob?.isActive == true) {
+            AppLog.put("跨章预加载诊断: 让路放弃（滚动补货链在跑）")
             return false
         }
         val now = SystemClock.elapsedRealtime()
