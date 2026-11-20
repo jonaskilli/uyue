@@ -159,6 +159,22 @@
         </androidx.core.widget.NestedScrollView>
     </LinearLayout>
 
+    <!-- 11-20：跨章预加载进度（常驻一行，避免藏在只会 Http 模式显示的顶部区）
+         预加载关闭/没有目标章时 GONE，不占高度。 -->
+    <TextView
+        android:id="@+id/tv_preload_state"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textColor="@color/secondaryText"
+        android:textSize="12sp"
+        android:visibility="gone"
+        tools:text="预加载 第4章 3/8 段"
+        tools:visibility="visible" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

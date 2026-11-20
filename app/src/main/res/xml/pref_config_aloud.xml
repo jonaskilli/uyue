@@ -20,6 +20,18 @@
             android:maxLines="1"
             app:iconSpaceReserved="false" />
 
+        <!-- 11-20：跨章预加载每章节数（0=关）。与上面的「U·TTS预合成段数」分工：
+             上者管同章内滚动补货，本键管每个未来章开头备多少段。
+             「听书预加载数量(章节)」决定备几章，本键决定每章备多少段。 -->
+        <io.legado.app.lib.prefs.EditTextPreference
+            android:defaultValue="8"
+            android:key="preloadChapterSpan"
+            android:summary="每个未来章节开头提前备多少段音频（0=关闭跨章预加载，默认 8，上限 60）。配合『听书预加载数量』一起用：3 章 × 8 段 = 翻到那 3 章开头立刻开口。"
+            android:title="跨章预加载每章节数(段)"
+            android:inputType="number"
+            android:maxLines="1"
+            app:iconSpaceReserved="false" />
+
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="false"
             android:key="ignoreAudioFocus"

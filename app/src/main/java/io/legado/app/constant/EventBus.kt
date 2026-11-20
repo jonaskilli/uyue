@@ -41,6 +41,10 @@ object EventBus {
     const val READ_ALOUD_STARTING = "readAloudStarting"
     const val READ_ALOUD_AUDIO_CACHE_REFRESH = "readAloudAudioCacheRefresh"
     const val READ_ALOUD_VOLUME_GAIN = "readAloudVolumeGain"
+    // 跨章预加载进度（value = 可直接显示的文本，空串=不显示）
+    // 11-20：跨章预加载此前**完全无感**——成功时不打日志、界面无进度，
+    // 用户看到的只是「开了 3 章却像没缓存」。本事件把进度送到朗读面板与通知栏。
+    const val READ_ALOUD_PRELOAD_STATE = "readAloudPreloadState"
     // 视觉小说舞台：段落归属（说话人/旁白）+ 段落全文，value = VnParagraph
     const val VN_PARAGRAPH = "vnParagraph"
     // 视觉小说舞台：当前字幕片段及其段内字符区间，value = VnSubtitlePos

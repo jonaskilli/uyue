@@ -4122,7 +4122,24 @@ abstract class BaseReadAloudService : BaseService(),
         }
     }
 
-    private fun upReadAloudNotification() {
+    /**
+     * 11-20：跨章预加载进度文案（子类提供）。
+     *
+     * 为什么挂在父类通知上：用户「预加载不显示」的核心是**看不见它在干什么**——
+     * 朗读面板不常开、阅读页段前标记只认 U阅 本地缓存（跨章预热写的是 UTTS 缓存，
+     * 标记不亮）。常驻可见的位置只有前台服务通知，所以进度放通知副标题。
+     *
+     * 空串 = 不显示（预加载关闭或没有目标章）。
+     */
+    protected open fun preloadStateText(): String = ""
+
+    private fun notificationSubText(): String {
+        val base = getString(R.string.read_aloud)
+        val preload = runCatching { preloadStateText() }.getOrDefault("")
+        return if (preload.isBlank()) base else "$base · $preload"
+    }
+
+    protected fun upReadAloudNotification() {
         upNotificationJob = execute {
             try {
                 val notification = createNotification()
@@ -4169,7 +4186,7 @@ abstract class BaseReadAloudService : BaseService(),
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setSmallIcon(R.drawable.ic_volume_up)
-            .setSubText(getString(R.string.read_aloud))
+            .setSubText(notificationSubText())
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentTitle(nTitle)

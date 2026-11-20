@@ -335,6 +335,16 @@ object PreferKey {
     // 11-17 二合一：U·TTS 预合成段数（0=关，1~15 开启），原 preloadBatchEnabled 开关键已并入
     const val preloadSpan = "preloadSpan"
 
+    /**
+     * 11-20：跨章预加载「每章备多少段」（0=关）。
+     *
+     * 「听书预加载数量(章节)」= 3 的语义是「后面 3 章都提前备货」，
+     * 但每章有几十上百段，全备要好几分钟、且用户翻到那章时早就备完了。
+     * 真正有收益的是「每章开头若干段」——用户翻过去立刻开口。
+     * 本键控制这个「开头备多少段」，配合章节数形成「章数 × 每章节数」的总量。
+     */
+    const val preloadChapterSpan = "preloadChapterSpan"
+
     // 朗读封面跑马灯边框
     const val readAloudCoverMarqueeEnabled = "readAloudCoverMarqueeEnabled"
     const val readAloudCoverMarqueeSpeed = "readAloudCoverMarqueeSpeed"

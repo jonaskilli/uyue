@@ -1896,6 +1896,12 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud),
                 binding.tvChapterProgressStart.text = "${(it / 10f).toInt()}%"
             }
         }
+        // 11-20：跨章预加载进度（空串=关闭/无目标，整行收起）。
+        // 这一行是用户「预加载不显示」的直接答案：面板开着就能看到备到第几章第几段。
+        observeEvent<String>(EventBus.READ_ALOUD_PRELOAD_STATE) { text ->
+            binding.tvPreloadState.gone(text.isBlank())
+            binding.tvPreloadState.text = text
+        }
         observeEvent<Boolean>(EventBus.READ_ALOUD_CONFIG_CHANGED) {
             upTopSection()
             syncSceneEffectVisibility()
