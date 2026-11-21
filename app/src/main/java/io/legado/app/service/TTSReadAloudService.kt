@@ -2462,6 +2462,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 引擎重建）；也不逐段出「请求音频」卡（用户 1f4b863 时已知情同意）。
             // 传【原始文本】：UTTS 自己跑规则，不双跑脚本（bcea7a8 原判）。
             val tts = textToSpeech ?: return false
+            // 11-21 11:5x（用户报「顶部合成进度不显示下一章」）：跨章备货此前绕开
+            // synthesizeText 直提引擎，从不刷新 readProgress.json 的合成前沿 →
+            // UTTS 日志页顶部恒停播放章。补播放同款上报（reportSynthFront 759 行
+            // 同源）：UTTS 渲染端本就支持跨章格式「后台合成 第X章 n/63（当前：
+            // 第Y章 m/99）」，数据到了它就动。章节序/标题/总段数取本章段表。
+            io.legado.app.help.ReadProgressFile.reportSynthFront(
+                idx,
+                from,
+                preloaded.title,
+                total,
+            )
             AppLog.put(
                 "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 提交batch_json前（文本=${rawText.take(10)}）"
             )
