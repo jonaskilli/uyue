@@ -2421,8 +2421,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadSegmentFailCount.remove(it)
             }
         }
-        // 让路判据①（与同章预热同一口径）：播放请求在飞且已慢 ⇒ 上游卡住，
-        // 这时提交预热只会排队空转，本轮直接放弃，等下一轮。
+        // 让路判据①：播放请求在飞 ⇒ 本轮放弃。
+        // 11-21 15:5x（用户终裁「播放即掐」）：判据从「已飞 6 秒才算卡」收紧为
+        // **只要在飞就让**——播放提交后到 UTTS 开始合成之间有空档，此刻塞备货
+        // 进串行队列就会排在播放前面，播放开头等 2~3s。单链后备货密度高，
+        // 这个窗口撞上的概率大增。让位成本极低：本轮 return false，1.5s 后
+        // 播放落定（playbackSettledAt 刷新）自然续跑，已备进度毫发无损。
+        if (playbackSubmitAt > playbackSettledAt) {
+            AppLog.putDebug("跨章预加载诊断: 让路放弃（播放请求在飞）")
+            return false
+        }
+        // 旧判据（已飞 6 秒才算卡）随「播放即掐」口径废止，保留作历史参考：
         if (playbackSubmitAt > playbackSettledAt &&
             SystemClock.elapsedRealtime() - playbackSubmitAt >= PRELOAD_YIELD_PLAYBACK_STUCK_MS
         ) {
