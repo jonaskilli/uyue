@@ -2368,7 +2368,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 "已有协程=${preloadJob?.isActive == true}, textToSpeech=${textToSpeech != null}, ttsInitFinish=$ttsInitFinish"
         )
         if (preloadJob?.isActive == true) return
-        AppLog.put("跨章预加载诊断: 启动调度协程")
+        AppLog.putDebug("跨章预加载诊断: 启动调度协程")
         preloadJob = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
                 val worked = try {
@@ -2383,7 +2383,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         runChapterPreloadRound()
                     }
                 } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-                    AppLog.put("跨章预加载诊断: 轮次 60s 超时自愈重启")
+                    AppLog.putDebug("跨章预加载诊断: 轮次 60s 超时自愈重启")
                     false
                 } catch (e: CancellationException) {
                     throw e
@@ -2406,15 +2406,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      */
     private suspend fun runChapterPreloadRound(): Boolean {
         val book = ReadBook.book ?: run {
-            AppLog.put("跨章预加载诊断: 轮次退出 book=null")
+            AppLog.putDebug("跨章预加载诊断: 轮次退出 book=null")
             return false
         }
         if (textToSpeech == null) {
-            AppLog.put("跨章预加载诊断: 轮次退出 textToSpeech=null")
+            AppLog.putDebug("跨章预加载诊断: 轮次退出 textToSpeech=null")
             return false
         }
         if (!ttsInitFinish) {
-            AppLog.put("跨章预加载诊断: 轮次退出 引擎未就绪")
+            AppLog.putDebug("跨章预加载诊断: 轮次退出 引擎未就绪")
             return false
         }
         // 用户设置「听书预加载数量(章节)」多少就备多少章——**不加人为上限**。
@@ -2464,7 +2464,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 11-21 15:4x：滚动链已停用（maybePreloadFromPlayback 入口 return），
         // 本判据恒不触发，保留代码作回退参考。
         if (preloadChainJob?.isActive == true) {
-            AppLog.put("跨章预加载诊断: 让路放弃（滚动补货链在跑）")
+            // 11-21 20:2x（用户口径「提示让路这种没必要显示」）：put→putDebug，
+            // 与本函数其余两处让路日志同级别——排障开调试日志仍可见，平时不刷屏。
+            AppLog.putDebug("跨章预加载诊断: 让路放弃（滚动补货链在跑）")
             return false
         }
         val now = SystemClock.elapsedRealtime()
@@ -2487,11 +2489,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             val idx = currentIdx + offset
             if ((preloadChapterRetryAt[idx] ?: 0L) > now) continue
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: run {
-                AppLog.put("跨章预加载诊断: 第${idx + 1}章 getChapter=null")
+                AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章 getChapter=null")
                 continue
             }
             val preloaded = preloadChapterCache[idx] ?: run {
-                AppLog.put("跨章预加载诊断: 第${idx + 1}章 开始构建段表")
+                AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章 开始构建段表")
                 val built = buildPreloadSegments(book, chapter)
                 AppLog.put(
                     "跨章预加载诊断: 第${idx + 1}章 段表构建完成 结果=${built?.segments?.size ?: "null"}章"
@@ -2597,26 +2599,26 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // false——这不是合成失败，不该记失败次数、更不该让日志页出现
             // 「1/81、2/81 重来一遍」的进度回退观感。服务都没了，本轮就地收口。
             if (!ok && !interruptedByPlayback && !isRun) {
-                AppLog.put("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 服务停止，不计失败")
+                AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 服务停止，不计失败")
                 return false
             }
             when {
                 ok -> {
                     preloadChapterProgress[idx] = from + 1
                     preloadSegmentFailCount.remove("$idx|$from")
-                    AppLog.put(
+                    AppLog.putDebug(
                         "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                     )
                 }
                 interruptedByPlayback -> {
                     // 播放优先是设计内行为：不推进、不计数，下轮立刻重试同一段。
                     // 那段确实没备上，必须补；但也不留任何「失败」痕迹。
-                    AppLog.put(
+                    AppLog.putDebug(
                         "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 被播放打断"
                     )
                 }
                 else -> {
-                    AppLog.put("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 合成返回失败")
+                    AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 合成返回失败")
                     // 真失败**不推进进度**，退避后重试同一段；
                     // 连续 3 次仍失败才跳过，避免死磕合不出的段。
                     val failKey = "$idx|$from"
@@ -2642,7 +2644,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         }
         // 走完一圈：全部章都备完了
         preloadActiveChapter = -1
-        AppLog.put("跨章预加载诊断: 一圈走完全部已备（currentIdx=$currentIdx, limit=$limitChapter）")
+        AppLog.putDebug("跨章预加载诊断: 一圈走完全部已备（currentIdx=$currentIdx, limit=$limitChapter）")
         postPreloadState(summarizePreloadState(currentIdx, limitChapter))
         return false
     }
