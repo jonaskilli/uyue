@@ -2674,21 +2674,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
     /** 跨章预加载进度文案（给父类通知副标题用；空串=不显示） */
     @Volatile private var preloadStateSnapshot = ""
-    /** 通知栏上一次刷新时刻：跨章预加载每备一段都会变文案，节流避免每 2.6 秒重建通知 */
-    @Volatile private var preloadNotifyAt = 0L
 
-    override fun preloadStateText(): String = preloadStateSnapshot
+    override fun preloadStateText(): String = ""
 
     private fun postPreloadState(text: String) {
+        // 11-21 16:5x（用户令「通知栏只用以前长久用的那种，只显示当前章节正在朗读的，
+        // 不显示已加载的」）：预加载进度撤出通知栏。prelaodStateText 恒空串 →
+        // notificationSubText() 走纯「朗读」分支，通知栏回到 11-20 之前的形态。
+        // 预加载进度的可见位置保留两处：UTTS 日志页顶部「合成进度：第N章 n/81」
+        // （34888c1 起）与朗读面板行（READ_ALOUD_PRELOAD_STATE 事件照发）。
         val changed = text != preloadStateSnapshot
         preloadStateSnapshot = text
         postEvent(EventBus.READ_ALOUD_PRELOAD_STATE, text)
-        // 通知副标题跟着更新：只在文案变化且距上次刷新超过 4 秒时重建，
-        // 避免每备一段就重建一次媒体通知（每段约 2.6 秒，不节流会很吵）
-        if (changed && SystemClock.elapsedRealtime() - preloadNotifyAt >= 4_000L) {
-            preloadNotifyAt = SystemClock.elapsedRealtime()
-            runCatching { upReadAloudNotification() }
-        }
     }
 
     /**
