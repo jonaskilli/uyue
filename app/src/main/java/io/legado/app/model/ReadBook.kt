@@ -283,6 +283,10 @@ object ReadBook : CoroutineScope by MainScope() {
         if (!AppConfig.showRoleAnnotation) return
         textChapter ?: return
         val bookName = book?.name ?: return
+        // 11-21 20:3x：缓存目录观察器随书挂载（切书自动挪目标目录）。
+        // 内部判 watchedBook 同目录直接返回，幂等零开销；观察器常驻期间
+        // 朗读脚本/分析服务写盘即触发防抖重挂（即时显示标注）。
+        DialogRoleManager.watchBook(bookName)
         Coroutine.async(this) {
             DialogRoleManager.clearChapterCache(bookName, textChapter.title)
             DialogRoleManager.attachAnnotations(textChapter, bookName)

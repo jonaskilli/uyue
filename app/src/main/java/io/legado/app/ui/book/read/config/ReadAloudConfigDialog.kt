@@ -11,6 +11,7 @@ import androidx.preference.ListPreference
 import androidx.preference.Preference
 import io.legado.app.R
 import io.legado.app.base.BasePrefDialogFragment
+import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.constant.EventBus
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
@@ -307,6 +308,12 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
                 // 开=立刻亮、关=立刻消失。
                 PreferKey.showAudioCacheIndicator -> {
                     postEvent(EventBus.READ_ALOUD_AUDIO_CACHE_REFRESH, true)
+                }
+
+                // 11-21 20:3x（用户令「打开角色标注开关立马显示」）：同音频缓存标记
+                // 的即时刷新口径——开=本章已有分析缓存立即上屏，关=立即无痕。
+                PreferKey.showRoleAnnotation -> {
+                    DialogRoleManager.notifyToggleChanged()
                 }
 
                 PreferKey.sysTtsPackageName -> {

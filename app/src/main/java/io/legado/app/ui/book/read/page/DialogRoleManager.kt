@@ -1,5 +1,7 @@
 package io.legado.app.ui.book.read.page
 
+import android.os.FileObserver
+import android.os.SystemClock
 import android.text.TextPaint
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ReadBookConfig
@@ -67,6 +69,103 @@ object DialogRoleManager {
             delay(300)
             val bookName = ReadBook.book?.name ?: return@launch
             // 只重挂当前正在阅读的那一章；其他章的缓存写入等切章时自然挂上
+            val textChapter = ReadBook.curTextChapter ?: return@launch
+            clearChapterCache(bookName, textChapter.title)
+            attachAnnotations(textChapter, bookName)
+            withContext(Dispatchers.Main) {
+                ReadBook.callBack?.upContent()
+            }
+        }
+    }
+
+    // ===== 11-21 20:3x（用户令「实时朗读分析那个标注也要立马显示」）=====
+    //
+    // 朗读链的缓存写盘跑在 **UTTS 进程**（规则 JS 经 lib-script 的
+    // ttsrv.writeTxtFile 落 /storage/emulated/0/Download/chajian/xiaoshuo/），
+    // U阅 进程内没有任何函数调用可以挂钩——11-20 接在 writeExternalFile 的
+    // 信号覆盖不到它（那条路径是 U阅 自己的写盘入口，朗读链不走）。
+    //
+    // 正解 = **FileObserver 盯当前书的缓存目录**：不管写盘方是 UTTS 的朗读
+    // 脚本、U阅 的全书分析服务还是手动改文件，CLOSE_WRITE/MOVED_TO/CREATE
+    // 一律触发，防抖 300ms 走现成的 [notifyCacheWritten]。与 UTTS 日志页的
+    // ReadProgressReader 同款「盯目录不盯文件」口径（防 inode 更换静默失效）。
+    //
+    // 生命周期：阅读页活跃期间常驻（startWatching 开销≈0，inotify 回调仅
+    // 文件变化时一次）；书名变化（切书）由 [watchBook] 重新挂目标目录。
+    @Volatile
+    private var cacheWatcher: FileObserver? = null
+    @Volatile
+    private var watchedBook: String? = null
+    private val watcherLock = Any()
+
+    /** 事件线程防抖节流：目录高频写入时只让一个 300ms 窗口活着 */
+    @Volatile
+    private var watcherDebounceAt = 0L
+
+    /** 切书/进阅读页时调用：把观察器挪到当前书的缓存目录。 */
+    fun watchBook(bookName: String?) {
+        synchronized(watcherLock) {
+            val target = bookName?.takeIf { it.isNotBlank() } ?: run {
+                cacheWatcher?.stopWatching()
+                cacheWatcher = null
+                watchedBook = null
+                return
+            }
+            if (watchedBook == target) return
+            cacheWatcher?.stopWatching()
+            val dir = getBookFolder(target)
+            if (!dir.isDirectory) {
+                // 目录还没建（本书从没分析过）：不挂观察器，等首次写盘/翻页
+                // 的挂载路径自然走到（attach 的书名与目录随后由翻页链补上）
+                watchedBook = null
+                return
+            }
+            val mask = FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or
+                FileObserver.CREATE or FileObserver.DELETE
+            cacheWatcher = object : FileObserver(dir, mask) {
+                override fun onEvent(event: Int, path: String?) {
+                    if (path == null) return
+                    if (!path.endsWith(".json")) return
+                    // 粗节流：300ms 内的连发只透传第一发（细防抖在 notifyCacheWritten）
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - watcherDebounceAt < 300) return
+                    watcherDebounceAt = now
+                    notifyCacheWritten()
+                }
+            }.also { it.startWatching() }
+            watchedBook = target
+        }
+    }
+
+    /**
+     * 11-21 20:3x（用户令「打开角色标注开关立马显示」）：开关切换的即时刷新。
+     * 与 notifyCacheWritten 同一套防抖重挂，但**清空后强制挂载**：
+     *   · 开 → 若本章已有分析缓存立即上屏（attachAnnotations 内部按开关门控，
+     *     关闭态下它直接 return，所以这里不用再判）；
+     *   · 关 → 需要把已画的标注清掉。走 ReadBook.loadRoleAnnotations 的关闭
+     *     清理口径（它对关态清缓存+upContent），关开关立即无痕。
+     * 防抖复用 pendingReattachJob：开关连拨/分析写入并发时只挂一次。
+     */
+    fun notifyToggleChanged() {
+        if (!AppConfig.showRoleAnnotation) {
+            // 关：清空各行已挂的标注并重绘（roleAnnotations 是 val 列表，用
+            // setRoleAnnotations(emptyList) 同款清法，保持 synchronized 口径）。
+            // 清内存缓存在 IO 走协程，主线程回调复用文件内既有的 withContext 模式。
+            val textChapter = ReadBook.curTextChapter ?: return
+            reattachScope.launch {
+                textChapter.pages.forEach { page ->
+                    page.lines.forEach { line -> line.setRoleAnnotations(emptyList()) }
+                }
+                withContext(Dispatchers.Main) {
+                    ReadBook.callBack?.upContent()
+                }
+            }
+            return
+        }
+        if (pendingReattachJob?.isActive == true) return
+        pendingReattachJob = reattachScope.launch {
+            delay(300)
+            val bookName = ReadBook.book?.name ?: return@launch
             val textChapter = ReadBook.curTextChapter ?: return@launch
             clearChapterCache(bookName, textChapter.title)
             attachAnnotations(textChapter, bookName)

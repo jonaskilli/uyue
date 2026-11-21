@@ -20,6 +20,7 @@ import io.legado.app.help.JsExtensions
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.ReadBook
+import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.ui.book.toc.AiCacheFileUtil
 import io.legado.app.utils.servicePendingIntent
 import kotlinx.coroutines.Dispatchers
@@ -926,6 +927,12 @@ class BookScriptAnalysisService : BaseService() {
             }
             writeChapterCacheObject(file, obj)
             if (!existed) created++
+            // 11-21 20:3x（用户令「角色分析完立马显示标记」）：分析把正在读的
+            // 那一章缓存写盘后立即通知重挂——此前要等翻页/切章才显示。
+            // notifyCacheWritten 自带 300ms 防抖与「仅当前章」过滤，零成本旁路。
+            if (patch.title == ReadBook.curTextChapter?.title) {
+                DialogRoleManager.notifyCacheWritten()
+            }
         }
         return created
     }
