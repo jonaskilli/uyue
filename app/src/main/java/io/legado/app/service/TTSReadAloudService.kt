@@ -2474,7 +2474,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             try {
                 ok = preloadGate.withLock {
                     val submitAt = SystemClock.elapsedRealtime()
-                    val result = preloadOneSegment(from, rawText, tts)
+                    // 11-21 11:1x 实锤修复：这里已持 preloadGate，必须调**不加锁的
+                    // 内层** preloadOneSegmentLocked。fadcaf1 误调带锁壳子
+                    // preloadOneSegment → Mutex 不可重入 → 与自己死锁：插桩行
+                    //（在锁内）永远到不了，60s 看门狗每轮掐掉重来，日志上表现为
+                    //「提交前→60s 自愈」无限循环、preloadOneSegment 返回行零出现。
+                    val result = preloadOneSegmentLocked(from, rawText, tts)
                     AppLog.put(
                         "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 preloadOneSegment 返回=$result " +
                             "耗时=${(SystemClock.elapsedRealtime() - submitAt) / 1000}s " +
