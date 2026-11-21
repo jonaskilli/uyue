@@ -1181,6 +1181,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         val completer = CompletableDeferred<File?>()
         synthesisCompleters[uid] = completer
         synthesisTargetFiles[uid] = tmp
+        // 11-21 20:5x（用户报「19:50 已成功合成，20:28 点播放又走一遍请求」实锤）：
+        // 音频落点收编。此前 tmp 在 finally 里无条件 delete——预加载「备好了」只备在
+        // UTTS 的 synth_cache，U阅 本地缓存永远是空的；播放到该段查本地缓存必 miss，
+        // 只好再发一遍请求靠 UTTS 缓存兜住（日志成对刷 PRE+「预合成」，且多一程 IPC）。
+        // 现在成功回调后把 tmp **改名**到正式缓存文件名（与 getCacheFileForText 同键），
+        // 播放直接命中本地缓存秒播，UTTS 请求整趟省掉。
+        val finalCache = getCacheFileForText(rawText, index, chapterTitle)
         return try {
             val ret = tts.synthesizeToFile(rawText, params, tmp, uid)
             if (ret != TextToSpeech.SUCCESS) {
@@ -1191,7 +1198,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // ⚠️ 不能用「临时文件存在」兜底：预热路径上 UTTS 只回 50ms 静音，
                 // 临时文件必然存在，拿它判成功等于恒真（假成功会让下一段提前发，
                 // 又回到事实上的并发提交）。
-                withTimeoutOrNull(PRELOAD_SEGMENT_TIMEOUT_MS) { completer.await() } != null
+                val delivered = withTimeoutOrNull(PRELOAD_SEGMENT_TIMEOUT_MS) { completer.await() }
+                if (delivered != null && delivered.exists() && delivered.length() > 0) {
+                    // 收编：正式缓存已存在（播放刚写过/上次收编过）就不覆盖；
+                    // 有效音频校验沿用宽松口径（isValidAudioFile），失败不阻塞本轮成功。
+                    if (!finalCache.exists() && isValidAudioFile(delivered)) {
+                        runCatching { delivered.renameTo(finalCache) }
+                            .onFailure { AppLog.putDebug("预热音频收编失败: ${it.localizedMessage}") }
+                    }
+                    true
+                } else {
+                    false
+                }
             }
         } catch (e: CancellationException) {
             synthesisCompleters.remove(uid)
@@ -1202,6 +1220,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         } finally {
             synthesisCompleters.remove(uid)
             synthesisTargetFiles.remove(uid)
+            // 11-21 20:5x：收编成功时 tmp 已改名走人（delete 无害）；失败/超时/被打断
+            // 时照旧清理半截文件，不留垃圾。
             runCatching { tmp.delete() }
             // 每次只有 1 段，等它落定再返回 —— 这就是「串行」的物理保证
         }
