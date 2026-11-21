@@ -2523,6 +2523,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // 被掐）→ 与协程中断同待遇：不计失败、不退避。
                 interruptedByPlayback = true
             }
+            // 11-21 13:2x（用户报「预合成顺序不对」瑕疵 B）：服务 stop（onDestroy
+            // 已置 isRun=false）会把在途那笔一起掐掉，completer 收 onError → 返回
+            // false——这不是合成失败，不该记失败次数、更不该让日志页出现
+            // 「1/81、2/81 重来一遍」的进度回退观感。服务都没了，本轮就地收口。
+            if (!ok && !interruptedByPlayback && !isRun) {
+                AppLog.put("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 服务停止，不计失败")
+                return false
+            }
             when {
                 ok -> {
                     preloadChapterProgress[idx] = from + 1
