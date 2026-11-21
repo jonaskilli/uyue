@@ -183,6 +183,26 @@ object DialogCacheRealignment {
 
         // 组装新 results：按新序号升序写入；同时保留旧 results 里与引号无关的
         // 整体字段由调用方负责（本函数只产出 results）。
+        // 11-21 15:5x 修复（孤儿回填）：对不上新正文的旧条目**原样保留**，绝不剔除——
+        // 「宁旧勿错」= 旧数据最多没用，不能没了。当初承诺「孤儿不删」，首版实现却
+        // 把孤儿从 results 里丢掉了（0077 实测：9 条→1 条，用户看到「缓存全消失」，
+        // 且唯一真相只在 .bak 里，重开规则后无法再恢复）。回填口径：孤儿挂回原序号；
+        // 若原序号已被精确命中的条目占用，则**宁要命中的新映射、孤儿顺延挂到
+        // 未占用的更大序号**（保证每个旧条目都有位置，且不覆盖任何已命中结果）。
+        val occupiedByMapped = HashSet<Int>(oldToNew.values)
+        for (oldSeq in orphans) {
+            val obj = oldRoles[oldSeq] ?: continue
+            val slot = if (!occupiedByMapped.contains(oldSeq) && oldSeq <= quotes.size)
+                oldSeq else {
+                var s = maxOf(oldSeq, 1)
+                while (occupiedByMapped.contains(s) || newResults.has(s.toString())) s++
+                s
+            }
+            occupiedByMapped.add(slot)
+            val copy = JSONObject(obj.toString())
+            // 台词保持缓存原文（正文对不上才成了孤儿，正文那句不是它的）
+            newResults.put(slot.toString(), copy)
+        }
         for ((oldSeq, newSeq) in oldToNew) {
             val obj = oldRoles[oldSeq] ?: continue
             val copy = JSONObject(obj.toString())
@@ -192,7 +212,9 @@ object DialogCacheRealignment {
 
         // 无变化守卫：映射后的键集、名字、台词与旧 results 完全一致 → 返回 null，
         // 调用方零写盘（「没坏就不修」）。正文没被规则改过时每次挂标注都走这里。
-        if (newResults.length() > 0 && newResults.length() == countValidEntries(oldResults)) {
+        // 孤儿回填场景不算「无变化」（回填要么改了键集/序号，要么留待调用方
+        // changed 复查兜底——那里全同会跳过写盘，自循环由它堵死）。
+        if (orphans.isEmpty() && newResults.length() > 0 && newResults.length() == countValidEntries(oldResults)) {
             var identical = true
             val it = newResults.keys()
             while (it.hasNext()) {
@@ -212,6 +234,8 @@ object DialogCacheRealignment {
         val mode = if (orphans.isEmpty() && oldSeqs.size == quotes.size) "exact"
                    else if (orphans.isEmpty()) "exact+order"
                    else "order"
+        // 11-21 15:5x：孤儿已回填进 results，Realigned.orphans 仍报告（日志口径用），
+        // 但语义从「丢弃」变为「保留在缓存、位置未确认」。
         return Realigned(newResults, oldToNew.size, orphans, mode)
     }
 }

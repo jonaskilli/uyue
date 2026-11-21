@@ -141,6 +141,53 @@ class DialogCacheRealignmentTest {
         assertEquals("角色2", r.results.getJSONObject("1").optString("name"))
     }
 
+    // ========== 11-21 15:5x 回归：孤儿绝不丢（0077 实测 9→1 的教训） ==========
+
+    @org.junit.Test
+    fun `orphans are backfilled never dropped`() {
+        // 9 条缓存、正文只剩 1 句匹配 → 8 条孤儿必须全部保留在 results 里
+        val old = resultsOf(1 to "看上别的男人了？", 2 to "说话！", 3 to "真以为我找不到你？",
+            4 to "我其实真不是变态。", 5 to "骚东西，想我了？", 6 to "之前夸没夸过你的手指",
+            7 to "会弹琴吗？", 8 to "不管会不会现在都去学琴", 9 to "你不要太过分！")
+        val newContent = "正文里只有“我其实真不是变态。”这一句对得上"
+        val r = DialogCacheRealignment.buildRealignedResults(newContent, old)
+        assertNotNull(r)
+        assertTrue(r!!.orphans.size == 8)
+        // 结果条目数=旧条目数（9），一个不丢
+        assertEquals(9, r.results.length())
+        // 命中的那条挂到新位置且台词刷新；孤儿原样保留（名字+原台词）
+        val hit = r.results.getJSONObject("1")
+        assertEquals("角色4", hit.optString("name"))
+        assertEquals("我其实真不是变态。", hit.optString("dialogText"))
+        // 孤儿之一：原名原台词仍在结果里
+        var kept = 0
+        for (k in listOf("2","3","5","6","7","8","9")) {
+            val o = r.results.optJSONObject(k)
+            if (o != null && o.optString("name") == "角色" + k && o.optString("dialogText")!!.isNotEmpty()) kept++
+        }
+        assertTrue("孤儿回填不足: kept=$kept", kept == 7)
+    }
+
+    @org.junit.Test
+    fun `realigned result equal to current cache yields same object for idempotence`() {
+        // 幂等：对「已回填过」的缓存再排一次，产出与输入全同（调用方据此跳过写盘）
+        val old = resultsOf(1 to "消失的句子", 2 to "第二句。")
+        val newContent = "“第二句。”"
+        val first = DialogCacheRealignment.buildRealignedResults(newContent, old)
+        assertNotNull(first)
+        // 把第一次结果再喂回去（模拟第二次挂标注）
+        val again = DialogCacheRealignment.buildRealignedResults(newContent, first!!.results)
+        assertNotNull(again)
+        // 全同：键集一致、每个条目 name/dialogText 一致 → 调用方 changed=false 不写盘
+        assertEquals(first.results.length(), again!!.results.length())
+        for (k in first.results.keys()) {
+            val a = first.results.getJSONObject(k)
+            val b = again.results.getJSONObject(k)
+            assertEquals(a.optString("name"), b.optString("name"))
+            assertEquals(a.optString("dialogText"), b.optString("dialogText"))
+        }
+    }
+
     @org.junit.Test
     fun `empty or shell cache returns null`() {
         val shell = JSONObject().put("3", JSONObject().put("name", "").put("dialogText", "x"))

@@ -229,7 +229,10 @@ object DialogRoleManager {
         val realigned = DialogCacheRealignment.buildRealignedResults(content, oldResults)
             ?: return
         val elapsedMs = System.currentTimeMillis() - t0
-        // 重排产出的映射必须真的改变了什么才写盘（完全相同则不动）
+        // 重排产出的映射必须真的改变了什么才写盘（完全相同则不动）。
+        // 11-21 15:5x 自循环守卫：孤儿回填后缓存台词序列≠正文台词序列是**常态**，
+        // 快检必然不通过、每次挂标注都会重进这里；若这次重排对键集与内容毫无改变
+        // （上一轮已回填到位），写盘纯属重复——跳过。
         var changed = false
         val oldKeys = sortedSetOf<Int>()
         oldResults.keys().forEach { it.toIntOrNull()?.let { s -> oldKeys.add(s) } }
