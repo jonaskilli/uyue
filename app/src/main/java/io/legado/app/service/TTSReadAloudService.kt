@@ -197,6 +197,19 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          */
         private const val PRELOAD_YIELD_PLAYBACK_STUCK_MS = 6_000L
         /**
+         * 11-22 00:3x（用户实报「点击朗读到开始播放要花好久」）：**首段优先窗口**。
+         *
+         * 起播瞬间预热协程往往比播放笔早几十毫秒抢到 UTTS 的引擎串行门，一段就要
+         * 2~3 秒，首段只能排队——真机实测首段晚了 3.1 秒才出声（4.82 秒总延迟里
+         * 占 64%）。预热协程启动时先等这个窗口，把起跑让给播放笔。
+         *
+         * 为什么是 600ms：播放笔在 `act=play` 之后通常 50~300ms 内提交（真机
+         * 23:29:38.211 收到 play → .542 提交 Legado0，约 330ms）。600ms 覆盖绝大多数
+         * 情况，又短到备货几乎无感——而 `awaitFirstPlaybackWindow` 一旦检测到
+         * 播放笔已提交就**立即返回**，不硬等满窗口。
+         */
+        private const val PRELOAD_FIRST_WINDOW_MS = 600L
+        /**
          * 11-17：慢重试总预算——「永不跳句」模式下给失败段原地重来的总时长。
          *
          * 为什么要有上限：用户原话「只能满足一定的条件它才跳，不然一直等着一个不会合成的
@@ -2390,6 +2403,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         if (preloadJob?.isActive == true) return
         AppLog.putDebug("跨章预加载诊断: 启动调度协程")
         preloadJob = lifecycleScope.launch(Dispatchers.IO) {
+            // 11-22 00:3x（用户实报「点击朗读到开始播放要花好久」）：**首轮之前**先让
+            // 600ms 给播放笔——起播瞬间预热比播放早 31ms 抢到引擎串行门、独占 2.6 秒，
+            // 首段因此晚 3.1 秒出声（详见 awaitFirstPlaybackWindow 注释）。
+            // 只等**一次**：后续轮次照旧按让路判据跑，反复等待只会拖慢整体备货。
+            runCatching { awaitFirstPlaybackWindow() }
             while (isActive) {
                 val worked = try {
                     // 11-21 真机 05:13/05:21 两场次实锤：vivo 冻结（暂停+退后台）把
@@ -2413,9 +2431,76 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 }
                 // 有活立刻继续（按「近到远」一段接一段）；没活才歇一会儿再查。
                 // 歇着也要轮询：暂停/跳段后起点会变，不能只靠外部事件唤醒（会漏）。
-                if (!worked) delay(if (isPlay()) 1_500L else 2_500L)
+                //
+                // ===== 11-22 01:0x（用户令「改吧」）：暂停时的间歇 2.5s → 0.3s =====
+                //
+                // 旧口径 `if (isPlay()) 1_500 else 2_500` 在**暂停态反而等更久**，
+                // 逻辑是反的。用户问「不朗读暂停朗读就缓存得更快吗」，核算后：
+                //   · 朗读中：合成 1.6s + 间歇 1.5s + 让路等待(0~3s) = 3.1~6.1s/段
+                //     （让路等待占大头，且会出现 12 秒级长空档）
+                //   · 暂停后：合成 1.6s + 间歇 2.5s + 无让路        = 4.1s/段（稳定）
+                // 暂停的本质优势是「没有播放抢占」，理应急着备——给它更长的间歇
+                // 等于把优势抵消掉。
+                //
+                // 新口径：
+                //   · 朗读中 1.5s 不变——要频繁回来检查是否该为播放让路；
+                //   · 暂停后 0.3s——没有任何东西需要让路，备货是唯一任务，连续跑最快。
+                //     速度约从 4.1s/段 → 1.9s/段（翻倍多）。
+                // 0.3 而非 0：留一点余量，避免「没活可干」时（章尾备完/正文未就绪）
+                // 变成忙等空转烧 CPU。
+                if (!worked) delay(if (isPlay()) 1_500L else 300L)
             }
         }
+    }
+
+    /**
+     * 11-22 00:3x（用户实报「点击朗读到开始播放要花好久」）：**首段优先窗口**。
+     *
+     * ## 现场（appLog + debug.log 实锤，23:29:38 那次起播）
+     * ```
+     * 23:29:38.511  预热协程提交「第254章第2段」preload_only
+     * 23:29:38.542  播放笔 Legado0（标题段）提交 ← 晚 31ms
+     * 23:29:41.121  预热段合成完成（跑了 2.6 秒，期间独占引擎串行门）
+     * 23:29:41.658  Legado0 才真正开始合成
+     * 23:29:43.365  出声
+     * ```
+     * 合计 4.82 秒，其中约 3.1 秒纯粹在**排队等预热让路**。
+     *
+     * ## 为什么现有的让路机制没拦住
+     * `runChapterPreloadRound` 里的判据是 `playbackSubmitAt > playbackSettledAt`
+     * ——依赖「播放已经提交过」这个事实。可起播那一瞬，预热协程比播放笔早 31ms
+     * 抢占，那时 playbackSubmitAt 还是 0（本次播放还没提交过任何一笔），
+     * 让路判据根本不成立。它随后独占了 UTTS 的 onSynthesizeText 串行队列。
+     * 于是「让路」在整段预热跑完之后才开始生效（日志里那两条
+     * 「让路放弃（播放请求在飞）」出现在 23:29:41.659 之后，正是第一轮结束后）。
+     *
+     * ## 修法（用户 11-22 拍板 A 案：首段优先）
+     * 在**预热协程刚起来那一轮**之前先等一小段（[PRELOAD_FIRST_WINDOW_MS]），
+     * 把起跑机会让给播放笔：
+     *   · 播放笔一旦提交，playbackSubmitAt 被置位 ⇒ 本轮让路判据立刻生效，正常让路；
+     *   · 若这段时间里没有播放（比如预热是章末触发的、播放正在跑），
+     *     就按原逻辑继续——只是晚 600ms 开工，备货总量不变。
+     * 只作用于**首次**（每个 preloadJob 生命周期一次），后续轮次照旧不等待，
+     * 否则每次让路后再跑都要多等 600ms，反而拖慢整体备货。
+     *
+     * 代价：起播瞬间的备货晚 600ms 起跑。备货本来就领先播放十几段，
+     * 600ms 在整章尺度上可忽略；换来的是**首段早 3 秒出声**——用户直接感知的收益。
+     */
+    private suspend fun awaitFirstPlaybackWindow() {
+        // 记住进入窗口前的提交时刻：只有**窗口期间新提交的**才算「播放来了」，
+        // 否则上一次播放留下的旧值（playbackSubmitAt>0）会让窗口一进来就误判退出，
+        // 等于没等——那正是要修的竞态本身。
+        val baselineSubmitAt = playbackSubmitAt
+        val deadline = SystemClock.elapsedRealtime() + PRELOAD_FIRST_WINDOW_MS
+        // 逐 50ms 探一次：一旦播放笔提交就立刻退出等待，不必死等满窗口。
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (playbackSubmitAt > baselineSubmitAt) {
+                AppLog.putDebug("跨章预加载诊断: 首段优先窗口——播放已提交，让路")
+                return
+            }
+            delay(50L)
+        }
+        AppLog.putDebug("跨章预加载诊断: 首段优先窗口结束（期间无播放提交），开始备货")
     }
 
     /**
