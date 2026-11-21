@@ -296,7 +296,18 @@ object ReadBook : CoroutineScope by MainScope() {
      * 异步扫描当前章节的音频缓存状态，并刷新视图。
      */
     fun loadAudioCacheIndicators(textChapter: TextChapter?) {
-        if (!AppConfig.showAudioCacheIndicator) return
+        // 11-21：开关关闭时清掉已画的标记再刷新视图——此前直接 return，
+        // 关开关后旧标记残留到下次翻页（用户关了开关图标还在）。
+        // 开关路径（READ_ALOUD_AUDIO_CACHE_REFRESH 事件）开着时会走完整重扫。
+        if (!AppConfig.showAudioCacheIndicator) {
+            textChapter?.pages?.forEach { page ->
+                page.lines.forEach { line ->
+                    line.hasAudioCache = false
+                }
+            }
+            callBack?.upContent()
+            return
+        }
         textChapter ?: return
         Coroutine.async(this) {
             AudioCacheIndicatorManager.scanChapter(textChapter)

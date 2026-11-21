@@ -300,6 +300,15 @@ class ReadAloudConfigDialog : BasePrefDialogFragment() {
                     postEvent(EventBus.READ_ALOUD_CONFIG_CHANGED, true)
                 }
 
+                // 11-21（用户实报「打开标记后三四十秒才显示」）：音频缓存标记开关
+                // 此前没有任何即时刷新——标记只在翻页/切章时重扫（loadAudioCacheIndicators
+                // 的调用点全在 ReadBook 的翻页链上），朗读中不翻页就一直不亮。
+                // 开关一拨立即发刷新事件：阅读界面收到马上重扫本章并重绘，
+                // 开=立刻亮、关=立刻消失。
+                PreferKey.showAudioCacheIndicator -> {
+                    postEvent(EventBus.READ_ALOUD_AUDIO_CACHE_REFRESH, true)
+                }
+
                 PreferKey.sysTtsPackageName -> {
                     findPreference<EditTextPreference>(PreferKey.sysTtsPackageName)?.let { pref ->
                         val pkg = AppConfig.sysTtsPackageName
