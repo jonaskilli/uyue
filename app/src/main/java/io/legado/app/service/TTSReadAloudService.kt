@@ -2473,7 +2473,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             val genBefore = abortGeneration
             try {
                 ok = preloadGate.withLock {
-                    preloadOneSegment(from, rawText, tts)
+                    val submitAt = SystemClock.elapsedRealtime()
+                    val result = preloadOneSegment(from, rawText, tts)
+                    AppLog.put(
+                        "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 preloadOneSegment 返回=$result " +
+                            "耗时=${(SystemClock.elapsedRealtime() - submitAt) / 1000}s " +
+                            "代次变化=${abortGeneration != genBefore}"
+                    )
+                    result
                 }
             } catch (e: CancellationException) {
                 // 两种取消必须分开（沿用 11-20 二次定案）：
