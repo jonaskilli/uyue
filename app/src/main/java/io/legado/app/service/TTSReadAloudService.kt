@@ -6,8 +6,6 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
-import org.json.JSONArray
-import org.json.JSONObject
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.lifecycle.lifecycleScope
@@ -1107,7 +1105,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     }
 
     /**
-     * 预热单段：提交一段 batch_json（只含 1 段），阻塞等它的完成回调。
+     * 预热单段：提交一段 preload_only（单段预加载），阻塞等它的完成回调。
      *
      * 为什么必须等回调而不是只看返回码：Android 的 `synthesizeToFile` 是**异步**的，
      * 返回 SUCCESS 只代表「已交给引擎」，真正的结果在 `onDone/onError` 里。
@@ -1125,12 +1123,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private suspend fun preloadOneSegmentLocked(
         index: Int,
         rawText: String,
-        tts: TextToSpeech
+        tts: TextToSpeech,
+        // 本章总段数：随 preload_only 传 para_total，UTTS 逐段卡标「N/M」。
+        // -1 = 调用方没带（滚动链旧调用），UTTS 侧不标段号，行为与旧版一致。
+        segmentTotal: Int = -1
     ): Boolean {
-        val arr = JSONArray()
-        arr.put(JSONObject().put("text", rawText).put("paraIndex", index))
-        val json = JSONObject().put("segments", arr).toString()
-        val params = Bundle().apply { putString("batch_json", json) }
+        // 11-21 12:1x（用户拍板「逐段卡要改」）：不再打 batch_json（UTTS 批量预热通道，
+        // 只回静音、emitHitLog=false+isPreload=true 双闸拦日志页），改打**单段
+        // preload_only**——UTTS 11-20 定稿的口径：走正常单段合成、出真实音频落
+        // U阅 缓存、日志页照常出「请求音频+获取成功（预合成）」卡（含正文全文、
+        // 音色标注、段号 N/M、成功丸），失败出红行。不破窗、不占播放槽位不变。
+        val params = Bundle().apply {
+            putBoolean("preload_only", true)
+            putInt("para_index", index)
+            putInt("para_total", segmentTotal)
+        }
         val tmp = File(cacheDir, "preload_${System.currentTimeMillis()}.wav")
         val uid = "PRELOAD_${System.currentTimeMillis()}"
         // 借用主合成链的完成回调机制：onDone 会 complete(目标文件)、onError 会 complete(null)。
@@ -2456,11 +2463,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadChapterProgress[idx] = from + 1
                 return true
             }
-            // 11-21 03:4x（用户终裁）：合成动作走 batch_json（preloadOneSegment，
-            // 与章内滚动预热同款）——UTTS 收包后自己合成、写自己的 synth_cache、
-            // 只回静音。不走播放同款路径（2852b91 实锤两链互删在途 .tmp + 互触发
-            // 引擎重建）；也不逐段出「请求音频」卡（用户 1f4b863 时已知情同意）。
-            // 传【原始文本】：UTTS 自己跑规则，不双跑脚本（bcea7a8 原判）。
+            // 11-21 12:1x（用户拍板「逐段卡要改」）：合成动作改走**单段 preload_only**
+            // （原 03:4x 口径 batch_json 只回静音、日志页双闸拦截，用户看不到任何
+            // 下一章痕迹）。preload_only 是 UTTS 11-20 定稿的预加载正路：正常单段
+            // 合成、真实音频落 U阅 缓存、日志页出「请求音频+获取成功（预合成）」卡
+            // （正文全文+音色标注+段号 N/M）、失败出红行；不破窗、不占播放槽位、
+            // 不被 onStop 掐——暂停/播放都不影响备货。传【原始文本】：UTTS 自己跑
+            // 规则，不双跑脚本（bcea7a8 原判）。
             val tts = textToSpeech ?: return false
             // 11-21 11:5x（用户报「顶部合成进度不显示下一章」）：跨章备货此前绕开
             // synthesizeText 直提引擎，从不刷新 readProgress.json 的合成前沿 →
@@ -2474,7 +2483,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 total,
             )
             AppLog.put(
-                "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 提交batch_json前（文本=${rawText.take(10)}）"
+                "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 提交preload_only前（文本=${rawText.take(10)}）"
             )
             var ok = false
             var interruptedByPlayback = false
@@ -2490,7 +2499,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     // preloadOneSegment → Mutex 不可重入 → 与自己死锁：插桩行
                     //（在锁内）永远到不了，60s 看门狗每轮掐掉重来，日志上表现为
                     //「提交前→60s 自愈」无限循环、preloadOneSegment 返回行零出现。
-                    val result = preloadOneSegmentLocked(from, rawText, tts)
+                    val result = preloadOneSegmentLocked(from, rawText, tts, total)
                     AppLog.put(
                         "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 preloadOneSegment 返回=$result " +
                             "耗时=${(SystemClock.elapsedRealtime() - submitAt) / 1000}s " +
