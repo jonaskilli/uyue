@@ -155,17 +155,19 @@ class DialogCacheRealignmentTest {
         assertTrue(r!!.orphans.size == 8)
         // 结果条目数=旧条目数（9），一个不丢
         assertEquals(9, r.results.length())
-        // 命中的那条挂到新位置且台词刷新；孤儿原样保留（名字+原台词）
+        // 命中的那条挂到新位置且台词刷新；孤儿原样保留（名字+原台词）。
+        // 注意：回填是「顺延找空位」不是「保持原键」——校验按名字集合+台词集合对账。
         val hit = r.results.getJSONObject("1")
         assertEquals("角色4", hit.optString("name"))
         assertEquals("我其实真不是变态。", hit.optString("dialogText"))
-        // 孤儿之一：原名原台词仍在结果里
-        var kept = 0
-        for (k in listOf("2","3","5","6","7","8","9")) {
-            val o = r.results.optJSONObject(k)
-            if (o != null && o.optString("name") == "角色" + k && o.optString("dialogText")!!.isNotEmpty()) kept++
-        }
-        assertTrue("孤儿回填不足: kept=$kept", kept == 7)
+        // 9 个名字一个不少（角色1~9 全在结果里）
+        val names = (1..r.results.length()).map { r.results.getJSONObject(it.toString()).optString("name") }.toSet()
+        assertEquals((1..9).map { "角色$it" }.toSet(), names)
+        // 每条孤儿台词原文保留（「说话！」「你不要太过分！」等 7 条非命中台词都在）
+        val texts = (1..r.results.length()).map { r.results.getJSONObject(it.toString()).optString("dialogText") }.toSet()
+        assertTrue(texts.contains("说话！"))
+        assertTrue(texts.contains("你不要太过分！"))
+        assertTrue(texts.contains("会弹琴吗？"))
     }
 
     @org.junit.Test
