@@ -86,6 +86,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private const val TAG = "TTSReadAloudService"
         private const val PRELOAD_TRIGGER_REMAIN = 5
 
+        // ===== 跨服务生命周期的跨章预加载状态（11-21 14:1x）=====
+        // 三张表挂在伴生对象上：服务 stop→重建（切章/重新定位）不清零，
+        // 已备进度/段表/重试时刻全部延续——重建后跳到没备过的段续备，
+        // 不再「1/81 重来」。换书时由轮函数 validRange 清理范围外的章。
+        private val preloadProgressStore = HashMap<Int, Int>()
+        private val preloadCacheStore = HashMap<Int, PreloadedChapter>()
+        private val preloadRetryStore = HashMap<Int, Long>()
+
         /**
          * 批量预热每批段数（11-15，路 C）。
          *
@@ -423,14 +431,22 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     /** 当前跨章预加载目标章（-1=空闲），只用于对外发状态，不参与逻辑 */
     @Volatile private var preloadActiveChapter = -1
 
-    /** 章索引 → 已备到第几段（0=未开始）。只在 preloadJob 协程内读写，单线程无需加锁 */
-    private val preloadChapterProgress = HashMap<Int, Int>()
+    /**
+     * 章索引 → 已备到第几段（0=未开始）。只在 preloadJob 协程内读写，单线程无需加锁。
+     *
+     * 11-21 14:1x（真机 14:06:40 stop→14:07:02 play 实锤）：原为服务成员变量，
+     * 服务 stop→重建（用户切章/重新定位）即清零——245 章已备 7 段的进度归零，
+     * 重建后从第 1 段重推（已备段虽秒回但逐段出卡），日志页出现「1/81 重来」的
+     * 进度回退观感。改为**伴生对象级**：跨服务生命周期保留，重建后直接跳到
+     * 没备过的段续备。范围外章仍由轮函数的 validRange 清理兜底，不会拿旧书章空转。
+     */
+    private val preloadChapterProgress get() = Companion.preloadProgressStore
 
     /** 章索引 → 排版好的段表。排版成本高（整章 StaticLayout），一章只解一次 */
-    private val preloadChapterCache = HashMap<Int, PreloadedChapter>()
+    private val preloadChapterCache get() = Companion.preloadCacheStore
 
     /** 章索引 → 正文未就绪时的下次重试时刻（毫秒），避免每轮重复解析/刷日志 */
-    private val preloadChapterRetryAt = HashMap<Int, Long>()
+    private val preloadChapterRetryAt get() = Companion.preloadRetryStore
 
     /**
      * 11-20：单段失败计数（key = "章索引|段号"）。
@@ -1133,10 +1149,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // preload_only**——UTTS 11-20 定稿的口径：走正常单段合成、出真实音频落
         // U阅 缓存、日志页照常出「请求音频+获取成功（预合成）」卡（含正文全文、
         // 音色标注、段号 N/M、成功丸），失败出红行。不破窗、不占播放槽位不变。
+        // 11-21 14:1x（真机 244 章段卡标 4/81 实锤）：滚动链调用不带 segmentTotal
+        //（默认 -1），此前仍写 para_total=-1 → UTTS 侧 MDC 残留上一笔的 paraTotal=81
+        // 落盘，卡上分母串成别章的总数。改为 **-1 就不写**：UTTS 侧 reqSnapshot 读到
+        // 0 → 落盘 MDC 也不写 → 渲染层只标 N 不标 M，与播放路径 index<0 不写的口径
+        // 完全一致。
         val params = Bundle().apply {
             putBoolean("preload_only", true)
             putInt("para_index", index)
-            putInt("para_total", segmentTotal)
+            if (segmentTotal > 0) putInt("para_total", segmentTotal)
         }
         val tmp = File(cacheDir, "preload_${System.currentTimeMillis()}.wav")
         val uid = "PRELOAD_${System.currentTimeMillis()}"
