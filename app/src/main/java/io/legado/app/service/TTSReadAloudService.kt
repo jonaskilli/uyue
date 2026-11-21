@@ -1797,6 +1797,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 触发频率与旧的合成循环口径一致（每 4 段一批），只是驱动源换了。
      */
     private fun maybePreloadFromPlayback() {
+        // ===== 11-21 15:4x（用户终裁「单链线性补货」）停用 =====
+        // 备货统一走跨章轮函数（runChapterPreloadRound），扫描范围已扩到
+        // offset 0..limitChapter（含当前章、起点=播放位置后第一段），从正文
+        // 顺序上连续推进——不再有「滚动链 nowSpeak+4 与跨章链各自为政」的
+        // 错序（快进几段没备上、下一章先备了）。本函数保留代码作回退参考，
+        // 入口直接 return，不产生任何提交。
+        return
         // 11-21 03:4x 旧口径恢复：滚动补货**恒启用**（preloadSpan>0 即工作），
         // 不再被跨章预加载停用——旧版分工是「滚动补货管当前章剩余、跨章管后面
         // 整章」，两路范围不相交（跨章 offset 从 1 起），不存在两路备同一段。
@@ -2430,16 +2437,29 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 15s 的 completer 超时管不到提交阶段，轮函数整个挂死、零日志。
         // 同门互让：滚动链跑完本轮再来，两链本就共用 preloadGate 串行门，
         // 只是把「等锁」提前到「本轮放弃」，避免无超时 binder 阻塞。
+        // 11-21 15:4x：滚动链已停用（maybePreloadFromPlayback 入口 return），
+        // 本判据恒不触发，保留代码作回退参考。
         if (preloadChainJob?.isActive == true) {
             AppLog.put("跨章预加载诊断: 让路放弃（滚动补货链在跑）")
             return false
         }
         val now = SystemClock.elapsedRealtime()
-        // 11-21 03:4x 旧口径恢复：只备**后面的整章**（offset 1..N），当前章剩余
-        // 归滚动补货（maybePreloadFromPlayback）——两路各管各的，不抢同一段。
-        // 一章从头备到尾再下一章（不再「每轮 1 段轮转」）：章末触发场景下
-        // 播放还有 5 段余量，整章顺序备完正是旧版顺畅的节奏。
-        for (offset in 1..limitChapter) {
+        // ===== 11-21 15:4x（用户终裁「单链线性补货」）=====
+        // 用户口径：从当前位置起按正文顺序连续备——第 n 段在播就备 n+1、n+2…
+        // 本章尾 → 下一章第 1 段 →…，永远备「正文顺序上第一个没备过的段」；
+        // 快进时起点跟着播放位置走。旧格局（滚动链 nowSpeak+4 备当前章 +
+        // 跨章链只备下一章）会产生「快进几段没备上、下一章先备了」的错序。
+        //
+        // 改法：轮函数扫描范围改为 offset 0..limitChapter（**含当前章**），
+        // 当前章内从「播放位置之后的第一段」找第一个没备过的段；下一章起
+        // 从头扫。滚动补货链 maybePreloadFromPlayback 停用（见该函数），
+        // 全部备货走本函数单一来源，串行门 preloadGate 天然保序。
+        //
+        // 进度表 preloadChapterProgress 的语义相应放宽：当前章记的是
+        // 「从章首起已备到的段下标」，但快进/跳段后进度可能落后于真实缓存
+        // 状态——所以当前章不用进度表直接定位，改为**逐段探测**（缓存命中
+        // 即跳过），探测到的位置回写进度表，下轮从那继续，O(1) 续跑。
+        for (offset in 0..limitChapter) {
             val idx = currentIdx + offset
             if ((preloadChapterRetryAt[idx] ?: 0L) > now) continue
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: run {
@@ -2465,8 +2485,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             }
             val total = preloaded.segments.size
             if (total <= 0) continue
-            // 整章从第 0 段起。已备过的段命中本地缓存直接跳过，不重付。
-            val from = preloadChapterProgress[idx] ?: 0
+            // 单链口径的起点：当前章（offset=0）从「播放位置之后」起扫；
+            // 后面的章从头扫。已备判断=进度表 + 缓存双保险（快进后进度可能
+            // 落后，逐段探测缓存兜住，不重复付已备段）。
+            val playPos = if (offset == 0) nowSpeak else -1
+            var from = preloadChapterProgress[idx] ?: 0
+            if (offset == 0 && from <= playPos) from = playPos + 1
             if (from >= total) {
                 // 这章备完了，继续看下一章
                 preloadChapterProgress[idx] = total
