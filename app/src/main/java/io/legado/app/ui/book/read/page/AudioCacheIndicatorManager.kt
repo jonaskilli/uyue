@@ -2,8 +2,8 @@ package io.legado.app.ui.book.read.page
 
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.ReadAloud
+import io.legado.app.service.TtsCacheFileName
 import io.legado.app.ui.book.read.page.entities.TextChapter
-import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.StringUtils
 import splitties.init.appCtx
 import java.io.File
@@ -63,10 +63,6 @@ object AudioCacheIndicatorManager {
 
         val title = textChapter.title
         val speechRateHttp = AppConfig.speechRatePlay + 5
-        val fineRateHttp = AppConfig.speechRatePlayFine
-        val engine = ReadAloud.ttsEngine ?: "default"
-        val voice = AppConfig.sysTtsVoiceName ?: "default"
-        val rateSys = (AppConfig.ttsSpeechRate + 5) / 10f
 
         // 朗读服务 contentList 会过滤空段落，索引只计非空段落，
         // 因此这里也过滤后按顺序匹配，避免空行导致后续索引偏移。
@@ -76,23 +72,27 @@ object AudioCacheIndicatorManager {
 
         nonEmptyParagraphs.forEachIndexed { index, paragraph ->
             val rawText = prepareParagraphText(paragraph.text)
-            val indexPart = "|$index"
+            val indexPart = index
 
-            // 1) 尝试 HttpTTS 缓存（使用 trim 后的文本，与 HttpReadAloudService.getFileNameHelper 保持一致）
-            val httpFileName = MD5Utils.md5Encode16(title.trim()) + "_" +
-                    MD5Utils.md5Encode16("$speechRateHttp-$fineRateHttp-$indexPart-|${rawText.trim()}")
+            // 1) 尝试 HttpTTS 缓存（文件名统一走 TtsCacheFileName——11-21 起
+            //    写入/扫描共用唯一算法，此前两份手写实现漂移导致标记全灰）
+            val httpFileName = TtsCacheFileName.httpTts(
+                title, rawText.trim(), indexPart, speechRate = speechRateHttp,
+            )
             if (httpCacheFiles.contains(httpFileName)) {
                 cachedParagraphMap[paragraph.num] = File("${httpTtsFolderPath}$httpFileName.mp3")
                 return@forEachIndexed
             }
 
-            // 2) 尝试系统 TTS 缓存（使用原始文本计算，与 TTSReadAloudService 一致）
-            val titlePart = if (title.isNotEmpty()) {
-                MD5Utils.md5Encode16(title.trim()) + "_"
-            } else ""
-
-            val key = MD5Utils.md5Encode16("$engine|$voice|$rateSys$indexPart|$rawText")
-            val sysFileName = "$titlePart$key"
+            // 2) 尝试系统 TTS 缓存。voice 传 null=回落设置项——与写入侧
+            //    「引擎实例优先、否则设置项」在引擎 voice.name==设置项时同键。
+            //    ⚠️ 11-21 修「标记全灰」的关键之一：旧扫描代码自算 MD5 时
+            //    voice 只读设置项、写入侧却用引擎 voice.name，两侧键不一致。
+            val sysFileName = TtsCacheFileName.sysTts(
+                title = title,
+                content = rawText,
+                index = indexPart,
+            )
             if (sysCacheFiles.contains(sysFileName)) {
                 cachedParagraphMap[paragraph.num] = File("${sysTtsFolderPath}$sysFileName.wav")
             }
@@ -135,24 +135,22 @@ object AudioCacheIndicatorManager {
         val nonEmptyParagraphs = paragraphs.filter { prepareParagraphText(it.text).trim().isNotEmpty() }
         val index = nonEmptyParagraphs.indexOfFirst { it.num == paragraphNum }
         if (index < 0) return null
-        val indexPart = "|$index"
         val title = textChapter.title
 
-        // 1) 尝试 HttpTTS（使用 trim 后的文本，与 HttpReadAloudService.getFileNameHelper 保持一致）
-        val speechRateHttp = AppConfig.speechRatePlay + 5
-        val fineRateHttp = AppConfig.speechRatePlayFine
-        val httpFileName = MD5Utils.md5Encode16(title.trim()) + "_" +
-                MD5Utils.md5Encode16("$speechRateHttp-$fineRateHttp-$indexPart-|${rawText.trim()}")
+        // 1) 尝试 HttpTTS（算法统一走 TtsCacheFileName，11-21）
+        val httpFileName = TtsCacheFileName.httpTts(
+            title, rawText.trim(), index,
+            speechRate = AppConfig.speechRatePlay + 5,
+        )
         File("${httpTtsFolderPath}$httpFileName.mp3").takeIf { it.exists() }?.let { return it }
 
-        // 2) 尝试系统 TTS
-        val engine = ReadAloud.ttsEngine ?: "default"
-        val voice = AppConfig.sysTtsVoiceName ?: "default"
-        val rateSys = (AppConfig.ttsSpeechRate + 5) / 10f
-
-        val titlePart = if (title.isNotEmpty()) MD5Utils.md5Encode16(title.trim()) + "_" else ""
-        val key = MD5Utils.md5Encode16("$engine|$voice|$rateSys$indexPart|$rawText")
-        val file = File("${sysTtsFolderPath}$titlePart$key.wav")
+        // 2) 尝试系统 TTS（voice 传 null 回落设置项，与 scanChapter 同口径）
+        val sysFileName = TtsCacheFileName.sysTts(
+            title = title,
+            content = rawText,
+            index = index,
+        )
+        val file = File("${sysTtsFolderPath}$sysFileName.wav")
         if (file.exists()) return file
         return null
     }

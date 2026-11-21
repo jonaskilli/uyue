@@ -1905,14 +1905,14 @@ class HttpReadAloudService : BaseReadAloudService(), Player.Listener {
     }
 
     private fun getFileNameHelper(title: String, content: String, index: Int = -1): String {
-        val t = title.trim()
-        val c = content.trim()
-        val indexPart = if (index >= 0) "|$index" else ""
-        // 语速是"合成后烘焙进缓存音频"的（Sonic 后处理在写缓存前执行），
-        // 因此缓存 key 必须包含精细语速（0.01 精度）：滑块任意微调都换 key 重新合成，
-        // 否则同一粗刻度区间（如 1.00~1.04）内微调会命中旧语速的缓存，听不到变化
-        val fineRate = io.legado.app.help.config.AppConfig.speechRatePlayFine
-        return MD5Utils.md5Encode16(t) + "_" + MD5Utils.md5Encode16("$speechRate-$fineRate-$indexPart-|$c")
+        // 11-21：算法收敛到 TtsCacheFileName（唯一权威实现），此处只剩转发。
+        // 此前与扫描侧（AudioCacheIndicatorManager）各写一份已漂移过一次。
+        // ⚠️ speechRate 用本服务成员（初始化时定格 + 换语速时刷新），
+        // 不是实时读 AppConfig——服务生命周期内语速不变，保持与旧实现一致。
+        return TtsCacheFileName.httpTts(
+            title, content, index,
+            speechRate = speechRate,
+        )
     }
 
     /**

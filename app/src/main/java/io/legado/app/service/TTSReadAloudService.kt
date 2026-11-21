@@ -903,6 +903,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     putInt("para_index", index)
                     putInt("para_total", contentList.size)
                 }
+                // 11-21（书章随请求走）：书名/章名随请求交给 UTTS，请求级事实
+                // 优先于规则 JS 自己定位——JS 定位失败「沿用上次章名」在多引擎
+                // 并发下会把预加载笔串到上一章（真机 17:00:50 实锤 245 章段
+                // 66/81 被标 244 章）。书名用 ReadBook.book.name，章名与缓存键
+                // 同源（textChapter.title），播放/预加载两条路径都带。
+                putString("book_name", ReadBook.book?.name ?: "")
+                putString("chapter_title", chapterTitle)
                 // 11-20：后台预加载标记（UTTS 侧据此不落日志页、不破窗、不占播放槽位，
                 // 但仍走正常单段合成出真实音频）。
                 if (preloadOnly) putBoolean("preload_only", true)
@@ -1142,7 +1149,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         tts: TextToSpeech,
         // 本章总段数：随 preload_only 传 para_total，UTTS 逐段卡标「N/M」。
         // -1 = 调用方没带（滚动链旧调用），UTTS 侧不标段号，行为与旧版一致。
-        segmentTotal: Int = -1
+        segmentTotal: Int = -1,
+        // 11-21（书章随请求走）：本笔所属章名，随 Bundle 交 UTTS——请求级事实
+        // 优先于规则 JS 定位，防预加载笔串章（真机 245 章段被标 244 章实锤）。
+        // 书名取 ReadBook.book.name（预加载只在朗读中发生，book 必非空）。
+        chapterTitle: String = ""
     ): Boolean {
         // 11-21 12:1x（用户拍板「逐段卡要改」）：不再打 batch_json（UTTS 批量预热通道，
         // 只回静音、emitHitLog=false+isPreload=true 双闸拦日志页），改打**单段
@@ -1158,6 +1169,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             putBoolean("preload_only", true)
             putInt("para_index", index)
             if (segmentTotal > 0) putInt("para_total", segmentTotal)
+            // 11-21（书章随请求走）：预加载笔也带书章，与播放路径同一口径。
+            // 书名随书取、章名用调用方传入的本笔章名（preloaded.title）。
+            putString("book_name", ReadBook.book?.name ?: "")
+            if (chapterTitle.isNotBlank()) putString("chapter_title", chapterTitle)
         }
         val tmp = File(cacheDir, "preload_${System.currentTimeMillis()}.wav")
         val uid = "PRELOAD_${System.currentTimeMillis()}"
@@ -2553,7 +2568,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     // preloadOneSegment → Mutex 不可重入 → 与自己死锁：插桩行
                     //（在锁内）永远到不了，60s 看门狗每轮掐掉重来，日志上表现为
                     //「提交前→60s 自愈」无限循环、preloadOneSegment 返回行零出现。
-                    val result = preloadOneSegmentLocked(from, rawText, tts, total)
+                    val result = preloadOneSegmentLocked(from, rawText, tts, total, preloaded.title)
                     AppLog.put(
                         "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 preloadOneSegment 返回=$result " +
                             "耗时=${(SystemClock.elapsedRealtime() - submitAt) / 1000}s " +
@@ -2938,15 +2953,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     }
 
     private fun getFileNameHelper(title: String, content: String, index: Int = -1): String {
-        val t = title.trim()
-        val c = content.trim()
-        val engine = ReadAloud.ttsEngine ?: "default"
-        val voice = textToSpeech?.voice?.name ?: AppConfig.sysTtsVoiceName ?: "default"
-        val rate = (AppConfig.ttsSpeechRate + 5) / 10f
-        val indexPart = if (index >= 0) "|$index" else ""
-        val key = MD5Utils.md5Encode16("$engine|$voice|$rate$indexPart|$c")
-        val titlePart = if (t.isNotEmpty()) MD5Utils.md5Encode16(t) + "_" else ""
-        return "$titlePart$key"
+        // 11-21：算法收敛到 TtsCacheFileName（唯一权威实现），此处只剩转发。
+        // voice 与 getCacheFileForText 同口径：引擎实例的 voice.name 优先。
+        return TtsCacheFileName.sysTts(
+            title = title,
+            content = content,
+            index = index,
+            engine = ReadAloud.ttsEngine,
+            voice = textToSpeech?.voice?.name,
+        )
     }
 
     /**
@@ -3009,13 +3024,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     }
 
     private fun getCacheFileForText(text: String, index: Int = -1, chapterTitle: String = ""): File {
-        val engine = ReadAloud.ttsEngine ?: "default"
-        val rate = (AppConfig.ttsSpeechRate + 5) / 10f
-        val voice = textToSpeech?.voice?.name ?: AppConfig.sysTtsVoiceName ?: "default"
-        val indexPart = if (index >= 0) "|$index" else ""
-        val key = MD5Utils.md5Encode16("$engine|$voice|$rate$indexPart|$text")
-        val titlePart = if (chapterTitle.isNotEmpty()) MD5Utils.md5Encode16(chapterTitle.trim()) + "_" else ""
-        return File(ttsFolderPath, "$titlePart$key.wav")
+        // 11-21：算法收敛到 TtsCacheFileName（唯一权威实现），此处只剩转发。
+        // voice 取引擎实例的 voice.name 优先（写入时引擎已初始化）；
+        // 阅读页扫描侧拿不到引擎实例、回落设置项——正常情况两者一致。
+        val name = TtsCacheFileName.sysTts(
+            title = chapterTitle,
+            content = text,
+            index = index,
+        )
+        return File(ttsFolderPath, "$name.wav")
     }
 
     private fun hasSpeakFile(name: String): Boolean {
