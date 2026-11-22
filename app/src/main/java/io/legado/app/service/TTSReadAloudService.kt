@@ -790,13 +790,28 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 数**计数**：从 fromSeg+1 扫到本章末，遇到已备就 +1，遇到空洞**继续扫**
             // 不中断。这样「第 8、14、17、18、20 段备好了」就报 5，进度条有浅绿可画。
             //
-            // 仍然只统计**本章**（跨章累加的成本与收益见下方注释，暂不做）：
-            // 跨章累加要逐章建段表（下一章段表在本章合成时未必就绪），
-            // 且 UTTS 侧对「跨章」已有独立细条表达，先把本章做准。
+            // ===== 11-22 13:4x（用户令）：「当前段之后的全算缓冲，包括下一章」=====
             //
-            // 顺带保留 11-22 自查修的 chapterTitle 口径：必须用调用方传入的那个，
-            // 不能取 ReadBook.durChapterTitle（跨章预加载笔的章名是下一章，
-            // 用错标题会让哈希不匹配 ⇒ 全部判成没备好）。
+            // 用户原话：「假如我当前在第三段朗读，那第三段之后的都属于缓冲内容，
+            // 包括下一章。现在只把下一章算缓冲这不合适。」
+            //
+            // 旧实现**只数本章**（本函数上一版注释还写着「跨章累加暂不做」），于是：
+            //   · 本章尾巴备完、下一章已备好几段时，那些段在数字上完全消失；
+            //   · UTTS 侧只好用「跨章细条」这种间接表达，用户看到的是两套口径。
+            // 现改为**跨章累加**：本章剩余 + 后续每一章的已备段数，全并进同一个数。
+            // 这正是「还能连着听多少」的字面含义，也和 UTTS 侧「缓冲 N 段」单数字
+            // 口径统一（细条仍在，但数字不再漏掉后续章）。
+            //
+            // ## 怎么拿到后续章的段表（成本控制）
+            // 只读 `preloadChapterCache`——那是预加载已经建好的段表，**不新建**。
+            // 没建过的章直接跳过（它必然还没备过货，计数为 0，跳过不丢信息）。
+            // 这样既不触发排版/IO 风暴，也不会因为「下一章段表未就绪」而卡住。
+            // 扫描上界取用户设置的目标章数（`audioPreDownloadNum`），
+            // 与预加载自己的范围完全一致，不会扫到用户没要求的章。
+            //
+            // ## 顺带保留 11-22 自查修的 chapterTitle 口径
+            // 本章段必须用**调用方传入的** chapterTitle（跨章预加载笔的章名是下一章，
+            // 用错标题会让哈希不匹配 ⇒ 全部判成没备好）；后续章用各自段表的 title。
             var n = 0
             for (i in start..contentList.lastIndex) {
                 val raw = runCatching { getRawText(i) }.getOrNull() ?: continue
@@ -805,6 +820,34 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     getCacheFileForText(raw, i, chapterTitle)
                 }.getOrNull() ?: continue
                 if (f.exists() && f.length() > 0) n++
+            }
+            // ===== 跨章累加：本章之后，一直到「已备到的最远章」 =====
+            // 只统计**已建过段表**的章（见上，不新建）；遇到第一个没建表的章就停——
+            // 预加载是「近到远」顺序备的，后面章没建表说明还没轮到它，
+            // 继续往后扫不会数到任何已备段，纯浪费 stat。
+            runCatching {
+                val book = ReadBook.book ?: return@runCatching
+                val curIdx = ReadBook.durChapterIndex
+                val limit = AppConfig.audioPreDownloadNum.coerceAtLeast(0)
+                if (limit <= 0) return@runCatching
+                for (offset in 1..limit) {
+                    val idx = curIdx + offset
+                    val pre = preloadChapterCache[idx] ?: break   // 没建表 ⇒ 还没备到
+                    val segs = pre.segments
+                    if (segs.isEmpty()) break
+                    var hit = 0
+                    for (si in segs.indices) {
+                        val raw = segs[si]
+                        if (raw.isBlank()) continue
+                        val f = runCatching {
+                            getCacheFileForText(raw, si, pre.title)
+                        }.getOrNull() ?: continue
+                        if (f.exists() && f.length() > 0) hit++
+                    }
+                    n += hit
+                    // 整章 0 段已备 ⇒ 备货前沿还没进这一章，再往后也不会有，停。
+                    if (hit == 0) break
+                }
             }
             n
         }.getOrElse { -1 }
