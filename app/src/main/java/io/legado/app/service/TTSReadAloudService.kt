@@ -1487,7 +1487,30 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             putString("book_name", ReadBook.book?.name ?: "")
             if (chapterTitle.isNotBlank()) putString("chapter_title", chapterTitle)
         }
-        val tmp = File(cacheDir, "preload_${System.currentTimeMillis()}.wav")
+        // ===== 11-22 17:2x：tmp 必须与正式缓存**同目录**，否则收编必失败 =====
+        //
+        // ## 现场（用户实报「缓存到下一章了，进章却从第一段重合成」）
+        // 预加载全程报「成功」（system_tts 里全是 `获取成功（预合成）`），
+        // 但播放到同一段仍是 MISS —— 说明音频合出来了、**没落进 正式缓存**。
+        //
+        // ## 根因：跨目录 renameTo 必返回 false，而返回值没人看
+        //   · 正式缓存目录 = ttsFolderPath = `externalCacheDir/systemTTS/`
+        //   · 旧 tmp 目录   = cacheDir = `cache/`（**父目录，不是 systemTTS**）
+        // `File.renameTo` 只能保证**同一文件系统内**成功；Android 上
+        // `/data/data/<pkg>/cache/` 与 `/storage/emulated/0/Android/data/<pkg>/cache/`
+        // 通常就不是一个卷（externalCacheDir 指向后者），跨卷 rename 直接 false。
+        // 于是 `runCatching { delivered.renameTo(finalCache) }` 吞掉 false（renameTo
+        // 失败**不抛异常**，只返回 false）→ 一行日志都没有 → finally 里 tmp.delete()
+        // 把合好的音频删了。下一轮探测 `finalCache.exists()` 仍 false ⇒ 再备一遍。
+        // 这就是真机 1060 笔预加载里 35% 是重复（同章同段同文本备 2~3 遍）的成因，
+        // 也是「进章全 MISS」的成因——两件事同一个根。
+        //
+        // 对照：播放路径的 tmp 写在 `File(ttsFolderPath, ...)`（同目录），
+        // 所以播放那侧一直正常，只有预加载这条支线中招。
+        //
+        // 修法：tmp 落到 ttsFolderPath（同目录、同卷），rename 退化为纯改名。
+        // 文件名加 preload_ 前缀 + 时间戳，与 .tmp 后缀区分，不混入播放侧收编扫描。
+        val tmp = File(ttsFolderPath, "preload_${System.currentTimeMillis()}.wav")
         val uid = "PRELOAD_${System.currentTimeMillis()}"
         // 借用主合成链的完成回调机制：onDone 会 complete(目标文件)、onError 会 complete(null)。
         // ⚠️ 类型必须与 synthesisCompleters 声明的 CompletableDeferred<File?> 一致（CI 实锤过一次）。
@@ -1518,9 +1541,31 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 if (delivered != null && delivered.exists() && delivered.length() > 0) {
                     // 收编：正式缓存已存在（播放刚写过/上次收编过）就不覆盖；
                     // 有效音频校验沿用宽松口径（isValidAudioFile），失败不阻塞本轮成功。
+                    //
+                    // 11-22 17:3x：**renameTo 失败必须可见、且要降级复制**。
+                    // 旧写法只 runCatching，而 renameTo 失败是返回 false、不抛异常——
+                    // 于是「合成功了但没落进正式缓存」这件事在日志里一个字都没有
+                    //（真机就是这样跑了两个多小时，1060 笔预加载里 35% 白重复）。
+                    // 现在：① 记返回值；② 失败退回 byte 复制（tmp 已在同目录，这一步
+                    // 只为万一同卷假设仍不成立时兜底）；③ 仍失败就打 WARN 级日志，
+                    // 让「预加载假成功」下次能直接从日志定位。
                     if (!finalCache.exists() && isValidAudioFile(delivered)) {
-                        runCatching { delivered.renameTo(finalCache) }
-                            .onFailure { AppLog.putDebug("预热音频收编失败: ${it.localizedMessage}") }
+                        val renamed = runCatching { delivered.renameTo(finalCache) }
+                            .getOrDefault(false)
+                        if (!renamed) {
+                            val copied = runCatching {
+                                delivered.copyTo(finalCache, overwrite = true).length() > 0
+                            }.getOrDefault(false)
+                            if (!copied) {
+                                AppLog.put(
+                                    "预热音频收编失败：" +
+                                        "rename=false copy=false（tmp=${delivered.absolutePath}，" +
+                                        "final=${finalCache.absolutePath}）"
+                                )
+                            } else {
+                                AppLog.putDebug("预热音频收编：rename 失败，已复制落地")
+                            }
+                        }
                     }
                     true
                 } else {
@@ -2991,6 +3036,33 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 也是旧注释里「逐段探测缓存兜住」原本就想做、但被 nowSpeak 短路掉的事。
             var from = preloadChapterProgress[idx] ?: 0
             if (from >= total) from = 0   // 进度表越界（旧值遗留）：从头探测，别放弃整章
+            // ===== 11-22 17:0x（用户实报「从章节中间开始朗读，却先缓存这章的标题」）=====
+            //
+            // ## 现场（真机 15:43~16:04 四章实锤，只看 TTS 日志即可复现）
+            //   第4章 入公门      首笔预加载=第1段「第4章 入公门」，播放起点=57/71
+            //   第8章 东珠        首笔预加载=第1段「第8章 东珠」，   播放起点=63/92
+            //   第261章 离开曼德拉  首笔预加载=第1段「第261章 离开曼德拉」，播放起点=13/133
+            //   0077 前两个男主    首笔预加载=第1段「0077…」，      播放起点=15/36
+            // 而从头读的章（第5/6/0079/0080…）播放起点=1，那时先备标题段是对的。
+            //
+            // ## 根因：14:2x 修「章末不再加载」时，把「当前章从播放位置起备」一起删了
+            // 旧代码有一段 `if (offset == 0 && from <= playPos) from = playPos + 1`，
+            // 它确实有 bug（跳段后会把没备过的段永久跳过，真机 82~98 段漏备），
+            // 于是整段被换成「从进度表/0 起逐段探测」。修好了漏备，却把
+            // **「标题段及播放位置之前的段永远读不到，不必备」** 这个正确约束丢了：
+            // 你从第57段开读，段1~56 到本章结束都不会被播放，备它们纯属白烧。
+            //
+            // ## 修法：只给「当前章」加下限，不动逐段探测
+            //   · offset == 0（当前章）且已开始播放（nowSpeak>0）⇒ 探测起点钳到 nowSpeak，
+            //     标题段/播放前段不再备；
+            //   · nowSpeak==0（还没播/正从头读）⇒ 仍从 0 起，标题段照旧先备（正常行为）；
+            //   · offset>0（后续章）⇒ 从头备，没有下限。
+            // **不恢复旧的 `from = playPos + 1`**：那会把 from 直接推过空洞（漏备根因）。
+            // 这里只改探测的**起点**，探测本身仍是「跳过已备、停在第一个真没备的段」，
+            // 所以跳段后章末继续加载（B7 已验）不受影响——跳段后 nowSpeak 变大，
+            // 起点也跟着变大，恰恰是想要的行为。
+            val currentChapterFloor = if (offset == 0) nowSpeak.coerceAtLeast(0) else 0
+            if (from < currentChapterFloor) from = currentChapterFloor
             // 逐段推进：跳过已备好的段，停在第一个真没备的段上
             var scan = from
             while (scan < total) {
