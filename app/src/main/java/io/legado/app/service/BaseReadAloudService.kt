@@ -688,6 +688,27 @@ abstract class BaseReadAloudService : BaseService(),
     }
     internal var contentList = emptyList<String>()
     internal var nowSpeak: Int = 0
+    /**
+     * [nowSpeak] 这个值**属于哪一章**（章号 = BookChapter.index；-1 = 还没定过）。
+     *
+     * 11-23 真机实锤（20:47:01 那场，用户报「预加载先备下一章章头、回头又把本章从第1段
+     * 重备一遍」）：`nowSpeak` 是**单个 Int**，切章瞬间它还停在上一章的末尾值，而
+     * 跨章预加载的「当前章探测下限」直接拿它当起点——
+     *   第3章读到 997 段 → 自动跳第4章（共 108 段）→ 预加载轮在 newReadAloud
+     *   重置 nowSpeak 之前抢跑，floor=997 ≥ 108 ⇒ 判「第4章已备完」⇒ 跳过第4章、
+     *   去备第5章章头；进度又被写成 total，下一轮 `from>=total` 归零 ⇒ 第4章从头重备。
+     *
+     * 那个「已备完」完全是伪结论：下限根本不属于本章。修法是让下限**先验章号**——
+     * 只有本字段 == 当前章时才采用 nowSpeak 当下限，否则按 0 起（预加载本来就会
+     * 逐段探测跳过已备段，从 0 起只多付几次 list/stat，绝不误判）。
+     *
+     * ⚠️ 为什么不能改用 [contentListChapterIndex]：它记的是「段表建于第几章」，
+     * newReadAloud 里段表赋值在前、nowSpeak 赋值在后（中间还有页定位等一串计算），
+     * 那个窗口里段表章号已是新章、nowSpeak 还是旧的——用它判会漏掉真窗口。
+     * 本字段在 newReadAloud 末尾**所有** nowSpeak 写入都完成后才落章号，语义严格。
+     */
+    @Volatile
+    protected var nowSpeakChapterIndex: Int = -1
     internal var readAloudNumber: Int = 0
     internal var textChapter: TextChapter? = null
     internal var pageIndex = 0
@@ -2297,6 +2318,12 @@ abstract class BaseReadAloudService : BaseService(),
                 firstPlaySinceServiceStart = false
                 AppLog.putDebug("恢复首播落点判定完成（本次豁免规则1），后续正向触发恢复跳章")
             }
+            // ===== 11-23：给 nowSpeak 盖「属于哪一章」的章号（见 nowSpeakChapterIndex 注释）=====
+            // 必须放在本函数**所有** nowSpeak 写入之后（上面还有 toLast 末段覆盖、gengxin
+            // 恢复覆盖两处），否则章号会比 nowSpeak 先落定，跨章预加载又拿到错的下限。
+            // 段表这里已换成新章内容（上方 contentList 赋值），nowSpeak 也已在新区间内钳过，
+            // 此刻盖的章号是自洽的：本函数返回后 nowSpeak 一定属于这一章。
+            nowSpeakChapterIndex = textChapter.chapter.index
             launch(Dispatchers.Main) {
                 // 11-20 边界：play=false（暂停态翻页跟随）时跳章标志不消费，
                 // 就地清除——否则残留到之后某次播放会意外跳章。此时用户只是

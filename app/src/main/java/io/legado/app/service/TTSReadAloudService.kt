@@ -3247,7 +3247,38 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 这里只改探测的**起点**，探测本身仍是「跳过已备、停在第一个真没备的段」，
             // 所以跳段后章末继续加载（B7 已验）不受影响——跳段后 nowSpeak 变大，
             // 起点也跟着变大，恰恰是想要的行为。
-            val currentChapterFloor = if (offset == 0) nowSpeak.coerceAtLeast(0) else 0
+            //
+            // ===== 11-23 修（用户实报「预加载先备下一章章头、回头又把本章从第1段重备」）=====
+            //
+            // ## 现场（真机 20:47:01 那场，689KB 日志）
+            //   20:47:01.109  第3章读完，自动跳第4章
+            //   20:47:01.221  预加载轮开始，此刻 nowSpeak 仍停在第3章末尾的 **997**
+            //   20:47:01.239  直接开始构建**第5章**段表（第4章被判「已备完」跳过）
+            //   20:47:01.318  下一轮 from=108≥total 命中归零 → 第4章**从第1段重来**
+            //
+            // ## 根因：下限用了不属于本章的 nowSpeak
+            // `nowSpeak` 是单个 Int，切章瞬间还是上一章的值。旧写法无条件拿它当下限：
+            // 上一章比新章**长**（997 > 108）⇒ 起点越界 ⇒ 逐段探测一行都不跑 ⇒
+            // `scan >= total` 成立 ⇒ 判「本章全备完」、把进度写成 total 就去下一章。
+            // 那个「已备完」是纯伪结论。旧章比新章**短**时更阴：floor 落在章中间，
+            // 前面整截永不探测 ⇒ 静默漏备（不报错、日志上表现为"第一段起就没备"）。
+            // 旧注释警告的「跳过已备、停在第一个真没备的段」在这个窗口里根本没机会执行。
+            //
+            // ## 修法：下限先验章号
+            // `nowSpeakChapterIndex`（BaseReadAloudService 新增）记录 nowSpeak 属于哪一章，
+            // 只有它 == 本章时才采用 nowSpeak 当下限；否则下限按 0 起。
+            // 从 0 起不会误判：逐段探测本来就会跳过已备段，代价只是几次 list/stat。
+            // 章号为 -1（服务刚起、还没落过点）时同样按 0 起——宁可多探、不可错判。
+            val nowSpeakHere = nowSpeakChapterIndex == idx
+            val currentChapterFloor =
+                if (offset == 0 && nowSpeakHere) nowSpeak.coerceAtLeast(0) else 0
+            if (!nowSpeakHere && offset == 0 && nowSpeak > 0) {
+                // 只在真踩到「跨章旧值」时留一行：正常稳态零噪音，复现时一眼能认
+                AppLog.putDebug(
+                    "跨章预加载下限按0: nowSpeak=$nowSpeak 属第${nowSpeakChapterIndex + 1}章，" +
+                        "当前第${idx + 1}章（段表章=$contentListChapterIndex）"
+                )
+            }
             if (from < currentChapterFloor) from = currentChapterFloor
             // 逐段推进：跳过已备好的段，停在第一个真没备的段上
             var scan = from
