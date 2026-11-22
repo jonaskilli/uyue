@@ -2856,24 +2856,72 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             }
             val total = preloaded.segments.size
             if (total <= 0) continue
-            // 单链口径的起点：当前章（offset=0）从「播放位置之后」起扫；
-            // 后面的章从头扫。已备判断=进度表 + 缓存双保险（快进后进度可能
-            // 落后，逐段探测缓存兜住，不重复付已备段）。
-            val playPos = if (offset == 0) nowSpeak else -1
+            // ===== 11-22 14:2x（用户实报「到章节末尾就不再加载了」）=====
+            //
+            // ## 现场（真机 12:08 场次，第259章 104 段）
+            // 已备段号：3 8 21 23 25 29~41 43 45 50 60 63 67 69~72 75 79 81
+            // **82 以后的 23 段一个都没备**，且 82~98 这 17 段在全量日志里
+            // **从来没被任何请求合成过**（不是被播放路径补上了，是真漏了）。
+            // 12:14:08 备完第 81 段，12:14:35 直接跳去备第260章。
+            //
+            // ## 根因：`from = nowSpeak + 1` 会把未备段永久跳过
+            // 旧代码：
+            //   ```
+            //   var from = preloadChapterProgress[idx] ?: 0
+            //   if (offset == 0 && from <= playPos) from = playPos + 1
+            //   ```
+            // 用户跳段时 `nowSpeak` 直接跳到 99，于是 `from` 被推成 100；
+            // `preloadChapterProgress` 随后也只会记 100 之后的值。
+            // **82~98 这些从没备过、也没被播放过的段从此再也扫不到**——
+            // 「起点已经越过它们」不等于「它们已经备好了」，这是纯粹的状态混淆。
+            // 越靠近章末越明显：播放位置冲到 total 附近后 from>=total ⇒ `continue`
+            // 直接进下一章，当前章剩下的一整截就此放弃，这正是用户观感
+            //「到章末就不加载了」。
+            //
+            // ## 修法：以「已备」为唯一判据，不以「播放到过」为判据
+            // 不再用 nowSpeak 推 from。改为从 `preloadChapterProgress` 起**逐段探测**：
+            //   · 该段缓存已存在 ⇒ 跳过（继续往后找一个真没有的）；
+            //   · 该段没备 ⇒ 就是本轮要备的目标（不论它相对播放位置是前是后）。
+            // 探测上界为本章末；一次探测最多扫 total 段（list/stat 级，几十~百次），
+            // 且每个已备段探测一次后就推进进度表，不会重复付。
+            //
+            // 为什么要探测、不能只看进度表：跳段/回跳后进度表可能领先或落后真实
+            // 缓存状态（真机 12:14「进度 81、实际已备 81」看似一致，但 82~98 是
+            // 从没进过进度表也没备过的空洞）。逐段探测是唯一能发现空洞的办法，
+            // 也是旧注释里「逐段探测缓存兜住」原本就想做、但被 nowSpeak 短路掉的事。
             var from = preloadChapterProgress[idx] ?: 0
-            if (offset == 0 && from <= playPos) from = playPos + 1
-            if (from >= total) {
-                // 这章备完了，继续看下一章
+            if (from >= total) from = 0   // 进度表越界（旧值遗留）：从头探测，别放弃整章
+            // 逐段推进：跳过已备好的段，停在第一个真没备的段上
+            var scan = from
+            while (scan < total) {
+                val probeRaw = preloaded.segments[scan]
+                if (probeRaw.isBlank()) { scan++; continue }
+                val probe = runCatching {
+                    getCacheFileForText(probeRaw, scan, preloaded.title)
+                }.getOrNull()
+                if (probe != null && probe.exists() && probe.length() > 0) {
+                    scan++          // 已备：跳过，继续找下一个空洞
+                    continue
+                }
+                break               // 找到第一个没备的段 = 本轮目标
+            }
+            if (scan >= total) {
+                // 本章真的全备完了（逐段探测确认过），才允许进下一章
                 preloadChapterProgress[idx] = total
                 continue
             }
+            // 进度表对齐到探测位置：下次从这里继续，O(1) 续跑
+            preloadChapterProgress[idx] = scan
+            from = scan
             preloadActiveChapter = idx
             val rawText = preloaded.segments[from]
             if (rawText.isBlank()) {
                 preloadChapterProgress[idx] = from + 1
                 return true
             }
-            // 已有 U阅 本地缓存就跳过（该段已被播放或同章滚动预热备过）
+            // 兜底复查：上面的逐段探测已保证 from 是「第一个没备的段」，
+            // 正常不会命中这里。保留是防御——探测与本行之间若被播放路径
+            // 抢先写好了同一段（并发），这里直接放行、不重复提交。
             val cacheFile = getCacheFileForText(rawText, from, preloaded.title)
             if (cacheFile.exists() && cacheFile.length() > 0 && isValidAudioFile(cacheFile)) {
                 preloadChapterProgress[idx] = from + 1
