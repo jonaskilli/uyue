@@ -96,6 +96,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          */
         private const val BUFFERED_COUNT_TTL_MS = 500L
 
+        /**
+         * 11-22 21:4x：`缓冲上报诊断` 的**心跳**间隔（毫秒）。
+         *
+         * 诊断只在「内容变了」或「距上次 ≥ 5 秒」时落一行：预加载每 2 秒一笔、播放每段一笔，
+         * 每笔都打一场朗读就上千行，会把 appLog 淹掉。留 5 秒心跳是为了能看出
+         * 「数字卡住不动」——那正是本次要抓的现场（暂停后缓冲停在 5 段 52 秒没变）。
+         */
+        private const val BUF_DIAG_HEARTBEAT_MS = 5_000L
+
         // ===== 跨服务生命周期的跨章预加载状态（11-21 14:1x）=====
         // 三张表挂在伴生对象上：服务 stop→重建（切章/重新定位）不清零，
         // 已备进度/段表/重试时刻全部延续——重建后跳到没备过的段续备，
@@ -455,6 +464,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     @Volatile
     private var bufferedCountCache: BufferedCountCache? = null
 
+    // 11-22 21:4x：缓冲上报诊断的节流状态（**临时诊断**，定位后连同 logBufDiag 一起删）
+    @Volatile
+    private var lastBufDiagKey = ""
+
+    @Volatile
+    private var lastBufDiagAt = 0L
+
     /**
      * 11-14 修「连点跳段时同一段被反复重提」（方案 A：取消后短期保留登记 + 冷却）。
      *
@@ -813,7 +829,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      */
     private fun countBufferedAhead(fromSeg: Int, chapterTitle: String): Int {
         return runCatching {
-            if (fromSeg < 0 || contentList.isEmpty()) return -1
+            if (fromSeg < 0 || contentList.isEmpty()) {
+                logBufDiag(
+                    key = "early|$fromSeg|${contentList.size}",
+                    line = "缓冲上报诊断: 返回-1 原因=入参无效 from=$fromSeg contentList=${contentList.size}",
+                )
+                return -1
+            }
             // ===== 11-22 15:2x：切章窗口保护 =====
             //
             // `contentList` 未必属于当前章：BaseReadAloudService 用
@@ -828,6 +850,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (contentListChapterIndex >= 0 &&
                 contentListChapterIndex != ReadBook.durChapterIndex
             ) {
+                logBufDiag(
+                    key = "cut|$contentListChapterIndex|${ReadBook.durChapterIndex}",
+                    line = "缓冲上报诊断: 返回-1 原因=切章窗口 " +
+                        "contentListChapterIndex=$contentListChapterIndex " +
+                        "durChapterIndex=${ReadBook.durChapterIndex}",
+                )
                 return -1
             }
             // 11-22 14:4x：同一段 500ms 内不重复全扫（成本见 bufferedCountCache 注释）。
@@ -898,29 +926,56 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // ## 顺带保留 11-22 自查修的 chapterTitle 口径
             // 本章段必须用**调用方传入的** chapterTitle（跨章预加载笔的章名是下一章，
             // 用错标题会让哈希不匹配 ⇒ 全部判成没备好）；后续章用各自段表的 title。
-            var n = 0
+            // 11-22 21:4x（真机 20:46:35 实锤「暂停后缓冲只算本章、跨章 0 段」）：
+            // 本章与跨章**分开计数**，各自留一个诊断字符串。这里只加统计与日志，
+            // **不改数值语义**——合计仍是 localN + crossN，与改造前逐字一致。
+            var localN = 0
             for (i in start..contentList.lastIndex) {
                 val raw = runCatching { getRawText(i) }.getOrNull() ?: continue
                 if (raw.isBlank()) continue
                 val f = runCatching {
                     getCacheFileForText(raw, i, chapterTitle)
                 }.getOrNull() ?: continue
-                if (f.exists() && f.length() > 0) n++
+                if (f.exists() && f.length() > 0) localN++
             }
             // ===== 跨章累加：本章之后，一直到「已备到的最远章」 =====
             // 只统计**已建过段表**的章（见上，不新建）；遇到第一个没建表的章就停——
             // 预加载是「近到远」顺序备的，后面章没建表说明还没轮到它，
             // 继续往后扫不会数到任何已备段，纯浪费 stat。
+            //
+            // ⚠️ 11-22 21:4x：把原来的 `break` 改成「记下中断原因再跳出」，方便诊断
+            // 分清「这段扫了但 0 段」和「根本没扫」（表不在 / 章号对不上）。
+            var crossN = 0
+            var crossDetail = ""
+            var crossStop = "未进入"
+            var diagCurIdx = -1
+            var diagLimit = -1
             runCatching {
-                val book = ReadBook.book ?: return@runCatching
+                val book = ReadBook.book
                 val curIdx = ReadBook.durChapterIndex
                 val limit = AppConfig.audioPreDownloadNum.coerceAtLeast(0)
-                if (limit <= 0) return@runCatching
+                diagCurIdx = curIdx
+                diagLimit = limit
+                if (book == null) {
+                    crossStop = "book=null"
+                    return@runCatching
+                }
+                if (limit <= 0) {
+                    crossStop = "limit<=0"
+                    return@runCatching
+                }
                 for (offset in 1..limit) {
                     val idx = curIdx + offset
-                    val pre = preloadChapterCache[idx] ?: break   // 没建表 ⇒ 还没备到
+                    val pre = preloadChapterCache[idx]
+                    if (pre == null) {          // 没建表 ⇒ 还没备到
+                        crossStop = "第${idx + 1}章无段表"
+                        return@runCatching
+                    }
                     val segs = pre.segments
-                    if (segs.isEmpty()) break
+                    if (segs.isEmpty()) {
+                        crossStop = "第${idx + 1}章段表为空"
+                        return@runCatching
+                    }
                     var hit = 0
                     for (si in segs.indices) {
                         val raw = segs[si]
@@ -930,19 +985,63 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         }.getOrNull() ?: continue
                         if (f.exists() && f.length() > 0) hit++
                     }
-                    n += hit
+                    crossN += hit
+                    crossDetail += (if (crossDetail.isEmpty()) "" else ", ") + "第${idx + 1}章=$hit"
                     // 整章 0 段已备 ⇒ 备货前沿还没进这一章，再往后也不会有，停。
-                    if (hit == 0) break
+                    if (hit == 0) {
+                        crossStop = "第${idx + 1}章整章 0 段"
+                        return@runCatching
+                    }
                 }
+                crossStop = "扫完 $limit 章"
             }
+            val totalN = localN + crossN
+            // 一行把「本章/跨章/合计 + 章号 + 已建表章 + 中断原因」打全：
+            // 下次真机复现时，只看这一行就能分清是「表不在」还是「文件判未备」。
+            logBufDiag(
+                key = "$fromSeg|$localN|$crossN|$crossStop|$diagCurIdx|${preloadChapterCache.keys.sorted()}",
+                line = "缓冲上报诊断: from=$fromSeg 章=$chapterTitle 本章=$localN 跨章=$crossN " +
+                    "合计=$totalN curIdx=$diagCurIdx limit=$diagLimit " +
+                    "跨章明细=[$crossDetail] 中断=$crossStop " +
+                    "已建表章=${preloadChapterCache.keys.sorted()} contentList章=$contentListChapterIndex",
+            )
             // 11-22 14:4x：写回短时缓存（同一段 500ms 内不重复全扫）
             bufferedCountCache = BufferedCountCache(
                 key = cacheKey,
                 at = SystemClock.elapsedRealtime(),
-                value = n,
+                value = totalN,
             )
-            n
+            totalN
         }.getOrElse { -1 }
+    }
+
+    /**
+     * 11-22 21:4x：缓冲上报诊断（**临时**，定位完连同调用点一起删）。
+     *
+     * ## 为什么加它
+     * 真机 20:46:35 截图：暂停在第3章 127/134 时，吸顶写「第4章 0/0 缓冲 5 段·跨章」。
+     * 5 段正好等于「本章 128~132 已备」，而当时第4章已备 15 段（0~14）一段也没进数字
+     * ——说明这一笔 `跨章` 那截算出来就是 0，且此后每笔上报都是 5（否则数字会涨到 19）。
+     *
+     * 静态逐环核过：`limit=2` 传对了、段表确实建了（第4章 108 段）、写入与计数用同一套
+     * 文件名算法（`getCacheFileForText` → `TtsCacheFileName.sysTts`，title 都用
+     * `preloaded.title`）、本章能数到 5 也证明 index/voice 口径一致、伴生对象静态表
+     * 不会被暂停清空（唯一删除点只清 validRange 外的章）、TTL 只有 500ms 解释不了 52 秒
+     * 不动。**静态排不出**，只剩两种可能：
+     *   ① 那一笔 `preloadCacheStore[curIdx+1]` 取不到表（键/生命周期问题）；
+     *   ② 表取到了，但跨章文件被判「未备」（title 或 voice 与写入侧不一致）。
+     * 这一行日志把两类原因都带出来，一次复现即可定性。
+     *
+     * ## 节流
+     * 内容（from/本章/跨章/中断原因/表键）没变时每 [BUF_DIAG_HEARTBEAT_MS] 才落一行；
+     * 变了立刻落。这样既不会淹掉 appLog，又能看到「卡住不动」的现场。
+     */
+    private fun logBufDiag(key: String, line: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (key == lastBufDiagKey && now - lastBufDiagAt < BUF_DIAG_HEARTBEAT_MS) return
+        lastBufDiagKey = key
+        lastBufDiagAt = now
+        AppLog.put(line)
     }
 
     private suspend fun synthesizeText(
