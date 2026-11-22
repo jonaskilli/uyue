@@ -3671,7 +3671,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     }
 
     /**
-     * 自动清理 UTTS 共享预合成缓存（/storage/emulated/0/Download/chajian/utts_synth_cache 的 .pcm）。
+     * 自动清理 UTTS 共享预合成缓存（/storage/emulated/0/Download/chajian/uyue-utts/synth-cache 的 .pcm）。
      *
      * 由 [removeCacheFile] **开头**调用（11-16 复核修正：挂末尾会随本地水位提前
      * return 而失效）；只有系统 TTS 链路调用——synth_cache 只由 UTTS 引擎产生，

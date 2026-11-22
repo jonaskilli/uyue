@@ -32,7 +32,8 @@ jobs:
           packages: 'platforms;android-36 build-tools;36.0.0 platform-tools'
 
       # 签名密钥不入公开仓库（11-17 用户令）：从 GitHub Secrets 注入到
-      # ~/.gradle/gradle.properties，密钥库 base64 解码回 app/release-testkey.jks。
+      # ~/.gradle/gradle.properties，密钥库 base64 解码回 app/<RELEASE_STORE_FILE>。
+      # 11-23 起换为 U阅 独立密钥库（uyue-release.jks，别名 uyue），不再是通用 testkey。
       # Secrets 清单：ANDROID_SIGNING_KEY_BASE64 / RELEASE_STORE_FILE /
       # RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD
       - name: Restore signing config from Secrets

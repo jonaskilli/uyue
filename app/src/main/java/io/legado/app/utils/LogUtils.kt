@@ -58,7 +58,7 @@ object LogUtils {
 
     private fun createFileHandler(context: Context): FileHandler? {
         try {
-            // 日志目录改到共享存储 Download/uyue/logs：
+            // 日志目录改到共享存储 Download/chajian/uyue-utts/logs/uyue（11-23 与 UTTS 归拢到同一共享根）：
             // 原先写在 externalCacheDir（Android/data/<包名>/cache/logs），Android 11+ 分区存储下
             // 其他进程/文件管理器读不到，排查问题时只能靠 App 内的日志对话框。
             // Download 是一级共享目录，PC 数据线与手机文件管理器都能直接看到。
@@ -117,7 +117,7 @@ object LogUtils {
     }
 
     /**
-     * 共享存储里的日志目录 `Download/uyue/logs`。
+     * 共享存储里的日志目录 `Download/chajian/uyue-utts/logs/uyue`。
      *
      * 返回 null 表示当前没有写入权限（或外部存储未挂载），调用方退回私有缓存目录。
      * 判据用「真实写一次探测」而不是只看 canWrite：分区存储下有的机型 canWrite 报 true
@@ -128,7 +128,7 @@ object LogUtils {
             Environment.DIRECTORY_DOWNLOADS
         )
         if (base == null || !base.isDirectory) return@runCatching null
-        val folder = File(base, "uyue/logs")
+        val folder = File(base, "chajian/uyue-utts/logs/uyue")
         if (!folder.isDirectory && !folder.mkdirs()) return@runCatching null
         val probe = File(folder, ".write_probe")
         try {
