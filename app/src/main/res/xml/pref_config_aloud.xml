@@ -8,18 +8,6 @@
         app:allowDividerBelow="false"
         app:iconSpaceReserved="false">
 
-        <!-- 11-17 二合一（用户拍板「单键，0=关」）：U·TTS 预合成段数，0=关，1~15 开启，默认 5。
-             仅对 U·TTS 引擎生效（依赖其 batch_json 预热协议）；内置引擎或其他 TTS 不受影响，
-             但建议非 U·TTS 用户填 0。放在朗读设置第一项（用户令）。 -->
-        <io.legado.app.lib.prefs.EditTextPreference
-            android:defaultValue="5"
-            android:key="preloadSpan"
-            android:summary="朗读时预合成后续段落音频，播放时直接命中缓存。0=关闭，建议 5；引擎较慢时可加大（上限 15）。仅对支持预合成协议的引擎有效。"
-            android:title="U·TTS预合成段数(段)"
-            android:inputType="number"
-            android:maxLines="1"
-            app:iconSpaceReserved="false" />
-
         <io.legado.app.lib.prefs.SwitchPreference
             android:defaultValue="false"
             android:key="ignoreAudioFocus"

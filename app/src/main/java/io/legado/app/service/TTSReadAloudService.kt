@@ -167,18 +167,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         /** 11-16：播放推进到本段之后才允许后台预热（用户令「开头不预热」）。 */
         private const val PRELOAD_START_AFTER = 3
         /**
-         * 一条预热链最多往后续备多少段。
-         *
-         * 11-16：由「每批 4 段、并发」改为「链式串行、每次触发备 N 段」。
-         * 取 3 的理由：串行下每段约 1.3 秒，3 段≈4 秒，刚好是播放 1~2 段的时长，
-         * 既不堆积、又能持续领先播放；比原来一次 4 并发更稳（并发会被串行门挡住）。
-         *
-         * 11-17：改为用户可调（[AppConfig.preloadSpan]，默认 5）。03-18 装机台账
-         * span=3 备货 1.5 段/分钟 vs 播放消耗 15 段/分钟（预热只覆盖 10%），用户令
-         * 「这个应该让自己设置」——默认 5 提一档，慢插件用户可自行调大。
-         */
-        private val PRELOAD_SPAN get() = AppConfig.preloadSpan
-        /**
          * 单个预热段的等待上限（毫秒）。
          *
          * 远短于播放侧（`sysTtsSynthesizeTimeout`，默认 120 秒）：预热是纯优化，
@@ -1519,7 +1507,6 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 真正占时间的是云端合成（约 1.3 秒/段），与本函数是否分多段无关。
      */
     private fun launchPreloadBatch(start: Int, end: Int, chapterTitle: String) {
-        if (AppConfig.preloadSpan <= 0) return
         if (singleParagraphMode) return
         val tts = textToSpeech ?: return
         if (!ttsInitFinish) return
@@ -1529,7 +1516,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
 
         preloadChainJob = lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
-                val limit = minOf(start + PRELOAD_SPAN, end)
+                // 11-23：原「用户可调 span（默认5）」设置已随旧滚动链退役，本回退参考
+                // 链固定按 5 段一轮（与退役前默认行为一致）。
+                val limit = minOf(start + 5, end)
                 var okCount = 0
                 for (i in start until limit) {
                     if (!isActive) break
@@ -2382,11 +2371,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 错序（快进几段没备上、下一章先备了）。本函数保留代码作回退参考，
         // 入口直接 return，不产生任何提交。
         return
-        // 11-21 03:4x 旧口径恢复：滚动补货**恒启用**（preloadSpan>0 即工作），
+        // 11-21 03:4x 旧口径恢复：滚动补货**恒启用**（随 11-23 设置退役，回退参考
+        // 链不再读 preloadSpan；真开关改由调用方判定）。
         // 不再被跨章预加载停用——旧版分工是「滚动补货管当前章剩余、跨章管后面
         // 整章」，两路范围不相交（跨章 offset 从 1 起），不存在两路备同一段。
         // 2852b91 的「连续流吃掉当前章」口径随旧版一并作废。
-        if (AppConfig.preloadSpan <= 0) return
         if (singleParagraphMode) return
         if (nowSpeak < PRELOAD_START_AFTER) return
         if ((nowSpeak - PRELOAD_START_AFTER) % PRELOAD_BATCH_SIZE != 0) return
@@ -2906,7 +2895,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 唤醒跨章预加载调度器（幂等）。
      *
      * 语义（11-21 03:4x 旧口径恢复，用户终裁）：**旧式章末跨章备货**——只备
-     * 「当前章 +1 .. +N」的**整章**，当前章剩余归滚动补货（preloadSpan）。
+     * 「当前章 +1 .. +N」的**整章**（N = audioPreDownloadNum；11-23 起当前章
+     * 剩余也归本调度器单链逐段备，旧滚动补货链与「预合成段数」设置一并退役）。
      * 常驻调度器形态保留（不取消在跑链，翻章由 validRange 清理旧章），
      * 但范围与 2852b91「从当前位置连续流」已彻底切割：后者是互掐翻车根因。
      * 合成动作走 batch_json（UTTS 后院备货），与播放零引擎冲突。

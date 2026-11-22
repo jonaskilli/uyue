@@ -1624,14 +1624,17 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         set(value) = appCtx.putPrefString(PreferKey.sysTtsVoiceName, value)
 
     /**
-     * 11-17（二合一，用户拍板「单键，0=关」）：U·TTS 预合成段数——每次预热触发往后续备几段。
-     * 0 = 关闭后台预合成；1~15 = 开启并生效。
+     * ⚠️ **已退役（11-23）**：原「U·TTS预合成段数」设置。
      *
-     * 03-18 装机台账：span=3 时备货 1.5 段/分钟，播放消耗 15 段/分钟，预热只覆盖 10%。
-     * 值越大命中越多，跳段时白备的也越多（每段成本只是几秒插件时间）。
-     * 只在引擎为 U·TTS（支持 batch_json 预热协议）时有意义；其他引擎读到的
-     * 段数会被 launchPreloadBatch 的兼容守卫忽略（batch_json 不识别即静音丢弃），
-     * 旧版引擎用户建议填 0。
+     * 沿革：11-16 链式串行预热 → 11-17 二合一成用户可调键（0=关，默认5）→
+     * 11-21 15:44 单链线性补货（6aaacf0）把滚动补货链停用，本键失去一切活引用
+     * （仅剩两条「保留作回退参考」的死代码链），设置页条目同日删除。
+     * 预合成功能本体由单链逐段预加载承担：开关 = [audioPreDownloadNum]，
+     * 备货范围 = 当前章 + 后 N 章（N 同 [audioPreDownloadNum]）。
+     *
+     * 字段保留原因：老用户 SharedPreferences 里已存的 preloadSpan 值不作迁移、
+     * 不再读取生效；保留 getter/setter 仅防其他编译单元残留引用（现无），
+     * 后续大扫除可连同 PreferKey.preloadSpan 一并删除。
      */
     var preloadSpan: Int
         get() = (appCtx.getPrefString(PreferKey.preloadSpan, "5")?.toIntOrNull() ?: 5)
