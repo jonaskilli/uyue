@@ -1168,6 +1168,30 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 书名取 ReadBook.book.name（预加载只在朗读中发生，book 必非空）。
         chapterTitle: String = ""
     ): Boolean {
+        // ===== 11-22 03:0x（真机日志实锤）：预加载**也要跳过纯符号段** =====
+        //
+        // 现场（01:46:01）：
+        //   01:46:01.539 预加载 第1章第87段 提交preload_only（文本=　　...... ）
+        //   01:46:01.972 UTTS 拿到 61B 回应 → 01:46:01.976「预合成失败（第 87 段）：服务端错误」
+        //   01:46:03.316 重试又一次 61B → 01:46:03.319 再失败
+        //   01:46:04.980 第三次才成功（此时切成备用发音人）
+        //
+        // 而播放路径早就跳过这类段：`synthesizeSingle` / 滚动补货链都在送引擎前判
+        // `text.matches(AppPattern.notReadAloudRegex)` → 打「纯符号段静音跳过」直接返回。
+        // **预加载路径漏了这道闸**，于是「......」「——」这类段被真的送去合成：
+        // 引擎对纯符号返回 61B 的错误体（插件侧 5xx 归因），白烧 2~4 秒 + 两次重试，
+        // 日志里还留两条吓人的「服务端错误」。
+        //
+        // 判据与播放路径**完全同一函数**（AppPattern.notReadAloudRegex），保证两条路径
+        // 对「这段该不该念」的判断永远一致——这也是用户 11-22 反复强调的
+        //「两处口径必须统一，不能各拍一个数」。
+        // 用 rawText（不是 applyTtsScripts 之后的）与播放侧 synthesizeSingle 同源。
+        if (rawText.matches(AppPattern.notReadAloudRegex)) {
+            AppLog.putDebug(
+                "跨章预加载诊断: index=$index 纯符号段，跳过合成（${rawText.trim().take(12)}）"
+            )
+            return true // 视同「本段无需备货」，与已备同等对待：不计失败、继续下一段
+        }
         // 11-21 12:1x（用户拍板「逐段卡要改」）：不再打 batch_json（UTTS 批量预热通道，
         // 只回静音、emitHitLog=false+isPreload=true 双闸拦日志页），改打**单段
         // preload_only**——UTTS 11-20 定稿的口径：走正常单段合成、出真实音频落
