@@ -1896,12 +1896,11 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud),
                 binding.tvChapterProgressStart.text = "${(it / 10f).toInt()}%"
             }
         }
-        // 11-20：跨章预加载进度（空串=关闭/无目标，整行收起）。
-        // 这一行是用户「预加载不显示」的直接答案：面板开着就能看到备到第几章第几段。
-        observeEvent<String>(EventBus.READ_ALOUD_PRELOAD_STATE) { text ->
-            binding.tvPreloadState.gone(text.isBlank())
-            binding.tvPreloadState.text = text
-        }
+        // 11-22 21:5x（用户令「阅读播放这个弹窗顶部的预加载提示不要」）：
+        // 这行「预加载 准备中 · 第80章（后续 0/2 章）」常驻在控制面板顶部，
+        // 用户不要它了 ⇒ 不再订阅 EventBus.READ_ALOUD_PRELOAD_STATE，控件在布局里
+        // 本来就是 android:visibility="gone"，没人 set 就永远不出现。
+        // ⚠️ 服务侧照旧 post 该事件（日志页/通知栏还在用同一状态），别跟着删。
         observeEvent<Boolean>(EventBus.READ_ALOUD_CONFIG_CHANGED) {
             upTopSection()
             syncSceneEffectVisibility()

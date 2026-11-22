@@ -127,6 +127,41 @@ object ReadProgressFile {
     }
 
     /**
+     * 11-22 21:5x（用户实报「正在播第 8 段、第 12 段已经合成完，缓冲却写 3 段」）：
+     * **只刷新缓冲段数**（外加 `at`），不动播放组/合成组任何字段。
+     *
+     * ## 为什么需要它
+     * `bufferedAheadSegs` 有三处写入：合成提交（[reportSynthFront]）、预加载提交
+     * （同）、段切换（[report]）。**合成"完成"这一刻没人写**——于是第 12 段落盘了，
+     * 数字还停在上一笔提交时的 3，要等下一笔提交（约 2~4 秒后）才跳成 4。
+     * 用户看到的就是「明明已经合成好了，缓冲数不涨」。
+     *
+     * ## 与 [touch] 的区别
+     * touch 只续 `at`，不重算缓冲（字幕同步循环 200ms 一跳，重算太贵）；
+     * 本函数由**合成完成回调**调用（2~4 秒一次），自带重算，只写这一个字段。
+     *
+     * @param bufferedAhead -1 = 本次没算（调用方未提供），直接跳过
+     */
+    fun reportBufferedAhead(bufferedAhead: Int) {
+        if (bufferedAhead < 0) return
+        runCatching {
+            val dir = File(EngineDataDir.baseDir())
+            if (!dir.exists()) return@runCatching
+            synchronized(ioLock) {
+                val f = File(dir, FILE_NAME)
+                if (!f.exists()) return@runCatching
+                val json = runCatching { JSONObject(f.readText()) }
+                    .getOrElse { return@runCatching }
+                json.put("bufferedAheadSegs", bufferedAhead)
+                json.put("at", System.currentTimeMillis())
+                f.writeText(json.toString())
+            }
+        }.onFailure {
+            AppLog.putDebug("缓冲数刷新写入失败: ${it.localizedMessage}")
+        }
+    }
+
+    /**
      * 心跳：只刷新时间戳 `at`，不动段号/正文/合成字段。
      *
      * 为什么需要它（11-15 用户实报「有时候正在朗读日志不显示」）：

@@ -761,6 +761,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     completer.complete(null)
                 }
             }
+            // 11-22 21:5x（用户实报「正在播第 8 段、第 12 段已经合成完，缓冲却写 3 段」）：
+            // 缓冲数原来只在「提交合成」和「段切换」两处算，合成**完成**这一刻不刷新
+            // ⇒ 第 12 段落盘了，数字还停在上一笔提交时的 3，要等下一笔提交（2~4 秒）
+            // 才跳成 4。在完成回调里补一次（IO 线程；countBufferedAhead 内部有 500ms
+            // TTL 兜重复扫描），数字就跟着落盘即时走。
+            refreshBufferedAhead()
         }
 
         override fun onError(utteranceId: String?, errorCode: Int) {
@@ -827,6 +833,31 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 复杂度 O(剩余段数)，典型的 list/stat 级开销，几十~几百段无感。
      * 任何异常都吞掉返回 -1（进度条少画一个数字，不影响朗读）。
      */
+    /**
+     * 11-22 21:5x（用户：「一章 75 段，章节标题算第 1 段、74 是最后一段，播到 74 停了
+     * 我还以为没播完这一章」）——**对外报的章内段总数**：
+     *
+     * 段表末尾那段是 [BaseReadAloudService] 建的「章末占位段」（一个空格），
+     * 只负责在章尾补 50ms 静音、让播放链自然收口，**不是可朗读正文**。
+     * 把它算进分母，就会出现「播完正文停在 74/75」的假未完成。
+     *
+     * 口径（三条路必须同源，否则日志卡的分母、吸顶进度行的分母、预加载的分母
+     * 又会各拍一个数——11-22 d0af83f 刚把三处收成一致，这里只做「同时减 1」）：
+     *   · 播放：[ReadProgressFile.report] 的 totalSegs、请求的 para_total；
+     *   · 预加载：[ReadProgressFile.reportSynthFront] 的 totalSegs、para_total；
+     *   · 段号本身不变（标题段仍是第 1 段，正文最后一段 = 分母值 ⇒ 播满即 N/N）。
+     *
+     * 为什么用「末尾是否空白」判定而不是 size-1：预加载段表由
+     * `buildPreloadSegments` 的 `seal()` 补同一个 " "，两处一条判据即可；
+     * 万一将来不补了，这里也不会把真实正文段错删掉。
+     */
+    private val speakTotalSegs: Int
+        get() {
+            val last = contentList.lastOrNull()
+            return if (last != null && last.isBlank()) contentList.size - 1
+            else contentList.size
+        }
+
     private fun countBufferedAhead(fromSeg: Int, chapterTitle: String): Int {
         return runCatching {
             if (fromSeg < 0 || contentList.isEmpty()) {
@@ -1036,6 +1067,26 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 内容（from/本章/跨章/中断原因/表键）没变时每 [BUF_DIAG_HEARTBEAT_MS] 才落一行；
      * 变了立刻落。这样既不会淹掉 appLog，又能看到「卡住不动」的现场。
      */
+    /**
+     * 11-22 21:5x：合成完成后把缓冲段数刷新到 readProgress.json（见 onDone 调用点）。
+     *
+     * 为什么不在回调线程直接算：`countBufferedAhead` 最多 400+ 次 stat，回调来自
+     * 引擎的 binder 线程，压这里会拖慢下一笔提交。丢到 IO 线程，失败静默
+     *（写盘失败只影响进度显示，不影响朗读）。
+     */
+    private fun refreshBufferedAhead() {
+        if (textToSpeech == null) return
+        synthScope.launch(Dispatchers.IO) {
+            runCatching {
+                val n = countBufferedAhead(
+                    nowSpeak,
+                    textChapter?.title ?: textChapter?.chapter?.title ?: "",
+                )
+                io.legado.app.help.ReadProgressFile.reportBufferedAhead(n)
+            }
+        }
+    }
+
     private fun logBufDiag(key: String, line: String) {
         val now = SystemClock.elapsedRealtime()
         if (key == lastBufDiagKey && now - lastBufDiagAt < BUF_DIAG_HEARTBEAT_MS) return
@@ -1128,7 +1179,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             synthChapterIdx ?: ReadBook.durChapterIndex,
             index,
             chapterTitle,
-            synthTotalSegs ?: contentList.size,
+            synthTotalSegs ?: speakTotalSegs,
             // ===== 11-22 15:0x（用户指出「双重动态值，基准要统一」）=====
             //
             // 缓冲段数必须锚在**正在播放的段**，不能锚在这一笔合成的前沿。
@@ -1285,7 +1336,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // index<0（无段上下文的调用方）不写，UTTS 侧落盘该两段为空，渲染跳过。
                 if (index >= 0) {
                     putInt("para_index", index)
-                    putInt("para_total", contentList.size)
+                    // 11-22 21:5x：分母去掉末尾章末占位段（见 speakTotalSegs 注释），
+                    // 与 readProgress 的 totalSegs 同源，否则卡片与吸顶会差 1。
+                    putInt("para_total", speakTotalSegs)
                 }
                 // 11-21（书章随请求走）：书名/章名随请求交给 UTTS，请求级事实
                 // 优先于规则 JS 自己定位——JS 定位失败「沿用上次章名」在多引擎
@@ -2653,7 +2706,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         // 与算合成进度）。只在段切换时写一次，不是定时写；失败静默。
                         // segText=本段正文前 60 字，UTTS 靠它匹配日志卡片（日志无段号字段）。
                         io.legado.app.help.ReadProgressFile.report(
-                            ReadBook.durChapterIndex, nowSpeak, contentList.size,
+                            ReadBook.durChapterIndex, nowSpeak, speakTotalSegs,
                             contentList.getOrNull(nowSpeak).orEmpty(),
                             // 11-22 15:2x：段切换时同步刷新缓冲段数。
                             // 缓冲数的基准是「正在播放的段」，播放推进后基准就变了；
@@ -3130,6 +3183,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             }
             val total = preloaded.segments.size
             if (total <= 0) continue
+            // 11-22 21:5x（用户「播到 74 停了我还以为没播完」）：对外报的章内总段数
+            // 去掉末尾章末占位段，与播放侧 speakTotalSegs 同口径。内部扫描仍用 total
+            //（占位段也在段表里，只是不报给日志页当分母）。
+            val displayTotal = if (preloaded.segments.last().isBlank()) total - 1 else total
             // ===== 11-22 14:2x（用户实报「到章节末尾就不再加载了」）=====
             //
             // ## 现场（真机 12:08 场次，第259章 104 段）
@@ -3245,7 +3302,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 idx,
                 from,
                 preloaded.title,
-                total,
+                displayTotal,
                 // ===== 11-22 15:0x：预加载笔也要上报缓冲段数 =====
                 //
                 // 旧调用只传了前 4 个参数，第 5 个 `bufferedAhead` 吃默认值 -1，
@@ -3278,7 +3335,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     // preloadOneSegment → Mutex 不可重入 → 与自己死锁：插桩行
                     //（在锁内）永远到不了，60s 看门狗每轮掐掉重来，日志上表现为
                     //「提交前→60s 自愈」无限循环、preloadOneSegment 返回行零出现。
-                    val result = preloadOneSegmentLocked(from, rawText, tts, total, preloaded.title)
+                    val result = preloadOneSegmentLocked(from, rawText, tts, displayTotal, preloaded.title)
                     AppLog.put(
                         "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 preloadOneSegment 返回=$result " +
                             "耗时=${(SystemClock.elapsedRealtime() - submitAt) / 1000}s " +
