@@ -197,6 +197,45 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          */
         private const val PRELOAD_YIELD_PLAYBACK_STUCK_MS = 6_000L
         /**
+         * 11-22 13:2x（用户拍板「照你推荐来吧」）：让路时**先等一小会儿**再抢，
+         * 而不是当场放弃整轮。
+         *
+         * ## 现场（真机 12:08–12:21 一场次，定量）
+         * 同一批日志里 `让路放弃（播放请求在飞）` 出现 **354 次、全部是这一个理由**，
+         * 而这一场只备下 89 段——轮询 354 次换来 89 段，效率极低。
+         * 更关键的是**预加载完全没有提前量**（逐段对齐，差仅几毫秒）：
+         * ```
+         * 260章2  预加载提交 12:14:37.213 / 播放开始 12:14:37.218
+         * 260章4  预加载提交 12:14:44.288 / 播放开始 12:14:44.296
+         * 260章8  预加载提交 12:15:05.615 / 播放开始 12:15:05.625
+         * ```
+         * 预加载备的那一段，正好就是播放马上要播的那一段——「跨章预加载」
+         * 退化成「跟着播放走」，一秒都没领先。姓名分析搭在这条链上，
+         * 于是必然赶不上：轮到该段时才开始分析，这一段就干等 6~7 秒。
+         *
+         * ## 为什么「直接 return false」抢不到窗口
+         * 播放每 1~3 秒就提交一笔，而调度器「没活干就 delay 1.5s」再回来。
+         * 等到它回来时，下一笔播放往往**又已经提交**（`playbackSubmitAt` 刚刷新），
+         * 判据再次成立 ⇒ 再放弃 ⇒ 无限循环。它只在「恰好有一瞬间播放落定」时
+         * 才能挤进去，这就是它总与播放同时提交的机械原因。
+         *
+         * ## 改法（有界等待，不长期占播放路径）
+         * 判据命中时**不立刻放弃**，而是小步轮询等播放落定；落定后立刻跑这一轮，
+         * 抢在下一笔播放提交之前把 1 段备上。最多等 [PRELOAD_YIELD_WAIT_MS]：
+         *   · 等到落定 → 正常往下走，本段备货（此时播放正在播，不排队）；
+         *   · 等满仍未落定（播放确实在持续请求）→ 照旧 return false，
+         *     保持 11-21「播放即掐」的原意，绝不把备货塞进播放的串行队列。
+         *
+         * 为什么安全（不会重蹈「起播等 3 秒」那类问题）：
+         *   · 等待期**不持有** preloadGate（本函数在锁外 return），不阻塞任何东西；
+         *   · 等待期**不发请求**，只在检测到播放落定后才提交 1 段；
+         *   · 上界 1.2s 比调度器自身 1.5s 的轮询间隔还短，等于把「下次再试」
+         *     提前到「本轮的尾巴」，不增加任何额外负载。
+         */
+        private const val PRELOAD_YIELD_WAIT_MS = 1_200L
+        /** 让路等待的小步轮询间隔：够细以抓住播放落定的瞬间，又不至于忙等 */
+        private const val PRELOAD_YIELD_POLL_MS = 60L
+        /**
          * 11-22 00:3x（用户实报「点击朗读到开始播放要花好久」）：**首段优先窗口**。
          *
          * 起播瞬间预热协程往往比播放笔早几十毫秒抢到 UTTS 的引擎串行门，一段就要
@@ -732,22 +771,40 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (fromSeg < 0 || contentList.isEmpty()) return -1
             val start = (fromSeg + 1).coerceAtLeast(0)
             if (start > contentList.lastIndex) return 0
+            // ===== 11-22 13:0x（用户实报「缓冲范围不对，基本没显示过」+ 截图「6/105 缓冲 0 段」）=====
+            //
+            // ## 现场
+            // 用户截图吸顶行恒为「6/105 缓冲 0 段」，浅绿段从来没出现过。
+            // U阅 AppLog 里已备段号是**断续**的（第259章备了 31 段、最大段号 81，
+            // 但中间有 50 个空洞；第4章 13 段 / 51 个空洞）——因为跨章备货每轮
+            // 都被「播放请求在飞」让路（真机同一场次让路 354 次），只能备到零星几段。
+            //
+            // ## 旧判据为什么恒 0
+            // 旧实现从 fromSeg+1 往后逐段查，**遇到第一个缺失就 break**，算的是
+            //「连续已备长度」。而上面已备本身就是断续的 ⇒ 当前段紧跟的下一段
+            // 十有八九没备 ⇒ 循环第一次就 break ⇒ 恒为 0。
+            // 数字本身没算错，是**语义选错了**：用户要的是「往后一共还能连着听多少」，
+            // 那是「已备好的段数」，不是「从下一段起不断档的长度」。
+            //
+            // ## 新口径（用户原话「当前正在播放之后的段数都属于缓冲段数」）
+            // 数**计数**：从 fromSeg+1 扫到本章末，遇到已备就 +1，遇到空洞**继续扫**
+            // 不中断。这样「第 8、14、17、18、20 段备好了」就报 5，进度条有浅绿可画。
+            //
+            // 仍然只统计**本章**（跨章累加的成本与收益见下方注释，暂不做）：
+            // 跨章累加要逐章建段表（下一章段表在本章合成时未必就绪），
+            // 且 UTTS 侧对「跨章」已有独立细条表达，先把本章做准。
+            //
+            // 顺带保留 11-22 自查修的 chapterTitle 口径：必须用调用方传入的那个，
+            // 不能取 ReadBook.durChapterTitle（跨章预加载笔的章名是下一章，
+            // 用错标题会让哈希不匹配 ⇒ 全部判成没备好）。
             var n = 0
             for (i in start..contentList.lastIndex) {
-                val raw = runCatching { getRawText(i) }.getOrNull() ?: break
+                val raw = runCatching { getRawText(i) }.getOrNull() ?: continue
+                if (raw.isBlank()) continue
                 val f = runCatching {
-                    // ⚠️ 11-22 自查修：章节标题**必须用调用方传入的那一个**，不能取
-                    // ReadBook.durChapterTitle。
-                    //
-                    // 原因：跨章预加载时（preloadOnly 路径）合成的是**下一章**的段，
-                    // 而 ReadBook.durChapterTitle 仍停在**播放章**。缓存文件名
-                    // （TtsCacheFileName.sysTts）把 chapterTitle 算进哈希，
-                    // 用错标题 ⇒ 算出的文件名与真实缓存不匹配 ⇒ 全部判成「没备好」，
-                    // 缓冲段数恒为 0，进度条那截浅绿永远是空的。
-                    // 参数名之所以叫 chapterTitle 而不是从 ReadBook 取，就是为了这个。
                     getCacheFileForText(raw, i, chapterTitle)
-                }.getOrNull() ?: break
-                if (f.exists() && f.length() > 0) n++ else break
+                }.getOrNull() ?: continue
+                if (f.exists() && f.length() > 0) n++
             }
             n
         }.getOrElse { -1 }
@@ -1257,6 +1314,40 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 落盘，卡上分母串成别章的总数。改为 **-1 就不写**：UTTS 侧 reqSnapshot 读到
         // 0 → 落盘 MDC 也不写 → 渲染层只标 N 不标 M，与播放路径 index<0 不写的口径
         // 完全一致。
+        //
+        // ===== 11-22 13:0x：预加载「在途去重」——治「同一段被合成两遍」=====
+        //
+        // ## 现场（用户实报「一段话两张卡」，真机定量）
+        // 同一段文字被提交给引擎两次、出两张卡：
+        //   12:18:53.619 播放笔   index=17 → 12:18:56.945 成功 127.6 KB · 3.1s
+        //   12:18:57.482 预加载笔 index=18(文本=同一段) → 12:19:03.038「（预合成）」
+        // 两份日志合起来看：272 次提交里 **85 次是白重复**（187 个不同文本、79 个重复，
+        // 最多一段被提交 4 次）。
+        //
+        // ## 根因
+        // 播放走的是 [synthesizeText]，它开头有三道保护：缓存命中 / `inFlightSyntheses`
+        // 在途去重 / `canceledAt` 冷却复查。而预加载走的是**本函数直提引擎**
+        //（`tts.synthesizeToFile`），这三道**一道都不经过**。外层 `runChapterPreloadRound`
+        // 虽然有一道「已有缓存就跳过」，但它只判 `file.exists()`——
+        // 播放那笔当时**还在请求中**（53.6→56.9 才落盘），文件尚不存在 ⇒ 预加载判定
+        //「没备过」⇒ 又提交一遍。于是只要预加载扫描位置追到正在播放的段附近，
+        // 就必然成对重复。
+        //
+        // ## 修法
+        // 提交前先查 `inFlightSyntheses`（键与 [synthesizeText] 完全同源的缓存绝对路径）：
+        // 同一段正有别人在合成 ⇒ 本笔直接跳过（返回 true = 视同已备，不计失败、
+        // 继续下一段）。等那一笔落盘后，下一轮预加载的 `file.exists()` 判据自然命中，
+        // 不会漏备；真失败了也会在下一轮重来，语义不变。
+        //
+        // 为什么不用「等那一笔」（像 synthesizeText 那样 await）：预加载是后台备货，
+        // 等只会把备货节奏拖到跟播放同步，反而失去提前量；跳过更快、且下一轮必复用。
+        val finalCacheForDedup = getCacheFileForText(rawText, index, chapterTitle)
+        if (inFlightSyntheses.containsKey(finalCacheForDedup.absolutePath)) {
+            AppLog.putDebug(
+                "预热跳过：该段正在合成中（避免重复提交）index=$index text=${rawText.take(12)}"
+            )
+            return true
+        }
         val params = Bundle().apply {
             putBoolean("preload_only", true)
             putInt("para_index", index)
@@ -1279,7 +1370,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 只好再发一遍请求靠 UTTS 缓存兜住（日志成对刷 PRE+「预合成」，且多一程 IPC）。
         // 现在成功回调后把 tmp **改名**到正式缓存文件名（与 getCacheFileForText 同键），
         // 播放直接命中本地缓存秒播，UTTS 请求整趟省掉。
-        val finalCache = getCacheFileForText(rawText, index, chapterTitle)
+        //
+        // 11-22 13:0x：沿用上面在途去重算出的同一个 File（同一函数同一参数，结果必然相同），
+        // 不再重复算一次哈希。
+        val finalCache = finalCacheForDedup
         return try {
             val ret = tts.synthesizeToFile(rawText, params, tmp, uid)
             if (ret != TextToSpeech.SUCCESS) {
@@ -2620,15 +2714,39 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadSegmentFailCount.remove(it)
             }
         }
-        // 让路判据①：播放请求在飞 ⇒ 本轮放弃。
+        // 让路判据①：播放请求在飞 ⇒ 先短等它落定，等不到才放弃。
+        //
         // 11-21 15:5x（用户终裁「播放即掐」）：判据从「已飞 6 秒才算卡」收紧为
         // **只要在飞就让**——播放提交后到 UTTS 开始合成之间有空档，此刻塞备货
-        // 进串行队列就会排在播放前面，播放开头等 2~3s。单链后备货密度高，
-        // 这个窗口撞上的概率大增。让位成本极低：本轮 return false，1.5s 后
-        // 播放落定（playbackSettledAt 刷新）自然续跑，已备进度毫发无损。
+        // 进串行队列就会排在播放前面，播放开头等 2~3s。
+        //
+        // ===== 11-22 13:2x（用户拍板「照你推荐来吧」）：直接放弃 → 有界等待 =====
+        // 旧写法命中就 `return false`，交给调度器 1.5s 后再来；可播放每 1~3 秒就
+        // 提交一笔，等它回来时下一笔往往又已提交 ⇒ 判据再次成立 ⇒ 真机上
+        // **354 次让路全部是这一个理由**，而预加载与播放逐段几乎同时提交（无提前量）。
+        // 现改为：小步轮询等播放落定（[PRELOAD_YIELD_WAIT_MS] 为界），
+        // 等到了就立刻跑这一轮、抢在下一笔播放之前备 1 段；等不到照旧放弃，
+        // 「播放即掐」的原意完全保留（绝不把备货塞进播放队列）。
+        // 等待期不持锁、不发请求，只是观察，代价可忽略。
         if (playbackSubmitAt > playbackSettledAt) {
-            AppLog.putDebug("跨章预加载诊断: 让路放弃（播放请求在飞）")
-            return false
+            val yieldWaitStart = SystemClock.elapsedRealtime()
+            var settledInTime = false
+            while (SystemClock.elapsedRealtime() - yieldWaitStart < PRELOAD_YIELD_WAIT_MS) {
+                if (!isActive) return false          // 服务/协程被停：立即收口
+                if (playbackSubmitAt <= playbackSettledAt) {
+                    settledInTime = true             // 播放落定，让出机会了
+                    break
+                }
+                delay(PRELOAD_YIELD_POLL_MS)
+            }
+            if (!settledInTime) {
+                AppLog.putDebug("跨章预加载诊断: 让路放弃（播放请求在飞，等待超时）")
+                return false
+            }
+            AppLog.putDebug(
+                "跨章预加载诊断: 让路转为等待——播放已落定，" +
+                    "抢跑（等了 ${SystemClock.elapsedRealtime() - yieldWaitStart}ms）"
+            )
         }
         // 旧判据（已飞 6 秒才算卡）随「播放即掐」口径废止，保留作历史参考：
         if (playbackSubmitAt > playbackSettledAt &&
