@@ -64,7 +64,26 @@ object ReadProgressFile {
      * @param segText      当前段正文（内部截 60 字）：UTTS 日志行没有段号字段，
      *                     靠章名+正文前缀匹配定位「正在朗读」那张卡
      */
-    fun report(chapterIndex: Int, segIndex: Int, totalSegs: Int, segText: String) {
+    fun report(
+        chapterIndex: Int,
+        segIndex: Int,
+        totalSegs: Int,
+        segText: String,
+        // ===== 11-22 15:2x：播放推进时同步刷新缓冲段数 =====
+        //
+        // ## 为什么必须在这里补
+        // `bufferedAheadSegs` 原本只在**合成**时写入（reportSynthFront）。
+        // 但缓冲数的基准是「正在播放的段」（用户要求的口径），播放推进后
+        // 基准变了、数字却没跟着变——听几段之后数字会一直卡在旧值上，
+        // 而 UTTS 侧是拿这个旧数字往**新的播放位置**上画的，越听越偏。
+        // 长段播放时更明显：只靠 15s 心跳 `touch()` 续命，数字整段纹丝不动。
+        //
+        // ## 口径
+        // 与 reportSynthFront 完全同一函数、同一基准（nowSpeak + 播放章标题），
+        // 两条路写同一个字段不会打架：谁最后写谁生效，但两者算的是同一个值。
+        // 传 -1 = 本笔没算（调用方没提供），保持旧值不动。
+        bufferedAhead: Int = -1,
+    ) {
         // 同一段重复上报直接跳过：字幕同步循环 200ms 一跳，不挡会产生大量无谓写盘
         val book = ReadBook.book?.name.orEmpty()
         if (book == lastBook && chapterIndex == lastChapterIdx && segIndex == lastSeg) return
@@ -96,6 +115,8 @@ object ReadProgressFile {
                 // 正文前缀（截 60 字）：日志行没有段号字段，「哪张卡是正在朗读」
                 // 靠章名+正文前缀匹配——正文是两边唯一的公共键（请求音频行 <b>正文</b>=原文）
                 json.put("segText", segText.take(60))
+                // 11-22 15:2x：段切换时同步刷新缓冲数（-1=没算，保持旧值）
+                if (bufferedAhead >= 0) json.put("bufferedAheadSegs", bufferedAhead)
                 json.put("at", System.currentTimeMillis())
                 f.writeText(json.toString())
             }

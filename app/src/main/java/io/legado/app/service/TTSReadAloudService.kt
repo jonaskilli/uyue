@@ -798,6 +798,22 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private fun countBufferedAhead(fromSeg: Int, chapterTitle: String): Int {
         return runCatching {
             if (fromSeg < 0 || contentList.isEmpty()) return -1
+            // ===== 11-22 15:2x：切章窗口保护 =====
+            //
+            // `contentList` 未必属于当前章：BaseReadAloudService 用
+            // `contentListChapterIndex` 记录「段表建于第几章」，切章瞬间
+            // textChapter 已换成新章、而 contentList 还是旧章的（真机 18:21 实证，
+            // 该字段正是为修这个 bug 才加的）。此时若拿新章的 nowSpeak
+            // 去索引旧章的段表，段号全错位 ⇒ 算出一个毫无意义的数字。
+            //
+            // 处理：段表章号与本笔章号不一致时直接返回 -1（不显示数字）。
+            // 宁可这一瞬间少一个数字，也不显示假数据——UTTS 侧对 -1 的
+            // 处理是「退回旧画法、不画缓冲数」，语义正好。
+            if (contentListChapterIndex >= 0 &&
+                contentListChapterIndex != ReadBook.durChapterIndex
+            ) {
+                return -1
+            }
             // 11-22 14:4x：同一段 500ms 内不重复全扫（成本见 bufferedCountCache 注释）。
             // 播放每推进一段起点就变，key 自然失效；这里只兜「同段被反复重报」。
             val cacheKey = "$fromSeg|$chapterTitle"
@@ -2463,7 +2479,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         // segText=本段正文前 60 字，UTTS 靠它匹配日志卡片（日志无段号字段）。
                         io.legado.app.help.ReadProgressFile.report(
                             ReadBook.durChapterIndex, nowSpeak, contentList.size,
-                            contentList.getOrNull(nowSpeak).orEmpty()
+                            contentList.getOrNull(nowSpeak).orEmpty(),
+                            // 11-22 15:2x：段切换时同步刷新缓冲段数。
+                            // 缓冲数的基准是「正在播放的段」，播放推进后基准就变了；
+                            // 不在这里重算，数字会卡在上一段（甚至更早）的旧值上，
+                            // 而 UTTS 拿旧数字往新播放位置画 —— 越听越偏。
+                            // 与 reportSynthFront 同一函数、同一基准，两条路写同一字段不打架。
+                            countBufferedAhead(
+                                nowSpeak,
+                                textChapter?.title ?: textChapter?.chapter?.title ?: "",
+                            ),
                         )
                         lastNowSpeak = nowSpeak
                         lastProgressHeartbeatMs = System.currentTimeMillis()
