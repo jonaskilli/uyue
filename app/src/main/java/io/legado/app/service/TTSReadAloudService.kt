@@ -86,6 +86,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private const val TAG = "TTSReadAloudService"
         private const val PRELOAD_TRIGGER_REMAIN = 5
 
+        /**
+         * 11-22 14:4x：`countBufferedAhead` 结果的短时有效期（毫秒）。
+         *
+         * 该函数在播放主路径上**同步**跑，跨章累加后一次要扫 400+ 次 stat
+         * （详细成本见 `bufferedCountCache` 注释）。同一段被反复重报
+         * （重试/并发抢跑）时没必要重算，500ms 内复用上次结果。
+         */
+        private const val BUFFERED_COUNT_TTL_MS = 500L
+
         // ===== 跨服务生命周期的跨章预加载状态（11-21 14:1x）=====
         // 三张表挂在伴生对象上：服务 stop→重建（切章/重新定位）不清零，
         // 已备进度/段表/重试时刻全部延续——重建后跳到没备过的段续备，
@@ -424,6 +433,26 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 预加载走自己的 utteranceId 也会撞上同一段，按「缓存文件」而非 utteranceId 做键才能一起盖住。
      */
     private val inFlightSyntheses = ConcurrentHashMap<String, CompletableDeferred<File?>>()
+
+    /**
+     * 11-22 14:4x：`countBufferedAhead` 的短时缓存（治它自己的 IO 放大）。
+     *
+     * ## 为什么需要
+     * 该函数在 [synthesizeText] 里**同步**执行（播放主路径），每笔合成都调一次。
+     * 11-22 改成「跨章累加」后，一次统计要扫：本章剩余段（最多 ~100）
+     * + 后续每章全部段（第260章78 + 261章132 + 262章110 = 320）≈ **419 次 stat**。
+     * 真机一场 272 次提交 ⇒ 最坏 11 万次 stat 全压在播放路径上。
+     *
+     * ## 做法
+     * 同一个「起点段 + 章名」在 [BUFFERED_COUNT_TTL_MS] 内复用上次结果。
+     * 播放每段推进一次起点就会换 key，所以缓存天然按「段」失效；
+     * TTL 只用于兜住**同一段被反复重报**（重试/并发抢跑同段）的情况。
+     * 缓存只是「少算几次」，算不准的代价是进度条数字晚一个心跳更新——可接受。
+     */
+    private data class BufferedCountCache(val key: String, val at: Long, val value: Int)
+
+    @Volatile
+    private var bufferedCountCache: BufferedCountCache? = null
 
     /**
      * 11-14 修「连点跳段时同一段被反复重提」（方案 A：取消后短期保留登记 + 冷却）。
@@ -769,6 +798,16 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private fun countBufferedAhead(fromSeg: Int, chapterTitle: String): Int {
         return runCatching {
             if (fromSeg < 0 || contentList.isEmpty()) return -1
+            // 11-22 14:4x：同一段 500ms 内不重复全扫（成本见 bufferedCountCache 注释）。
+            // 播放每推进一段起点就变，key 自然失效；这里只兜「同段被反复重报」。
+            val cacheKey = "$fromSeg|$chapterTitle"
+            bufferedCountCache?.let { c ->
+                if (c.key == cacheKey &&
+                    SystemClock.elapsedRealtime() - c.at < BUFFERED_COUNT_TTL_MS
+                ) {
+                    return c.value
+                }
+            }
             val start = (fromSeg + 1).coerceAtLeast(0)
             if (start > contentList.lastIndex) return 0
             // ===== 11-22 13:0x（用户实报「缓冲范围不对，基本没显示过」+ 截图「6/105 缓冲 0 段」）=====
@@ -849,6 +888,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     if (hit == 0) break
                 }
             }
+            // 11-22 14:4x：写回短时缓存（同一段 500ms 内不重复全扫）
+            bufferedCountCache = BufferedCountCache(
+                key = cacheKey,
+                at = SystemClock.elapsedRealtime(),
+                value = n,
+            )
             n
         }.getOrElse { -1 }
     }
@@ -938,11 +983,36 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             index,
             chapterTitle,
             synthTotalSegs ?: contentList.size,
-            // 11-22（用户令「跨章备的量得显示」）：往后已备总段数，跨章累加。
-            // 从本段往后数到本章末尾，逐个查缓存文件是否存在；
-            // **只算本章**（跨章累加在下方「能否精确到后续章」注释里说明限制）。
-            // 传**本笔所属章**的标题（跨章预加载时是下一章的），不是当前播放章
-            countBufferedAhead(index, chapterTitle),
+            // ===== 11-22 15:0x（用户指出「双重动态值，基准要统一」）=====
+            //
+            // 缓冲段数必须锚在**正在播放的段**，不能锚在这一笔合成的前沿。
+            //
+            // ## 现场问题（用户追问「跳段/翻页/跨章这些计算都没问题吗」时揪出）
+            // 旧写法传的是 `index`——那是**本笔正在合成的段**，而合成循环
+            // （`for (i in nowSpeak until endIndex)`）**跑在播放前面**，
+            // 于是数字的基准是「合成到哪」，不是「听到哪」。
+            // 而 UTTS 渲染端（TtsLogScreen 约 2569 行）是这样画的：
+            //     val curSegIdx = playDone - 1              // 播放段（playDone 来自 snap.segIndex）
+            //     val bufEndAbs = curSegIdx + bufferedAhead  // 加到播放段上
+            // **两个坐标混用**：数字从合成前沿之后开始数，却加到播放位置上画。
+            // 合成领先播放多少段，浅绿就少算多少段（领先 20 段 ⇒ 少算 20 段）。
+            //
+            // ## 为什么必须统一到播放位置
+            // 这个数字要回答的是「从**我正在听的地方**往后，还能连续听多久」。
+            // 用户明确：「缓存段数都是以正在播放开始计算的，还是个双重动态值」——
+            // 播放位置在动、已备集合也在动，两个动态量的坐标必须是同一个，
+            // 否则怎么算都有偏差。播放位置是唯一的「用户此刻在哪」的真相。
+            //
+            // ## 取哪个位置
+            // 用 `nowSpeak`（BaseReadAloudService 的当前播放段，0-based），
+            // 与 UTTS 侧 `snap.segIndex` 同源（U阅 report() 上报的就是它）。
+            // 章节标题也必须跟着用**播放章**的标题——旧代码传的 `chapterTitle` 是
+            // 「本笔所属章」，跨章预加载笔时是下一章，与播放位置不同章会让缓存键
+            // 哈希不匹配 ⇒ 全部判成没备好。两处必须同改，缺一不可。
+            countBufferedAhead(
+                nowSpeak,
+                textChapter?.title ?: textChapter?.chapter?.title ?: chapterTitle,
+            ),
         )
         // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
         // 这样某一方被 cancel 不会掐断这一笔——否则 mine 永不 complete，等它的人会永久挂住。
@@ -2945,6 +3015,20 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 from,
                 preloaded.title,
                 total,
+                // ===== 11-22 15:0x：预加载笔也要上报缓冲段数 =====
+                //
+                // 旧调用只传了前 4 个参数，第 5 个 `bufferedAhead` 吃默认值 -1，
+                // UTTS 侧收到 -1 就退回旧画法、**不显示「缓冲 N 段」**。
+                // 而跨章预加载恰恰是备货最活跃的时候，这期间数字一直是空的，
+                // 用户看到「缓冲 0 段 / 无数字」正是这个原因。
+                //
+                // 基准同样锚**正在播放的段**（nowSpeak）+ **播放章**标题，
+                // 与主播放路径完全同源——两条路若用不同基准，
+                // 同一时刻会算出两个不同的数，数字就会来回跳。
+                countBufferedAhead(
+                    nowSpeak,
+                    textChapter?.title ?: textChapter?.chapter?.title ?: "",
+                ),
             )
             AppLog.put(
                 "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 提交preload_only前（文本=${rawText.take(10)}）"
