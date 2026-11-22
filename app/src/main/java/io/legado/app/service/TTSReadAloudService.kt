@@ -59,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.NonCancellable
@@ -2870,7 +2871,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             val yieldWaitStart = SystemClock.elapsedRealtime()
             var settledInTime = false
             while (SystemClock.elapsedRealtime() - yieldWaitStart < PRELOAD_YIELD_WAIT_MS) {
-                if (!isActive) return false          // 服务/协程被停：立即收口
+                // ⚠️ 这里不能用裸 `isActive`：runChapterPreloadRound 不是 CoroutineScope
+                // 的扩展函数，isActive 的两个候选（CoroutineContext / CoroutineScope 扩展）
+                // 都没有接收者 ⇒ 编译报「Unresolved reference 'not' for operator '!'」。
+                // 11-22 CI 从 602324a 起连红 5 次就是这个原因（本地没编译所以没发现）。
+                if (!currentCoroutineContext().isActive) return false  // 服务/协程被停：立即收口
                 if (playbackSubmitAt <= playbackSettledAt) {
                     settledInTime = true             // 播放落定，让出机会了
                     break
