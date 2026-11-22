@@ -703,6 +703,56 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 去重键 = 目标缓存文件绝对路径，与 `doSynthesizeText` 内部的缓存键完全同源，
      * 只按「段落文本 + 下标 + 章节标题」判同一段，不受 utteranceId（各调用方自己生成）影响。
      */
+    /**
+     * 11-22（用户令「跨章备的量得显示」）：统计**从 [fromSeg] 往后、本章内已备好的段数**。
+     *
+     * ## 为什么需要它
+     * 吸顶进度条要表达「还能连着听多少」。UTTS 侧只知道「合成前沿在第几章第几段」，
+     * 算不出「往后备了多少」——而后者才是用户要的那个数。所以由 U阅 侧算好上报。
+     *
+     * ## 为什么只数本章、不跨章累加
+     * 跨章累加需要逐章遍历下一章的段表并查缓存文件，而下一章的段表在本章合成时
+     * **未必已构建**（ReadBook 只保证当前章就绪）。强行算会引入「段表未就绪」的
+     * 空窗与额外磁盘扫描，收益却只在「已备超一整章」时才有。
+     * 现实节奏下（合成循环追不上播放）几乎不会备满整章，先把本章这个主战场做准；
+     * 真备满一章时 UTTS 侧会显示「整章已备」，语义仍然正确。
+     *
+     * ## 判据
+     * 纯**缓存文件存在性**，不读音频内容：
+     *   · 与播放路径 `synthesizeText` 开头那条命中判据同源（file.exists && length>0），
+     *     保证「我数成已备的，播放时一定真能秒播」；
+     *   · 不调 AudioCacheValidator 深检——那是命中瞬间的一次性校验，放这里会变成
+     *     O(N) 次全文件读，纯烧 IO。
+     *
+     * 复杂度 O(剩余段数)，典型的 list/stat 级开销，几十~几百段无感。
+     * 任何异常都吞掉返回 -1（进度条少画一个数字，不影响朗读）。
+     */
+    private fun countBufferedAhead(fromSeg: Int, chapterTitle: String): Int {
+        return runCatching {
+            if (fromSeg < 0 || contentList.isEmpty()) return -1
+            val start = (fromSeg + 1).coerceAtLeast(0)
+            if (start > contentList.lastIndex) return 0
+            var n = 0
+            for (i in start..contentList.lastIndex) {
+                val raw = runCatching { getRawText(i) }.getOrNull() ?: break
+                val f = runCatching {
+                    // ⚠️ 11-22 自查修：章节标题**必须用调用方传入的那一个**，不能取
+                    // ReadBook.durChapterTitle。
+                    //
+                    // 原因：跨章预加载时（preloadOnly 路径）合成的是**下一章**的段，
+                    // 而 ReadBook.durChapterTitle 仍停在**播放章**。缓存文件名
+                    // （TtsCacheFileName.sysTts）把 chapterTitle 算进哈希，
+                    // 用错标题 ⇒ 算出的文件名与真实缓存不匹配 ⇒ 全部判成「没备好」，
+                    // 缓冲段数恒为 0，进度条那截浅绿永远是空的。
+                    // 参数名之所以叫 chapterTitle 而不是从 ReadBook 取，就是为了这个。
+                    getCacheFileForText(raw, i, chapterTitle)
+                }.getOrNull() ?: break
+                if (f.exists() && f.length() > 0) n++ else break
+            }
+            n
+        }.getOrElse { -1 }
+    }
+
     private suspend fun synthesizeText(
         text: String,
         utteranceId: String,
@@ -788,6 +838,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             index,
             chapterTitle,
             synthTotalSegs ?: contentList.size,
+            // 11-22（用户令「跨章备的量得显示」）：往后已备总段数，跨章累加。
+            // 从本段往后数到本章末尾，逐个查缓存文件是否存在；
+            // **只算本章**（跨章累加在下方「能否精确到后续章」注释里说明限制）。
+            // 传**本笔所属章**的标题（跨章预加载时是下一章的），不是当前播放章
+            countBufferedAhead(index, chapterTitle),
         )
         // 登记后跑的**局部协程**：用服务级 scope（不挂在任何调用方的 job 下），
         // 这样某一方被 cancel 不会掐断这一笔——否则 mine 永不 complete，等它的人会永久挂住。

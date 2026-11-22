@@ -149,7 +149,26 @@ object ReadProgressFile {
      * @param segIndex     前沿段在该章 contentList 的下标
      * @param chapterTitle 前沿章名（预取跨章时与播放章不同，渲染层据此分显）
      */
-    fun reportSynthFront(chapterIndex: Int, segIndex: Int, chapterTitle: String, totalSegs: Int) {
+    fun reportSynthFront(
+        chapterIndex: Int,
+        segIndex: Int,
+        chapterTitle: String,
+        totalSegs: Int,
+        // ===== 11-22（用户令「跨章备的量得显示」）：往后已备总段数，**跨章累加** =====
+        //
+        // 为什么由 U阅 算：UTTS 侧只有 `synthChapterIndex + synthSegIndex` 一组字段
+        // （合成前沿所在的那一章），压根不知道前沿之后还有几段已备好，更不知道
+        // 前沿已经跨到第几章。而「我还能连着听多少」恰恰是用户唯一真正关心的问题——
+        // 只报「已备至第5章」无法区分「第5章备了1条」和「第5章备了60条」，
+        // 那两种情况的听感天差地别。
+        //
+        // 算法（U阅 侧天然有全部信息）：从**当前播放段**往后数，数到末尾为止，
+        // 统计缓存文件已存在的段数（跨章累加，因为合成循环本来就是跨章连续的）。
+        // 纯文件存在性判断，不读音频内容，几十~几百段也只有一次 list/stat 开销。
+        //
+        // 传 -1 = 本笔没算（调用方未提供），UTTS 侧据此退回旧显示（不画缓冲数）。
+        bufferedAhead: Int = -1,
+    ) {
         runCatching {
             val dir = File(EngineDataDir.baseDir())
             if (!dir.exists()) dir.mkdirs()
@@ -164,6 +183,9 @@ object ReadProgressFile {
                 json.put("synthChapterTitle", chapterTitle)
                 // 前沿章总段数：UTTS 进度行「第x章 3/25」的分母（该章已完成段数的上限）
                 json.put("synthTotalSegs", totalSegs)
+                // 11-22：往后已备总段数（跨章累加）——吸顶进度条「浅绿段」的数据源，
+                // 直接回答「还能连着听多少段」。-1 表示本笔没算，UTTS 侧不画该数字。
+                json.put("bufferedAheadSegs", bufferedAhead)
                 f.writeText(json.toString())
             }
         }.onFailure {
