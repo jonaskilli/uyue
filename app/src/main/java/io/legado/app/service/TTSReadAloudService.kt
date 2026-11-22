@@ -541,6 +541,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      */
     private val preloadSegmentFailCount = HashMap<String, Int>()
 
+    /**
+     * 预加载用的段表。
+     *
+     * ⚠️ 11-22 18:4x（用户实报「同一章，播放卡写 /133、预加载卡写 /132，看着乱」）：
+     * 这份段表必须与主播放的 `contentList` **逐项同口径**，包括末尾那个章末占位段。
+     *
+     * 主播放侧（BaseReadAloudService ~2032 行）建表时：
+     *     contentList = getNeedReadAloud(0,false,0).split("\n").filter{...}.toMutableList()
+     *         .apply { add(" ") }        // ← 末尾补一个 " " 当章末标记
+     * 而预加载这边只做了 split+filter、**没补**，于是同一章两套口径差 1：
+     * 播放 133 段、预加载 132 段。日志页同一段的 N/M 分母不同，用户会觉得"乱"；
+     * 更实际的影响是 `para_total` 不一致，进度条/折叠统计的基数都跟着偏。
+     *
+     * 在构建处统一补齐（而不是在每个使用点 +1），两条源路径都覆盖。
+     */
     private data class PreloadedChapter(
         val title: String,
         val segments: List<String>
@@ -3313,6 +3328,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      *  ③ 排版不可用（阅读页尺寸没初始化等）才降级正文直切，并打日志标明是降级口径。
      */
     private suspend fun buildPreloadSegments(book: Book, chapter: BookChapter): PreloadedChapter? {
+        // 11-22 18:4x：与主播放 contentList 同口径——末尾补章末占位段 " "。
+        // 主播放建表处 `.apply { add(" ") }`（BaseReadAloudService ~2032），
+        // 预加载此前漏了这一步，导致同章分母差 1（播放 133 / 预加载 132）。
+        // 只在这里收口一次，三条 return 路径全部覆盖。
+        fun seal(title: String, segs: List<String>): PreloadedChapter =
+            PreloadedChapter(title, segs.toMutableList().apply { add(" ") })
         // ① 当前章 / 下一章通常已经排好版（ReadBook 常驻 curTextChapter 与 nextTextChapter），
         // 直接复用它的段表：零排版成本、且与主播放是同一个对象，段文本逐字一致。
         val offset = chapter.index - ReadBook.durChapterIndex
@@ -3320,7 +3341,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             val tc = ReadBook.textChapter(offset)
             if (tc != null && tc.chapter.index == chapter.index && tc.pages.isNotEmpty()) {
                 val segments = tc.getNeedReadAloud(0, false, 0).split("\n").filter { it.isNotEmpty() }
-                if (segments.isNotEmpty()) return PreloadedChapter(tc.title, segments)
+                if (segments.isNotEmpty()) return seal(tc.title, segments)
             }
         }
         val rawContent = BookHelp.getContent(book, chapter) ?: return null
@@ -3355,7 +3376,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 }
                 val segments = textChapter.getNeedReadAloud(0, false, 0)
                     .split("\n").filter { it.isNotEmpty() }
-                if (segments.isEmpty()) null else PreloadedChapter(displayTitle, segments)
+                if (segments.isEmpty()) null else seal(displayTitle, segments)
             }.getOrNull()
             if (laidOut != null) return laidOut
         }
@@ -3369,7 +3390,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         } else {
             bodySegments
         }
-        return if (segments.isEmpty()) null else PreloadedChapter(displayTitle, segments)
+        return if (segments.isEmpty()) null else seal(displayTitle, segments)
     }
 
     // ====== 缓存管理 ======
