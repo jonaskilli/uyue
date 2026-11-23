@@ -214,3 +214,11 @@ cn.hutool.core.util.**{*;}
 -keepattributes RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations, InnerClasses, Signature, Exceptions
 -keep class io.ktor.server.engine.** { *; }
 -keep class io.ktor.server.application.** { *; }
+# KTOR-7298 双保险（摘上游 34b2b26）：ktor 3.1.3 虽为官方修复版本，
+# 但 embeddedServer 仍经 ServiceLoader 发现 engine factory——混淆/裁剪
+# META-INF/services 或 factory 实现类同样会让 release 包启动即失败。
+-keep class * implements io.ktor.server.engine.ApplicationEngineFactory { *; }
+-keep class * implements io.ktor.client.engine.HttpClientEngineFactory { *; }
+-keep class META-INF.services.** { *; }
+-dontwarn io.ktor.**
+-dontwarn kotlinx.serialization.**
