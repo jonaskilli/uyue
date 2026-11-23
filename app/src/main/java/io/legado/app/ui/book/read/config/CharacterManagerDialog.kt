@@ -17,17 +17,23 @@ import android.view.WindowManager
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.textfield.TextInputEditText
 import io.legado.app.R
 import io.legado.app.constant.AppLog
+import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
 import io.legado.app.help.MiyueKeyManager
+import io.legado.app.model.CharacterProfileManager
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.read.page.entities.column.TextColumn
+import io.legado.app.utils.defaultSharedPreferences
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -1434,8 +1440,17 @@ class CharacterManagerDialog : DialogFragment() {
                 val bookToDelete = bookList[which]
                 AlertDialog.Builder(requireContext())
                     .setTitle("确认删除")
-                    .setMessage("确定要删除书籍 '$bookToDelete' 及其所有角色数据吗？")
+                    .setMessage(
+                        "确定要删除书籍 '$bookToDelete' 吗？\n\n" +
+                            "这会同时删除这本书关联的所有 AI 数据，且不可恢复：\n" +
+                            "• 所有角色与角色档案\n" +
+                            "• AI 生成的插图和头像\n" +
+                            "• 识别的角色缓存（xiaoshuo 目录）\n" +
+                            "• 角色对话记录与 AI 生图绑定设置"
+                    )
                     .setPositiveButton("删除") { _, _ ->
+                        // 先清理这本书的 AI 关联数据（文件/数据库/设置），再删书籍本身
+                        deleteBookAiData(bookToDelete)
                         if (bookToDelete == currentBook) {
                             currentBook = bookList.filter { it != bookToDelete }.first()
                             writeTxtFile("cunfang.txt", currentBook)
@@ -1449,13 +1464,91 @@ class CharacterManagerDialog : DialogFragment() {
                         selectedIndex = -1
                         updateCharacterList()
                         updateLabel()
-                        toast("已删除书籍: $bookToDelete")
+                        toast("已删除书籍及其 AI 数据: $bookToDelete")
                     }
                     .setNegativeButton("取消", null)
                     .show()
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    /**
+     * 删除某本书关联的所有 AI 生成数据，且只删与这本书有关的：
+     * - AI 生图持久目录：/Download/AI生图/{书名}
+     * - AI 头像目录：/Download/AI头像/{书名}（含各角色子目录与历史）
+     * - 识别的角色缓存：/Download/chajian/xiaoshuo/{书名} 的各种目录写法
+     * - 角色对话记录：EngineDataDir/rolechat/{书名}_*.json
+     * - 角色档案数据库：CharacterProfileManager.clearBook(书名)
+     * - AI 生图按书绑定设置：SharedPreferences 中按书名的 key（及旧 bookUrl key 兜底）
+     *
+     * 全部在 IO 线程执行，避免阻塞 UI；单项失败不影响其它项。
+     */
+    private fun deleteBookAiData(bookName: String) {
+        val prefs = requireContext().defaultSharedPreferences
+        // 用 Fragment 的 lifecycleScope，不用 viewLifecycleOwner：
+        // 删除确认弹窗点击时本 DialogFragment 的 View 可能已销毁（getView()==null），
+        // 访问 viewLifecycleOwner 会抛 IllegalStateException
+        lifecycleScope.launch(Dispatchers.IO) {
+            // 1) AI 生图持久目录：/Download/AI生图/{书名}
+            runCatching {
+                val sanitized = bookName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                    .trim().ifEmpty { "unknown" }
+                File("/storage/emulated/0/Download/AI生图", sanitized)
+                    .takeIf { it.exists() }?.deleteRecursively()
+            }
+            // 2) AI 头像目录：/Download/AI头像/{书名}
+            runCatching {
+                val avatarName = bookName.replace(Regex("[\\\\/:*?\"<>|\\s]"), "_").take(40)
+                File("/storage/emulated/0/Download/AI头像", avatarName)
+                    .takeIf { it.exists() }?.deleteRecursively()
+            }
+            // 3) 识别的角色缓存：xiaoshuo 下书名的几种目录写法（与脚本候选规则一致）
+            runCatching {
+                val xiaoRoot = "/storage/emulated/0/Download/chajian/xiaoshuo/"
+                listOf(
+                    bookName,
+                    bookName.trim(),
+                    bookName.replace(Regex("[\\\\/:*?\"<>|]"), "_"),
+                    bookName.replace(Regex("[\\\\/:*?\"<>|]"), "").trim()
+                ).filter { it.isNotBlank() && it != "." && it != ".." }
+                    .map { File(xiaoRoot + it) }
+                    .forEach { it.takeIf { d -> d.exists() }?.deleteRecursively() }
+            }
+            // 4) 角色对话记录：rolechat/{书名}_*.json
+            runCatching {
+                val roleChatDir = File(io.legado.app.help.EngineDataDir.baseDir(), "rolechat")
+                roleChatDir.listFiles { f -> f.isFile && f.name.startsWith("${bookName}_") && f.name.endsWith(".json") }
+                    ?.forEach { it.delete() }
+            }
+            // 5) 角色档案数据库（含删除名单，防止朗读时自动重建）
+            runCatching { CharacterProfileManager.clearBook(bookName) }
+            // 6) AI 生图按书绑定设置：清书名 key；旧 bookUrl key 无法从书名反推，
+            //    这里只清当前正在读的这本书对应的 bookUrl（读到的是当前书时）
+            runCatching {
+                val editor = prefs.edit()
+                val namePrefixes = listOf(
+                    PreferKey.aiImageEnableNamePrefix,
+                    PreferKey.aiImageTemplateBindNamePrefix,
+                    PreferKey.aiImageSaveNamePrefix
+                )
+                prefs.all.keys.filter { key -> namePrefixes.any { key == it + bookName } }
+                    .forEach { editor.remove(it) }
+                val currentUrl = ReadBook.book?.takeIf { it.name == bookName }?.bookUrl
+                if (!currentUrl.isNullOrBlank()) {
+                    val urlPrefixes = listOf(
+                        PreferKey.aiImageEnablePrefix,
+                        PreferKey.aiImageTemplateBindPrefix,
+                        PreferKey.aiImageSavePrefix
+                    )
+                    prefs.all.keys.filter { key -> urlPrefixes.any { key == it + currentUrl } }
+                        .forEach { editor.remove(it) }
+                }
+                editor.apply()
+            }
+            // 不做全局缓存清理：AI 生图的目录已删，读取时目录不存在自然不会命中，
+            // 清全局缓存会影响其它书。
+        }
     }
 
     private fun updateSpinner() {
