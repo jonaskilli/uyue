@@ -114,6 +114,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private val preloadRetryStore = HashMap<Int, Long>()
 
         /**
+         * 「该章哪些段**确实落进了正式缓存**」——11-23 新增。
+         *
+         * 为什么需要这本账：跨章缓冲计数一直是「按当前设置重算缓存文件名再 stat」，
+         * 真机 18:32 实锤它与预加载两套口径对不上：第2章已备 82 段，计数却长期报
+         * 0 / 27（`跨章明细=[第2章=0] 中断=第2章整章 0 段`，而 66ms 前刚打
+         * 「跨章预加载已备: 第2章 第1/93 段」）。计数真正关心的是「后台已备好、
+         * 接着能直接播的段数」，而预加载在落盘那一刻**确切知道**是哪一章哪一段
+         * ⇒ 直接记下来，计数读这本账，不再靠重算文件名猜。
+         *
+         * 记账前仍验一次正式缓存文件存在：ok=true 只代表引擎回了音频，
+         * 收编失败/被跳过时文件可能根本没落地（这正是计数少算的成因之一）。
+         */
+        private val preloadPreparedStore = HashMap<Int, MutableSet<Int>>()
+
+        /**
          * 批量预热每批段数（11-15，路 C）。
          *
          * 为什么是 4：取消粒度＝整批。用户跳段时这一批的预热成果全部作废
@@ -995,17 +1010,24 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         crossStop = "第${idx + 1}章段表为空"
                         return@runCatching
                     }
-                    var hit = 0
+                    var fileHit = 0
                     for (si in segs.indices) {
                         val raw = segs[si]
                         if (raw.isBlank()) continue
                         val f = runCatching {
                             getCacheFileForText(raw, si, pre.title)
                         }.getOrNull() ?: continue
-                        if (f.exists() && f.length() > 0) hit++
+                        if (f.exists() && f.length() > 0) fileHit++
                     }
+                    // 11-23：**以预加载落盘账为准**，文件扫描只做兜底与对照。
+                    // 真机 18:32 实锤文件扫描口径会系统性少算（已备 82 段却报 0/27），
+                    // 而收入账在落盘成功那一刻写、用的是同一份 title/index/text，
+                    // 不存在「事后重算名字对不上」的问题。两者取大，谁都不漏。
+                    val recorded = Companion.preloadPreparedStore[idx]?.size ?: 0
+                    val hit = maxOf(fileHit, recorded)
                     crossN += hit
-                    crossDetail += (if (crossDetail.isEmpty()) "" else ", ") + "第${idx + 1}章=$hit"
+                    crossDetail += (if (crossDetail.isEmpty()) "" else ", ") +
+                        "第${idx + 1}章=$hit(文件$fileHit/记录$recorded)"
                     // 整章 0 段已备 ⇒ 备货前沿还没进这一章，再往后也不会有，停。
                     if (hit == 0) {
                         crossStop = "第${idx + 1}章整章 0 段"
@@ -3066,6 +3088,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             preloadChapterProgress.remove(it)
             preloadChapterCache.remove(it)
             preloadChapterRetryAt.remove(it)
+            Companion.preloadPreparedStore.remove(it)
             preloadSegmentFailCount.keys.filter { k -> k.startsWith("$it|") }.forEach {
                 preloadSegmentFailCount.remove(it)
             }
@@ -3169,6 +3192,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     return false
                 }
                 preloadChapterCache[idx] = built
+                // 11-23：段表重建后旧的分段口径可能已变，旧账不再可信，清掉重记。
+                Companion.preloadPreparedStore.remove(idx)
                 built
             }
             val total = preloaded.segments.size
@@ -3392,6 +3417,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 ok -> {
                     preloadChapterProgress[idx] = from + 1
                     preloadSegmentFailCount.remove("$idx|$from")
+                    // 11-23：记「这段真落进正式缓存了」，跨章缓冲计数改读这本账
+                    //（见 preloadPreparedStore 注释——真机 18:32「已备 82 段、计数 0/27」）。
+                    val landed = runCatching {
+                        val f = getCacheFileForText(rawText, from, preloaded.title)
+                        f.exists() && f.length() > 0
+                    }.getOrDefault(false)
+                    if (landed) {
+                        Companion.preloadPreparedStore
+                            .getOrPut(idx) { java.util.Collections.synchronizedSet(mutableSetOf()) }
+                            .add(from)
+                    }
                     AppLog.putDebug(
                         "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                     )
