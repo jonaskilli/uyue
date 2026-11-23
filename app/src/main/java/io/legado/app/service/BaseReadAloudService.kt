@@ -1978,7 +1978,8 @@ abstract class BaseReadAloudService : BaseService(),
                     intent.getBooleanExtra("play", true),
                     intent.getIntExtra("pageIndex", ReadBook.durPageIndex),
                     intent.getIntExtra("startPos", 0),
-                    intent.getBooleanExtra("fromPageTurn", false)
+                    intent.getBooleanExtra("fromPageTurn", false),
+                    intent.getIntExtra("startParagraph", 0)
                 )
             }
 
@@ -1996,7 +1997,13 @@ abstract class BaseReadAloudService : BaseService(),
         return super.onStartCommand(intent, flags, startId)
     }
 
-    private fun newReadAloud(play: Boolean, pageIndex: Int, startPos: Int, fromPageTurn: Boolean = false) {
+    private fun newReadAloud(
+        play: Boolean,
+        pageIndex: Int,
+        startPos: Int,
+        fromPageTurn: Boolean = false,
+        startParagraph: Int = 0
+    ) {
         execute(executeContext = Dispatchers.IO) {
             var textChapter = ReadBook.curTextChapter ?: return@execute
             // 11-19 20:5x 加：段表必须与「当前章」同源，否则不建。
@@ -2091,6 +2098,28 @@ abstract class BaseReadAloudService : BaseService(),
             clearAiEffectRuntime()
             var pos = startPos
             val page = textChapter.getPage(pageIndex)!!
+
+            // ===== 摘上游 66107bf/05a68a6 的段号定位能力（最小接入版）=====
+            // 只对显式 startParagraph>0 的入口生效（当前唯一来源：段落小喇叭，
+            // 05a68a6 传 startParagraph=paragraphNum 定位目标段）。
+            // 为什么不用上游整块：上游把「翻页/滚动入口」也改走 topParaNum 定位，
+            // 会绕开我方自研的段首对齐块（半截段/反向尾巴页/纯尾巴页跳章都在
+            // 那套算法里）；我方这些入口的落点算法已实测打磨，不替换。
+            // paragraphNum 是排版时按段落结束符递增生成的，与 chapterPosition 无关，
+            // 编辑正文后 chapterPosition 错乱也不影响段号定位。
+            if (startParagraph > 0 && startParagraph <= contentList.size &&
+                !readAloudByPage && !toLast && pendingGengxinResumeIndex < 0
+            ) {
+                nowSpeak = startParagraph - 1
+                // 与下方段首对齐块同口径：段表累加得该段真实起点
+                readAloudNumber = paragraphStartPosOf(nowSpeak)
+                pos = 0
+                paragraphStartPos = 0
+                AppLog.putDebug(
+                    "段号定位: startParagraph=$startParagraph nowSpeak=$nowSpeak " +
+                        "readAloudNumber=$readAloudNumber"
+                )
+            }
             // 11-14 二次修（用户实报「乱翻乱点后高亮不准、朗读段落不准，可能跟半截段
             // 有关」）：把「页内偏移 startPos」换算成「段内偏移」时，旧写法只遍历
             // page.paragraphs（**本页内**的段），遇到**从上页跨过来的半截段**就错——
