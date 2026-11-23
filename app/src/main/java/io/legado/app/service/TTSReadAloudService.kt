@@ -123,8 +123,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          * 接着能直接播的段数」，而预加载在落盘那一刻**确切知道**是哪一章哪一段
          * ⇒ 直接记下来，计数读这本账，不再靠重算文件名猜。
          *
-         * 记账前仍验一次正式缓存文件存在：ok=true 只代表引擎回了音频，
-         * 收编失败/被跳过时文件可能根本没落地（这正是计数少算的成因之一）。
+         * 11-23 23:5x 改口径（用户实拍「读 n 章、备到 n+1 章时缓冲恒 0」）：
+         * **记账不再验文件存在**。原实现记账前要 stat 一次自己重算的文件名，而
+         * 写入侧与重算侧的 title/voice/index 只要有一处不同就 miss ⇒ 一笔都不记
+         *（真机 22:49 第23章连报「已备 1..12 段」，账本却是 0/0，跨章恒 0）。
+         * ok=true（引擎回了音频）就是「这段能直接播」的证据——真落盘改名失败时，
+         * 播放会改走 UTTS 的 synth_cache，照样连听。文件扫描只留作计数侧兜底与对照。
          */
         private val preloadPreparedStore = HashMap<Int, MutableSet<Int>>()
 
@@ -977,14 +981,35 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 11-22 21:4x（真机 20:46:35 实锤「暂停后缓冲只算本章、跨章 0 段」）：
             // 本章与跨章**分开计数**，各自留一个诊断字符串。这里只加统计与日志，
             // **不改数值语义**——合计仍是 localN + crossN，与改造前逐字一致。
+            // ===== 11-23 23:5x（用户实拍「进 n+1 章后本章仍报缓冲 0 段」）=====
+            // 本章计数改为「预加载记账 ∪ 缓存文件命中」，**按段号去重**：
+            //   · 记账：预加载落盘那一刻记的 (章, 段)，是本轮真备过的权威事实；
+            //   · 文件：上一场/上一轮就已落盘的缓存（记账会因切书清空、段表重建而丢），
+            //     判据与播放侧 cacheHit 同函数（getCacheFileForText + exists + 长度>0）。
+            // 旧实现只有文件这一路，重算名字与写入侧不一致时（多音色/换声/章名差异）
+            // 整章全 miss —— 真机 22:51 第23章卡片已备到 37 段，本章却报 1，就是这一路。
+            // 记账按「章内段号」存，与 contentList 下标同口径（段表末尾占位段是空串，
+            // 与播放侧 speakTotalSegs 的减一规则一致，正文段下标不受影响）。
+            val chapterIdxForCount =
+                if (contentListChapterIndex >= 0) contentListChapterIndex
+                else ReadBook.durChapterIndex
+            val recordedLocal = Companion.preloadPreparedStore[chapterIdxForCount]
             var localN = 0
+            var localFileN = 0
             for (i in start..contentList.lastIndex) {
+                if (recordedLocal?.contains(i) == true) {
+                    localN++
+                    continue
+                }
                 val raw = runCatching { getRawText(i) }.getOrNull() ?: continue
                 if (raw.isBlank()) continue
                 val f = runCatching {
                     getCacheFileForText(raw, i, chapterTitle)
                 }.getOrNull() ?: continue
-                if (f.exists() && f.length() > 0) localN++
+                if (f.exists() && f.length() > 0) {
+                    localN++
+                    localFileN++
+                }
             }
             // ===== 跨章累加：本章之后，一直到「已备到的最远章」 =====
             // 只统计**已建过段表**的章（见上，不新建）；遇到第一个没建表的章就停——
@@ -1024,6 +1049,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         crossStop = "第${idx + 1}章段表为空"
                         return@runCatching
                     }
+                    // ===== 11-23 23:5x：跨章也改成「记账 ∪ 文件」按段号去重 =====
+                    // 原来直接 maxOf(文件数, 记账数)——两者都只覆盖一部分时（记账只记本轮
+                    // 备过的、文件只命中名字对得上的）取大会低估。按段号求并集才是
+                    // 「这一章能直接播多少段」的真值。
+                    val recordedSet = Companion.preloadPreparedStore[idx]
+                    val hitSegs = HashSet<Int>(recordedSet?.size ?: 16)
+                    recordedSet?.let { hitSegs.addAll(it) }
                     var fileHit = 0
                     for (si in segs.indices) {
                         val raw = segs[si]
@@ -1031,17 +1063,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                         val f = runCatching {
                             getCacheFileForText(raw, si, pre.title)
                         }.getOrNull() ?: continue
-                        if (f.exists() && f.length() > 0) fileHit++
+                        if (f.exists() && f.length() > 0) {
+                            fileHit++
+                            hitSegs.add(si)
+                        }
                     }
-                    // 11-23：**以预加载落盘账为准**，文件扫描只做兜底与对照。
-                    // 真机 18:32 实锤文件扫描口径会系统性少算（已备 82 段却报 0/27），
-                    // 而收入账在落盘成功那一刻写、用的是同一份 title/index/text，
-                    // 不存在「事后重算名字对不上」的问题。两者取大，谁都不漏。
-                    val recorded = Companion.preloadPreparedStore[idx]?.size ?: 0
-                    val hit = maxOf(fileHit, recorded)
+                    val hit = hitSegs.size
                     crossN += hit
                     crossDetail += (if (crossDetail.isEmpty()) "" else ", ") +
-                        "第${idx + 1}章=$hit(文件$fileHit/记录$recorded)"
+                        "第${idx + 1}章=$hit(文件$fileHit/记录${recordedSet?.size ?: 0})"
                     // 整章 0 段已备 ⇒ 备货前沿还没进这一章，再往后也不会有，停。
                     if (hit == 0) {
                         crossStop = "第${idx + 1}章整章 0 段"
@@ -1056,7 +1086,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             logBufDiag(
                 key = "$fromSeg|$localN|$crossN|$crossStop|$diagCurIdx|${preloadChapterCache.keys.sorted()}",
                 line = "缓冲上报诊断: from=$fromSeg 章=$chapterTitle 本章=$localN 跨章=$crossN " +
-                    "合计=$totalN curIdx=$diagCurIdx limit=$diagLimit " +
+                    "合计=$totalN 本章明细=文件$localFileN/记录${recordedLocal?.size ?: 0}" +
+                    " curIdx=$diagCurIdx limit=$diagLimit " +
                     "跨章明细=[$crossDetail] 中断=$crossStop " +
                     "已建表章=${preloadChapterCache.keys.sorted()} contentList章=$contentListChapterIndex",
             )
@@ -3458,17 +3489,18 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 ok -> {
                     preloadChapterProgress[idx] = from + 1
                     preloadSegmentFailCount.remove("$idx|$from")
-                    // 11-23：记「这段真落进正式缓存了」，跨章缓冲计数改读这本账
-                    //（见 preloadPreparedStore 注释——真机 18:32「已备 82 段、计数 0/27」）。
-                    val landed = runCatching {
-                        val f = getCacheFileForText(rawText, from, preloaded.title)
-                        f.exists() && f.length() > 0
-                    }.getOrDefault(false)
-                    if (landed) {
-                        Companion.preloadPreparedStore
-                            .getOrPut(idx) { java.util.Collections.synchronizedSet(mutableSetOf()) }
-                            .add(from)
-                    }
+                    // ===== 11-23 23:5x（用户实拍「读 n 章、后台备到 n+1 章，缓冲报 0」）=====
+                    // 记账**不再以「自己重算的文件名存在」为条件**。
+                    // 真机 23:49 实锤：第23章 22:49:42–22:50:10 连报「已备 1..12 段」，
+                    // 同一时段的缓冲上报却是 `跨章明细=[第23章=0(文件0/记录0)]`——
+                    // 就是因为这里 stat 自己重算的名字（title/voice/index 任一与写入侧
+                    // 不同就 miss）验不到 ⇒ 一笔都不记 ⇒ 跨章恒 0。
+                    // 引擎已回成功（下一行「已备」在涨）就是「这段能直接播」的充足证据：
+                    // 真落盘改名失败时播放会改走 UTTS 的 synth_cache，照样能连听。
+                    // 所以这里**只记账、不验文件**；文件扫描留在计数侧做兜底与对照。
+                    Companion.preloadPreparedStore
+                        .getOrPut(idx) { java.util.Collections.synchronizedSet(mutableSetOf()) }
+                        .add(from)
                     AppLog.putDebug(
                         "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                     )
