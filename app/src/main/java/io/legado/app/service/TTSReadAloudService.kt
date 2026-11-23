@@ -3134,6 +3134,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             Companion.preloadPreparedStore.clear()
             preloadSegmentFailCount.clear()
             Companion.preloadBookUrl = bookUrl
+            // 11-24 02:0x（用户实报「换书后吸顶还显示缓冲 34 段·跨章」）：
+            // 清内存账本**不够**——`bufferedAheadSegs` 是落盘字段，只有段切换/合成提交/
+            // 合成完成三条路会改它，换书时没人动 ⇒ 它停在换书前最后一笔的值上，
+            // 真机 01:22:47.160 写进旧书第5章的 34，到 :55.018 下一笔重算才归零，
+            // 中间 8 秒吸顶一直显示旧书的跨章数。这里主动清零，新书没备过段 ⇒ 0 就是真值。
+            runCatching { io.legado.app.help.ReadProgressFile.clearBufferedAhead() }
             return false
         }
         if (prevBookUrl == null) Companion.preloadBookUrl = bookUrl

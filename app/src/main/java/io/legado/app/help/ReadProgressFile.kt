@@ -183,6 +183,50 @@ object ReadProgressFile {
     }
 
     /**
+     * 11-24 02:0x（用户实报「换书后吸顶还显示『缓冲 34 段·跨章』」）：
+     * **换书瞬间把缓冲段数清零**。
+     *
+     * ## 现场（真机 01:22:47.160，U阅 appLog 原文）
+     * ```
+     * 缓冲上报诊断: from=41 章=004 … 本章=0 跨章=34 合计=34
+     *               跨章明细=[第5章=34(文件9/记录34)]
+     * 跨章预加载诊断: 换书，清空预加载状态（旧=k_id=7695…，新=k_id=7701…）  ← 晚 30ms
+     * ```
+     * 账本清空发生在 :47.190，可这一笔上报在 :47.160 已经带着**旧书第5章**的
+     * 34 段算完并写盘了；之后到 :55.018 才有下一笔重算（=0），中间 8 秒吸顶一直
+     * 显示旧书的「缓冲 34 段·跨章」。
+     *
+     * ## 为什么清账本不够
+     * `bufferedAheadSegs` 是**落盘字段**，只有三条路会改它：段切换 [report]、
+     * 合成提交 [reportSynthFront]、合成完成 [reportBufferedAhead]。
+     * 换书时清的是内存记账表 `preloadPreparedStore`，落盘那个数字没人动
+     * ⇒ 它停在换书前最后一笔的值上，直到下一次合成完成才被重算覆盖。
+     * 心跳 [touch] 只刷 `at`（字幕同步 200ms 一跳，重算太贵），救不了。
+     *
+     * ## 口径
+     * 换书后「新书还没备任何段」⇒ 缓冲就是 0，这是**真值**不是占位；
+     * 清零比留着旧书的 34 诚实。UTTS 侧拿到 0 会画成「缓冲 0 段」，
+     * 紧接着首笔预加载成功就会涨上去（真机 :58.059 第一笔记录）。
+     */
+    fun clearBufferedAhead() {
+        runCatching {
+            val dir = File(EngineDataDir.baseDir())
+            if (!dir.exists()) return@runCatching
+            synchronized(ioLock) {
+                val f = File(dir, FILE_NAME)
+                if (!f.exists()) return@runCatching
+                val json = runCatching { JSONObject(f.readText()) }
+                    .getOrElse { return@runCatching }
+                json.put("bufferedAheadSegs", 0)
+                json.put("at", System.currentTimeMillis())
+                f.writeText(json.toString())
+            }
+        }.onFailure {
+            AppLog.putDebug("缓冲数清零写入失败: ${it.localizedMessage}")
+        }
+    }
+
+    /**
      * 心跳：只刷新时间戳 `at`，不动段号/正文/合成字段。
      *
      * 为什么需要它（11-15 用户实报「有时候正在朗读日志不显示」）：
