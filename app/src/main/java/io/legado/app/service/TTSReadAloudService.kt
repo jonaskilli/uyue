@@ -2742,6 +2742,12 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                                 nowSpeak,
                                 textChapter?.title ?: textChapter?.chapter?.title ?: "",
                             ),
+                            // 11-23 21:5x：书名/章名与段表同源（黄条指错书的根治）。
+                            // bookName 来自 readAloudBookName（与 textChapter 同一次快照，
+                            // bookUrl 对不上时为空串=UTTS 不显示黄条）；chapterTitle 就是
+                            // 本服务段表所属那一章的标题，不再让读方另读 ReadBook.curTextChapter。
+                            readAloudBookName,
+                            textChapter?.title ?: textChapter?.chapter?.title ?: "",
                         )
                         lastNowSpeak = nowSpeak
                         lastProgressHeartbeatMs = System.currentTimeMillis()

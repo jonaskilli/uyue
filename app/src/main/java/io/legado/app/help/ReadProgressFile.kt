@@ -1,7 +1,6 @@
 package io.legado.app.help
 
 import io.legado.app.constant.AppLog
-import io.legado.app.model.ReadBook
 import org.json.JSONObject
 import java.io.File
 
@@ -83,9 +82,31 @@ object ReadProgressFile {
         // 两条路写同一个字段不会打架：谁最后写谁生效，但两者算的是同一个值。
         // 传 -1 = 本笔没算（调用方没提供），保持旧值不动。
         bufferedAhead: Int = -1,
+        // ===== 11-23 21:5x：书名/章名改由调用方传入（同源修复）=====
+        //
+        // ## 真机症状（用户 18:35 截图）
+        // 日志页黄条写「正在朗读《阴湿痴女拥有奇异体香后》」，而同一份快照的
+        // 章名/段号是《强占男配肥村姑》001 的 2/112——书名和数字对不上。
+        //
+        // ## 根因
+        // 旧实现里 `book` 读 `ReadBook.book?.name`、`chapterTitle` 读
+        // `ReadBook.curTextChapter?.title`：**两个全局量分别读、分别写**。
+        // 切书瞬间二者不同步（curTextChapter 已切到新书首章、ReadBook.book 还停在旧书），
+        // 于是文件里落成「旧书名 + 新章节段号」。而段号/总段数来自服务自己的段表
+        //（contentList/speakTotalSegs），本来就属于新书 ⇒ 三者互相矛盾。
+        //
+        // ## 修法
+        // 书名与章名一律由调用方（朗读服务）传入**它与段表同源的那一份**：
+        //   · chapterTitle = 服务手里那个 textChapter.title（段表就是从它建的）；
+        //   · bookName     = 在同一处快照下来的书名（见 BaseReadAloudService.readAloudBookName，
+        //                    只有 ReadBook.book.bookUrl == textChapter.chapter.bookUrl 才取值，
+        //                    对不上就给空串——宁可不显示黄条，也不显示假书）。
+        // 空串 = 无法确定书身份：UTTS 侧黄条判据要求 book 非空，自然不会出现假提示。
+        bookName: String,
+        chapterTitle: String,
     ) {
         // 同一段重复上报直接跳过：字幕同步循环 200ms 一跳，不挡会产生大量无谓写盘
-        val book = ReadBook.book?.name.orEmpty()
+        val book = bookName
         if (book == lastBook && chapterIndex == lastChapterIdx && segIndex == lastSeg) return
         lastBook = book
         lastChapterIdx = chapterIndex
@@ -106,7 +127,7 @@ object ReadProgressFile {
                     runCatching { JSONObject(f.readText()) }.getOrElse { JSONObject() }
                 } else JSONObject()
                 json.put("book", book)
-                json.put("chapterTitle", ReadBook.curTextChapter?.title.orEmpty())
+                json.put("chapterTitle", chapterTitle)
                 // 播放组：UTTS 用它定位「正在朗读」那条卡
                 json.put("playing", true)
                 json.put("chapterIndex", chapterIndex)

@@ -711,6 +711,23 @@ abstract class BaseReadAloudService : BaseService(),
     protected var nowSpeakChapterIndex: Int = -1
     internal var readAloudNumber: Int = 0
     internal var textChapter: TextChapter? = null
+
+    /**
+     * 与 [textChapter] **同源快照**下来的书名（11-23 21:5x，日志页黄条说谎的根治）。
+     *
+     * ## 为什么不能现场读 ReadBook.book
+     * `readProgress.json` 的书名原先由 ReadProgressFile 现场读 `ReadBook.book?.name`，
+     * 而章名/段号来自本服务的 [textChapter] 与段表——两套来源。切书瞬间
+     * `ReadBook.curTextChapter` 已切到新书首章、`ReadBook.book` 还停在旧书，
+     * 于是落盘成「旧书名 + 新章节段号」（用户 11-23 18:35 截图实锤）。
+     *
+     * ## 取值规则
+     * 只在 `ReadBook.book.bookUrl == textChapter.chapter.bookUrl` 时才认这本书，
+     * 否则给空串——空串会被 UTTS 当成「书身份未知」，黄条不显示。
+     * 宁可少一条提示，也不给一条指错书的提示。
+     */
+    @Volatile
+    internal var readAloudBookName: String = ""
     internal var pageIndex = 0
     /** 单段播放模式：只播放当前段落，播放完后自动暂停 */
     var singleParagraphMode = false
@@ -2017,6 +2034,13 @@ abstract class BaseReadAloudService : BaseService(),
             }
             this@BaseReadAloudService.pageIndex = pageIndex
             this@BaseReadAloudService.textChapter = textChapter
+            // 11-23 21:5x：书名与这份 textChapter **同源**快照（见 readAloudBookName 注释）。
+            // 必须紧跟 textChapter 赋值：此刻两边的书身份要么一致、要么明确判不一致给空串，
+            // 绝不允许各读一次全局变量后各写一次文件。
+            readAloudBookName = runCatching {
+                val b = ReadBook.book
+                if (b != null && b.bookUrl == textChapter.chapter.bookUrl) b.name else ""
+            }.getOrDefault("")
             // 11-14 修「从第五章第 7 页点朗读，却从第 5 页开头念」（真机 01:41:03 实锤）：
             // 用户看到的页数是 UI 的 durPageIndex，而换算段落用的是 textChapter.pages，
             // 两者可能不同步——排版还没排到第 7 页时 pages 只有 5 页，而
