@@ -129,6 +129,20 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private val preloadPreparedStore = HashMap<Int, MutableSet<Int>>()
 
         /**
+         * 上一次预加载属于哪本书（bookUrl）——11-23 新增，用来按**书身份**判换书。
+         *
+         * 为什么需要：上面几张晓表挂在伴生对象上、清理只按「章号范围」
+         *（validRange = 当前章 .. 当前章+目标章数），而**两本书的章号都从 0 起**：
+         * 切书后旧书的段表/进度/已备账原样停在同号章上，轮函数照旧拿旧书段表提交。
+         * 真机 18:38:38 现场：已切到「强占男配肥村姑」第001章，预加载却还在报
+         * 「第2章 54/93 段 · 第2章 永远的外人」（上一本书的章），提交的也是上一本书
+         * 的正文 ⇒ 规则收到「新书+旧书段落」→ 上文探针定位失败（段不在窗口）→
+         * 滑窗 AI 兜底 → 把旧书角色分析进新书角色表 → saveRecords 写前过滤每轮
+         * 都要剔除（用户看到的「串书防护又来了」）。
+         */
+        private var preloadBookUrl: String? = null
+
+        /**
          * 批量预热每批段数（11-15，路 C）。
          *
          * 为什么是 4：取消粒度＝整批。用户跳段时这一批的预热成果全部作废
@@ -3065,6 +3079,27 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             AppLog.putDebug("跨章预加载诊断: 轮次退出 book=null")
             return false
         }
+        // ===== 11-23（用户实报「新书一直出上文探针定位失败、串书防护一直剔除角色」）=====
+        // 按**书身份**判换书：章号范围清理治不了换书（两本书章号都从 0 起），
+        // 旧书段表会挂着同号章继续备货 ⇒ 新书里提交旧书段落 ⇒ 规则窗口对不上
+        // ⇒ 探针失败 + AI 拿旧书段落的名字污染新书角色表（写前过滤才拦得住）。
+        // 换了书就整组清空，本轮直接退出，下一轮用新书重建。
+        val bookUrl = book.bookUrl
+        val prevBookUrl = Companion.preloadBookUrl
+        if (prevBookUrl != null && prevBookUrl != bookUrl) {
+            AppLog.put(
+                "跨章预加载诊断: 换书，清空预加载状态（旧=${prevBookUrl.takeLast(24)}，" +
+                    "新=${bookUrl.takeLast(24)}）"
+            )
+            preloadChapterProgress.clear()
+            preloadChapterCache.clear()
+            preloadChapterRetryAt.clear()
+            Companion.preloadPreparedStore.clear()
+            preloadSegmentFailCount.clear()
+            Companion.preloadBookUrl = bookUrl
+            return false
+        }
+        if (prevBookUrl == null) Companion.preloadBookUrl = bookUrl
         if (textToSpeech == null) {
             AppLog.putDebug("跨章预加载诊断: 轮次退出 textToSpeech=null")
             return false
