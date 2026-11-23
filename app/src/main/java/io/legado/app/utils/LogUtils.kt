@@ -133,11 +133,30 @@ object LogUtils {
         val probe = File(folder, ".write_probe")
         try {
             probe.writeText("")
+            migrateLegacyLogs(base, folder)
             folder
         } finally {
             kotlin.runCatching { probe.delete() }
         }
     }.getOrNull()
+
+    /**
+     * 老日志搬家（11-23）：旧目录 `Download/uyue/logs` → `Download/chajian/uyue-utts/logs/uyue`
+     * （与 UTTS 日志归拢到同一共享根）。只复制新目录里还没有的同名文件，不覆盖新日志；
+     * 失败静默——搬家失败最多是旧日志没迁过来，绝不能影响日志本身可写。
+     */
+    private fun migrateLegacyLogs(base: File, target: File) {
+        kotlin.runCatching {
+            val legacy = File(base, "uyue/logs")
+            if (legacy.absolutePath == target.absolutePath) return
+            if (!legacy.isDirectory) return
+            legacy.listFiles()?.forEach { f ->
+                if (!f.isFile) return@forEach
+                val dst = File(target, f.name)
+                if (!dst.exists()) f.copyTo(dst)
+            }
+        }
+    }
 
     fun logDeviceInfo() {
         d("DeviceInfo") {
