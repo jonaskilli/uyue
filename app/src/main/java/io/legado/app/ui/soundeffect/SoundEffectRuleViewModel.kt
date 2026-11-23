@@ -140,6 +140,15 @@ class SoundEffectRuleViewModel(application: Application) : BaseViewModel(applica
         data.addAll(newData)
     }
 
+    /**
+     * 追加导入：接在当前所有分组的末尾。
+     * 导入项的 id 会重新分配，避免与现有分组/规则冲突；顺序按列表位置重排。
+     */
+    fun appendGroups(newData: List<SoundEffectGroupWithRules>) {
+        data.addAll(SoundEffectRuleManager.copiesForAppend(newData, data))
+        data.forEachIndexed { index, gwr -> gwr.group.order = index }
+    }
+
     private fun post(block: () -> Unit) {
         mainHandler.post { block() }
     }

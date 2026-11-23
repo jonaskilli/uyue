@@ -405,6 +405,31 @@ object SoundEffectRuleManager {
     }
 
     /**
+     * 为「追加导入」生成安全副本：给导入的分组和规则重新分配 id，
+     * 避免与当前列表 id 相同导致选中、拖动、编辑串到别的条目。
+     * 原数据不变，调用方可以直接把返回值 addAll 到现有列表末尾。
+     */
+    fun copiesForAppend(
+        incoming: List<SoundEffectGroupWithRules>,
+        existing: List<SoundEffectGroupWithRules>
+    ): List<SoundEffectGroupWithRules> {
+        val usedGroupIds = existing.mapTo(HashSet()) { it.group.id }
+        val usedRuleIds = existing.flatMapTo(HashSet()) { gwr -> gwr.list.map { it.id } }
+        var idSeed = System.currentTimeMillis()
+        fun nextId(used: HashSet<Long>): Long {
+            while (used.contains(idSeed)) idSeed++
+            used.add(idSeed)
+            return idSeed++
+        }
+        return incoming.map { gwr ->
+            val group = gwr.group.copy(id = nextId(usedGroupIds))
+            val rules = gwr.list.map { rule -> rule.copy(id = nextId(usedRuleIds)) }
+                .toMutableList()
+            SoundEffectGroupWithRules(group, rules)
+        }
+    }
+
+    /**
      * 按朗读服务的方式编译正则：支持 JS 风格 `/pattern/flags` 与 `\u{XXXX}`。
      */
     fun compilePattern(pattern: String): Regex {

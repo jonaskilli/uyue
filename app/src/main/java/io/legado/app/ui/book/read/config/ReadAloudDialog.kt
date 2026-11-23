@@ -1707,6 +1707,15 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud),
                 android.view.ViewGroup.LayoutParams.WRAP_CONTENT
             )
         }
+        val scrollView = androidx.core.widget.NestedScrollView(context).apply {
+            isFillViewport = false
+            isNestedScrollingEnabled = true
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            addView(container)
+        }
         var pickerDialog: androidx.appcompat.app.AlertDialog? = null
         names.forEachIndexed { index, name ->
             io.legado.app.databinding.ItemNarrationPickBinding.inflate(layoutInflater).apply {
@@ -1736,7 +1745,7 @@ class ReadAloudDialog : BaseDialogFragment(R.layout.dialog_read_aloud),
 
         pickerDialog = androidx.appcompat.app.AlertDialog.Builder(context)
             .setTitle("本书旁白")
-            .setView(container)
+            .setView(scrollView)
             .setNegativeButton("取消", null)
             .create()
         pickerDialog.show()

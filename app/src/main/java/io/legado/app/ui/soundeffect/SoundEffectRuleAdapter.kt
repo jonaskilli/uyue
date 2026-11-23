@@ -13,6 +13,9 @@ import io.legado.app.databinding.ItemSoundEffectRuleBinding
 import io.legado.app.lib.theme.backgroundColor
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
 import io.legado.app.utils.ColorUtils
+import io.legado.app.utils.applyOpenTint
+import io.legado.app.utils.getCompatColor
+import io.legado.app.utils.setTintMutate
 
 sealed class SoundEffectFlatItem {
     data class GroupHeader(
@@ -351,6 +354,16 @@ class SoundEffectRuleAdapter(
     private fun showGroupMenu(view: View, groupId: Long) {
         val popupMenu = PopupMenu(context, view)
         popupMenu.inflate(R.menu.sound_effect_rule_group)
+        // AI 音效是目录索引，不是规则分组，不能暂存成规则导入到其它模式
+        popupMenu.menu.findItem(R.id.menu_group_export_clipboard)?.isVisible = !aiMode
+        // PopupMenu 默认不显示 item 图标，这里用反射打开图标显示
+        // 注意：不能用 applyTint（它强转 androidx MenuItemImpl，对系统 PopupMenu 会 ClassCastException）
+        popupMenu.menu.applyOpenTint(context)
+        // 图标本身是固定色（ic_delete 为白色），反射着色在高版本系统可能失效，
+        // 这里显式按主题文字色着色：白天黑色、深色主题白色
+        val iconTint = context.getCompatColor(R.color.primaryText)
+        popupMenu.menu.findItem(R.id.menu_group_export_clipboard)?.icon?.setTintMutate(iconTint)
+        popupMenu.menu.findItem(R.id.menu_group_del)?.icon?.setTintMutate(iconTint)
         popupMenu.setOnMenuItemClickListener { menuItem ->
             when (menuItem.itemId) {
                 R.id.menu_group_top -> callBack.onGroupToTop(groupId)
@@ -359,6 +372,7 @@ class SoundEffectRuleAdapter(
                 R.id.menu_group_bottom -> callBack.onGroupToBottom(groupId)
                 R.id.menu_group_rename -> callBack.onGroupRename(groupId)
                 R.id.menu_group_add_rule -> callBack.onGroupAddRule(groupId)
+                R.id.menu_group_export_clipboard -> callBack.onGroupExportClipboard(groupId)
                 R.id.menu_group_del -> callBack.onDeleteGroup(groupId)
             }
             true
@@ -369,10 +383,14 @@ class SoundEffectRuleAdapter(
     private fun showRuleMenu(view: View, rule: SoundEffectRule) {
         val popupMenu = PopupMenu(context, view)
         popupMenu.inflate(R.menu.sound_effect_rule_item)
+        // AI 音效是裸 MP3，没有 audios JSON，不提供增删；保留原来的音量调整
+        popupMenu.menu.findItem(R.id.menu_edit_sound_files)?.isVisible = !aiMode
+        popupMenu.menu.findItem(R.id.menu_adjust_volume)?.isVisible = aiMode
         popupMenu.setOnMenuItemClickListener { menuItem ->
             when (menuItem.itemId) {
                 R.id.menu_top -> callBack.toTop(rule)
                 R.id.menu_bottom -> callBack.toBottom(rule)
+                R.id.menu_edit_sound_files -> callBack.editSoundFiles(rule)
                 R.id.menu_adjust_volume -> callBack.adjustVolume(rule)
                 R.id.menu_del -> {
                     callBack.delete(rule)
@@ -441,6 +459,7 @@ class SoundEffectRuleAdapter(
         fun edit(rule: SoundEffectRule)
         fun toTop(rule: SoundEffectRule)
         fun toBottom(rule: SoundEffectRule)
+        fun editSoundFiles(rule: SoundEffectRule)
         fun adjustVolume(rule: SoundEffectRule)
         fun upCountView()
         fun onPlayError(message: String)
@@ -452,6 +471,7 @@ class SoundEffectRuleAdapter(
         fun onGroupDown(groupId: Long)
         fun onGroupRename(groupId: Long)
         fun onGroupAddRule(groupId: Long)
+        fun onGroupExportClipboard(groupId: Long)
         fun onDeleteGroup(groupId: Long)
     }
 }

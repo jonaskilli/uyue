@@ -50,6 +50,30 @@ object BgmManager {
     private val mainScope = CoroutineScope(Dispatchers.Main)
 
     /**
+     * BGM 播放总门闸：只有朗读处于播放状态时才允许 BGM 出声。
+     *
+     * 朗读暂停/停止会关闭门闸，此后任何来源的播放请求（预分析回调、播放器监听器、
+     * 设置界面残留的异步任务等）都会被拒绝。这样即使有 pause() 之后才返回的异步
+     * 播放调用，也无法把 BGM 重新启动——必须等朗读再次 play() 重新打开门闸。
+     *
+     * 用 @Volatile 保证朗读服务线程与 mainScope 协程之间的可见性。
+     */
+    @Volatile
+    private var allowPlay = false
+
+    /** 打开门闸：仅由朗读真正开始播放时调用 */
+    fun setReadAloudPlaying(playing: Boolean) {
+        allowPlay = playing
+        if (!playing) {
+            // 关闭时立即清掉待播推荐，避免暂停期间残留的推荐被下一轮误用
+            pendingNextBgmIndex = -1
+        }
+    }
+
+    /** 朗读是否在播（供预分析等异步回调判断，避免启动已无意义的播放） */
+    fun isReadAloudPlaying(): Boolean = allowPlay
+
+    /**
      * 初始化播放器
      */
     var getNextBgmIndex: (() -> Int)? = null
@@ -81,7 +105,8 @@ object BgmManager {
                         if (this@apply == activePlayer) {
                             // 朗读已暂停/停止时不再自动切歌，直接停——
                             // 否则朗读停了 BGM 还会一首接一首无限播下去
-                            if (!BaseReadAloudService.isPlay()) {
+                            // 用门闸判断：暂停/停止时它必然为 false，比 isPlay() 可靠
+                            if (!allowPlay) {
                                 pause()
                                 return
                             }
@@ -97,13 +122,16 @@ object BgmManager {
                         Player.MEDIA_ITEM_TRANSITION_REASON_AUTO -> {
                             io.legado.app.constant.AppLog.put("AI背景音乐: BGM自动顺序切换(异常), index=$currentIdx, name=$fileName")
                             pause()
-                            if (BaseReadAloudService.isPlay()) {
+                            if (allowPlay) {
                                 onBgmStarted?.invoke()
                             }
                         }
                         Player.MEDIA_ITEM_TRANSITION_REASON_SEEK -> {
                             io.legado.app.constant.AppLog.put("AI背景音乐: BGM切换完成(SEEK), index=$currentIdx, name=$fileName")
-                            onBgmStarted?.invoke()
+                            // 朗读已暂停时不再触发预分析，避免暂停后仍跑无意义的分析任务
+                            if (allowPlay) {
+                                onBgmStarted?.invoke()
+                            }
                         }
                     }
                 }
@@ -114,7 +142,7 @@ object BgmManager {
                     io.legado.app.constant.AppLog.put("AI背景音乐: 播放错误 $fileName，自动跳过: ${error.localizedMessage}")
                     // 播放出错时自动跳过到下一首
                     // 朗读已暂停/停止时不再跳歌，避免无人管住 BGM
-                    if (!BaseReadAloudService.isPlay()) return
+                    if (!allowPlay) return
                     mainScope.launch {
                         // 取局部 size，避免检查与取模之间 bgmNames 被清空导致 % 0
                         val size = bgmNames.size
@@ -593,6 +621,8 @@ object BgmManager {
      * 【关键】resolveAudioUri 在 IO 线程执行，避免主线程阻塞
      */
     private suspend fun playAudioByIndex(index: Int) {
+        // 门闸：朗读不在播时拒绝一切播放（含暂停后到达的异步调用）
+        if (!allowPlay) return
         if (index < 0 || index >= bgmNames.size) return
         // 已经在播放同一首，无需切换
         if (currentPlayingIndex == index && activePlayer?.isPlaying == true) {
@@ -601,6 +631,9 @@ object BgmManager {
         val name = bgmNames[index]
         // 在 IO 线程查找文件，避免主线程阻塞（SAF 路径的 findFile 是 IPC 调用）
         val uri = withContext(Dispatchers.IO) { resolveAudioUri(name) }
+        // IO 挂起期间朗读可能被暂停，恢复后必须重新检查门闸，
+        // 否则 pause() 之后到达的这次调用仍会把 BGM 播起来
+        if (!allowPlay) return
 
         if (uri == null) {
             io.legado.app.utils.LogUtils.d("BgmManager", "❌ 找不到音频文件: $name")
@@ -629,6 +662,8 @@ object BgmManager {
                 audioDurations[index] = duration
             }
         }
+        // 再次检查：时长读取的 IO 挂起期间也可能已被暂停
+        if (!allowPlay) return
         val mediaItem = MediaItem.fromUri(uri)
 
         if (activePlayer?.isPlaying == true) {
@@ -648,6 +683,14 @@ object BgmManager {
             fadeInJob.join()
 
             activePlayer?.pause()
+
+            // 交叉淡出期间朗读被暂停：standby 已经 play 了新音乐，必须一并停掉，
+            // 否则暂停后这首新歌会一直播（旧实现的历史 bug）
+            if (!allowPlay) {
+                standbyPlayer?.pause()
+                standbyPlayer?.volume = 0f
+                return
+            }
 
             // 交换角色
             val temp = activePlayer
@@ -726,8 +769,9 @@ object BgmManager {
      * 播放指定索引的BGM（带淡入）
      */
     fun playByIndex(index: Int) {
-        if (!AppConfig.isBgmEnabled) return
+        if (!AppConfig.isBgmEnabled || !allowPlay) return
         mainScope.launch {
+            if (!allowPlay) return@launch
             if (bgmNames.isEmpty()) {
                 withContext(Dispatchers.IO) { loadBgmFiles() }
             }
@@ -742,8 +786,9 @@ object BgmManager {
      * 开始播放（带淡入），首次播放时走默认索引0
      */
     fun play() {
-        if (!AppConfig.isBgmEnabled) return
+        if (!AppConfig.isBgmEnabled || !allowPlay) return
         mainScope.launch {
+            if (!allowPlay) return@launch
             if (bgmNames.isEmpty()) {
                 withContext(Dispatchers.IO) { loadBgmFiles() }
             }
@@ -753,6 +798,7 @@ object BgmManager {
                     val defaultIndex = 0.coerceAtMost(bgmNames.size - 1)
                     val name = bgmNames[defaultIndex]
                     val uri = withContext(Dispatchers.IO) { resolveAudioUri(name) }
+                    if (!allowPlay) return@launch
                     if (uri != null) {
                         currentPlayingIndex = defaultIndex
                         BgmKeywordMatcher.recordPlayedBgm(name)
@@ -783,6 +829,10 @@ object BgmManager {
      * 恢复播放时 play()/playAudioByIndex() 会重新淡入设置音量，先停无副作用。
      */
     fun pause() {
+        // 关闭门闸：pause 一旦调用，此后所有播放入口都会被拒绝，
+        // 必须等朗读 play()/resume() 重新打开才允许出声
+        allowPlay = false
+        pendingNextBgmIndex = -1
         mainScope.launch {
             playerA?.pause()
             playerB?.pause()
@@ -794,7 +844,9 @@ object BgmManager {
      * 下一首（交叉淡出）
      */
     fun next() {
+        if (!allowPlay) return
         mainScope.launch {
+            if (!allowPlay) return@launch
             val size = bgmNames.size
             if (size <= 0) return@launch
             val nextIndex = (currentPlayingIndex + 1) % size
@@ -807,7 +859,9 @@ object BgmManager {
      * 上一首
      */
     fun prev() {
+        if (!allowPlay) return
         mainScope.launch {
+            if (!allowPlay) return@launch
             val size = bgmNames.size
             if (size <= 0) return@launch
             val prevIndex = (currentPlayingIndex - 1 + size) % size

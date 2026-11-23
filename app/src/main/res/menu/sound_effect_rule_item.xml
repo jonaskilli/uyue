@@ -10,6 +10,10 @@
         android:title="@string/to_bottom" />
 
     <item
+        android:id="@+id/menu_edit_sound_files"
+        android:title="修改音效文件" />
+
+    <item
         android:id="@+id/menu_adjust_volume"
         android:title="修改音量" />
 

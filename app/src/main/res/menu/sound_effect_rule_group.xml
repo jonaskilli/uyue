@@ -26,7 +26,13 @@
         android:title="在此分组新建规则" />
 
     <item
+        android:id="@+id/menu_group_export_clipboard"
+        android:icon="@drawable/ic_upload_line"
+        android:title="导出此分组到临时内存" />
+
+    <item
         android:id="@+id/menu_group_del"
+        android:icon="@drawable/ic_delete"
         android:title="删除分组及组内规则" />
 
 </menu>

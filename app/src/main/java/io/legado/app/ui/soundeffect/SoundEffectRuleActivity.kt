@@ -96,7 +96,7 @@ class SoundEffectRuleActivity :
                 toastOnUi("不是有效的规则文件")
                 return@launch
             }
-            confirmImport(parsed)
+            showImportModeDialog(parsed, "本地文件")
         }
     }
 
@@ -124,6 +124,32 @@ class SoundEffectRuleActivity :
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             if (uris.isEmpty()) return@registerForActivityResult
             writeSoundEffectBatch(uris)
+        }
+
+    /** 音效文件编辑弹窗：添加音频时记住要追加到哪个音效 JSON */
+    private var soundEffectFileDialog: SoundEffectVolumeDialog? = null
+    private var pendingAppendEffectName: String? = null
+
+    private val pickAudiosForAppend =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            val name = pendingAppendEffectName ?: return@registerForActivityResult
+            pendingAppendEffectName = null
+            if (uris.isEmpty()) return@registerForActivityResult
+            showLoading("正在读取音频…")
+            lifecycleScope.launch {
+                val audios = withContext(IO) {
+                    uris.mapNotNull { SoundEffectFileManager.readBytes(this@SoundEffectRuleActivity, it) }
+                }
+                hideLoading()
+                if (audios.isEmpty()) {
+                    toastOnUi("没有读到音频内容")
+                    return@launch
+                }
+                if (audios.size < uris.size) {
+                    toastOnUi("有 ${uris.size - audios.size} 个文件读取失败，将跳过")
+                }
+                soundEffectFileDialog?.addAudios(name, audios)
+            }
         }
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
@@ -270,7 +296,10 @@ class SoundEffectRuleActivity :
                 R.id.menu_add_group,
                 R.id.menu_add_sound_effect,
                 R.id.menu_batch_add_sound_effect,
-                R.id.menu_import_local
+                R.id.menu_import_local,
+                R.id.menu_import_clipboard,
+                R.id.menu_export_clipboard,
+                R.id.menu_manage_clipboard
             ).forEach { menu.findItem(it)?.isVisible = false }
         }
         return super.onCompatCreateOptionsMenu(menu)
@@ -286,7 +315,13 @@ class SoundEffectRuleActivity :
                 mode = HandleFileContract.FILE
                 allowExtensions = arrayOf("json", "txt")
             }
+            R.id.menu_import_clipboard -> importFromClipboard()
             R.id.menu_export -> exportCurrent()
+            R.id.menu_export_clipboard -> exportToClipboard(
+                "${SoundEffectRuleManager.modeTitle(viewModel.mode)} · 全部分组",
+                viewModel.data
+            )
+            R.id.menu_manage_clipboard -> manageClipboard()
             R.id.menu_download_sound_and_music ->
                 io.legado.app.ui.book.read.config.BgmDownloadDialog()
                     .show(supportFragmentManager, "soundEffectDownload")
@@ -409,75 +444,99 @@ class SoundEffectRuleActivity :
     }
 
     /**
-     * 修改音量，两类数据源共用同一个对话框与同一套差量算法：
-     * - 前三种模式：`replacement` 里的 `(音效名)` 指向 `bendiyinxiao2` 目录下的音效 JSON，
-     *   把 `audios` 数组中的每个 base64 展开成一段；
-     * - AI 音效模式：`rule.pattern` 是音效库相对路径，直接读对应的**裸 MP3**，单段。
-     * 没有标记 / 文件不存在时段列表为空，对话框显示空白即可。
+     * 前三种模式：修改音效文件。
+     * `replacement` 里的每个 `(音效名)` 对应一个 JSON，按 JSON 分组显示组内的多个 MP3。
      */
-    override fun adjustVolume(rule: SoundEffectRule) {
+    override fun editSoundFiles(rule: SoundEffectRule) {
+        val segments = buildSoundFileSegments(rule)
+        soundEffectFileDialog = SoundEffectVolumeDialog(
+            activity = this,
+            sourceSegments = segments,
+            onPickAudios = { name ->
+                pendingAppendEffectName = name
+                pickAudiosForAppend.launch(arrayOf("audio/*"))
+            },
+            onSave = { states -> saveVolumes(states) },
+            onDismiss = { soundEffectFileDialog = null }
+        ).also { it.show() }
+    }
+
+    /** 把规则里引用的所有音效 JSON 展开成弹窗用的段列表。 */
+    private fun buildSoundFileSegments(rule: SoundEffectRule): List<SoundEffectVolumeDialog.Segment> {
         val cn = arrayOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
-        // 外显名字与列表里保持一致：规则名，空则回退到匹配文本 / 库内路径
         val displayName = rule.name.ifBlank { rule.pattern }
         val segments = ArrayList<SoundEffectVolumeDialog.Segment>()
-        if (viewModel.mode == SoundEffectRuleManager.MODE_AI) {
-            // 只读本地已有的 MP3，不触发远端下载（避免打开对话框被网络阻塞）
-            val file = AiEffectDownloader.localFileOf(rule.pattern)
-            val bytes = if (file.exists() && file.length() > 0L) {
-                runCatching { file.readBytes() }.getOrNull()
-            } else null
-            if (bytes != null) {
-                val info = Mp3GainUtil.readGain(bytes)
-                val v = Mp3GainUtil.validate(bytes)
+        val labelIndexByEffect = HashMap<String, Int>()
+
+        SoundEffectPlayer.extractEffectNames(rule.replacement).forEach { name ->
+            val audio = SoundEffectFileManager.readAudioJson(name) ?: return@forEach
+            var labelIndex = labelIndexByEffect[name] ?: 0
+            audio.audios.forEachIndexed { index, item ->
+                val info = Mp3GainUtil.readGain(item)
+                val v = Mp3GainUtil.validate(item)
+                val label = "音效" + (cn.getOrNull(labelIndex) ?: (labelIndex + 1).toString())
+                labelIndex++
                 segments.add(
                     SoundEffectVolumeDialog.Segment(
-                        effectName = rule.pattern,
-                        indexInFile = 0,
+                        effectName = name,
+                        indexInFile = index,
                         displayName = displayName,
-                        effectLabel = "",
-                        label = "音效一",
-                        originalBytes = bytes,
+                        effectLabel = "($name)",
+                        label = label,
+                        originalBytes = item,
                         supported = v.ok,
                         reason = v.reason,
-                        currentGain = info.current,
-                        audioFile = file
+                        currentGain = info.current
                     )
                 )
             }
-        } else {
-            val names = SoundEffectPlayer.extractEffectNames(rule.replacement)
-            names.forEach { name ->
-                val audio = SoundEffectFileManager.readAudioJson(name) ?: return@forEach
-                audio.audios.forEachIndexed { index, item ->
-                    val info = Mp3GainUtil.readGain(item)
-                    val v = Mp3GainUtil.validate(item)
-                    segments.add(
-                        SoundEffectVolumeDialog.Segment(
-                            effectName = name,
-                            indexInFile = index,
-                            displayName = displayName,
-                            effectLabel = "($name)",
-                            label = "音效" + (cn.getOrNull(segments.size)
-                                ?: (segments.size + 1).toString()),
-                            originalBytes = item,
-                            supported = v.ok,
-                            reason = v.reason,
-                            currentGain = info.current
-                        )
-                    )
-                }
-            }
+            labelIndexByEffect[name] = labelIndex
         }
-        SoundEffectVolumeDialog(this, segments) { states -> saveVolumes(states) }.show()
+        return segments
     }
 
-    /** 点「保存」才落盘：按音效名分组，把各段结果放回原 `audios` 位置并保留轮换索引。 */
+    /** AI 音效模式仍是裸 MP3，只保留原来的音量调整。 */
+    override fun adjustVolume(rule: SoundEffectRule) {
+        val displayName = rule.name.ifBlank { rule.pattern }
+        val segments = ArrayList<SoundEffectVolumeDialog.Segment>()
+        val file = AiEffectDownloader.localFileOf(rule.pattern)
+        val bytes = if (file.exists() && file.length() > 0L) {
+            runCatching { file.readBytes() }.getOrNull()
+        } else null
+        if (bytes != null) {
+            val info = Mp3GainUtil.readGain(bytes)
+            val v = Mp3GainUtil.validate(bytes)
+            segments.add(
+                SoundEffectVolumeDialog.Segment(
+                    effectName = rule.pattern,
+                    indexInFile = 0,
+                    displayName = displayName,
+                    effectLabel = "",
+                    label = "音效一",
+                    originalBytes = bytes,
+                    supported = v.ok,
+                    reason = v.reason,
+                    currentGain = info.current,
+                    audioFile = file
+                )
+            )
+        }
+        SoundEffectVolumeDialog(
+            activity = this,
+            sourceSegments = segments,
+            onPickAudios = {},
+            onSave = { states -> saveVolumes(states) }
+        ).show()
+    }
+
+    /** 点「保存」才落盘：按音效名分组，应用删除、音量修改与新增，再写回 JSON。 */
     private fun saveVolumes(states: List<SoundEffectVolumeDialog.SegmentState>) {
         if (states.isEmpty()) {
             toastOnUi("没有可保存的音效")
             return
         }
-        showLoading("正在保存音量…")
+        val hasJsonFiles = states.any { it.segment.audioFile == null }
+        showLoading(if (hasJsonFiles) "正在保存音效文件…" else "正在保存音量…")
         lifecycleScope.launch {
             val errors = withContext(IO) {
                 val errs = ArrayList<String>()
@@ -486,7 +545,9 @@ class SoundEffectRuleActivity :
                     val file = st.segment.audioFile ?: return@forEach
                     writeAiEffectMp3(file, st.bytes)?.let { errs.add("${file.name}: $it") }
                 }
-                // 前三种（base64 JSON）：按音效名分组，放回 audios 并保留 currentIndex
+                // 前三种（base64 JSON）：按弹窗当前显示顺序重写 audios，删除项已被弹窗过滤。
+                // 段对象带着自己的 label 移动，所以未保存时「音效六」拖到最上面仍叫「音效六」；
+                // 保存后数组顺序改变，下次打开会重新按 index 编号为音效一、音效二……
                 states.filter { it.segment.audioFile == null }
                     .groupBy { it.segment.effectName }
                     .forEach { (name, list) ->
@@ -495,20 +556,24 @@ class SoundEffectRuleActivity :
                             errs.add(name)
                             return@forEach
                         }
-                        val newAudios = json.audios.toMutableList()
-                        list.forEach { st ->
-                            if (st.segment.indexInFile < newAudios.size) {
-                                newAudios[st.segment.indexInFile] = st.bytes
-                            }
+                        val orderedAudios = list.map { it.bytes }.toMutableList()
+                        // 尽量保持原来 currentIndex 指向的那一段仍然是下一段要播的音频
+                        val anchorState = list.firstOrNull {
+                            !it.segment.isNew && it.segment.indexInFile == json.currentIndex
                         }
-                        SoundEffectFileManager.saveAudioJson(name, json.currentIndex, newAudios)
+                        val newIndex = when {
+                            orderedAudios.isEmpty() -> 0
+                            anchorState != null -> list.indexOf(anchorState).coerceIn(0, orderedAudios.lastIndex)
+                            else -> json.currentIndex.coerceIn(0, orderedAudios.lastIndex)
+                        }
+                        SoundEffectFileManager.saveAudioJson(name, newIndex, orderedAudios)
                             ?.let { errs.add("$name: $it") }
                     }
                 errs
             }
             hideLoading()
             if (errors.isEmpty()) {
-                toastOnUi("音量已保存")
+                toastOnUi(if (hasJsonFiles) "音效文件已保存" else "音量已保存")
             } else {
                 toastOnUi("保存失败：${errors.joinToString("、")}")
             }
@@ -784,6 +849,14 @@ class SoundEffectRuleActivity :
 
     override fun onGroupAddRule(groupId: Long) = startEdit(null, groupId)
 
+    override fun onGroupExportClipboard(groupId: Long) {
+        val gwr = findGroup(groupId) ?: return
+        exportToClipboard(
+            "${SoundEffectRuleManager.modeTitle(viewModel.mode)} · ${gwr.group.name}",
+            listOf(gwr)
+        )
+    }
+
     override fun onDeleteGroup(groupId: Long) {
         val gwr = findGroup(groupId) ?: return
         alert("删除分组", "删除分组「${gwr.group.name}」及其中的 ${gwr.list.size} 条规则？") {
@@ -952,15 +1025,100 @@ class SoundEffectRuleActivity :
         }
     }
 
-    private fun confirmImport(parsed: List<SoundEffectGroupWithRules>) {
+    /**
+     * 导入前先选方式：追加到末尾（保留现有）或覆盖当前分类的全部规则。
+     */
+    private fun showImportModeDialog(
+        parsed: List<SoundEffectGroupWithRules>,
+        source: String
+    ) {
+        if (parsed.isEmpty()) {
+            toastOnUi("没有可导入的分组")
+            return
+        }
         val count = parsed.sumOf { it.list.size }
-        alert("导入规则", "将用导入的 ${parsed.size} 个分组、${count} 条规则覆盖当前的规则，是否继续？") {
-            noButton()
-            yesButton {
-                viewModel.replaceAll(parsed)
-                adapter.clearSelection()
-                onDataChanged()
+        // 不能同时传 message 和 items：AppCompat 1.7.1 的 AlertController 在 message 非空时
+        // 不会把 setItems 的 ListView 挂进对话框，列表项会完全不显示。信息只能放在标题里。
+        alert("$source：${parsed.size} 组 / $count 条 · 选择导入方式") {
+            items(listOf("追加到当前分组末尾（保留现有）", "覆盖当前所有分组")) { _, index ->
+                applyImport(parsed, append = index == 0)
             }
+            cancelButton()
+        }
+    }
+
+    private fun applyImport(parsed: List<SoundEffectGroupWithRules>, append: Boolean) {
+        if (append) viewModel.appendGroups(parsed) else viewModel.replaceAll(parsed)
+        adapter.clearSelection()
+        onDataChanged()
+        toastOnUi(
+            if (append) "已在末尾追加 ${parsed.size} 个分组，可拖动调整顺序"
+            else "已覆盖当前规则"
+        )
+    }
+
+    /** 右上角：从临时内存导入。只有一份时跳过选择，直接问导入方式 */
+    private fun importFromClipboard() {
+        val entries = SoundEffectClipboard.all()
+        if (entries.isEmpty()) {
+            toastOnUi("临时内存为空，请先导出规则或分组")
+            return
+        }
+        if (entries.size == 1) {
+            showImportModeDialog(entries[0].groups, "临时内存「${entries[0].label}」")
+            return
+        }
+        alert("从临时内存导入（共 ${entries.size} 份）") {
+            items(entries.map { it.summary() }) { _, index ->
+                val entry = entries[index]
+                showImportModeDialog(entry.groups, "临时内存「${entry.label}」")
+            }
+            neutralButton("管理临时内存") { manageClipboard() }
+            cancelButton()
+        }
+    }
+
+    /** 导出当前列表或某个分组到临时内存，供其它分类导入 */
+    private fun exportToClipboard(label: String, groups: List<SoundEffectGroupWithRules>) {
+        if (groups.isEmpty()) {
+            toastOnUi("没有可导出的内容")
+            return
+        }
+        val count = groups.sumOf { it.list.size }
+        lifecycleScope.launch(IO) {
+            SoundEffectClipboard.add(label, groups)
+            withContext(Dispatchers.Main) {
+                toastOnUi("已导出到临时内存：$label（${groups.size} 组 / $count 条）")
+            }
+        }
+    }
+
+    /** 删除单份或清空临时内存 */
+    private fun manageClipboard() {
+        val entries = SoundEffectClipboard.all()
+        if (entries.isEmpty()) {
+            toastOnUi("临时内存为空")
+            return
+        }
+        alert("管理临时内存（${entries.size}/${SoundEffectClipboard.MAX_ENTRIES} 份）") {
+            items(entries.map { it.summary() }) { _, index ->
+                val entry = entries[index]
+                alert("删除暂存", "删除「${entry.label}」？") {
+                    yesButton {
+                        lifecycleScope.launch(IO) { SoundEffectClipboard.remove(entry.id) }
+                    }
+                    noButton()
+                }
+            }
+            neutralButton("清空全部") {
+                alert("清空临时内存", "确定清空全部 ${entries.size} 份暂存？") {
+                    yesButton {
+                        lifecycleScope.launch(IO) { SoundEffectClipboard.clear() }
+                    }
+                    noButton()
+                }
+            }
+            cancelButton()
         }
     }
 
