@@ -67,6 +67,7 @@ class SoundEffectRuleActivity :
     }
 
     private var busy = false
+    private var targetAiHandled = false
 
     private val editRule =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -157,7 +158,11 @@ class SoundEffectRuleActivity :
         initSearchView()
         initSelectActionView()
         initModeToggle()
-        prepare()
+        if (intent.getStringExtra(EXTRA_MODE) == SoundEffectRuleManager.MODE_AI) {
+            switchMode(SoundEffectRuleManager.MODE_AI, onSwitched = ::openTargetAiFromIntent)
+        } else {
+            prepare()
+        }
     }
 
     // ---------------- 初始化 ----------------
@@ -213,7 +218,7 @@ class SoundEffectRuleActivity :
         )
     }
 
-    private fun switchMode(newMode: String) {
+    private fun switchMode(newMode: String, onSwitched: (() -> Unit)? = null) {
         if (busy) {
             revertToggle()
             return
@@ -226,8 +231,10 @@ class SoundEffectRuleActivity :
                 invalidateOptionsMenu()
                 adapter.clearSelection()
                 searchView.setQuery("", false)
+                binding.rgMode.check(checkedIdOfMode(viewModel.mode))
                 upPathView()
                 refreshList(keepExpanded = false)
+                onSwitched?.invoke()
             }
         }
         // 改动已即时落盘；只是切换/浏览（没改过东西）时不要陪写一次文件
@@ -596,6 +603,25 @@ class SoundEffectRuleActivity :
             AppLog.put("[音效文件] AI音效写入失败：${e.message}", e)
             e.message ?: "保存失败"
         }
+    }
+
+    /** 从阅读页 AI 音效标记跳转过来时，自动打开对应 AI 条目的编辑弹窗。 */
+    private fun openTargetAiFromIntent() {
+        if (targetAiHandled) return
+        val targetPath = intent.getStringExtra(EXTRA_TARGET_AI_PATH).orEmpty()
+        val targetName = intent.getStringExtra(EXTRA_TARGET_AI_NAME).orEmpty()
+        if (targetPath.isBlank() && targetName.isBlank()) return
+        targetAiHandled = true
+
+        val rule = viewModel.data.flatMap { it.list }.firstOrNull { candidate ->
+            (targetPath.isNotBlank() && candidate.pattern == targetPath) ||
+                (targetName.isNotBlank() && candidate.name == targetName)
+        }
+        if (rule == null) {
+            toastOnUi("没有找到对应的 AI 音效条目")
+            return
+        }
+        showRenameAiSoundDialog(rule)
     }
 
     // ---------------- AI 音效改名 ----------------
@@ -1139,5 +1165,10 @@ class SoundEffectRuleActivity :
     companion object {
         /** 选择音频文件时使用的 MIME，放开所有音频格式 */
         private const val AUDIO_MIME = "audio/*"
+
+        /** 阅读页音效标记跳转：模式、AI 音效名、AI 音效路径 */
+        const val EXTRA_MODE = "extraMode"
+        const val EXTRA_TARGET_AI_NAME = "extraTargetAiName"
+        const val EXTRA_TARGET_AI_PATH = "extraTargetAiPath"
     }
 }

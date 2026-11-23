@@ -255,12 +255,6 @@ abstract class BaseReadAloudService : BaseService(),
             val mode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
                 AppConfig.getEffectiveSoundEffectMode(it)
             } ?: AppConfig.soundEffectMode
-            if (mode == "off") return text
-
-            val jsonFileName = if (mode == "normal") "ttsrv-replaces5.json" else "ttsrv-replaces3.json"
-            val file = java.io.File(io.legado.app.help.EngineDataDir.baseDir() + jsonFileName)
-            val downloadUrl = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/$jsonFileName?download=true"
-            val rules = getSoundEffectRules(file, downloadUrl) ?: return text
 
             // 短段落补上文，原文两段之间是换行，这里换成衔接符，便于规则识别与删除
             val withContext = prevText.isNotBlank() && text.length < MIN_MATCH_CHARS
@@ -275,21 +269,22 @@ abstract class BaseReadAloudService : BaseService(),
             return try {
                 val hasEffects = soundEffectPattern.containsMatchIn(source)
                 var result = source
-                for (rule in rules) {
-                    if (rule.isRegex && rule.regex == null) {
-                        // 正则编译失败：保持原有行为，跳过该条
-                        continue
-                    }
-                    try {
-                        result = if (rule.regex != null) {
-                            rule.regex.replace(result, rule.replacement)
-                        } else {
-                            result.replace(rule.pattern, rule.replacement)
-                        }
-                    } catch (e: Exception) {
-                        AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message} pattern=${rule.pattern}")
-                    }
+
+                // 普通/全部音效按模式执行；off 与 AI 模式不执行这组正则规则
+                val mainFileName = when (mode) {
+                    "normal" -> "ttsrv-replaces5.json"
+                    "all" -> "ttsrv-replaces3.json"
+                    else -> null
                 }
+                if (mainFileName != null) {
+                    loadSoundEffectRules(mainFileName)?.let { result = applyCompiledRules(result, it) }
+                }
+
+                // 衔接音效始终在前面的规则替换完成后再执行，不和音效开关绑定
+                loadSoundEffectRules("ttsrv-replaces4.json")?.let {
+                    result = applyCompiledRules(result, it)
+                }
+
                 // 只有"替换后确实配出了音效"才值得记一条：
                 // 规则跑完但没配上音效是常态，每段落打一条汇总会把有用的日志全淹掉
                 val nowHasEffects = soundEffectPattern.containsMatchIn(result)
@@ -305,6 +300,29 @@ abstract class BaseReadAloudService : BaseService(),
             }
         }
 
+        private fun loadSoundEffectRules(fileName: String): List<CompiledRule>? {
+            val file = java.io.File(io.legado.app.help.EngineDataDir.baseDir() + fileName)
+            val downloadUrl = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/$fileName?download=true"
+            return getSoundEffectRules(file, downloadUrl)
+        }
+
+        private fun applyCompiledRules(input: String, rules: List<CompiledRule>): String {
+            var result = input
+            for (rule in rules) {
+                if (rule.isRegex && rule.regex == null) continue
+                try {
+                    result = if (rule.regex != null) {
+                        rule.regex.replace(result, rule.replacement)
+                    } else {
+                        result.replace(rule.pattern, rule.replacement)
+                    }
+                } catch (e: Exception) {
+                    AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message} pattern=${rule.pattern}")
+                }
+            }
+            return result
+        }
+
         /**
          * 外部（音效规则管理界面）改写规则文件后调用，强制丢弃已编译的规则缓存，
          * 使下一次朗读重新读取并编译规则文件。
@@ -315,7 +333,7 @@ abstract class BaseReadAloudService : BaseService(),
         @JvmStatic
         fun invalidateSoundEffectRuleCache() {
             synchronized(ruleCacheLock) {
-                ruleCache = null
+                ruleCaches.clear()
             }
             AppLog.put("[ttsrv] 规则缓存已失效，下次朗读将重新加载")
         }
@@ -348,7 +366,7 @@ abstract class BaseReadAloudService : BaseService(),
         )
 
         private val ruleCacheLock = Any()
-        private var ruleCache: RuleCache? = null
+        private val ruleCaches = HashMap<String, RuleCache>()
 
         /**
          * 获取当前生效的音效规则集（已按 order 排序、已完成正则编译）。
@@ -365,7 +383,7 @@ abstract class BaseReadAloudService : BaseService(),
                 val lastModified = file.lastModified()
                 val size = file.length()
                 synchronized(ruleCacheLock) {
-                    val cached = ruleCache
+                    val cached = ruleCaches[path]
                     if (cached != null && cached.path == path
                         && cached.lastModified == lastModified && cached.size == size
                     ) {
@@ -385,7 +403,7 @@ abstract class BaseReadAloudService : BaseService(),
             val lastModified = if (file.exists()) file.lastModified() else 0L
             val size = if (file.exists()) file.length() else raw.length.toLong()
             synchronized(ruleCacheLock) {
-                ruleCache = RuleCache(path, lastModified, size, rules)
+                ruleCaches[path] = RuleCache(path, lastModified, size, rules)
             }
             AppLog.put("[ttsrv] 规则已编译缓存: ${rules.size}条, 文件=${file.name}")
             return rules
@@ -1816,9 +1834,14 @@ abstract class BaseReadAloudService : BaseService(),
         if (aiEffectCacheKey == key) return
         aiEffectCache.clear()
         aiEffectCacheKey = key
+        AiEffectIndex.ensureLoaded()
+        val enabledPaths = AiEffectIndex.allEntries()
+            .filter { it.isEnabled }
+            .mapTo(HashSet()) { it.path }
         val records = AiEffectStore.load(bookUrl, chapterIndex)
         records.forEach { r ->
-            if (r.effects.isNotEmpty()) aiEffectCache[r.paraIndex] = r.effects
+            val enabledEffects = r.effects.filter { it.path.isBlank() || enabledPaths.contains(it.path) }
+            if (enabledEffects.isNotEmpty()) aiEffectCache[r.paraIndex] = enabledEffects
         }
         if (records.isNotEmpty()) {
             AppLog.put("[AI音效] 载入本章记录 ${records.size} 段")

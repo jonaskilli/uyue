@@ -123,6 +123,7 @@ object SoundEffectRuleManager {
                         name = entry.name,
                         // pattern 存相对路径，供试听与保存时还原
                         pattern = entry.path,
+                        isEnabled = entry.isEnabled,
                         // AI 模式下 sampleText（正则测试文本）空着没用，借它携带检索关键词，
                         // 保存时再取回来，避免用户改一条就把全部关键词冲掉
                         sampleText = entry.keywords.joinToString("|")
@@ -152,7 +153,16 @@ object SoundEffectRuleManager {
                 val path = if (prefix.isEmpty()) "$name.mp3" else "$prefix/$name.mp3"
                 val parts = path.split('/')
                 if (parts.size < 3) return@forEach
-                entries.add(AiEffectIndex.Entry(name, path, parts[0], parts[1], keywords))
+                entries.add(
+                    AiEffectIndex.Entry(
+                        name = name,
+                        path = path,
+                        category = parts[0],
+                        sub = parts[1],
+                        keywords = keywords,
+                        isEnabled = rule.isEnabled
+                    )
+                )
             }
         }
         val error = AiEffectIndex.replaceAll(entries)
@@ -380,6 +390,38 @@ object SoundEffectRuleManager {
             AppLog.put("[音效规则] 保存失败：${e.message}", e)
             "保存失败：${e.message}"
         }
+    }
+
+    /**
+     * 更新一条规则并写回对应模式的文件。
+     * 供阅读页“音效标记 → 规则编辑”直跳链路复用，避免重复实现管理页的保存逻辑。
+     */
+    fun updateRule(
+        mode: String,
+        rule: SoundEffectRule,
+        groupId: Long
+    ): String? {
+        val data = load(mode).toMutableList()
+        if (data.isEmpty()) {
+            data.add(
+                SoundEffectGroupWithRules(
+                    SoundEffectRuleGroup(
+                        id = newGroupId(emptyList()),
+                        name = DEFAULT_GROUP_NAME
+                    ),
+                    mutableListOf()
+                )
+            )
+        }
+        val group = data.find { it.group.id == groupId } ?: data.first()
+        val index = group.list.indexOfFirst { it.id == rule.id }
+        if (index >= 0) {
+            group.list[index] = rule
+        } else {
+            group.list.add(rule)
+            renumberRules(group.list)
+        }
+        return save(mode, data)
     }
 
     /** 组内规则重新按 0..n 编号 */

@@ -174,7 +174,7 @@
                     android:enabled="false"
                     android:gravity="top"
                     android:minLines="3"
-                    android:textColor="@color/secondaryText"
+                    android:textColor="@color/primaryText"
                     tools:ignore="SpeakableTextPresentCheck,TouchTargetSizeCheck" />
             </io.legado.app.ui.widget.text.TextInputLayout>
 

@@ -565,6 +565,14 @@ object HttpTtsAudioCache {
                 } else {
                     emptyMap()
                 }
+                val enabledAiPaths = if (withAiEffects) {
+                    AiEffectIndex.ensureLoaded()
+                    AiEffectIndex.allEntries()
+                        .filter { it.isEnabled }
+                        .mapTo(HashSet()) { it.path }
+                } else {
+                    emptySet()
+                }
                 val aiEffectPaths = mutableSetOf<String>()
                 val segInfos = mutableListOf<AudioConcatUtil.SegmentInfo>()
                 segments.forEachIndexed { index, text ->
@@ -590,7 +598,7 @@ object HttpTtsAudioCache {
                     // AI 音效：按净字数比例换算偏移，与朗读时的位置序号/at 一致
                     if (withAiEffects) {
                         aiEffectRecords[index]?.effects?.forEach { pick ->
-                            if (pick.path.isBlank()) return@forEach
+                            if (pick.path.isBlank() || pick.path !in enabledAiPaths) return@forEach
                             val ratio = AiEffectAnalyzer.ratioOfPos(text, pick.pos, pick.at)
                             segEffects.add(
                                 AudioConcatUtil.SegmentEffect(
