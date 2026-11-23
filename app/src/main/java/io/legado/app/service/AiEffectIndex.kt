@@ -69,6 +69,9 @@ object AiEffectIndex {
      */
     private const val KEYWORD_SEP = '|'
 
+    /** 索引条目里的禁用前缀：`@disabled|正名|关键词…`，旧格式默认启用 */
+    private const val DISABLED_MARK = "@disabled"
+
     /**
      * 外部索引文件，位于音效库目录下。
      * **只要它存在就用它**，不联网、不覆盖，用户可在「音效规则管理」里自由编辑。
@@ -113,7 +116,8 @@ object AiEffectIndex {
         val path: String,
         val category: String,
         val sub: String,
-        val keywords: List<String> = emptyList()
+        val keywords: List<String> = emptyList(),
+        val isEnabled: Boolean = true
     )
 
     @Volatile
@@ -261,9 +265,11 @@ object AiEffectIndex {
         emptyMap()
     }
 
-    /** 条目序列化回索引里的字符串：`正名|关键词|关键词…`，无关键词时只有正名 */
-    private fun serialize(name: String, keywords: List<String>): String =
-        if (keywords.isEmpty()) name else name + "|" + keywords.joinToString("|")
+    /** 条目序列化回索引里的字符串：`正名|关键词|关键词…`，禁用项加 `@disabled|` 前缀 */
+    private fun serialize(name: String, keywords: List<String>, isEnabled: Boolean = true): String {
+        val body = if (keywords.isEmpty()) name else name + "|" + keywords.joinToString("|")
+        return if (isEnabled) body else "$DISABLED_MARK|$body"
+    }
 
     /** 从 assets 读出内置索引，导出到外部文件并加载 */
     private fun loadFromAssets(file: File) {
@@ -365,13 +371,18 @@ object AiEffectIndex {
                 for (i in 0 until arr.length()) {
                     val rawName = arr.optString(i).trim()
                     if (rawName.isEmpty()) continue
-                    val parts = rawName.split(KEYWORD_SEP)
-                    val name = parts[0].trim()
+                    var parts = rawName.split(KEYWORD_SEP)
+                    var isEnabled = true
+                    if (parts.firstOrNull()?.trim() == DISABLED_MARK) {
+                        isEnabled = false
+                        parts = parts.drop(1)
+                    }
+                    val name = parts.firstOrNull()?.trim().orEmpty()
                     if (name.isEmpty()) continue
                     val keywords = parts.drop(1)
                         .map { it.trim() }
                         .filter { it.isNotEmpty() }
-                    val entry = Entry(name, "$cat/$sub/$name.mp3", cat, sub, keywords)
+                    val entry = Entry(name, "$cat/$sub/$name.mp3", cat, sub, keywords, isEnabled)
                     list.add(entry)
                 }
             }
@@ -379,10 +390,10 @@ object AiEffectIndex {
         return list
     }
 
-    /** 按音效名精确查找，未加载或找不到返回 null */
+    /** 按音效名精确查找，未加载、已禁用或找不到返回 null */
     fun findByName(name: String): Entry? {
         if (!loaded) return null
-        return byName[name.trim()]
+        return byName[name.trim()]?.takeIf { it.isEnabled }
     }
 
     /** 所有音效条目，供界面展示与编辑 */
@@ -400,9 +411,9 @@ object AiEffectIndex {
             if (!seen.add("${e.category}/${e.sub}/${e.name}")) continue
             val subs = grouped.getOrPut(e.category) { LinkedHashMap() }
             val names = subs.getOrPut(e.sub) { ArrayList() }
-            // 必须把关键词一起写回，否则用户在界面里改一条再保存，
-            // 四千多条音效的关键词会被整批冲掉
-            names.add(serialize(e.name, e.keywords))
+            // 必须把关键词和启用状态一起写回，否则用户在界面里改一条再保存，
+            // 四千多条音效的关键词/禁用项会被整批冲掉
+            names.add(serialize(e.name, e.keywords, e.isEnabled))
         }
         val obj = JSONObject()
         grouped.forEach { (cat, subs) ->
@@ -442,6 +453,7 @@ object AiEffectIndex {
         if (kw.isEmpty()) return emptyList()
         val hits = ArrayList<Pair<Entry, Int>>()
         for (e in entries) {
+            if (!e.isEnabled) continue
             val s = scoreOf(e, kw)
             if (s > 0) hits.add(e to s)
         }

@@ -39,12 +39,13 @@ import java.util.zip.ZipInputStream
 /**
  * 下载音效和音乐对话框。
  *
- * 三个下载项，全部来自魔搭仓库 mingwuyan/bdyinxiao-ttsrv-backup（zip 整包，下载后自动解压归位）：
+ * 四个下载项，全部来自魔搭仓库 mingwuyan/bdyinxiao-ttsrv-backup（zip 整包，下载后自动解压归位）：
  *  1. 背景音乐 —— 背景音乐.zip：下载前**必须**重新选择一个文件夹（避免新下载内容和
  *     原文件夹里已有的内容混在一起），解压到所选文件夹（mp3 + 背景音乐的关键词.json 等）；
  *  2. 全部音效 —— 全部音效.zip：根目录的 ttsrv-replaces*.json 规则文件 → 当前引擎
  *     数据目录（EngineDataDir），bendiyinxiao2/ 下的音效 json → chajian/bendiyinxiao2/；
- *  3. AI广播剧音效库 —— AI广播剧音效库.zip：zip 内 广播剧音效库/ 前缀去掉后整个解压到
+ *  3. 全部音效旧版 —— 全部音效旧版.zip：与「全部音效」相同的解压规则，只是使用更新前的旧包；
+ *  4. AI广播剧音效库 —— AI广播剧音效库.zip：zip 内 广播剧音效库/ 前缀去掉后整个解压到
  *     音效库目录（AppConfig.aiEffectLocalDir），根目录的索引 json 额外落一份为
  *     ai_effect_index_kw.json（App 读取索引用的文件名），完成后刷新索引缓存。
  */
@@ -91,6 +92,7 @@ class BgmDownloadDialog : BaseDialogFragment(R.layout.dialog_bgm_download) {
         val target = when {
             binding.rbBgm.isChecked -> TARGET_BGM
             binding.rbAllEffect.isChecked -> TARGET_ALL_SFX
+            binding.rbAllEffectOld.isChecked -> TARGET_ALL_SFX_OLD
             else -> TARGET_AI_LIB
         }
         // 下载前提示：会覆盖原有文件，须用户点确定才继续
@@ -110,7 +112,7 @@ class BgmDownloadDialog : BaseDialogFragment(R.layout.dialog_bgm_download) {
                 showProgress("请先选择背景音乐保存文件夹...")
                 selectDir.launch { mode = HandleFileContract.DIR }
             }
-            TARGET_ALL_SFX -> startDownload(TARGET_ALL_SFX)
+            TARGET_ALL_SFX, TARGET_ALL_SFX_OLD -> startDownload(target)
             else -> startDownload(TARGET_AI_LIB)
         }
     }
@@ -139,6 +141,7 @@ class BgmDownloadDialog : BaseDialogFragment(R.layout.dialog_bgm_download) {
         val zipName = when (target) {
             TARGET_BGM -> "背景音乐.zip"
             TARGET_ALL_SFX -> "全部音效.zip"
+            TARGET_ALL_SFX_OLD -> "全部音效旧版.zip"
             else -> "AI广播剧音效库.zip"
         }
         setDownloading(true)
@@ -203,6 +206,7 @@ class BgmDownloadDialog : BaseDialogFragment(R.layout.dialog_bgm_download) {
             return when (target) {
                 TARGET_BGM -> unzipToBgm(tempFile)
                 TARGET_ALL_SFX -> unzipToSfxDirs(tempFile)
+                TARGET_ALL_SFX_OLD -> unzipToSfxDirs(tempFile, "全部音效旧版")
                 else -> unzipToAiEffectDir(tempFile)
             }
         } finally {
@@ -229,8 +233,8 @@ class BgmDownloadDialog : BaseDialogFragment(R.layout.dialog_bgm_download) {
             "背景音乐已切换为该文件夹：${describePath(bgmPath)}"
     }
 
-    /** 全部音效：规则文件 → 引擎数据目录；音效 json → bendiyinxiao2 */
-    private suspend fun unzipToSfxDirs(zipFile: File): String {
+    /** 全部音效（含旧版）：规则文件 → 引擎数据目录；音效 json → bendiyinxiao2 */
+    private suspend fun unzipToSfxDirs(zipFile: File, label: String = "全部音效"): String {
         val sfxDir = File(BaseReadAloudService.SOUND_EFFECT_DIR)
         if (!sfxDir.exists()) sfxDir.mkdirs()
         val ruleDir = File(EngineDataDir.baseDir())
@@ -254,7 +258,7 @@ class BgmDownloadDialog : BaseDialogFragment(R.layout.dialog_bgm_download) {
             if (isSfx) sfxCount++
             updateProgress("正在解压：$name")
         }
-        return "全部音效下载完成：规则文件 $ruleCount 个 → ${ruleDir.absolutePath}\n" +
+        return "${label}下载完成：规则文件 $ruleCount 个 → ${ruleDir.absolutePath}\n" +
             "音效文件 $sfxCount 个 → ${sfxDir.absolutePath}"
     }
 
@@ -377,5 +381,6 @@ class BgmDownloadDialog : BaseDialogFragment(R.layout.dialog_bgm_download) {
         private const val TARGET_BGM = 0
         private const val TARGET_ALL_SFX = 1
         private const val TARGET_AI_LIB = 2
+        private const val TARGET_ALL_SFX_OLD = 3
     }
 }

@@ -85,6 +85,8 @@ import io.legado.app.model.AiImageGenerator
 import io.legado.app.model.BookCover
 import io.legado.app.model.ReadAloud
 import io.legado.app.model.ReadBook
+import io.legado.app.service.AiEffectDownloader
+import io.legado.app.service.AiEffectIndex
 import io.legado.app.model.analyzeRule.AnalyzeRule
 import io.legado.app.model.analyzeRule.AnalyzeRule.Companion.setChapter
 import io.legado.app.model.analyzeRule.AnalyzeRule.Companion.setCoroutineContext
@@ -119,6 +121,15 @@ import io.legado.app.ui.book.read.config.FullscreenAiImageDialog
 import io.legado.app.ui.book.read.config.MoreConfigDialog
 import io.legado.app.ui.book.read.config.ReadAloudDialog
 import io.legado.app.ui.book.read.config.ReadStyleDialog
+import io.legado.app.ui.book.read.config.SoundEffectPreviewDialog
+import io.legado.app.ui.soundeffect.SoundEffectGroupWithRules
+import io.legado.app.ui.soundeffect.SoundEffectRule
+import io.legado.app.ui.soundeffect.SoundEffectRuleEditActivity
+import io.legado.app.ui.soundeffect.SoundEffectRuleEditActivity.Companion.EXTRA_SOURCE_MODE
+import io.legado.app.ui.soundeffect.SoundEffectRuleEditViewModel.Companion.EXTRA_GROUP_ID
+import io.legado.app.ui.soundeffect.SoundEffectRuleEditViewModel.Companion.EXTRA_RULE
+import io.legado.app.ui.soundeffect.SoundEffectRuleManager
+import io.legado.app.ui.soundeffect.SoundEffectPlayer
 import io.legado.app.ui.book.read.config.SpeakEngineDialog
 import io.legado.app.ui.book.read.config.TipConfigDialog.Companion.TIP_COLOR
 import io.legado.app.ui.book.read.config.TipConfigDialog.Companion.TIP_DIVIDER_COLOR
@@ -225,6 +236,28 @@ class ReadBookActivity : BaseReadBookActivity(),
                 viewModel.replaceRuleChanged()
             }
         }
+
+    private var pendingSoundEffectMode: String? = null
+    private var soundEffectRulePickerDialog: androidx.appcompat.app.AlertDialog? = null
+
+    private val soundEffectRuleEditActivity =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode != RESULT_OK) return@registerForActivityResult
+            val data = result.data ?: return@registerForActivityResult
+            @Suppress("DEPRECATION")
+            val rule = data.getParcelableExtra<SoundEffectRule>(EXTRA_RULE)
+                ?: return@registerForActivityResult
+            val groupId = data.getLongExtra(EXTRA_GROUP_ID, -1L)
+            val mode = data.getStringExtra(EXTRA_SOURCE_MODE) ?: pendingSoundEffectMode ?: return@registerForActivityResult
+            pendingSoundEffectMode = null
+            lifecycleScope.launch(IO) {
+                val error = SoundEffectRuleManager.updateRule(mode, rule, groupId)
+                withContext(Main) {
+                    if (error == null) toastOnUi("音效规则已保存") else toastOnUi(error)
+                }
+            }
+        }
+
     private val searchContentActivity =
         registerForActivityResult(StartActivityContract(SearchContentActivity::class.java)) {
             val data = it.data ?: return@registerForActivityResult
@@ -1035,6 +1068,59 @@ class ReadBookActivity : BaseReadBookActivity(),
                 return true
             }
 
+            R.id.menu_sound_effect -> {
+                val paragraphs = binding.readView.getSelectedParagraphs()
+                val first = paragraphs.firstOrNull()
+                val text = first?.second ?: selectedText
+
+                // AI 音效记录按朗读服务的 contentList 下标保存，不能用排版段落号。
+                // 这里按朗读服务的同一套规则重建段落列表，再用文本反查真实下标。
+                val readAloudByPage = getPrefBoolean(PreferKey.readAloudByPage)
+                val speakLines = ReadBook.curTextChapter
+                    ?.getNeedReadAloud(0, readAloudByPage, 0)
+                    ?.split("\n")
+                    ?.filter { it.isNotEmpty() }
+                    .orEmpty()
+                val targetText = normalizeSpeakParagraph(text)
+                var speakIndex = speakLines.indexOfFirst {
+                    normalizeSpeakParagraph(it) == targetText
+                }
+                // 按页朗读时，contentList 里可能是一整页而不是单段；
+                // 精确相等失败时退化为包含匹配，取长度最接近的一条。
+                if (speakIndex < 0 && targetText.isNotBlank()) {
+                    speakIndex = speakLines.mapIndexedNotNull { index, line ->
+                        val normalized = normalizeSpeakParagraph(line)
+                        if (normalized.contains(targetText) || targetText.contains(normalized)) {
+                            index to kotlin.math.abs(normalized.length - targetText.length)
+                        } else {
+                            null
+                        }
+                    }.minByOrNull { it.second }?.first ?: -1
+                }
+                val prevText = speakLines.getOrNull(speakIndex - 1).orEmpty()
+                val bookUrl = ReadBook.book?.bookUrl.orEmpty()
+                val mode = AppConfig.getEffectiveSoundEffectMode(bookUrl)
+                showDialogFragment(
+                    SoundEffectPreviewDialog.create(
+                        text = text,
+                        prevText = prevText,
+                        mode = mode,
+                        bookUrl = bookUrl,
+                        chapterIndex = ReadBook.durChapterIndex,
+                        paraIndex = speakIndex
+                    ).apply {
+                        onEditRule = { effectName, marker, markerIndex, isAiEffect, effectPath ->
+                            if (isAiEffect) {
+                                openAiSoundEditor(effectName, effectPath)
+                            } else {
+                                openSoundEffectRuleEditor(effectName, marker, markerIndex, mode, text)
+                            }
+                        }
+                    }
+                )
+                return true
+            }
+
             R.id.menu_aloud -> when (AppConfig.contentSelectSpeakMod) {
                 1 -> lifecycleScope.launch {
                     binding.readView.aloudStartSelect()
@@ -1084,6 +1170,285 @@ class ReadBookActivity : BaseReadBookActivity(),
             }
         }
         return false
+    }
+
+    /** 朗读段落与排版段落的缩进不同，反查段落下标时统一忽略空白字符。 */
+    private fun normalizeSpeakParagraph(text: String): String =
+        text.filter { !it.isWhitespace() && it != '\u3000' }
+
+    private data class SoundEffectRuleCandidate(
+        val mode: String,
+        val group: SoundEffectGroupWithRules,
+        val rule: SoundEffectRule
+    )
+
+    /** AI 音效标记直接在阅读页打开编辑弹窗，不经过音效规则管理界面。 */
+    private fun openAiSoundEditor(effectName: String, effectPath: String) {
+        lifecycleScope.launch(IO) {
+            val data = runCatching {
+                AiEffectIndex.ensureLoaded()
+                SoundEffectRuleManager.loadAiIndex()
+            }.getOrElse { error ->
+                withContext(Main) {
+                    toastOnUi("读取 AI 音效索引失败：${error.message}")
+                }
+                return@launch
+            }
+            val group = data.firstOrNull { gwr ->
+                gwr.list.any { it.pattern == effectPath || it.name == effectName }
+            }
+            val rule = group?.list?.firstOrNull {
+                it.pattern == effectPath || it.name == effectName
+            }
+            withContext(Main) {
+                if (group == null || rule == null) {
+                    toastOnUi("没有找到对应的 AI 音效条目")
+                    return@withContext
+                }
+                showAiSoundEditDialog(data, group, rule)
+            }
+        }
+    }
+
+    private fun showAiSoundEditDialog(
+        data: MutableList<SoundEffectGroupWithRules>,
+        group: SoundEffectGroupWithRules,
+        rule: SoundEffectRule
+    ) {
+        val oldPath = rule.pattern
+        val oldKeywords = SoundEffectRuleManager.parseAiKeywords(rule.sampleText)
+        val oldText = SoundEffectRuleManager.joinAiName(rule.name, oldKeywords)
+        val input = android.widget.EditText(this).apply {
+            setText(oldText)
+            setSelectAllOnFocus(true)
+            setSingleLine(false)
+            setMaxLines(3)
+            hint = "正名|关键词|关键词"
+        }
+        val playButton = android.widget.Button(this).apply {
+            text = "试听"
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = (12 * resources.displayMetrics.density).toInt() }
+            setOnClickListener {
+                SoundEffectPlayer.playAiEffect(oldPath) { error ->
+                    error?.let { toastOnUi(it) }
+                }
+            }
+        }
+        val enabledCheck = android.widget.CheckBox(this).apply {
+            text = "启用"
+            isChecked = rule.isEnabled
+        }
+        val actionRow = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(playButton)
+            addView(enabledCheck)
+        }
+        val padding = (16 * resources.displayMetrics.density).toInt()
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(padding, padding / 2, padding, 0)
+            addView(input)
+            addView(actionRow)
+        }
+
+        fun apply(newText: String, enabled: Boolean) {
+            if (newText.isBlank()) return
+            if (newText == oldText && enabled == rule.isEnabled) return
+            applyAiSoundEdit(data, group, rule, newText, enabled)
+        }
+
+        alert("AI音效（改名、关键词与启用）") {
+            customView { container }
+            neutralButton("重置为原名")
+            noButton()
+            yesButton {
+                apply(input.text?.toString()?.trim().orEmpty(), enabledCheck.isChecked)
+            }
+        }.apply {
+            getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
+                val original = oldPath.substringAfterLast('/').removeSuffix(".mp3")
+                if (original.isNotBlank()) {
+                    apply(
+                        SoundEffectRuleManager.joinAiName(original, oldKeywords),
+                        enabledCheck.isChecked
+                    )
+                }
+                dismiss()
+            }
+        }
+    }
+
+    private fun applyAiSoundEdit(
+        data: MutableList<SoundEffectGroupWithRules>,
+        group: SoundEffectGroupWithRules,
+        rule: SoundEffectRule,
+        rawText: String,
+        isEnabled: Boolean
+    ) {
+        val (rawName, keywords) = SoundEffectRuleManager.splitAiName(rawText)
+        if (rawName.isBlank()) {
+            toastOnUi("名字不能为空")
+            return
+        }
+        val safeName = rawName.replace(Regex("[/\\\\:*?\"<>|]"), "_")
+        val nameChanged = safeName != rule.name
+        val prefix = rule.pattern.substringBeforeLast('/', "")
+        val newPath = if (prefix.isEmpty()) "$safeName.mp3" else "$prefix/$safeName.mp3"
+
+        if (nameChanged && !AiEffectDownloader.localFileOf(rule.pattern).exists()) {
+            alert("无法改名") {
+                setMessage(
+                    "本地还没有这个音效的音频文件，无法改名。\n\n" +
+                        "请先试听把它下载到本地，再改名。只改关键词不受影响。"
+                )
+                noButton()
+                yesButton { }
+            }
+            return
+        }
+
+        lifecycleScope.launch(IO) {
+            val error = runCatching {
+                if (nameChanged) {
+                    val oldFile = AiEffectDownloader.localFileOf(rule.pattern)
+                    val newFile = AiEffectDownloader.localFileOf(newPath)
+                    if (oldFile.exists() && !newFile.exists()) {
+                        newFile.parentFile?.mkdirs()
+                        if (!oldFile.renameTo(newFile)) {
+                            oldFile.copyTo(newFile)
+                            oldFile.delete()
+                        }
+                    }
+                }
+                val index = group.list.indexOfFirst { it.id == rule.id }
+                if (index >= 0) {
+                    group.list[index] = rule.copy(
+                        name = safeName,
+                        pattern = newPath,
+                        isEnabled = isEnabled,
+                        sampleText = keywords.joinToString("|")
+                    )
+                }
+                SoundEffectRuleManager.saveAiIndex(data)
+            }.getOrElse { it.message ?: "保存失败" }
+            withContext(Main) {
+                if (error == null) toastOnUi("AI音效已保存") else toastOnUi("保存失败：$error")
+            }
+        }
+    }
+
+    /** 从音效标记预览直接打开对应规则编辑页，返回后由本页写回规则文件。 */
+    private fun openSoundEffectRuleEditor(
+        effectName: String,
+        marker: String,
+        markerIndex: Int,
+        mode: String,
+        testText: String
+    ) {
+        // 衔接音效始终在朗读时执行，所以反查规则也必须覆盖衔接文件，不能只看当前模式。
+        val searchModes = LinkedHashSet<String>().apply {
+            add(mode)
+            add(SoundEffectRuleManager.MODE_TRANSITION)
+            add(SoundEffectRuleManager.MODE_ALL)
+            add(SoundEffectRuleManager.MODE_NORMAL)
+        }.filter {
+            it == SoundEffectRuleManager.MODE_ALL ||
+                it == SoundEffectRuleManager.MODE_NORMAL ||
+                it == SoundEffectRuleManager.MODE_TRANSITION
+        }
+
+        val dataByMode = HashMap<String, MutableList<SoundEffectGroupWithRules>>()
+        val candidates = ArrayList<SoundEffectRuleCandidate>()
+        searchModes.forEach { searchMode ->
+            val data = SoundEffectRuleManager.load(searchMode)
+            if (data.isEmpty()) return@forEach
+            dataByMode[searchMode] = data
+            data.forEach { group ->
+                group.list.forEach { rule ->
+                    if (rule.replacement.contains(marker) ||
+                        rule.replacement.contains("($effectName)")
+                    ) {
+                        candidates.add(SoundEffectRuleCandidate(searchMode, group, rule))
+                    }
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            toastOnUi("没有找到生成「$effectName」的规则")
+            return
+        }
+
+        // 当前书实际启用的模式命中时直接用它，不再因为 all/normal 文件内容重复而弹选择。
+        // 只有当前模式没命中时，才按「衔接 → 全部 → 普通」回退查找。
+        val priorityModes = LinkedHashSet<String>().apply {
+            add(mode)
+            add(SoundEffectRuleManager.MODE_TRANSITION)
+            add(SoundEffectRuleManager.MODE_ALL)
+            add(SoundEffectRuleManager.MODE_NORMAL)
+        }.filter {
+            it == SoundEffectRuleManager.MODE_ALL ||
+                it == SoundEffectRuleManager.MODE_NORMAL ||
+                it == SoundEffectRuleManager.MODE_TRANSITION
+        }
+        val preferred = priorityModes.firstNotNullOfOrNull { preferredMode ->
+            candidates.filter { it.mode == preferredMode }.takeIf { it.isNotEmpty() }
+        }.orEmpty()
+        val sorted = preferred.sortedByDescending { it.rule.isEnabled }
+
+        fun launch(candidate: SoundEffectRuleCandidate) {
+            val data = dataByMode[candidate.mode].orEmpty()
+            pendingSoundEffectMode = candidate.mode
+            val prepared = candidate.rule.copyRule().apply { sampleText = testText }
+            soundEffectRuleEditActivity.launch(
+                SoundEffectRuleEditActivity.startIntent(
+                    context = this,
+                    rule = prepared,
+                    groupId = candidate.group.group.id,
+                    groupIds = data.map { it.group.id }.toLongArray(),
+                    groupNames = data.map { it.group.name }.toTypedArray(),
+                    targetMarker = marker,
+                    targetMarkerIndex = markerIndex,
+                    sourceMode = candidate.mode
+                )
+            )
+        }
+
+        if (sorted.size == 1) {
+            launch(sorted.first())
+            return
+        }
+        val labels = sorted.map { candidate ->
+            val ruleName = candidate.rule.name.ifBlank { candidate.rule.pattern }
+            "$ruleName（${SoundEffectRuleManager.modeTitle(candidate.mode)} / ${candidate.group.group.name}）"
+        }.toTypedArray()
+        soundEffectRulePickerDialog?.dismiss()
+        // 不用 setItems：AlertDialog 点击条目会自动关闭。
+        // 这里用自定义 ListView，点条目后只打开编辑页，不关弹窗，返回后可以继续选下一条。
+        val listView = android.widget.ListView(this).apply {
+            adapter = android.widget.ArrayAdapter(
+                this@ReadBookActivity,
+                android.R.layout.simple_list_item_1,
+                labels.toList()
+            )
+            dividerHeight = 1
+            setOnItemClickListener { _, _, position, _ ->
+                sorted.getOrNull(position)?.let { launch(it) }
+            }
+        }
+        val picker = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("选择规则：$effectName（${sorted.size} 条）")
+            .setView(listView)
+            .setNegativeButton("取消", null)
+            .create()
+        picker.setOnDismissListener {
+            if (soundEffectRulePickerDialog == picker) soundEffectRulePickerDialog = null
+        }
+        soundEffectRulePickerDialog = picker
+        picker.show()
     }
 
     /**

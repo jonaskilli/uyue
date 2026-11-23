@@ -49,6 +49,17 @@
             android:textSize="15sp" />
 
         <RadioButton
+            android:id="@+id/rbAllEffectOld"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="全部音效旧版"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp" />
+
+        <RadioButton
             android:id="@+id/rbAiEffect"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

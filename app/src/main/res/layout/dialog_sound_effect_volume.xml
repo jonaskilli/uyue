@@ -10,23 +10,19 @@
         android:id="@+id/tv_hint"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="调整倍数后点右侧播放按钮试听；只有点「保存」才会写回音效文件"
+        android:text="点播放试听；长按卡片可上下拖动排序；只有点「保存」才会写回音效文件"
         android:textColor="@color/primaryText"
         android:textSize="12sp"
         android:layout_marginBottom="8dp" />
 
-    <ScrollView
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rv_segments"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:fillViewport="true">
-
-        <LinearLayout
-            android:id="@+id/ll_segments"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical" />
-
-    </ScrollView>
+        android:clipToPadding="false"
+        android:paddingTop="4dp"
+        android:paddingBottom="8dp"
+        android:scrollbars="vertical" />
 
 </LinearLayout>

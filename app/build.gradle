@@ -377,17 +377,22 @@ dependencies {
     implementation('androidx.lifecycle:lifecycle-runtime-compose:2.8.7')
 
     // Ktor (for 混元太极 proxy server)
-    implementation('io.ktor:ktor-server-core:3.0.3')
-    implementation('io.ktor:ktor-server-cio:3.0.3')
-    implementation('io.ktor:ktor-server-content-negotiation:3.0.3')
-    implementation('io.ktor:ktor-server-cors:3.0.3')
-    implementation('io.ktor:ktor-server-status-pages:3.0.3')
-    implementation('io.ktor:ktor-server-call-logging:3.0.3')
-    implementation('io.ktor:ktor-serialization-kotlinx-json:3.0.3')
-    implementation('io.ktor:ktor-client-core:3.0.3')
-    implementation('io.ktor:ktor-client-cio:3.0.3')
-    implementation('io.ktor:ktor-client-content-negotiation:3.0.3')
-    implementation('io.ktor:ktor-client-websockets:3.0.3')
+    // 3.0.3 在 R8 release 包上有 KTOR-7298：embeddedServer 的 module lambda
+    // 经反射定位时 single() 命中多个候选，抛 "Array has more than one element"，
+    // 导致混元太极服务启动即失败、通知不弹、外部无法调用端口；debug 包不复现。
+    // 我方 11-12（e3981317）靠 keep 整个 ProxyServer 及其内部类绕过了同一根因，
+    // 但那是「压制」而非「根治」——上游 3.1.3 为官方修复，两法叠加最稳。
+    implementation('io.ktor:ktor-server-core:3.1.3')
+    implementation('io.ktor:ktor-server-cio:3.1.3')
+    implementation('io.ktor:ktor-server-content-negotiation:3.1.3')
+    implementation('io.ktor:ktor-server-cors:3.1.3')
+    implementation('io.ktor:ktor-server-status-pages:3.1.3')
+    implementation('io.ktor:ktor-server-call-logging:3.1.3')
+    implementation('io.ktor:ktor-serialization-kotlinx-json:3.1.3')
+    implementation('io.ktor:ktor-client-core:3.1.3')
+    implementation('io.ktor:ktor-client-cio:3.1.3')
+    implementation('io.ktor:ktor-client-content-negotiation:3.1.3')
+    implementation('io.ktor:ktor-client-websockets:3.1.3')
     implementation('org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3')
 
     // FFmpeg 精简包（shiguangyuedu 同款）：分片合并转封装 MP4（-c copy 不重编码），

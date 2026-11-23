@@ -255,12 +255,6 @@ abstract class BaseReadAloudService : BaseService(),
             val mode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
                 AppConfig.getEffectiveSoundEffectMode(it)
             } ?: AppConfig.soundEffectMode
-            if (mode == "off") return text
-
-            val jsonFileName = if (mode == "normal") "ttsrv-replaces5.json" else "ttsrv-replaces3.json"
-            val file = java.io.File(io.legado.app.help.EngineDataDir.baseDir() + jsonFileName)
-            val downloadUrl = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/$jsonFileName?download=true"
-            val rules = getSoundEffectRules(file, downloadUrl) ?: return text
 
             // 短段落补上文，原文两段之间是换行，这里换成衔接符，便于规则识别与删除
             val withContext = prevText.isNotBlank() && text.length < MIN_MATCH_CHARS
@@ -275,21 +269,22 @@ abstract class BaseReadAloudService : BaseService(),
             return try {
                 val hasEffects = soundEffectPattern.containsMatchIn(source)
                 var result = source
-                for (rule in rules) {
-                    if (rule.isRegex && rule.regex == null) {
-                        // 正则编译失败：保持原有行为，跳过该条
-                        continue
-                    }
-                    try {
-                        result = if (rule.regex != null) {
-                            rule.regex.replace(result, rule.replacement)
-                        } else {
-                            result.replace(rule.pattern, rule.replacement)
-                        }
-                    } catch (e: Exception) {
-                        AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message} pattern=${rule.pattern}")
-                    }
+
+                // 普通/全部音效按模式执行；off 与 AI 模式不执行这组正则规则
+                val mainFileName = when (mode) {
+                    "normal" -> "ttsrv-replaces5.json"
+                    "all" -> "ttsrv-replaces3.json"
+                    else -> null
                 }
+                if (mainFileName != null) {
+                    loadSoundEffectRules(mainFileName)?.let { result = applyCompiledRules(result, it) }
+                }
+
+                // 衔接音效始终在前面的规则替换完成后再执行，不和音效开关绑定
+                loadSoundEffectRules("ttsrv-replaces4.json")?.let {
+                    result = applyCompiledRules(result, it)
+                }
+
                 // 只有"替换后确实配出了音效"才值得记一条：
                 // 规则跑完但没配上音效是常态，每段落打一条汇总会把有用的日志全淹掉
                 val nowHasEffects = soundEffectPattern.containsMatchIn(result)
@@ -305,6 +300,29 @@ abstract class BaseReadAloudService : BaseService(),
             }
         }
 
+        private fun loadSoundEffectRules(fileName: String): List<CompiledRule>? {
+            val file = java.io.File(io.legado.app.help.EngineDataDir.baseDir() + fileName)
+            val downloadUrl = "https://cnb.cool/mingwuyan/yinpin/-/git/raw/main/$fileName?download=true"
+            return getSoundEffectRules(file, downloadUrl)
+        }
+
+        private fun applyCompiledRules(input: String, rules: List<CompiledRule>): String {
+            var result = input
+            for (rule in rules) {
+                if (rule.isRegex && rule.regex == null) continue
+                try {
+                    result = if (rule.regex != null) {
+                        rule.regex.replace(result, rule.replacement)
+                    } else {
+                        result.replace(rule.pattern, rule.replacement)
+                    }
+                } catch (e: Exception) {
+                    AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message} pattern=${rule.pattern}")
+                }
+            }
+            return result
+        }
+
         /**
          * 外部（音效规则管理界面）改写规则文件后调用，强制丢弃已编译的规则缓存，
          * 使下一次朗读重新读取并编译规则文件。
@@ -315,7 +333,7 @@ abstract class BaseReadAloudService : BaseService(),
         @JvmStatic
         fun invalidateSoundEffectRuleCache() {
             synchronized(ruleCacheLock) {
-                ruleCache = null
+                ruleCaches.clear()
             }
             AppLog.put("[ttsrv] 规则缓存已失效，下次朗读将重新加载")
         }
@@ -348,7 +366,7 @@ abstract class BaseReadAloudService : BaseService(),
         )
 
         private val ruleCacheLock = Any()
-        private var ruleCache: RuleCache? = null
+        private val ruleCaches = HashMap<String, RuleCache>()
 
         /**
          * 获取当前生效的音效规则集（已按 order 排序、已完成正则编译）。
@@ -365,7 +383,7 @@ abstract class BaseReadAloudService : BaseService(),
                 val lastModified = file.lastModified()
                 val size = file.length()
                 synchronized(ruleCacheLock) {
-                    val cached = ruleCache
+                    val cached = ruleCaches[path]
                     if (cached != null && cached.path == path
                         && cached.lastModified == lastModified && cached.size == size
                     ) {
@@ -385,7 +403,7 @@ abstract class BaseReadAloudService : BaseService(),
             val lastModified = if (file.exists()) file.lastModified() else 0L
             val size = if (file.exists()) file.length() else raw.length.toLong()
             synchronized(ruleCacheLock) {
-                ruleCache = RuleCache(path, lastModified, size, rules)
+                ruleCaches[path] = RuleCache(path, lastModified, size, rules)
             }
             AppLog.put("[ttsrv] 规则已编译缓存: ${rules.size}条, 文件=${file.name}")
             return rules
@@ -1816,9 +1834,14 @@ abstract class BaseReadAloudService : BaseService(),
         if (aiEffectCacheKey == key) return
         aiEffectCache.clear()
         aiEffectCacheKey = key
+        AiEffectIndex.ensureLoaded()
+        val enabledPaths = AiEffectIndex.allEntries()
+            .filter { it.isEnabled }
+            .mapTo(HashSet()) { it.path }
         val records = AiEffectStore.load(bookUrl, chapterIndex)
         records.forEach { r ->
-            if (r.effects.isNotEmpty()) aiEffectCache[r.paraIndex] = r.effects
+            val enabledEffects = r.effects.filter { it.path.isBlank() || enabledPaths.contains(it.path) }
+            if (enabledEffects.isNotEmpty()) aiEffectCache[r.paraIndex] = enabledEffects
         }
         if (records.isNotEmpty()) {
             AppLog.put("[AI音效] 载入本章记录 ${records.size} 段")
@@ -1943,6 +1966,10 @@ abstract class BaseReadAloudService : BaseService(),
         isRun = false
         isRunFlow.value = false
         pause = true
+        // 服务销毁：关闭 BGM 门闸并取消预分析，防止销毁后残留异步任务播放 BGM
+        BgmManager.setReadAloudPlaying(false)
+        bgmAnalysisJob?.cancel()
+        bgmAnalysisJob = null
         // 服务结束即停掉倒计时并清掉定时残留，
         // 避免下次开面板还显示上一次的剩余时间、或残留值影响下一次朗读
         dsJob?.cancel()
@@ -1974,7 +2001,8 @@ abstract class BaseReadAloudService : BaseService(),
                     intent.getBooleanExtra("play", true),
                     intent.getIntExtra("pageIndex", ReadBook.durPageIndex),
                     intent.getIntExtra("startPos", 0),
-                    intent.getBooleanExtra("fromPageTurn", false)
+                    intent.getBooleanExtra("fromPageTurn", false),
+                    intent.getIntExtra("startParagraph", 0)
                 )
             }
 
@@ -1992,7 +2020,13 @@ abstract class BaseReadAloudService : BaseService(),
         return super.onStartCommand(intent, flags, startId)
     }
 
-    private fun newReadAloud(play: Boolean, pageIndex: Int, startPos: Int, fromPageTurn: Boolean = false) {
+    private fun newReadAloud(
+        play: Boolean,
+        pageIndex: Int,
+        startPos: Int,
+        fromPageTurn: Boolean = false,
+        startParagraph: Int = 0
+    ) {
         execute(executeContext = Dispatchers.IO) {
             var textChapter = ReadBook.curTextChapter ?: return@execute
             // 11-19 20:5x 加：段表必须与「当前章」同源，否则不建。
@@ -2087,6 +2121,28 @@ abstract class BaseReadAloudService : BaseService(),
             clearAiEffectRuntime()
             var pos = startPos
             val page = textChapter.getPage(pageIndex)!!
+
+            // ===== 摘上游 66107bf/05a68a6 的段号定位能力（最小接入版）=====
+            // 只对显式 startParagraph>0 的入口生效（当前唯一来源：段落小喇叭，
+            // 05a68a6 传 startParagraph=paragraphNum 定位目标段）。
+            // 为什么不用上游整块：上游把「翻页/滚动入口」也改走 topParaNum 定位，
+            // 会绕开我方自研的段首对齐块（半截段/反向尾巴页/纯尾巴页跳章都在
+            // 那套算法里）；我方这些入口的落点算法已实测打磨，不替换。
+            // paragraphNum 是排版时按段落结束符递增生成的，与 chapterPosition 无关，
+            // 编辑正文后 chapterPosition 错乱也不影响段号定位。
+            if (startParagraph > 0 && startParagraph <= contentList.size &&
+                !readAloudByPage && !toLast && pendingGengxinResumeIndex < 0
+            ) {
+                nowSpeak = startParagraph - 1
+                // 与下方段首对齐块同口径：段表累加得该段真实起点
+                readAloudNumber = paragraphStartPosOf(nowSpeak)
+                pos = 0
+                paragraphStartPos = 0
+                AppLog.putDebug(
+                    "段号定位: startParagraph=$startParagraph nowSpeak=$nowSpeak " +
+                        "readAloudNumber=$readAloudNumber"
+                )
+            }
             // 11-14 二次修（用户实报「乱翻乱点后高亮不准、朗读段落不准，可能跟半截段
             // 有关」）：把「页内偏移 startPos」换算成「段内偏移」时，旧写法只遍历
             // page.paragraphs（**本页内**的段），遇到**从上页跨过来的半截段**就错——
@@ -2454,6 +2510,8 @@ abstract class BaseReadAloudService : BaseService(),
         pause = false
         needResumeOnAudioFocusGain = false
         needResumeOnCallStateIdle = false
+        // 朗读真正开始播放：打开 BGM 门闸，此后 BGM 才被允许播放
+        BgmManager.setReadAloudPlaying(true)
         upReadAloudNotification()
         postEvent(EventBus.ALOUD_STATE, Status.PLAY)
         upFloatWindow()
@@ -2474,6 +2532,11 @@ abstract class BaseReadAloudService : BaseService(),
     open fun pauseReadAloud(abandonFocus: Boolean = true) {
         wifiLock?.release()
         pause = true
+        // 朗读暂停：立即关闭 BGM 门闸 + 取消在途的预分析，
+        // 这样暂停后到达的任何异步播放/分析结果都无法再把 BGM 播起来
+        BgmManager.setReadAloudPlaying(false)
+        bgmAnalysisJob?.cancel()
+        bgmAnalysisJob = null
         if (abandonFocus) {
             abandonFocus()
         }
@@ -2494,6 +2557,8 @@ abstract class BaseReadAloudService : BaseService(),
         pause = false
         needResumeOnAudioFocusGain = false
         needResumeOnCallStateIdle = false
+        // 朗读恢复：重新打开 BGM 门闸，允许恢复背景音乐
+        BgmManager.setReadAloudPlaying(true)
         upReadAloudNotification()
         upMediaSessionPlaybackState(PlaybackStateCompat.STATE_PLAYING)
         postEvent(EventBus.ALOUD_STATE, Status.PLAY)
@@ -2759,6 +2824,8 @@ abstract class BaseReadAloudService : BaseService(),
      */
     protected fun startBgm() {
         if (!AppConfig.isBgmEnabled) return
+        // 朗读不在播时（例如异步回调到达时已被暂停）不再启动 BGM
+        if (!isPlay()) return
         if (AppConfig.bgmAIEnabled) {
             if (BgmManager.hasPlayedOnce) {
                 BgmManager.play()
@@ -2996,7 +3063,11 @@ abstract class BaseReadAloudService : BaseService(),
                         pendingNextBgmIndex = resolved
                         BgmManager.pendingNextBgmIndex = pendingNextBgmIndex
                         AppLog.put("AI背景音乐: 预分析下一首=$recommendedFileName, index=$pendingNextBgmIndex")
-                        if (pendingNextBgmIndex >= 0 && !BgmManager.isPlaying()) {
+                        // 分析耗时数秒，返回时朗读可能已暂停；必须确认朗读仍在播才允许主动播放，
+                        // 否则暂停后 BGM 会被这里重新播起来
+                        if (isPlay() && BgmManager.isReadAloudPlaying() &&
+                            pendingNextBgmIndex >= 0 && !BgmManager.isPlaying()
+                        ) {
                             AppLog.put("AI背景音乐: 分析完成，BGM暂停中，主动播放 index=$pendingNextBgmIndex")
                             BgmManager.playByIndex(pendingNextBgmIndex)
                         }
@@ -3060,7 +3131,10 @@ abstract class BaseReadAloudService : BaseService(),
                     pendingNextBgmIndex = resolved
                     BgmManager.pendingNextBgmIndex = pendingNextBgmIndex
                     AppLog.put("关键词BGM: 预分析下一首=$recommendedFileName, index=$pendingNextBgmIndex")
-                    if (pendingNextBgmIndex >= 0 && !BgmManager.isPlaying()) {
+                    // 同 AI 路径：分析返回时朗读可能已暂停，必须确认仍在播才主动播放
+                    if (isPlay() && BgmManager.isReadAloudPlaying() &&
+                        pendingNextBgmIndex >= 0 && !BgmManager.isPlaying()
+                    ) {
                         AppLog.put("关键词BGM: 分析完成，BGM暂停中，主动播放 index=$pendingNextBgmIndex")
                         BgmManager.playByIndex(pendingNextBgmIndex)
                     }

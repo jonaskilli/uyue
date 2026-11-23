@@ -536,7 +536,8 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
     /**
      * 检测段落末尾小喇叭的操作（播放该段落音频）
      *
-     * @param continuePlay false=单击：有缓存直接播缓存，无缓存只合成当前段并自动停止；
+     * @param continuePlay false=单击：开启「全部音效/普通音效」时走朗读服务（命中缓存不重复合成）
+     *                     以触发正则音效，播完自动停止；未开启时沿用有缓存本地直播、无缓存单段合成；
      *                     true =长按：从该段开头连续朗读，播完继续后续段落（可跨章节）
      */
     private fun checkParagraphSpeakerClick(x: Float, y: Float, continuePlay: Boolean = false): Boolean {
@@ -590,9 +591,25 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
                     return true
                 }
 
-                // 单击：有缓存则直接播放缓存文件
+                // 单击：开启「全部音效/普通音效」时必须走朗读服务，
+                // 这样才会跑 applySoundEffectRules 的正则替换并按进度触发音效。
+                // 服务端 downloadAndPlayAudios() 会先查 hasSpeakFile 命中缓存直接播放，
+                // 不会重复合成，故走服务同样复用缓存，只是多了一层音效处理。
+                val soundEffectMode = ReadBook.book?.bookUrl?.let {
+                    AppConfig.getEffectiveSoundEffectMode(it)
+                } ?: AppConfig.soundEffectMode
                 val cacheFile = AudioCacheIndicatorManager.getCacheFile(textChapter, paragraphNum)
-                if (cacheFile != null) {
+                if (cacheFile != null && soundEffectMode != "off" && soundEffectMode != "transition") {
+                    // 有缓存且开启了规则音效：交给服务播，缓存命中 + 触发正则音效。
+                    // 传目标段落号，让服务按 paragraphNum 定位，避免用损坏的 chapterPosition 算错到章首。
+                    ReadAloud.play(
+                        context, true, pageIndex, startPos,
+                        singleParagraph = true,
+                        startParagraph = paragraphNum
+                    )
+                    context.toastOnUi("播放该段音频")
+                } else if (cacheFile != null) {
+                    // 音效关闭（或衔接音效，走朗读脚本而非本服务）：保持原来的本地直接播缓存
                     playCacheFile(cacheFile)
                     context.toastOnUi("播放该段音频")
                 } else {

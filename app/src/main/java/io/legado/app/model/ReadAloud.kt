@@ -68,7 +68,13 @@ object ReadAloud {
          * `nowSpeak != 0`，于是每翻一页都把该页首段整段跳过（11-13 真机日志：
          * 5 次翻页 5 次「nowSpeak!=0，跳过当前段」，用户实报「每页缺一段」）。
          */
-        fromPageTurn: Boolean = false
+        fromPageTurn: Boolean = false,
+        /**
+         * 起始段落号（1 基，与 TextLine.paragraphNum 一致）。
+         * 滚动模式传屏幕可见首行的段落号，让服务按段落定位而非依赖 chapterPosition。
+         * <=0 表示未提供。
+         */
+        startParagraph: Int = 0
     ) {
         postEvent(EventBus.READ_ALOUD_STARTING, true)
         val intent = Intent(context, aloudClass)
@@ -79,6 +85,7 @@ object ReadAloud {
         intent.putExtra("singleParagraph", singleParagraph)
         intent.putExtra("continueFromParagraph", continueFromParagraph)
         intent.putExtra("fromPageTurn", fromPageTurn)
+        intent.putExtra("startParagraph", startParagraph)
         LogUtils.d("ReadAloud", intent.toString())
         try {
             context.startForegroundServiceCompat(intent)

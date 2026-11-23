@@ -675,11 +675,24 @@ object ReadBook : CoroutineScope by MainScope() {
      * @param fromPageTurn 是否由「翻页跟随」触发（curPageChanged）。
      *   翻页时落点段尚未朗读，服务端不应按「接着上次听」的语义跳过它。
      */
-    fun readAloud(play: Boolean = true, startPos: Int = 0, fromPageTurn: Boolean = false) {
+    fun readAloud(
+        play: Boolean = true,
+        startPos: Int = 0,
+        fromPageTurn: Boolean = false,
+        pageIndex: Int? = null,
+        startParagraph: Int = 0
+    ) {
         book ?: return
         val textChapter = curTextChapter ?: return
         if (textChapter.isCompleted) {
-            ReadAloud.play(appCtx, play, startPos = startPos, fromPageTurn = fromPageTurn)
+            ReadAloud.play(
+                appCtx,
+                play,
+                pageIndex = pageIndex ?: durPageIndex,
+                startPos = startPos,
+                fromPageTurn = fromPageTurn,
+                startParagraph = startParagraph
+            )
         }
     }
 
