@@ -225,6 +225,58 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private const val PRELOAD_SEGMENT_MAX_FAILS = 3
 
         /**
+         * 11-27 根治「跨章预加载无限重扫」（真机 19:28–22:58 实锤）。
+         *
+         * ## 现场（第10章 107 段，被完整重扫 213 遍）
+         * ```
+         * 19:46:12.206  跨章预加载已备: 第10章 第106/107 段   ← 记账推到 106
+         * 19:46:13.823  跨章预加载已备: 第11章 第1/105 段     ← 进下一章
+         * 19:46:13.984  第10章第1段 提交preload_only         ← 立刻回头重扫本章
+         * 19:46:14.227  跨章预加载已备: 第10章 第1/107 段     ← 记账从 1 重来
+         * ```
+         * 3.5 小时提交 **25126 次**，去重后唯一 (章,段) 只有 **393** 个
+         * ⇒ **98.9% 是白重复**；单段最多提交 225 次。
+         * 伴生：应用冻结 38 次（最长 4087ms）、Dispatchers.Default/IO/Main
+         * 三条 5000ms 同时超时（线程池被逐段探测占满）。
+         *
+         * ## 根因：两套判据打架
+         * 备货**记账**是「引擎回成功即记」（11-23 定的，治的是「计数偏低」）；
+         * 而**探测**是「文件 exists()」。真机 2451 条缓冲诊断里
+         * `文件0/记录93`、`文件0/记录106` 共 2400+ 条，`文件[1-9]` **一条都没有**
+         * ⇒ 探测命中率严格为 0。于是：
+         *   记账推进到 total → 下轮 `from>=total` 归零 → 逐段探测第一个就 miss
+         *   → `scan=0` → 回到第 1 段重扫 → 又推到 total → **死循环**。
+         *
+         * ## 改法：加「连续空探测」闸，不再无限重扫
+         * 每章记一个连续「本轮探测一个文件都没命中」的轮次数。达到阈值就
+         * **退避整章**（[PRELOAD_DESYNC_RETRY_MS]）并打一行 WARN 级日志，
+         * 而不是立刻从头再扫。这样即使键真的对不上（探测永远 miss），
+         * 重扫频率也会从「约 43 秒一次、不停」降到「每 5 分钟一次」，
+         * 不再把 CPU/IO 与在途合成拖垮；日志上也能一眼看到这条告警。
+         *
+         * 为什么不直接把探测判据改成记账：记账是内存账本，进程重启/换书就没了，
+         * 而「这段到底能不能直接播」最终仍取决于文件。两者必须**同源**才是根治，
+         * 本次会话先上兜底闸止血，同源改造单独一批做。
+         */
+        private const val PRELOAD_DESYNC_MAX_ROUNDS = 3
+
+        /** 探测连续落空达到阈值后的整章退避时长（毫秒） */
+        private const val PRELOAD_DESYNC_RETRY_MS = 5 * 60_000L
+
+        /**
+         * 11-27：同一段「被播放打断」后的退避基数（毫秒）。
+         *
+         * 真机第13章第18段一晚被打断 **8 次**（19 段 5 次）：每次都是
+         * 「预热被打断 → 下轮立刻重试同一段 → 又被下一笔播放打断」。
+         * 这里从第 2 次起退避 `基数 × (次数-1)`，封顶上限，避免同一段
+         * 反复与播放抢引擎、进而触发引擎实例反复重建。
+         */
+        private const val PRELOAD_INTERRUPT_BACKOFF_BASE_MS = 500L
+
+        /** 打断退避封顶（毫秒）——再高会明显拖慢备货覆盖 */
+        private const val PRELOAD_INTERRUPT_BACKOFF_MAX_MS = 3_000L
+
+        /**
          * 11-18：预热让路判据——播放请求提交后超过这么久还没收尾，就判定上游慢/卡，
          * 本轮预热链直接放弃，不再逐段各干等 15 秒。
          *
@@ -579,6 +631,23 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private val preloadSegmentFailCount = HashMap<String, Int>()
 
     /**
+     * 11-27：章索引 → 「连续空探测」轮次数（见 [PRELOAD_DESYNC_MAX_ROUNDS]）。
+     *
+     * 一轮里若逐段探测**一个文件都没命中**，计 1 次；任何一次命中即清零。
+     * 连续达到阈值 ⇒ 判「该章探测判据已失配」，整章退避而不是从头重扫。
+     */
+    private val preloadDesyncRounds = HashMap<Int, Int>()
+
+    /**
+     * 11-27：段索引 → 「被播放打断」次数（key = "章索引|段号"）。
+     *
+     * 与 [preloadSegmentFailCount] 是**两套账**：打断不是失败（引擎没出错，
+     * 是我方主动让路），所以不计失败、不进「连续 3 次跳过」逻辑；
+     * 但同一段反复被打断要退避，否则会与播放反复抢引擎（见打断分支注释）。
+     */
+    private val preloadInterruptCount = HashMap<String, Int>()
+
+    /**
      * 预加载用的段表。
      *
      * ⚠️ 11-22 18:4x（用户实报「同一章，播放卡写 /133、预加载卡写 /132，看着乱」）：
@@ -707,6 +776,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         textToSpeech = null
         ttsInitFinish = false
         pendingPlay = false
+        // 11-27：连 TtsEngineActivator 的常驻探测连接一起释放。
+        // 本函数的语义就是「这个引擎实例不要了」，探测连接留着会继续占着
+        // UTTS 侧的一条连接；释放后再 activateTtsEngine 会重新建，符合预期。
+        runCatching { io.legado.app.help.tts.TtsEngineActivator.releaseProbeConnection() }
         // 11-18 用户报障修复（15:09 实锤卡 96 秒）：清实例时**顺手了结所有在途请求**。
         //
         // 为什么必须做：系统 TTS 引擎一旦 shutdown，已提交的那几笔就**再也不会回调**
@@ -3133,6 +3206,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             preloadChapterRetryAt.clear()
             Companion.preloadPreparedStore.clear()
             preloadSegmentFailCount.clear()
+            preloadDesyncRounds.clear()
+            preloadInterruptCount.clear()
             Companion.preloadBookUrl = bookUrl
             // 11-24 02:0x（用户实报「换书后吸顶还显示缓冲 34 段·跨章」）：
             // 清内存账本**不够**——`bufferedAheadSegs` 是落盘字段，只有段切换/合成提交/
@@ -3167,8 +3242,14 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             preloadChapterCache.remove(it)
             preloadChapterRetryAt.remove(it)
             Companion.preloadPreparedStore.remove(it)
-            preloadSegmentFailCount.keys.filter { k -> k.startsWith("$it|") }.forEach {
-                preloadSegmentFailCount.remove(it)
+            preloadDesyncRounds.remove(it)
+            // 11-27 顺手修既有笔误：原来 `remove(it)` 传的是**章号**而不是 key `k`，
+            // 于是这些失败计数从来没被真正删掉（只会越积越多）。
+            preloadSegmentFailCount.keys.filter { k -> k.startsWith("$it|") }.forEach { k ->
+                preloadSegmentFailCount.remove(k)
+            }
+            preloadInterruptCount.keys.filter { k -> k.startsWith("$it|") }.forEach { k ->
+                preloadInterruptCount.remove(k)
             }
         }
         // 让路判据①：播放请求在飞 ⇒ 先短等它落定，等不到才放弃。
@@ -3375,6 +3456,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (from < currentChapterFloor) from = currentChapterFloor
             // 逐段推进：跳过已备好的段，停在第一个真没备的段上
             var scan = from
+            // 11-27：本轮探测命中数（见 PRELOAD_DESYNC_MAX_ROUNDS）
+            var probeHit = 0
             while (scan < total) {
                 val probeRaw = preloaded.segments[scan]
                 if (probeRaw.isBlank()) { scan++; continue }
@@ -3383,6 +3466,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 }.getOrNull()
                 if (probe != null && probe.exists() && probe.length() > 0) {
                     scan++          // 已备：跳过，继续找下一个空洞
+                    probeHit++
                     continue
                 }
                 break               // 找到第一个没备的段 = 本轮目标
@@ -3390,7 +3474,37 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (scan >= total) {
                 // 本章真的全备完了（逐段探测确认过），才允许进下一章
                 preloadChapterProgress[idx] = total
+                preloadDesyncRounds.remove(idx)
                 continue
+            }
+            // ===== 11-27：防「无限重扫」兜底闸（详见 PRELOAD_DESYNC_MAX_ROUNDS）=====
+            //
+            // 判据：本轮从 from 起探测了多段、却**一个文件都没命中**，且进度表
+            // 已经推进过（from>下限）——这正是「记账说有、文件探测说没有」的
+            // 失配特征。此时若照旧从 0 重扫，就会变成每 40 秒扫一遍全章的死循环
+            // （真机第10章 213 遍、25126 次提交里 98.9% 是重复）。
+            //
+            // 处置：连续 3 轮都这样 ⇒ 整章退避 5 分钟，并打 WARN 级日志。
+            // 正常情况（键一致）永远不会走到这里：探测会命中，probeHit>0。
+            if (probeHit == 0 && from > currentChapterFloor) {
+                val rounds = (preloadDesyncRounds[idx] ?: 0) + 1
+                preloadDesyncRounds[idx] = rounds
+                if (rounds >= PRELOAD_DESYNC_MAX_ROUNDS) {
+                    preloadDesyncRounds[idx] = 0
+                    preloadChapterRetryAt[idx] =
+                        SystemClock.elapsedRealtime() + PRELOAD_DESYNC_RETRY_MS
+                    // 用 put（WARN 级）而不是 putDebug：这是「判据失配」的告警，
+                    // 出问题时用户导出日志就能直接看到，不必先开调试开关。
+                    AppLog.put(
+                        "跨章预加载探测失配：第${idx + 1}章 连续 $rounds 轮逐段探测零命中" +
+                            "（记账=${preloadChapterProgress[idx] ?: 0}/$total，" +
+                            "from=$from），已退避 ${PRELOAD_DESYNC_RETRY_MS / 1000} 秒。" +
+                            "正常不该出现——出现即说明缓存文件名口径与写入侧不一致"
+                    )
+                    return false
+                }
+            } else {
+                preloadDesyncRounds.remove(idx)
             }
             // 进度表对齐到探测位置：下次从这里继续，O(1) 续跑
             preloadChapterProgress[idx] = scan
@@ -3495,6 +3609,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 ok -> {
                     preloadChapterProgress[idx] = from + 1
                     preloadSegmentFailCount.remove("$idx|$from")
+                    preloadInterruptCount.remove("$idx|$from")
                     // ===== 11-23 23:5x（用户实拍「读 n 章、后台备到 n+1 章，缓冲报 0」）=====
                     // 记账**不再以「自己重算的文件名存在」为条件**。
                     // 真机 23:49 实锤：第23章 22:49:42–22:50:10 连报「已备 1..12 段」，
@@ -3514,9 +3629,36 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 interruptedByPlayback -> {
                     // 播放优先是设计内行为：不推进、不计数，下轮立刻重试同一段。
                     // 那段确实没备上，必须补；但也不留任何「失败」痕迹。
-                    AppLog.putDebug(
-                        "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 被播放打断"
-                    )
+                    //
+                    // ===== 11-27：同段反复被打断要退避（真机第13章第18段被打断 8 次）=====
+                    //
+                    // 为什么要加：`play()` 里每笔播放都会 `ensureChapterPreload()` +
+                    // `activateTtsEngine()`，而旧激活实现每次建连再 shutdown，会把
+                    // 正在跑的那笔预热一起掐掉 ⇒ 同段「被打断 → 下轮立刻重试 →
+                    // 又被下一笔播放打断」来回空转，同时不断触发引擎重建，
+                    // 最终把播放笔本身也投到死实例上（23:07:19 那次 36 秒零回调）。
+                    //
+                    // 退避只针对**反复**被打断的同一段（打不断就正常推进，不受影响）：
+                    // 第 1 次照旧立刻重试（保持原有「不丢段」语义），第 2 次起按
+                    // 500ms×次数递增，封顶 [PRELOAD_INTERRUPT_BACKOFF_MAX_MS]。
+                    // 这与「真失败」的计数是两套账，互不污染。
+                    val intKey = "$idx|$from"
+                    val ints = (preloadInterruptCount[intKey] ?: 0) + 1
+                    if (ints >= 2) {
+                        preloadInterruptCount[intKey] = ints
+                        val backoff = (PRELOAD_INTERRUPT_BACKOFF_BASE_MS * (ints - 1))
+                            .coerceAtMost(PRELOAD_INTERRUPT_BACKOFF_MAX_MS)
+                        preloadChapterRetryAt[idx] = SystemClock.elapsedRealtime() + backoff
+                        AppLog.putDebug(
+                            "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 被播放打断（第 $ints 次），" +
+                                "退避 ${backoff}ms 再试"
+                        )
+                    } else {
+                        preloadInterruptCount[intKey] = ints
+                        AppLog.putDebug(
+                            "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 被播放打断"
+                        )
+                    }
                 }
                 else -> {
                     AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 合成返回失败")

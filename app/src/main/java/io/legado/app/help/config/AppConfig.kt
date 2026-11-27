@@ -10,6 +10,7 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.HttpTTS
 import io.legado.app.help.book.AiImageBookPrefs
 import io.legado.app.utils.GSON
+import io.legado.app.utils.LogUtils
 import io.legado.app.utils.canvasrecorder.CanvasRecorderFactory
 import io.legado.app.utils.defaultSharedPreferences
 import io.legado.app.utils.fromJsonObject
@@ -1204,16 +1205,40 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
      * 同时清理转发器缓存和系统TTS缓存
      */
     fun clearTtsCache() {
-        val baseDir = appCtx.getExternalFilesDir(null) ?: appCtx.filesDir
-        FileUtils.delete(baseDir.absolutePath + File.separator + "httpTTS")
-        FileUtils.delete(baseDir.absolutePath + File.separator + "httpTTS_cache")
+        // ===== 11-27：清缓存必须留痕 =====
+        //
+        // 现场（11-27 排障）：真机 19:26:31 缓存 44 个 → 19:26:37 变 0 个，
+        // 中间**没有任何删除日志**——本函数此前一行都不打。日志里只能看到
+        // 「音频缓存清理: 当前 0 个，未超过保留水位 2000，跳过」，而自动清理
+        // 在 44 个时按水位根本不会删。于是「到底是谁清空的」只能靠反证推算，
+        // 排障成本极高（还要连带怀疑缓存键失配、探测恒 0 等一串假象）。
+        //
+        // 现在：先数清三处各有多少，删完再报一次。以后「上次清空是什么时候」
+        // 一秒可查，不必再反推。
+        val httpTtsDir = baseDir.absolutePath + File.separator + "httpTTS"
+        val httpTtsCacheDir = baseDir.absolutePath + File.separator + "httpTTS_cache"
         // 清理系统TTS缓存（与 TTSReadAloudService 的 ttsFolderPath 保持一致）
         val sysTtsCacheDir = File(appCtx.externalCacheDir, "systemTTS")
+        val sysCountBefore = runCatching {
+            FileUtils.listDirsAndFiles(sysTtsCacheDir.absolutePath)?.count { it.isFile } ?: 0
+        }.getOrDefault(0)
+        LogUtils.d(
+            "AppConfig",
+            "清空音频缓存开始：系统TTS $sysCountBefore 个（${sysTtsCacheDir.absolutePath}），" +
+                "同时清 httpTTS/httpTTS_cache 与 UTTS 共享 synth_cache"
+        )
+
+        FileUtils.delete(httpTtsDir)
+        FileUtils.delete(httpTtsCacheDir)
         if (sysTtsCacheDir.exists()) {
             FileUtils.listDirsAndFiles(sysTtsCacheDir.absolutePath)?.forEach {
                 FileUtils.delete(it.absolutePath)
             }
         }
+        val sysCountAfter = runCatching {
+            FileUtils.listDirsAndFiles(sysTtsCacheDir.absolutePath)?.count { it.isFile } ?: 0
+        }.getOrDefault(0)
+        LogUtils.d("AppConfig", "清空音频缓存完成：系统TTS 剩余 $sysCountAfter 个")
         // 11-15 晚：本函数的两个调用入口就是用户说的「清音频缓存」——
         //   ① 长按朗读引擎键 → ReadMenu.clearTtsCache() → SpeakEngineDialog.clearCacheStatic()
         //   ② 更换朗读引擎界面右上角清理键 → SpeakEngineDialog.clearCache()
