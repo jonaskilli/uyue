@@ -1215,6 +1215,7 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         //
         // 现在：先数清三处各有多少，删完再报一次。以后「上次清空是什么时候」
         // 一秒可查，不必再反推。
+        val baseDir = appCtx.getExternalFilesDir(null) ?: appCtx.filesDir
         val httpTtsDir = baseDir.absolutePath + File.separator + "httpTTS"
         val httpTtsCacheDir = baseDir.absolutePath + File.separator + "httpTTS_cache"
         // 清理系统TTS缓存（与 TTSReadAloudService 的 ttsFolderPath 保持一致）
