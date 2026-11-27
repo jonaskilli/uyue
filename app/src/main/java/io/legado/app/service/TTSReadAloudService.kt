@@ -2011,7 +2011,17 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     AppLog.putDebug(
                         "预加载让路：第${index + 1}段（合成器忙，本轮未合成，不计失败）"
                     )
-                    // 标记本轮为「让路」，外层据此跳过失败计数
+                    // 标记本轮为「让路」，外层据此跳过失败计数。
+                    // 键用「章名|段号」：调用处传的 chapterTitle 就是 preloaded.title
+                    //（见 runChapterPreloadRound 唯一调用点），外层用同一 title 查，能对上。
+                    //
+                    // ⚠️ 这是**短命标记**：正常路径由外层 when 或上面的提前返回清掉。
+                    // 加一个尺寸上限兜底——万一将来新增某条绕过清理的出口，
+                    // 标记也不会无限增长（超过上限说明有泄漏，清空并记一行）。
+                    if (yieldedSegmentKeys.size > 64) {
+                        yieldedSegmentKeys.clear()
+                        AppLog.putDebug("让路标记集超限已清空（可能存在未清理的出口）")
+                    }
                     yieldedSegmentKeys.add(chapterTitle + "|" + index)
                     return false
                 }
@@ -3936,6 +3946,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 「1/81、2/81 重来一遍」的进度回退观感。服务都没了，本轮就地收口。
             if (!ok && !interruptedByPlayback && !isRun) {
                 AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 服务停止，不计失败")
+                // 11-28：这里提前 return ⇒ 下面的 when 不会执行 ⇒ 让路标记不会被清除。
+                // 标记集是短命账本，残留会让**下次同一段**（章名|段号相同）被误判成
+                // 「本轮让路」而跳过一次失败计数。所以任何绕过 when 的出口都要自己清。
+                yieldedSegmentKeys.remove("${preloaded.title}|$from")
                 return false
             }
             when {
