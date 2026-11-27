@@ -202,10 +202,35 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         /**
          * 单个预热段的等待上限（毫秒）。
          *
-         * 远短于播放侧（`sysTtsSynthesizeTimeout`，默认 120 秒）：预热是纯优化，
-         * 一段卡住就跳过，绝不能让后台挂 2 分钟（真机 06:40 就是这样假死 6 分钟的）。
+         * ===== 11-28（用户：「讯飞合成声音确实慢，主要是音频也大，我得给他留充足的时间」）=====
+         * 原来固定 15 秒，真机第16章实测**不够**——7 次预加载失败全部卡在 15 秒整，
+         * 而 UTTS 侧同一段其实**合成功了**：
+         * ```
+         * 00:49:43.747  发出 69 字长段落合成请求
+         * 00:49:43.818  迅飞 200/149B（仅 68ms，是控制帧）
+         * 00:49:58.696  ← 14.95 秒后才拿到音频
+         * 00:49:58.500  预加载 15s 超时，判「合成返回失败」（但其实成了）
+         * 00:50:01.028  用户重读同段 → cache hit
+         * ```
+         * 也就是说这 15 秒不是失败，是**等不及**：长段落 + 讯飞慢 + 音频大，
+         * 单笔就要十几秒。放弃后那段没备上，播放时又得现场合成 → 用户听到卡顿。
+         *
+         * 现改为**跟随朗读设置里的「系统TTS合成超时」**（`sysTtsSynthesizeTimeout`，
+         * 默认 120 秒）——用户设那个值的语义就是「一段最多等多久」，与播放侧同源，
+         * 不再让预加载另开一个更短的口径（这与 slowRetryBudgetMs 的修法是同一思路）。
+         *
+         * ## 原来为什么写死 15 秒（保留这段历史，防止有人以为是随手改的）
+         * 预热是纯优化，历史上怕「一段卡住就让后台挂 2 分钟」（真机 06:40 假死 6 分钟）。
+         * 但那个假死的真因是当时的**无限重扫**（已于 11-27 定位并加退避闸），
+         * 不是「等得久」本身。等得久只是慢，不会假死；而等不及会直接导致
+         * **该备的没备上**，把代价转嫁给播放。两害相权，宁可等。
+         *
+         * ## 兜底仍然保留
+         * 不是无限等：上限就是用户设的合成超时（默认 120s），到点照旧放弃并重试；
+         * 且单段连续失败 3 次仍会跳过（[PRELOAD_SEGMENT_MAX_FAILS]），不会死磕。
          */
-        private const val PRELOAD_SEGMENT_TIMEOUT_MS = 15_000L
+        private val preloadSegmentTimeoutMs: Long
+            get() = AppConfig.sysTtsSynthesizeTimeout * 1000L
         /**
          * 11-20：跨章预加载「正文未就绪」后的重试间隔（毫秒）。
          * 未来章的正文靠 ReadBook 的正文预下载（preDownloadNum，默认 10 章）异步落盘，
@@ -1715,7 +1740,8 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 返回 SUCCESS 只代表「已交给引擎」，真正的结果在 `onDone/onError` 里。
      * 「成功再下一段」的语义要求拿到真结果，否则又会变成事实上的并发提交。
      *
-     * 超时取 [PRELOAD_SEGMENT_TIMEOUT_MS]（比播放侧短得多）：预热不值得等 2 分钟引擎超时。
+     * 超时跟随朗读设置的「系统TTS合成超时」（见 [preloadSegmentTimeoutMs] 注释）：
+     * 11-28 起不再固定 15 秒——讯飞长段落单笔就要十几秒，等不及会把代价转嫁给播放。
      *
      * @return true=该段已备进 UTTS 缓存
      */
@@ -1863,7 +1889,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // ⚠️ 不能用「临时文件存在」兜底：预热路径上 UTTS 只回 50ms 静音，
                 // 临时文件必然存在，拿它判成功等于恒真（假成功会让下一段提前发，
                 // 又回到事实上的并发提交）。
-                val delivered = withTimeoutOrNull(PRELOAD_SEGMENT_TIMEOUT_MS) { completer.await() }
+                val delivered = withTimeoutOrNull(preloadSegmentTimeoutMs) { completer.await() }
                 if (delivered != null && delivered.exists() && delivered.length() > 0) {
                     // 收编：正式缓存已存在（播放刚写过/上次收编过）就不覆盖；
                     // 有效音频校验沿用宽松口径（isValidAudioFile），失败不阻塞本轮成功。
