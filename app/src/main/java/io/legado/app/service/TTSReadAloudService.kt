@@ -3598,6 +3598,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 val prevDone = preloadChapterProgress[prevIdx] ?: 0
                 val prevNotDone = prevTotal <= 0 || prevDone < prevTotal
                 if (prevNotDone) {
+                    // ===== 11-28 边界：上一章长期备不完时，不能让后续章永远饿死 =====
+                    //
+                    // 单调闸的代价必须写清：上一章若**正文一直下载不到**
+                    //（`buildPreloadSegments` 返回 null ⇒ 只有 15 秒重试、进度永为 0），
+                    // 后面所有章都会被这道闸挡住——严格单调换来的顺序正确，
+                    // 代价是「后面章一段都备不了」。
+                    //
+                    // 为什么不为此放宽：用户的第一性需求就是「按顺序备」
+                    //（「18章没合完就开始19、20章」是主诉）。正文下不来是
+                    // 上游预下载的事，放宽会让备货再次乱序、播放再次磕绊，
+                    // 用「整章没备」换「乱序备一点」不划算。
+                    // 但必须让这件事**可见**：正文未就绪那条分支已在它自己的
+                    // 轮次里打「正文未就绪，稍后重试」，这里再补一句等待原因，
+                    // 排查时不用反推为什么后面章不动。
+                    //
                     // 用 putDebug：备货排队等待是正常节奏（上一章还在备），
                     // 只在排障开调试日志时可见，平时不该刷屏。
                     AppLog.putDebug(
