@@ -27,8 +27,10 @@ object AudioCacheIndicatorManager {
     }
 
     private val sysTtsFolderPath: String by lazy {
-        val baseDir = appCtx.externalCacheDir ?: appCtx.cacheDir
-        baseDir.absolutePath + File.separator + "systemTTS" + File.separator
+        // 11-28：收敛到唯一权威解析器，与写入侧/清空侧/拼接侧同源。
+        // 此前自己写死 externalCacheDir/systemTTS——四处各写一份，11-23 归拢时
+        // 只改了一半（漏了音频缓存），正是这类重复实现的典型翻车。
+        io.legado.app.help.TtsAudioCacheDir.path()
     }
 
     /** 判断当前是否使用 HttpTTS */

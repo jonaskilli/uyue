@@ -29,6 +29,7 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.help.MediaHelp
+import io.legado.app.help.TtsAudioCacheDir
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.config.AppConfig
@@ -250,6 +251,31 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private const val PRELOAD_SEGMENT_MAX_FAILS = 3
 
         /**
+         * 「空壳音频」判据：**有效音频最少字节数**（11-28）。
+         *
+         * 44 = 一个 WAV 文件头的长度（RIFF 头 + fmt + data 头的固定开销），
+         * 里面**没有任何采样数据**。UTTS 的「预热让路」分支（合成器忙时）
+         * 走的是 `callback.start(...); callback.done(); return`——不写任何音频，
+         * 于是落到 U阅 的 tmp 正好是 44 字节的裸头。
+         *
+         * ## 为什么必须单独判它（真机 11-28 02:37–02:45 实锤）
+         * 旧判据是 `delivered.length() > 0`（44 > 0 成立），随后
+         * `isValidAudioFile()` 内部 `length() <= 44 → false` 判失败，
+         * 但那个 false 被写在 `if (!finalCache.exists() && isValidAudioFile(...))`
+         * 里——条件不成立就**整段跳过、一行日志都不打**，finally 又把空壳删掉，
+         * 最后仍 `return true` 记「已备」。结果：预加载连报 11 次已备，
+         * 磁盘上预加载文件 0 个，播放每段都 MISS、只能现场合成 5~14 秒。
+         *
+         * 现在把它**前置成显式判据**并打 WARN：空壳 = 这次没合出来 = 判失败、
+         * 不推进进度、退避重试。宁可多试一次，也不能再谎报。
+         *
+         * ⚠️ 为什么不用 `SILENT_SOUND_SIZE`(844)：那是 U阅 **自己**为纯符号段
+         * 生成的合法静音占位（44 头 + 800 数据），是**真缓存**；而本判据挡的是
+         * UTTS 让路回的空壳。两者语义相反（844 要放行、44 要拦），不能混用。
+         */
+        private const val MIN_VALID_AUDIO_BYTES = 44L
+
+        /**
          * 11-27 根治「跨章预加载无限重扫」（真机 19:28–22:58 实锤）。
          *
          * ## 现场（第10章 107 段，被完整重扫 213 遍）
@@ -272,16 +298,26 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          *   记账推进到 total → 下轮 `from>=total` 归零 → 逐段探测第一个就 miss
          *   → `scan=0` → 回到第 1 段重扫 → 又推到 total → **死循环**。
          *
-         * ## 改法：加「连续空探测」闸，不再无限重扫
-         * 每章记一个连续「本轮探测一个文件都没命中」的轮次数。达到阈值就
-         * **退避整章**（[PRELOAD_DESYNC_RETRY_MS]）并打一行 WARN 级日志，
-         * 而不是立刻从头再扫。这样即使键真的对不上（探测永远 miss），
-         * 重扫频率也会从「约 43 秒一次、不停」降到「每 5 分钟一次」，
-         * 不再把 CPU/IO 与在途合成拖垮；日志上也能一眼看到这条告警。
+         * ## 11-28 判据重写（这一版才是对的）
+         * 上面 11-27 定的判据是**「本轮探测零命中 且 进度已推进」计一轮**——
+         * 方向错了：串行补货的正常形态就是零命中（备完第 N 段 ⇒ 进度写 N+1 ⇒
+         * 下一轮从 N+1 探测 ⇒ 第一个就是空洞 ⇒ 立刻 break ⇒ 命中数必然 0）。
+         * 于是它**在一切正常时恒成立**，备过 1~2 段后连 3 轮必触发；
+         * 而它想抓的真病例（记账推到 total ⇒ from 归零 ⇒ 第一段 miss）
+         * 恰恰因为 `from == 0` 不满足「进度已推进」而**永远抓不到**。
          *
-         * 为什么不直接把探测判据改成记账：记账是内存账本，进程重启/换书就没了，
-         * 而「这段到底能不能直接播」最终仍取决于文件。两者必须**同源**才是根治，
-         * 本次会话先上兜底闸止血，同源改造单独一批做。
+         * 真机 11-28 02:37–02:45 后果：4 章连报 4 次「探测失配」（命中率 100%），
+         * 每章备 2~3 段就被拉黑 5 分钟，调度器转而备下一章 ⇒
+         * 用户看到「第18章没合成完就开始备19、20章」，播放全程现场合成、磕绊。
+         *
+         * 新判据：**只在「进度表已到章末（from >= total 归零）却探测不到文件」时计**。
+         * 这才是「账本说齐了、磁盘说没有」的真失配；正常补货（进度在章中）不计。
+         * 另加两条防误判：①任何一次真实备货成功都清零计数；
+         * ②倒序：探测有命中（probeHit>0）也清零。
+         *
+         * 为什么仍保留这个闸：11-27 那次「无限重扫」是真实存在的（25126 次提交
+         * 里 98.9% 白重复），只是当时判据写反、没抓到真病例却把正常流程判死。
+         * 现在判据对准真病例，既留住了防重扫能力，又不再误伤。
          */
         private const val PRELOAD_DESYNC_MAX_ROUNDS = 3
 
@@ -506,12 +542,20 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private var lastActionWasStop = false
 
     // ====== 缓存目录 ======
-    private val ttsFolderPath: String by lazy {
-        val baseDir = externalCacheDir ?: cacheDir
-        val dir = File(baseDir, "systemTTS")
-        if (!dir.exists()) dir.mkdirs()
-        dir.absolutePath + File.separator
-    }
+    /**
+     * 11-28：目录解析收敛到 [io.legado.app.help.TtsAudioCacheDir]（唯一权威）。
+     *
+     * 此前写死 `externalCacheDir/systemTTS`，文件管理器与数据线都看不到，
+     * 每次排障都只能让用户手动复制文件出来（11-28 排查「预加载假成功」
+     * 就卡在这上面）。现在落 `Download/chajian/uyue-utts/audio-cache/`
+     * （与日志、UTTS synth-cache 同一共享根），无「所有文件访问」权限时
+     * 自动回落旧目录，旧目录内容启动时一次性迁移，不丢已缓存章节。
+     *
+     * ⚠️ 改动这一行等于改动**所有**缓存键的物理落点：写入侧、扫描侧
+     * （AudioCacheIndicatorManager）、清空侧（AppConfig）、拼接侧
+     * （HttpTtsAudioCache）必须同源，四处都已改为调用同一个解析器。
+     */
+    private val ttsFolderPath: String by lazy { TtsAudioCacheDir.path() }
 
     // ====== 合成核心 ======
     /**
@@ -1886,38 +1930,107 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 false
             } else {
                 // 判据只看回调本身：onDone 回文件即算引擎走完，onError/超时回 null 都算没备上。
-                // ⚠️ 不能用「临时文件存在」兜底：预热路径上 UTTS 只回 50ms 静音，
-                // 临时文件必然存在，拿它判成功等于恒真（假成功会让下一段提前发，
-                // 又回到事实上的并发提交）。
+                // ⚠️ 不能用「临时文件存在」兜底：预热路径在让路时**什么都不合成**，
+                // 临时文件却仍然存在（44B 裸 WAV 头），拿它判成功等于恒真。
+                // 11-28 实锤：正是这条「临时文件必然存在」把 11 次没合成误记成「已备」，
+                // 所以现在下面先判空壳尺寸（MIN_VALID_AUDIO_BYTES），再谈收编。
                 val delivered = withTimeoutOrNull(preloadSegmentTimeoutMs) { completer.await() }
                 if (delivered != null && delivered.exists() && delivered.length() > 0) {
-                    // 收编：正式缓存已存在（播放刚写过/上次收编过）就不覆盖；
-                    // 有效音频校验沿用宽松口径（isValidAudioFile），失败不阻塞本轮成功。
+                    // ===== 11-28（用户实报「第18章没合成完就备19、20章」）：=====
+                    // **「假成功」必须显式判出来，不能靠 isValidAudioFile 静默拦掉**
+                    //
+                    // ## 现场（真机 02:37–02:45 场次，磁盘文件实数）
+                    // 预加载连报 11 次「已备」，可缓存目录里第19/20章（日志章号
+                    // 「第21/22章」）**一个文件都没有**，目录总数 38 == 播放笔 38 笔：
+                    // 预加载那 11 段一个都没落盘，却全记进了「已备」账。
+                    //
+                    // ## 根因：UTTS 的「预热让路」只回一段空壳
+                    // UTTS `SystemTtsService` 在「合成器忙」时对 preload 请求走：
+                    //     callback.start(...); callback.done(); return
+                    // 不写任何音频数据 ⇒ tmp 只有 **44 字节 WAV 头**（只剩文件头、
+                    // 没有任何采样）。而这里的旧判据是：
+                    //   · `delivered.length() > 0` → 44 > 0 **通过**；
+                    //   · `isValidAudioFile(delivered)` → 内部第一句就是
+                    //     `length() <= 44 → false` ⇒ 收编 if **不成立**；
+                    //   · 于是既没 rename 也没 copy，**一行日志都不打**；
+                    //   · finally 里 `tmp.delete()` 把空壳删掉；
+                    //   · 最后仍 `return true` ⇒ 外层记「已备」并推进进度。
+                    //
+                    // 三条「零命中」互相印证：收编失败日志 0 条、跨章文件命中 0 次、
+                    // 预加载落盘文件 0 个——不是没进 if，而是进了 if 之后被静默跳过。
+                    //
+                    // ## 后果链（用户看到的三个现象全是它）
+                    // 谎报已备 ⇒ 进度表推到下一段 ⇒ 下轮探测「文件不存在」⇒
+                    // 判「探测失配」⇒ **整章退避 5 分钟** ⇒ 调度器跳下一章 ⇒
+                    // 播放到该段永远 MISS、只能现场合成 ⇒ 每段等 5~14 秒「磕磕绊绊」。
+                    //
+                    // ## 修法：先判「有没有真音频」，再谈收编
+                    // 空壳（<= 44B 裸头 / 全零静音）一律判**失败**：返回 false、
+                    // 不推进进度、按真失败退避重试，并打一条 WARN 让下次直接可见。
+                    val deliveredSize = delivered.length()
+                    if (deliveredSize <= MIN_VALID_AUDIO_BYTES) {
+                        AppLog.put(
+                            "预加载返回空壳音频（仅 ${deliveredSize}B 文件头，UTTS 预热让路未合成）：" +
+                                "第${index + 1}段 text=${rawText.take(12)}" +
+                                " —— 判失败，不记已备"
+                        )
+                        return false
+                    }
+                    if (!isValidAudioFile(delivered)) {
+                        AppLog.put(
+                            "预加载音频校验不通过（${deliveredSize}B）：第${index + 1}段" +
+                                " text=${rawText.take(12)} —— 判失败，不记已备"
+                        )
+                        return false
+                    }
+                    // 收编：正式缓存已存在（播放刚写过/上次收编过）就不覆盖。
                     //
                     // 11-22 17:3x：**renameTo 失败必须可见、且要降级复制**。
                     // 旧写法只 runCatching，而 renameTo 失败是返回 false、不抛异常——
                     // 于是「合成功了但没落进正式缓存」这件事在日志里一个字都没有
                     //（真机就是这样跑了两个多小时，1060 笔预加载里 35% 白重复）。
-                    // 现在：① 记返回值；② 失败退回 byte 复制（tmp 已在同目录，这一步
-                    // 只为万一同卷假设仍不成立时兜底）；③ 仍失败就打 WARN 级日志，
-                    // 让「预加载假成功」下次能直接从日志定位。
-                    if (!finalCache.exists() && isValidAudioFile(delivered)) {
+                    // 11-28 补：**任何分支都必须留痕**，不再有静默跳过——
+                    // 上一版只在 rename 和 copy 都失败时打一行，正常路径零日志，
+                    // 导致「到底算不算备上」只能靠推测（见上方 44B 空壳事故）。
+                    if (finalCache.exists() && finalCache.length() > MIN_VALID_AUDIO_BYTES) {
+                        AppLog.putDebug(
+                            "预加载收编跳过：正式缓存已存在第${index + 1}段（${finalCache.length()}B）"
+                        )
+                    } else {
                         val renamed = runCatching { delivered.renameTo(finalCache) }
                             .getOrDefault(false)
-                        if (!renamed) {
+                        if (renamed) {
+                            AppLog.putDebug(
+                                "预加载收编成功（rename）：第${index + 1}段 ${deliveredSize}B"
+                            )
+                        } else {
                             val copied = runCatching {
                                 delivered.copyTo(finalCache, overwrite = true).length() > 0
                             }.getOrDefault(false)
-                            if (!copied) {
-                                AppLog.put(
-                                    "预热音频收编失败：" +
-                                        "rename=false copy=false（tmp=${delivered.absolutePath}，" +
-                                        "final=${finalCache.absolutePath}）"
+                            if (copied) {
+                                AppLog.putDebug(
+                                    "预加载收编成功（rename 失败→已复制）：第${index + 1}段 ${deliveredSize}B"
                                 )
                             } else {
-                                AppLog.putDebug("预热音频收编：rename 失败，已复制落地")
+                                // 收编彻底失败 ⇒ 文件没进正式缓存 ⇒ 播放必然 MISS。
+                                // 绝不能算「已备」，否则又是谎报（本次事故同型）。
+                                AppLog.put(
+                                    "预加载收编失败（rename=false copy=false）：" +
+                                        "第${index + 1}段（tmp=${delivered.absolutePath}，" +
+                                        "final=${finalCache.absolutePath}）—— 判失败，不记已备"
+                                )
+                                return false
                             }
                         }
+                    }
+                    // 收编最后一道确认：以**磁盘事实**为准，不信任何中间结论。
+                    if (!finalCache.exists() || finalCache.length() <= MIN_VALID_AUDIO_BYTES) {
+                        AppLog.put(
+                            "预加载收编后复查失败：正式缓存不存在或仍是空壳" +
+                                "（${runCatching { finalCache.length() }.getOrDefault(0)}B）：" +
+                                "第${index + 1}段 —— 判失败，不记已备"
+                        )
+                        return false
                     }
                     true
                 } else {
@@ -3372,6 +3485,38 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         // 即跳过），探测到的位置回写进度表，下轮从那继续，O(1) 续跑。
         for (offset in 0..limitChapter) {
             val idx = currentIdx + offset
+            // ===== 11-28（用户实报「第18章没合成完就开始备19、20章」）：严格单调 =====
+            //
+            // ## 为什么必须有这道闸
+            // 上面那行 `if (retryAt > now) continue` 是「跳章」的物理入口：
+            // 当前章因为失配/失败被退避时，`continue` 会直接走到下一章去备货。
+            // 真机 11-28 02:41–02:43 就是这样连跳三章：第18章备 2 段被拉黑 ⇒
+            // continue ⇒ 备第19章；19 章备 3 段被拉黑 ⇒ continue ⇒ 备第20章。
+            // 用户看到的「18章没合完就开始19、20章」正是这个 continue。
+            //
+            // ## 判据：前面任何一章还没备完（含退避中），就不许碰后面的章
+            // 只在 `offset > 0`（后面章）时检查，且只看 `offset-1` 那一章——
+            // 因为循环是顺序走的，只要**紧邻的上一章**没备完，就不该越过去；
+            // 它能走到 getChapter 这一步，说明更前面的章都已在各自轮次
+            // 走完 `scan >= total`（本章全备完）分支。
+            //
+            // 退避中的章也算「没备完」：它只是暂时不备，不是已经备好了。
+            // 这样才能保证「等它退避结束继续备」，而不是永远跳过它。
+            if (offset > 0) {
+                val prevIdx = idx - 1
+                val prevTotal = preloadChapterCache[prevIdx]?.segments?.size ?: 0
+                val prevDone = preloadChapterProgress[prevIdx] ?: 0
+                val prevNotDone = prevTotal <= 0 || prevDone < prevTotal
+                if (prevNotDone) {
+                    // 用 putDebug：备货排队等待是正常节奏（上一章还在备），
+                    // 只在排障开调试日志时可见，平时不该刷屏。
+                    AppLog.putDebug(
+                        "跨章预加载单调等待：第${prevIdx + 1}章未备完" +
+                            "（$prevDone/$prevTotal），本轮不越章去备第${idx + 1}章"
+                    )
+                    break
+                }
+            }
             if ((preloadChapterRetryAt[idx] ?: 0L) > now) continue
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, idx) ?: run {
                 AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章 getChapter=null")
@@ -3436,6 +3581,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // 从没进过进度表也没备过的空洞）。逐段探测是唯一能发现空洞的办法，
             // 也是旧注释里「逐段探测缓存兜住」原本就想做、但被 nowSpeak 短路掉的事。
             var from = preloadChapterProgress[idx] ?: 0
+            // 11-28：记下「本轮是不是从越界归零进来的」——这是**真失配的唯一入口**。
+            // 见下方兜底闸重写说明：正常串行补货的 from 一定 < total，
+            // 只有「账本推到章末、可探测又找不到文件」才会走到归零这一支。
+            val fromWasReset = from >= total
             if (from >= total) from = 0   // 进度表越界（旧值遗留）：从头探测，别放弃整章
             // ===== 11-22 17:0x（用户实报「从章节中间开始朗读，却先缓存这章的标题」）=====
             //
@@ -3518,16 +3667,36 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 preloadDesyncRounds.remove(idx)
                 continue
             }
-            // ===== 11-27：防「无限重扫」兜底闸（详见 PRELOAD_DESYNC_MAX_ROUNDS）=====
+            // ===== 11-28：防「无限重扫」兜底闸——**判据已重写** =====
             //
-            // 判据：本轮从 from 起探测了多段、却**一个文件都没命中**，且进度表
-            // 已经推进过（from>下限）——这正是「记账说有、文件探测说没有」的
-            // 失配特征。此时若照旧从 0 重扫，就会变成每 40 秒扫一遍全章的死循环
-            // （真机第10章 213 遍、25126 次提交里 98.9% 是重复）。
+            // ## 旧判据为什么必须废掉（真机 11-28 02:37–02:45 实锤）
+            // 旧判据：`probeHit == 0 && from > currentChapterFloor` 计一轮，
+            // 连续 3 轮即「判失配」→ **整章退避 5 分钟**。
             //
-            // 处置：连续 3 轮都这样 ⇒ 整章退避 5 分钟，并打 WARN 级日志。
-            // 正常情况（键一致）永远不会走到这里：探测会命中，probeHit>0。
-            if (probeHit == 0 && from > currentChapterFloor) {
+            // 但**串行补货的正常形态恰恰就是 probeHit == 0**：
+            // 备完第 N 段 ⇒ 进度表写成 N+1 ⇒ 下一轮从 N+1 起探测 ⇒
+            // 第一个就是「还没备」的段 ⇒ 立刻 break ⇒ 本轮命中数必然是 0。
+            // 也就是说这个闸在**一切正常时恒成立**，只要备过 1~2 段，
+            // 之后连续 3 轮必然触发 —— 4 章 4 次触发，命中率 100%。
+            //
+            // 而它想抓的真病例（11-27 那次「记账推到 total ⇒ from 归零 ⇒
+            // 第一段就 miss」）恰恰因为 `from == 0` 不满足 `from > 下限`，
+            // **永远抓不到**。判据写反了，方向是错的。
+            //
+            // ## 后果（用户看到的三个现象是一个根）
+            // 误判失配 ⇒ 整章拉黑 300 秒 ⇒ `for` 循环 continue 到下一章 ⇒
+            // 第18章只备 3 段就跳去 19、20 章 ⇒ 播放永远落在缺口上现场合成。
+            //
+            // ## 新判据：只在「本章判定已备完、却仍有空洞」时才计
+            // 真失配的定义是「账本说整章齐了，可探测还是找不到文件」——
+            // 只有 `from >= total`（进度越界归零）这一种入口能表达它。
+            // 正常串行补货（进度在章中、探测停在第一个空洞）**不计**。
+            //
+            // 另外把「连续 3 轮」的计次口径收紧：只在上述归零入口计数，
+            // 且**任何一次真实备货成功都会清零**（见下方 ok 分支），
+            // 所以不会再把正常补货累积成失配。
+            val isProgressOverflow = fromWasReset
+            if (isProgressOverflow) {
                 val rounds = (preloadDesyncRounds[idx] ?: 0) + 1
                 preloadDesyncRounds[idx] = rounds
                 if (rounds >= PRELOAD_DESYNC_MAX_ROUNDS) {
@@ -3537,14 +3706,13 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     // 用 put（WARN 级）而不是 putDebug：这是「判据失配」的告警，
                     // 出问题时用户导出日志就能直接看到，不必先开调试开关。
                     AppLog.put(
-                        "跨章预加载探测失配：第${idx + 1}章 连续 $rounds 轮逐段探测零命中" +
-                            "（记账=${preloadChapterProgress[idx] ?: 0}/$total，" +
-                            "from=$from），已退避 ${PRELOAD_DESYNC_RETRY_MS / 1000} 秒。" +
-                            "正常不该出现——出现即说明缓存文件名口径与写入侧不一致"
+                        "跨章预加载探测失配：第${idx + 1}章 进度表已到章末($from/$total)" +
+                            "但探测仍无文件，连续 $rounds 轮 —— 已退避 " +
+                            "${PRELOAD_DESYNC_RETRY_MS / 1000} 秒"
                     )
                     return false
                 }
-            } else {
+            } else if (probeHit > 0) {
                 preloadDesyncRounds.remove(idx)
             }
             // 进度表对齐到探测位置：下次从这里继续，O(1) 续跑
@@ -3707,6 +3875,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     Companion.preloadPreparedStore
                         .getOrPut(idx) { java.util.Collections.synchronizedSet(mutableSetOf()) }
                         .add(from)
+                    // 11-28：**真备上一段就清零失配计数**。
+                    // 失配闸的语义是「账本说齐了、磁盘却说没有」——
+                    // 既然这一段真落了盘，就证明缓存键与写入侧是一致的，
+                    // 之前累计的轮次全部作废，不能跨轮累积成误判。
+                    preloadDesyncRounds.remove(idx)
                     AppLog.putDebug(
                         "跨章预加载已备: 第${idx + 1}章 第${from + 1}/$total 段（${preloaded.title.take(12)}）"
                     )
@@ -3770,11 +3943,59 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             postPreloadState(summarizePreloadState(currentIdx, limitChapter))
             return true
         }
-        // 走完一圈：全部章都备完了
+        // ===== 11-28：走完一圈 ≠ 全部备完 =====
+        //
+        // 旧文案「一圈走完全部已备」是**谎报**：`for` 循环里遇到
+        // `preloadChapterRetryAt[idx] > now`（退避中）只有 `continue`，
+        // 一轮扫下来什么也没做，照样落到这里就宣称「全部已备」。
+        // 真机 11-28 02:44:06 起连刷 10 次「一圈走完全部已备」，
+        // 而当时第18/19/20 章全在 300 秒退避里、每章只备了 2~3 段。
+        //
+        // 现在先查真实状态：还有任何一章进度未到 total、或仍在退避中，
+        // 就报「等待重试」，只有**每章都逐段探测确认扫到章末**才报「全部已备」。
+        val pending = preloadPendingChapters(currentIdx, limitChapter)
         preloadActiveChapter = -1
+        if (pending.isNotEmpty()) {
+            AppLog.putDebug(
+                "跨章预加载诊断: 一圈走完但未备完（currentIdx=$currentIdx, limit=$limitChapter, " +
+                    "待完成=$pending）"
+            )
+            postPreloadState(summarizePreloadState(currentIdx, limitChapter))
+            return false
+        }
         AppLog.putDebug("跨章预加载诊断: 一圈走完全部已备（currentIdx=$currentIdx, limit=$limitChapter）")
         postPreloadState(summarizePreloadState(currentIdx, limitChapter))
         return false
+    }
+
+    /**
+     * 列出「还没备完」的章号（1-based 用于显示），空 = 真的全备完了。
+     *
+     * 判据三条任一成立即算未备完：
+     *   ① 段表还没建（[preloadChapterCache] 无此章）——它必然还没备过；
+     *   ② 进度表 < 总段数——还有空洞；
+     *   ③ 仍在退避中（[preloadChapterRetryAt] 未到期）。
+     *
+     * 为什么不只看②：11-28 那次退避中的章进度表是 2/116（②也成立），
+     * 但还有一种情形是「进度被误推到 total 却仍在退避」，只看②会漏判。
+     */
+    private fun preloadPendingChapters(currentIdx: Int, limitChapter: Int): List<Int> {
+        val now = SystemClock.elapsedRealtime()
+        val list = ArrayList<Int>()
+        for (offset in 1..limitChapter) {
+            val idx = currentIdx + offset
+            val cached = preloadChapterCache[idx]
+            if (cached == null) {
+                list.add(idx + 1)
+                continue
+            }
+            val total = cached.segments.size
+            val done = preloadChapterProgress[idx] ?: 0
+            if (done < total || (preloadChapterRetryAt[idx] ?: 0L) > now) {
+                list.add(idx + 1)
+            }
+        }
+        return list
     }
 
     /**

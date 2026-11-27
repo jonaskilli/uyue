@@ -1218,14 +1218,24 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         val baseDir = appCtx.getExternalFilesDir(null) ?: appCtx.filesDir
         val httpTtsDir = baseDir.absolutePath + File.separator + "httpTTS"
         val httpTtsCacheDir = baseDir.absolutePath + File.separator + "httpTTS_cache"
-        // 清理系统TTS缓存（与 TTSReadAloudService 的 ttsFolderPath 保持一致）
-        val sysTtsCacheDir = File(appCtx.externalCacheDir, "systemTTS")
+        // 清理系统TTS缓存（11-28：改调唯一权威解析器，与写入侧同源）
+        //
+        // ⚠️ 必须**同时清两处**：当前目录（Download 共享根，或权限缺失时的旧目录）
+        // 与**旧目录**本身。迁移是「启动时一次性」且可能因权限不足没跑成，
+        // 旧目录里可能还留着改版前缓存的音频；只清当前目录会漏掉它们，
+        // 用户点了「清空缓存」却发现磁盘空间没降、旧章节还能秒播。
+        val sysTtsCacheDir = io.legado.app.help.TtsAudioCacheDir.dir()
+        val legacySysTtsDir = File(appCtx.externalCacheDir, "systemTTS")
         val sysCountBefore = runCatching {
             FileUtils.listDirsAndFiles(sysTtsCacheDir.absolutePath)?.count { it.isFile } ?: 0
         }.getOrDefault(0)
+        val legacyCountBefore = runCatching {
+            FileUtils.listDirsAndFiles(legacySysTtsDir.absolutePath)?.count { it.isFile } ?: 0
+        }.getOrDefault(0)
         LogUtils.d(
             "AppConfig",
-            "清空音频缓存开始：系统TTS $sysCountBefore 个（${sysTtsCacheDir.absolutePath}），" +
+            "清空音频缓存开始：系统TTS $sysCountBefore 个（${sysTtsCacheDir.absolutePath}）" +
+                " + 旧目录 $legacyCountBefore 个（${legacySysTtsDir.absolutePath}），" +
                 "同时清 httpTTS/httpTTS_cache 与 UTTS 共享 synth_cache"
         )
 
@@ -1236,10 +1246,22 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
                 FileUtils.delete(it.absolutePath)
             }
         }
+        if (legacySysTtsDir.exists() && legacySysTtsDir.absolutePath != sysTtsCacheDir.absolutePath) {
+            FileUtils.listDirsAndFiles(legacySysTtsDir.absolutePath)?.forEach {
+                FileUtils.delete(it.absolutePath)
+            }
+        }
         val sysCountAfter = runCatching {
             FileUtils.listDirsAndFiles(sysTtsCacheDir.absolutePath)?.count { it.isFile } ?: 0
         }.getOrDefault(0)
-        LogUtils.d("AppConfig", "清空音频缓存完成：系统TTS 剩余 $sysCountAfter 个")
+        val legacyCountAfter = runCatching {
+            FileUtils.listDirsAndFiles(legacySysTtsDir.absolutePath)?.count { it.isFile } ?: 0
+        }.getOrDefault(0)
+        LogUtils.d(
+            "AppConfig",
+            "清空音频缓存完成：系统TTS 剩余 $sysCountAfter 个" +
+                " + 旧目录剩余 $legacyCountAfter 个"
+        )
         // 11-15 晚：本函数的两个调用入口就是用户说的「清音频缓存」——
         //   ① 长按朗读引擎键 → ReadMenu.clearTtsCache() → SpeakEngineDialog.clearCacheStatic()
         //   ② 更换朗读引擎界面右上角清理键 → SpeakEngineDialog.clearCache()

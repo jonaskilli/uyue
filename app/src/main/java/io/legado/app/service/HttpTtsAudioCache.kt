@@ -39,9 +39,9 @@ object HttpTtsAudioCache {
         baseDir.absolutePath + File.separator + "httpTTS" + File.separator
     }
 
-    /** 系统TTS缓存目录（与 TTSReadAloudService.ttsFolderPath 保持一致） */
+    /** 系统TTS缓存目录（11-28：改调唯一权威解析器，与写入侧/扫描侧/清空侧同源） */
     private val sysTtsCacheDir: File by lazy {
-        File(appCtx.externalCacheDir, "systemTTS").apply { if (!exists()) mkdirs() }
+        io.legado.app.help.TtsAudioCacheDir.dir().apply { if (!exists()) mkdirs() }
     }
 
     private fun speechRate(): Int {
