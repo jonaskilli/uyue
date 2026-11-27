@@ -496,6 +496,34 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     private var playErrorNo = 0
     // 11-13：framework 双 onError 重载去重（见 onError 内注释）
     private val handledErrorCallbacks = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
+     * 11-28：**「让路」回调的 utteranceId 集合**——这些不是合成失败，不计失败次数。
+     *
+     * ## 为什么必须单独记
+     * UTTS 在「合成器忙」时对预加载请求让路（播放优先的正常调度），
+     * 真机实测让路率 **92%**（12 次提交里 11 次）。它现在回
+     * `TextToSpeech.ERROR_INVALID_REQUEST` 表示「本轮没轮到」，与真失败
+     * （网络/插件错，回 ERROR_SYNTHESIS）区分开。
+     *
+     * 若两者都当失败：92% 的让路率会让同一段迅速累积到
+     * [PRELOAD_SEGMENT_MAX_FAILS]（3 次）而被**永久跳过** ⇒ 真的漏段。
+     * 所以让路必须走「不计次、下轮立刻重试同一段」这条路。
+     *
+     * 用 utteranceId 传递而非返回值：onError 是异步回调，
+     * prepare 阶段拿不到「为什么失败」，只能在这里登记、等 completer 那侧读。
+     */
+    private val preloadYieldIds = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
+     * 11-28：「本轮这段是让路，不是失败」的标记集（键 = 章节标题|段号）。
+     *
+     * 为什么不能在 [preloadOneSegmentLocked] 里直接算完：
+     * 失败计数（preloadSegmentFailCount）在外层 `when` 分支里做，
+     * 而让路与真失败都返回 false，外层无法区分。用一个短命标记集传递，
+     * 外层读到就跳过失败计数并立刻清除——不跨轮累积。
+     */
+    private val yieldedSegmentKeys = java.util.Collections.synchronizedSet(HashSet<String>())
     private var itemRetryPending = false
 
     /**
@@ -959,6 +987,11 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             if (utteranceId != null) {
                 handledErrorCallbacks.add(utteranceId)
                 startedCallbacks.remove(utteranceId)
+                // 11-28：ERROR_INVALID_REQUEST = UTTS「让路」（合成器忙、本轮没合成），
+                // 不是失败。登记下来，preloadOneSegmentLocked 据此不计失败次数。
+                if (errorCode == TextToSpeech.ERROR_INVALID_REQUEST) {
+                    preloadYieldIds.add(utteranceId)
+                }
             }
             synthesisTargetFiles.remove(utteranceId)
             val completer = synthesisCompleters.remove(utteranceId)
@@ -1961,6 +1994,27 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // 11-28 实锤：正是这条「临时文件必然存在」把 11 次没合成误记成「已备」，
                 // 所以现在下面先判空壳尺寸（MIN_VALID_AUDIO_BYTES），再谈收编。
                 val delivered = withTimeoutOrNull(preloadSegmentTimeoutMs) { completer.await() }
+                // ===== 11-28：先分流「让路」，它不是失败 =====
+                //
+                // UTTS 让路（合成器忙、播放优先）回 ERROR_INVALID_REQUEST，
+                // onError 里已按错误码登记到 [preloadYieldIds]。真机让路率 **92%**
+                // （12 次提交 11 次让路）——若让它走下面的「空壳判失败」或真失败分支，
+                // 同一段会迅速累积到 3 次而被永久跳过 ⇒ 真的漏段。
+                //
+                // 处置：不推进进度、不计失败、不写任何东西，只留一行调试日志，
+                // 返回 false 让外层的 `else` 分支……注意——**不能**让它走 else 真失败分支
+                // （那里会 preloadSegmentFailCount++）。故这里直接返回，
+                // 并在返回前打标记供外层识别。
+                val yielded = uid in preloadYieldIds
+                if (yielded) preloadYieldIds.remove(uid)
+                if (yielded) {
+                    AppLog.putDebug(
+                        "预加载让路：第${index + 1}段（合成器忙，本轮未合成，不计失败）"
+                    )
+                    // 标记本轮为「让路」，外层据此跳过失败计数
+                    yieldedSegmentKeys.add(chapterTitle + "|" + index)
+                    return false
+                }
                 if (delivered != null && delivered.exists() && delivered.length() > 0) {
                     // ===== 11-28（用户实报「第18章没合成完就备19、20章」）：=====
                     // **「假成功」必须显式判出来，不能靠 isValidAudioFile 静默拦掉**
@@ -3943,6 +3997,20 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                             "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 被播放打断"
                         )
                     }
+                }
+                // ===== 11-28：让路不是失败，绝不能计次 =====
+                //
+                // UTTS 让路（合成器忙、播放优先）回 ERROR_INVALID_REQUEST，
+                // 内层已把「本轮这段是让路」写进 yieldedSegmentKeys。
+                // 真机让路率 **92%**（12 次提交 11 次）——若计失败，
+                // 同一段 3 轮就被判死、永久跳过 ⇒ 真漏段。
+                // 处置与「被播放打断」同款：不推进、不计次、下轮重试。
+                !ok && yieldedSegmentKeys.remove("${preloaded.title}|$from") -> {
+                    preloadInterruptCount.remove("$idx|$from")
+                    AppLog.putDebug(
+                        "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 让路（合成器忙），" +
+                            "不计失败、下轮重试"
+                    )
                 }
                 else -> {
                     AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 合成返回失败")
