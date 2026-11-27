@@ -341,6 +341,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
          */
         private const val PRELOAD_FIRST_WINDOW_MS = 600L
         /**
+         * 11-28（用户实报「第16章朗读感觉花了一分钟，明明都缓存好了」）：
+         * **临门让路**观察窗——预加载真正提交进 UTTS 合成队列之前的最后一次确认。
+         *
+         * 轮函数开头那道让路判据有竞态：真机 01:01:09 切章时，判据检查那一刻
+         * （.289）播放笔还没提交，57ms 后（.410）才提交，而预加载已在 .466 抢进队列，
+         * 一笔占锁 15 秒，播放只能排到它后面 ⇒「第16章」这个标题段（本身已缓存、
+         * 只需 1ms）等了 **25.76 秒**才出声。
+         *
+         * 取 300ms：播放笔在 play() 之后通常 50~330ms 内提交（真机实测），
+         * 300ms 能覆盖绝大多数切章竞态；同时代价可控——每段最多晚 300ms 提交，
+         * 备货本来就领先播放十几段，整章尺度可忽略。
+         * 设 0 = 关闭本保护（回退到旧行为）。
+         */
+        private const val PRELOAD_FINAL_GUARD_MS = 300L
+        /**
          * 11-17：慢重试总预算——「永不跳句」模式下给失败段原地重来的总时长。
          *
          * 为什么要有上限：用户原话「只能满足一定的条件它才跳，不然一直等着一个不会合成的
@@ -3565,6 +3580,50 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             // batch_json 路径下播放打断表现为引擎 stop → onError 回 null（不是
             // 协程取消），所以改用代次对比识别「这 15 秒里播放重置过」。
             val genBefore = abortGeneration
+
+            // ===== 11-28（用户实报「第16章朗读感觉花了一分钟，明明都缓存好了」）=====
+            // **临门让路**：进 preloadGate 之前再确认一次「这一刻有没有播放笔在飞」。
+            //
+            // ## 为什么轮函数开头那道让路判据没拦住（真机 01:01:09 实锤）
+            // ```
+            // 01:01:09.288  play() 被调
+            // 01:01:09.289  轮函数刚进来：playbackSubmitAt 还是 0（播放笔还没提交）
+            //               ⇒ 让路判据不成立，放行
+            // 01:01:09.410  播放笔才提交 "第16章"（已缓存，本身只需 1ms）
+            // 01:01:09.466  预加载抢先入队 "王八蛋看我" —— 占住 UTTS 全局合成锁
+            // 01:01:24.468  这笔预加载跑了 15s 才返回（含插件 AI 分析）
+            // 01:01:34.921  "第16章" 这笔播放才被 UTTS 处理 ⇒ 出声
+            // ```
+            // 也就是说：**判据检查的那一刻没有播放，57ms 后播放就来了**，
+            // 而这一笔预加载一旦入队就要占锁十几秒，播放只能排在它后面。
+            // 章末/切章时这个竞态必现——因为切章会同时触发 play() 和 ensureChapterPreload()。
+            //
+            // ## 修法
+            // 提交前做一次**极短**的观察窗（[PRELOAD_FINAL_GUARD_MS]，只观察不发请求）：
+            // 期间若出现播放提交，本段直接放弃（不推进进度，下一轮重来），
+            // 把队首让给播放笔。没播放就照常立刻提交，正常情况零额外延迟。
+            // 代价：每段最多晚 [PRELOAD_FINAL_GUARD_MS] 再提交；备货本来就领先播放十几段，
+            // 这点延迟在整章尺度上可忽略，换来的是**首段不用再等十几秒**。
+            if (PRELOAD_FINAL_GUARD_MS > 0) {
+                val guardBase = playbackSubmitAt
+                val guardEnd = SystemClock.elapsedRealtime() + PRELOAD_FINAL_GUARD_MS
+                var playbackCame = (playbackSubmitAt > playbackSettledAt)
+                while (!playbackCame && SystemClock.elapsedRealtime() < guardEnd) {
+                    if (!currentCoroutineContext().isActive) return false
+                    delay(PRELOAD_YIELD_POLL_MS)
+                    playbackCame = (playbackSubmitAt > playbackSettledAt) ||
+                        (playbackSubmitAt > guardBase)
+                }
+                if (playbackCame) {
+                    AppLog.putDebug(
+                        "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 临门让路" +
+                            "（播放笔刚提交，本轮先不备货）"
+                    )
+                    // 不推进进度、不计失败——下一轮从同一段重来（与原「被播放打断」同语义）
+                    return false
+                }
+            }
+
             try {
                 ok = preloadGate.withLock {
                     val submitAt = SystemClock.elapsedRealtime()
