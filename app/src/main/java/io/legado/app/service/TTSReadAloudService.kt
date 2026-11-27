@@ -621,7 +621,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
     @Volatile
     private var bufferedCountCache: BufferedCountCache? = null
 
-    // 11-22 21:4x：缓冲上报诊断的节流状态（**临时诊断**，定位后连同 logBufDiag 一起删）
+    // 11-22 21:4x：缓冲上报诊断的节流状态。
+    // 11-28：主日志已降级为 putDebug、两处异常路径（入参无效/切章窗口）保留原频率，
+    // 这两行仍被它们使用，不能删。
     @Volatile
     private var lastBufDiagKey = ""
 
@@ -1077,6 +1079,24 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     return c.value
                 }
             }
+            // ===== 11-28（查证后**保留原口径**，撤回过一度想改的「整章已备数」）=====
+            //
+            // 曾考虑改成「整章已备段数」（单调不减、有终值），查证后否决：
+            // 这个数字不只是文字，它是 UTTS 吸顶进度条**浅绿段的数据源**
+            //（见 UTTS `TtsLogScreen`：浅绿 = 已听 + bufferedAhead，
+            // 且 `coerceIn(playedFrac, 1f)` 硬钳）。
+            // 改成「整章已备数」后，播到章中某段时该数会远大于「本章剩余段数」，
+            // 浅绿被夹成 100% ⇒ **条显示本章全备好了，实际还剩几段没备**，
+            // 正是 11-22 花一轮修掉的「条在撒谎」，不能重新引回来。
+            //
+            // 用户原话（11-28）：「能看到比当前朗读多的段数挺好的」——
+            // 他要的就是「从当前位置往后还能连听多少」，即本口径。
+            //
+            // 关于「数字会下降」：查证后确认**大部分是真实状态，不是 bug**。
+            // 播完一段、缓冲就少一段（1→0 表示下一段还没备好），
+            // 这正是「还能连听多少」该有的行为。早先把它当 bug 是我看错。
+            // 真正偏低（38 段缓存只报 7）的成因是**预加载假成功**——
+            // 文件根本没落盘，计数自然数不到；该根已在同批修掉，本口径无需改。
             val start = (fromSeg + 1).coerceAtLeast(0)
             // ===== 11-22 17:5x（用户实报「缓冲到下一章了，进章数字却归 0」）=====
             //
@@ -1178,14 +1198,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             var crossN = 0
             var crossDetail = ""
             var crossStop = "未进入"
-            var diagCurIdx = -1
-            var diagLimit = -1
             runCatching {
                 val book = ReadBook.book
                 val curIdx = ReadBook.durChapterIndex
                 val limit = AppConfig.audioPreDownloadNum.coerceAtLeast(0)
-                diagCurIdx = curIdx
-                diagLimit = limit
                 if (book == null) {
                     crossStop = "book=null"
                     return@runCatching
@@ -1240,13 +1256,23 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             val totalN = localN + crossN
             // 一行把「本章/跨章/合计 + 章号 + 已建表章 + 中断原因」打全：
             // 下次真机复现时，只看这一行就能分清是「表不在」还是「文件判未备」。
-            logBufDiag(
-                key = "$fromSeg|$localN|$crossN|$crossStop|$diagCurIdx|${preloadChapterCache.keys.sorted()}",
-                line = "缓冲上报诊断: from=$fromSeg 章=$chapterTitle 本章=$localN 跨章=$crossN " +
-                    "合计=$totalN 本章明细=文件$localFileN/记录${recordedLocal?.size ?: 0}" +
-                    " curIdx=$diagCurIdx limit=$diagLimit " +
+            // ===== 11-28：诊断日志降级为 putDebug（用户实报日志被它刷屏）=====
+            //
+            // 旧写法用 logBufDiag + AppLog.put。真机 11-28 一份 4.5 分钟日志里，
+            // 这条**刷了 62 行**（占全篇 1/60），而排障真正要看的
+            //「预加载/跳章/失配」全被淹在里面。
+            // 节流按 key 生效，可 key 里含 fromSeg —— 播放每推进一段 key 就变，
+            // 于是节流形同虚设，等于每段都打一行。
+            //
+            // 现在降为 putDebug：只有用户打开「记录日志」开关时才落盘，
+            // 平时不刷屏；排障需要时仍能拿到全部字段，定位能力不减。
+            // 注意这里**不再走 logBufDiag 节流**（putDebug 本身是调试级，
+            // 已被开关挡住）；logBufDiag 仍被上面两处异常路径使用，故保留。
+            AppLog.putDebug(
+                "缓冲数: 章=$chapterTitle 本章=$localN 跨章=$crossN 合计=$totalN " +
+                    "本章明细=文件$localFileN/记录${recordedLocal?.size ?: 0} " +
                     "跨章明细=[$crossDetail] 中断=$crossStop " +
-                    "已建表章=${preloadChapterCache.keys.sorted()} contentList章=$contentListChapterIndex",
+                    "已建表章=${preloadChapterCache.keys.sorted()}"
             )
             // 11-22 14:4x：写回短时缓存（同一段 500ms 内不重复全扫）
             bufferedCountCache = BufferedCountCache(
