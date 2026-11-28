@@ -4039,11 +4039,37 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 shellSegmentKeys.remove("${preloaded.title}|$from")
                 return false
             }
+            // 11-28 复核补修：**标记必须在这里一次性取干净**，不能放在 when 条件里。
+            //
+            // ## 为什么（真 bug，不是洁癖）
+            // Kotlin 的 `when` 按顺序求值：若前一个分支已匹配，后面分支的条件**不执行**。
+            // 原写法把 `shellSegmentKeys.remove(...)` 放进第三个分支的条件里，
+            // 于是「本轮是让路」时第三个条件不执行 ⇒ 空壳标记**残留**。
+            // 该标记按「章名|段号」存取，残留后**下轮同一段**（很常见：备货会反复重试
+            // 同一段）即使其实是让路/真失败，也会被误判成本轮空壳 ⇒ 跳到空壳分支、
+            // 白退避一轮。同类泄漏在 `!isRun` 提前返回处已修过（见上方注释），
+            // 这里是从另一条路进同一个洞。
+            //
+            // 取出来放局部变量：既保证无条件清理，又让 when 条件保持纯判断（无副作用）。
+            val segKey = "${preloaded.title}|$from"
+            val wasYielded = yieldedSegmentKeys.remove(segKey)
+            val wasShell = shellSegmentKeys.remove(segKey)
+            val shellHits = shellFailCount[segKey] ?: 0
             when {
                 ok -> {
                     preloadChapterProgress[idx] = from + 1
                     preloadSegmentFailCount.remove("$idx|$from")
                     preloadInterruptCount.remove("$idx|$from")
+                    // ===== 11-28 复核补修：空壳计数必须在这里清零 =====
+                    //
+                    // 语义是「**连续**空壳多少次」，不是「累计空壳多少次」。
+                    // 不清零的后果：隔几轮偶发一次空壳，也会一路累加到
+                    // [PRELOAD_SHELL_MAX_FAILS] 而被跳过——等于把上限从 3 提到 12
+                    // 的误伤问题原样保留下来（只是来得更慢），违背这条通道的初衷。
+                    //
+                    // 与 preloadSegmentFailCount / preloadInterruptCount 同处清理，
+                    // 三者在「这段最终备上了」时都必须归零。
+                    shellFailCount.remove("${preloaded.title}|$from")
                     // ===== 11-23 23:5x（用户实拍「读 n 章、后台备到 n+1 章，缓冲报 0」）=====
                     // 记账**不再以「自己重算的文件名存在」为条件**。
                     // 真机 23:49 实锤：第23章 22:49:42–22:50:10 连报「已备 1..12 段」，
@@ -4106,7 +4132,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // 真机让路率 **92%**（12 次提交 11 次）——若计失败，
                 // 同一段 3 轮就被判死、永久跳过 ⇒ 真漏段。
                 // 处置与「被播放打断」同款：不推进、不计次、下轮重试。
-                !ok && yieldedSegmentKeys.remove("${preloaded.title}|$from") -> {
+                !ok && wasYielded -> {
                     preloadInterruptCount.remove("$idx|$from")
                     AppLog.putDebug(
                         "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 让路（合成器忙），" +
@@ -4120,8 +4146,7 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 //   · 未到 [PRELOAD_SHELL_MAX_FAILS] ⇒ 不计真失败、下轮重试同一段；
                 //   · 到达上限 ⇒ 清计数、**故意落到下面的 else 真失败分支**去跳过该段
                 //     （上层若长期坏，必须能往前推进，否则整章永远备不完）。
-                !ok && shellSegmentKeys.remove("${preloaded.title}|$from") &&
-                    (shellFailCount["${preloaded.title}|$from"] ?: 0) < PRELOAD_SHELL_MAX_FAILS -> {
+                !ok && wasShell && shellHits < PRELOAD_SHELL_MAX_FAILS -> {
                     preloadInterruptCount.remove("$idx|$from")
                     // 空壳多半是上游全局故障，退避比让路略长，避免每轮都撞同一个坏状态
                     preloadChapterRetryAt[idx] = SystemClock.elapsedRealtime() +
@@ -4140,9 +4165,15 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     val fails = (preloadSegmentFailCount[failKey] ?: 0) + 1
                     // 11-28：若这段其实是被「空壳」熬到上限才落到这里的，日志要说实话，
                     // 否则下次排查又会把它当成「这段文字合不出」而找错方向。
-                    val shellFailKey = "${preloaded.title}|$from"
-                    val shellHits = shellFailCount.remove(shellFailKey) ?: 0
-                    if (shellHits >= PRELOAD_SHELL_MAX_FAILS) {
+                    // shellHits 已在 when 之前取出（见上方 segKey 段），这里直接复用，
+                    // 不再重复 remove——重复 remove 会返回 null 而丢掉真实次数。
+                    //
+                    // 判据必须同时满足 `wasShell`：只有**本轮确实是空壳**才走这条。
+                    // 只看 shellHits 会误报——例如这段上轮空壳累到 5 次后本轮变成
+                    // 真失败（插件 404），shellHits 仍是 5，若不带 wasShell 就会打
+                    // 「空壳 5 次跳过」，把一次真失败归错因。
+                    if (wasShell && shellHits >= PRELOAD_SHELL_MAX_FAILS) {
+                        shellFailCount.remove(segKey)   // 到上限：清计数，放行该段
                         preloadChapterProgress[idx] = from + 1
                         AppLog.put(
                             "跨章预加载第 ${from + 1} 段空壳 ${shellHits} 次，跳过以免整章卡住" +
