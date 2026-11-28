@@ -175,6 +175,16 @@ object MiniMaxClient {
         root.put("stream", true)
         root.put("max_tokens", (maxTokens ?: 8192).coerceIn(1, 128000))
 
+        // 思考模式按模型分流：
+        // - M3.1 强制开启思考且不能关闭（disabled/none 均返回 400），只能用
+        //   Anthropic 协议的 output_config.effort 调到最低档 low，官方默认值为 max。
+        // - 其余模型显式关闭思考，避免无端产生 thinking token 占用输出预算。
+        if (model.contains("M3.1", ignoreCase = true)) {
+            root.put("output_config", JSONObject().put("effort", "low"))
+        } else {
+            root.put("thinking", JSONObject().put("type", "disabled"))
+        }
+
         val system = StringBuilder()
         val chatArray = JSONArray()
         messages.forEach { m ->
