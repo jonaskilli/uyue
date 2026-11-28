@@ -29,6 +29,7 @@ import io.legado.app.help.MiyueKeyManager
 import io.legado.app.model.CharacterProfileManager
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.read.page.DialogRoleManager
+import io.legado.app.ui.book.toc.AiCacheFileUtil
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.read.page.entities.column.TextColumn
 import io.legado.app.utils.defaultSharedPreferences
@@ -328,17 +329,26 @@ class CharacterManagerDialog : DialogFragment() {
         val chapter = ReadBook.curTextChapter ?: return
         val startSeq = currentPageLastQuoteSeq(chapter) ?: return
         val pinned = LinkedHashSet<String>()
+        // 角色缓存的键是「缓存口径标题」（chapterCacheTitle），不是原始/显示标题：
+        // TextChapter.title 是显示标题（已去引号），chapter.title 是原始标题，
+        // 本书配了改标题的替换规则时两者都与缓存文件名不符 ⇒ 读不到缓存。
         collectBackward(
-            DialogRoleManager.loadChapterCache(book.name, chapter.title),
+            DialogRoleManager.loadChapterCache(
+                book.name,
+                AiCacheFileUtil.chapterCacheTitle(book, chapter.chapter)
+            ),
             startSeq, pinned
         )
         // 当前章没凑够 10 个不同主名，才跨到上一章（最多这一章）
         if (pinned.size < PINNED_MAIN_NAME_LIMIT && ReadBook.durChapterIndex > 0) {
             val prevTitle = runCatching {
-                appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex - 1)?.title
+                appDb.bookChapterDao.getChapter(book.bookUrl, ReadBook.durChapterIndex - 1)
             }.getOrNull()
-            if (!prevTitle.isNullOrEmpty()) {
-                val prevCache = DialogRoleManager.loadChapterCache(book.name, prevTitle)
+            if (prevTitle != null) {
+                val prevCache = DialogRoleManager.loadChapterCache(
+                    book.name,
+                    AiCacheFileUtil.chapterCacheTitle(book, prevTitle)
+                )
                 val lastSeq = prevCache.keys.maxOrNull() ?: 0
                 if (lastSeq > 0) collectBackward(prevCache, lastSeq, pinned)
             }
