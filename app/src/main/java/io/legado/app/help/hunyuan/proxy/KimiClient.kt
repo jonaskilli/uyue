@@ -27,6 +27,7 @@ object KimiClient {
         .build()
 
     private const val HOST = "www.kimi.com"
+    private const val SCENARIO = "SCENARIO_K2D5"
     private const val CHAT_PATH = "/apiv2/kimi.gateway.chat.v1.ChatService/Chat"
     private const val DELETE_PATH = "/apiv2/kimi.gateway.chat.v1.ChatService/DeleteChat"
     private const val UA =
@@ -66,101 +67,54 @@ object KimiClient {
         return trimmed
     }
 
-    /** 将 OpenAI 格式 messages 转换为 Kimi 请求体（对齐 kimi2api.js buildKimiRequest）。 */
-    private fun buildRequestBody(messages: List<ChatMessage>): String {
-        val systemMsg = messages.firstOrNull { it.role == "system" }
-        val systemPrompt = systemMsg?.content?.takeIf { it.isNotBlank() }
+    /** kimi2api 当前使用 X-Msh-Device-Id（纯数字，至少 16 位）标识客户端。 */
+    private fun newDeviceId(): String = buildString {
+        repeat(16) { append(kotlin.random.Random.nextInt(0, 10)) }
+    }
 
+    /** kimi2api 当前使用 X-Msh-Session-Id（19 位数字）标识会话。 */
+    private fun newSessionId(): String = "17" + buildString {
+        repeat(17) { append(kotlin.random.Random.nextInt(0, 10)) }
+    }
+
+    /**
+     * 将 OpenAI 格式 messages 转换为 Kimi 当前网页请求体（对齐 kimi2api _build_chat_payload）。
+     * 旧版那套带大量 NULL 字段的请求体现在会被服务端 200 返回空帧，表现为「模型未返回内容」。
+     */
+    private fun buildRequestBody(messages: List<ChatMessage>, model: String): String {
         val parts = mutableListOf<String>()
         for (m in messages) {
             val content = m.content
             if (content.isBlank()) continue
-            val label = when (m.role) {
-                "system" -> "System"
-                "user" -> "User"
-                "assistant" -> "Assistant"
-                else -> m.role
+            val role = when (m.role.lowercase()) {
+                "system", "developer" -> "system"
+                "assistant" -> "assistant"
+                "tool" -> "user"
+                else -> "user"
             }
-            parts.add("$label: $content")
+            val body = if (role == "user" && m.role.equals("tool", true)) {
+                "[TOOL_RESULT for ${m.role}] $content"
+            } else content
+            parts.add("$role: $body")
         }
-        val text = parts.joinToString("\n\n")
-
-        val block = JSONObject().apply {
-            put("id", "")
-            put("parentId", JSONObject.NULL)
-            put("messageId", JSONObject.NULL)
-            put("text", JSONObject().apply {
-                put("content", text)
-                put("tips", JSONObject.NULL)
-            })
-            put("search", JSONObject.NULL)
-            put("file", JSONObject.NULL)
-            put("think", JSONObject.NULL)
-            put("exception", JSONObject.NULL)
-            put("memory", JSONObject.NULL)
-            put("contractReview", JSONObject.NULL)
-            put("tool", JSONObject.NULL)
-            put("artifact", JSONObject.NULL)
-            put("slidesView", JSONObject.NULL)
-            put("multiStage", JSONObject.NULL)
-            put("elemeMenuCard", JSONObject.NULL)
-            put("elemeOrderCard", JSONObject.NULL)
-            put("videoCards", JSONObject.NULL)
-            put("explorerResearch", JSONObject.NULL)
-            put("explorerResearchReanswer", JSONObject.NULL)
-            put("aippt", JSONObject.NULL)
-            put("contentViewZhidemaiCard", JSONObject.NULL)
-            put("error", JSONObject.NULL)
-            put("createTime", JSONObject.NULL)
-        }
-
-        val msg = JSONObject().apply {
-            put("id", "")
-            put("parentId", "")
-            put("role", "user")
-            put("status", JSONObject.NULL)
-            put("refs", JSONObject.NULL)
-            put("scenario", "SCENARIO_K2D5")
-            put("kimiPlus", JSONObject().apply {
-                put("id", ""); put("avatarUrl", ""); put("name", ""); put("specialId", "")
-            })
-            put("vote", JSONObject.NULL)
-            put("error", JSONObject.NULL)
-            put("createTime", JSONObject.NULL)
-            put("childrenMessageIds", JSONArray())
-            put("blocks", JSONArray().apply { put(block) })
-            put("labels", JSONArray())
-            put("labelsValue", JSONArray())
-        }
-
-        val options = JSONObject().apply {
-            put("lbs", JSONObject.NULL)
-            put("voiceId", "S_LvP7QSYN")
-            put("speed", 1.25)
-            put("thinking", false)
-            put("systemPrompt", systemPrompt ?: JSONObject.NULL)
-            put("slides", JSONObject.NULL)
-        }
-
-        val tools = JSONArray().apply {
-            put(JSONObject().apply {
-                put("type", "TOOL_TYPE_DEVICE_LBS")
-                put("search", JSONObject.NULL); put("genImage", JSONObject.NULL); put("name", "")
-            })
-            put(JSONObject().apply {
-                put("type", "TOOL_TYPE_SEARCH")
-                put("search", JSONObject.NULL); put("genImage", JSONObject.NULL); put("name", "")
-            })
-        }
+        val text = parts.joinToString("\n")
 
         return JSONObject().apply {
-            put("chatId", "")
-            put("kimiplusId", "")
-            put("scenario", "SCENARIO_K2D5")
-            put("message", msg)
-            put("options", options)
-            put("projectId", JSONObject.NULL)
-            put("tools", tools)
+            put("scenario", SCENARIO)
+            put("message", JSONObject().apply {
+                put("role", "user")
+                put("blocks", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("message_id", "")
+                        put("text", JSONObject().put("content", text))
+                    })
+                })
+                put("scenario", SCENARIO)
+            })
+            put("options", JSONObject().apply {
+                put("thinking", model.contains("think", ignoreCase = true))
+            })
+            put("tools", JSONArray())
         }.toString()
     }
 
@@ -168,9 +122,9 @@ object KimiClient {
      * 调用 Kimi /Chat，返回原始 Response（Connect 二进制帧流）。
      * 由调用方读取并解析帧。token 为空时回退到兜底 JWT。
      */
-    fun chatCompletion(messages: List<ChatMessage>, token: String): Response {
+    fun chatCompletion(messages: List<ChatMessage>, token: String, model: String = ""): Response {
         val auth = if (token.isBlank()) FALLBACK_AUTH else token
-        val json = buildRequestBody(messages)
+        val json = buildRequestBody(messages, model)
         val jBytes = json.toByteArray(Charsets.UTF_8)
         val buf = ByteArray(5 + jBytes.size)
         buf[0] = 0x00
@@ -185,6 +139,18 @@ object KimiClient {
             .header("Authorization", "Bearer $auth")
             .header("Content-Type", "application/connect+json")
             .header("Accept", "application/json")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+            .header("Origin", "https://$HOST")
+            .header("Referer", "https://$HOST/")
+            .header("R-Timezone", "Asia/Shanghai")
+            .header("X-Msh-Platform", "web")
+            .header("X-Msh-Device-Id", newDeviceId())
+            .header("X-Msh-Session-Id", newSessionId())
+            .header("Cache-Control", "no-cache")
+            .header("Pragma", "no-cache")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Site", "same-origin")
             .header("User-Agent", UA)
             .build()
 

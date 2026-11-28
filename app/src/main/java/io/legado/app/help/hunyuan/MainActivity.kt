@@ -541,6 +541,10 @@ fun App(vm: ProxyViewModel) {
                         vm.updateSelectedCookie(token.trim())
                         cookieText = token.trim()
                     },
+                    onKimiTokenExtracted = { token ->
+                        vm.updateSelectedCookie(token.trim())
+                        cookieText = token.trim()
+                    },
                     modifier = Modifier.fillMaxSize().padding(padding)
                 )
             }
@@ -733,7 +737,7 @@ fun ProxyScreen(
                         placeholder = when (provider) {
                             "cnb" -> "在内置浏览器登录 cnb.cool 后点「提取Cookie」（csrftoken 自动获取）"
                             "hunyuan" -> "在内置浏览器登录 aistudio.tencent.com 后点「提取Cookie」（含 hunyuan_user / hunyuan_token）"
-                            "kimi" -> "粘贴 kimi.com 的 Cookie（含 JWT 自动提取）"
+                            "kimi" -> "Kimi 用 JWT：在内置浏览器登录并发送一条消息，再点「提取Token」"
                             "qwen" -> "粘贴 qianwen.com 的 Cookie（含 tongyi_sso_ticket）"
                             "max" -> "MiniMax：授权接入中，暂可粘贴 access_token；或先在内置浏览器登录 account.minimax.cn"
                             else -> "粘贴 doubao.com 的完整 Cookie 字符串"
@@ -1086,6 +1090,7 @@ fun BrowserScreen(
     onCookieExtracted: (String) -> Unit,
     onDeepSeekTokenExtracted: (String) -> Unit,
     onMiniMaxToken: (String) -> Unit,
+    onKimiTokenExtracted: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1562,6 +1567,19 @@ fun BrowserScreen(
                 }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
                     Text("提取Token", fontSize = CompactBtnFont)
                 }
+            } else if (provider == "kimi") {
+                Button(onClick = {
+                    // Kimi Web 现在用 JWT（Authorization: Bearer eyJ...）鉴权，Cookie 里已不再直接给 JWT。
+                    val t = capturedToken.value
+                    if (t.isNullOrBlank() || !t.startsWith("eyJ")) {
+                        toast = "尚未捕获到 Kimi JWT，请先在 kimi.com 登录并发送一条消息"
+                    } else {
+                        onKimiTokenExtracted(t)
+                        toast = "已提取 Kimi JWT 并填入设置"
+                    }
+                }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
+                    Text("提取Token", fontSize = CompactBtnFont)
+                }
             } else if (provider == "max") {
                 Button(onClick = {
                     scope.launch {
@@ -1823,6 +1841,18 @@ fun BrowserScreen(
                                 if (!auth.isNullOrBlank()) {
                                     val token = auth.removePrefix("Bearer ").trim()
                                     if (token.isNotBlank()) capturedToken.value = token
+                                }
+                            }
+                            // Kimi 网页端鉴权在 Authorization: Bearer <JWT>，不再从 Cookie 直接取。
+                            // 用户先在内置浏览器登录并发送一条消息，这里捕获 JWT 供「提取Token」写入。
+                            if (request?.url?.host?.let {
+                                    it == "kimi.com" || it == "www.kimi.com" || it.endsWith(".kimi.com")
+                                } == true) {
+                                val headers = request?.requestHeaders
+                                val auth = headers?.get("authorization") ?: headers?.get("Authorization")
+                                if (!auth.isNullOrBlank()) {
+                                    val token = auth.removePrefix("Bearer ").trim()
+                                    if (token.startsWith("eyJ")) capturedToken.value = token
                                 }
                             }
                             // 龙猫：拦截 longcat.chat 的请求，记下请求头里的 mtgsig / m-traceid（Cookie 由「提取」按钮从 CookieManager 取，与 DeepSeek 同一机制）。

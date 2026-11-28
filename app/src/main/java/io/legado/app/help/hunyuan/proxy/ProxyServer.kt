@@ -1676,7 +1676,7 @@ object ProxyServer {
                     withContext(Dispatchers.IO) {
                         try {
                             withTimeout(300_000) {
-                                val resp = KimiClient.chatCompletion(req.messages, rawToken)
+                                val resp = KimiClient.chatCompletion(req.messages, rawToken, req.model)
                                 try {
                                     val roleChunk = ChatCompletionChunk(
                                         completionId, "chat.completion.chunk", created, req.model,
@@ -1730,7 +1730,7 @@ object ProxyServer {
         val (content, errMsg) = withContext(Dispatchers.IO) {
             try {
                 withTimeout(300_000) {
-                    val resp = KimiClient.chatCompletion(req.messages, rawToken)
+                    val resp = KimiClient.chatCompletion(req.messages, rawToken, req.model)
                     try {
                         val sb = StringBuilder()
                         var chatId: String? = null
@@ -2360,6 +2360,7 @@ object ProxyServer {
                 isWenxinModel(model) -> wenxinText(req)
                 isLongCatModel(model) -> longCatText(req)
                 isBailianModel(model) -> bailianText(req)
+                isMiniMaxModel(model) -> minimaxText(req)
                 isQwenModel(model) -> qwenText(req)
                 isDeepSeekModel(model) -> return DEEPSEEK_NEEDS_SERVER
                 isDoubaoModel(model) -> doubaoText(req)
@@ -2505,7 +2506,7 @@ object ProxyServer {
 
     private suspend fun kimiText(req: ChatCompletionRequest): String = upstream("Kimi") {
         val rawToken = KimiClient.extractToken(nextKimiCookie())
-        val resp = KimiClient.chatCompletion(req.messages, rawToken)
+        val resp = KimiClient.chatCompletion(req.messages, rawToken, req.model)
         var chatId: String? = null
         val sb = StringBuilder()
         try {
@@ -2572,6 +2573,20 @@ object ProxyServer {
             resp.close()
         }
         sb.toString()
+    }
+
+    /** MiniMax Code 会员接口（进程内）：聚合完整文本。 */
+    private suspend fun minimaxText(req: ChatCompletionRequest): String = upstream("MiniMax") {
+        val cred = nextMiniMaxCred()
+        MiniMaxClient.chat(req.messages, req.model, cred.token, req.max_tokens).use { resp ->
+            val sb = StringBuilder()
+            try {
+                MiniMaxClient.consume(resp) { sb.append(it) }
+            } finally {
+                resp.close()
+            }
+            sb.toString()
+        }
     }
 
     private suspend fun hunyuanText(req: ChatCompletionRequest): String = upstream("Hunyuan") {

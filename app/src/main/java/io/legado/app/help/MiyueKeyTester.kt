@@ -117,6 +117,13 @@ object MiyueKeyTester {
      */
     suspend fun testOne(entry: ApiEntry): ApiTestResult = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
+        // MiniMax 的部分模型（如 M3.1-Flash-Preview / M2.7）会先消耗若干 token 才输出正文，
+        // max_tokens=1 时上游 200 但 content 为 null，聚合后为空会被本地网关判成 502「服务端错误」。
+        // 实测 M3.1 需要 32 才开始吐字，64 可完整 end_turn；这里直接给 128，成本仍可忽略。
+        val testMaxTokens = if (
+            entry.model.contains("minimax", ignoreCase = true) ||
+            entry.endpoint.contains("minimax", ignoreCase = true)
+        ) 128 else 1
         val body = JSONObject().apply {
             put("model", entry.model)
             put("messages", JSONArray().apply {
@@ -125,7 +132,7 @@ object MiyueKeyTester {
                     put("content", "hi")
                 })
             })
-            put("max_tokens", 1)
+            put("max_tokens", testMaxTokens)
         }.toString()
         val request = Request.Builder()
             .url(entry.endpoint)
