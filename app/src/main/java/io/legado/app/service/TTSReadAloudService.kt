@@ -251,6 +251,21 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
         private const val PRELOAD_SEGMENT_MAX_FAILS = 3
 
         /**
+         * 11-28：单段**空壳**累计多少次才放弃（键=章节标题|段号）。
+         *
+         * ## 为什么门槛远高于 [PRELOAD_SEGMENT_MAX_FAILS]（3）
+         * 空壳不是"这段文字合不出"——是上游 UTTS 写音频故障（判据恒假、写 0 字节），
+         * 一段文字能合出来与否跟它无关。真失败 3 次判死是合理的（同一段文字反复合不出，
+         * 大概率是文字/音色的问题）；空壳 3 次判死则会把**整批正常段**式误杀
+         *（整场 194 段被永久跳过、第26/27/28 章 184/118/41 次，全是这么来的）。
+         *
+         * 取 12：等于「给上游 12 轮机会」。按备货轮次节奏（每轮数百毫秒~数秒）算，
+         * 足有几秒到十几秒的容错窗口——偶发的引擎重启/瞬时故障都能熬过去；
+         * 而若上游**长期**坏（本次这种），12 次后放行能让整章往前推进，不至于卡死。
+         */
+        private const val PRELOAD_SHELL_MAX_FAILS = 12
+
+        /**
          * 「空壳音频」判据：**有效音频最少字节数**（11-28）。
          *
          * 44 = 一个 WAV 文件头的长度（RIFF 头 + fmt + data 头的固定开销），
@@ -524,6 +539,29 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
      * 外层读到就跳过失败计数并立刻清除——不跨轮累积。
      */
     private val yieldedSegmentKeys = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
+     * 11-28：「本轮这段是**空壳故障**，不是真失败也不是让路」的标记集（键 = 章节标题|段号）。
+     *
+     * ## 为什么必须与让路分开
+     * 两者都返回 false、都要跳过「连续失败 3 次」计数，但语义完全不同：
+     *   · **让路** = 设计内的正常调度（播放优先），不计次、永久重试，不该有任何告警；
+     *   · **空壳** = 上游故障（UTTS 写进 0 字节采样），是**真的坏了**，
+     *     但责任不在这一段文字。要有独立的计数上限，否则上游一直坏就死磕不动。
+     * 混用一个集合，日志里就分不清「今天让路了 200 次」和「今天上游坏了 200 次」。
+     */
+    private val shellSegmentKeys = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
+     * 11-28：单段「空壳」累计次数（键 = 章节标题|段号）。
+     *
+     * 与 [preloadSegmentFailCount]（真失败，上限 3）分开：
+     * 空壳是全局故障，同一段可能连续撞上几十次；用 3 次的口径会把整批段误判死
+     *（整场 194 段被永久跳过就是这么来的）。这里给一个宽松上限
+     * [PRELOAD_SHELL_MAX_FAILS]，只为防止「上游长期坏 ⇒ 整章卡死」。
+     */
+    private val shellFailCount = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
     private var itemRetryPending = false
 
     /**
@@ -2034,36 +2072,64 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                     // 「第21/22章」）**一个文件都没有**，目录总数 38 == 播放笔 38 笔：
                     // 预加载那 11 段一个都没落盘，却全记进了「已备」账。
                     //
-                    // ## 根因：UTTS 的「预热让路」只回一段空壳
-                    // UTTS `SystemTtsService` 在「合成器忙」时对 preload 请求走：
-                    //     callback.start(...); callback.done(); return
-                    // 不写任何音频数据 ⇒ tmp 只有 **44 字节 WAV 头**（只剩文件头、
-                    // 没有任何采样）。而这里的旧判据是：
-                    //   · `delivered.length() > 0` → 44 > 0 **通过**；
-                    //   · `isValidAudioFile(delivered)` → 内部第一句就是
-                    //     `length() <= 44 → false` ⇒ 收编 if **不成立**；
-                    //   · 于是既没 rename 也没 copy，**一行日志都不打**；
-                    //   · finally 里 `tmp.delete()` 把空壳删掉；
-                    //   · 最后仍 `return true` ⇒ 外层记「已备」并推进进度。
+                    // ## 根因（11-28 修订：原先归因于「UTTS 让路」是**错的**）
                     //
-                    // 三条「零命中」互相印证：收编失败日志 0 条、跨章文件命中 0 次、
-                    // 预加载落盘文件 0 个——不是没进 if，而是进了 if 之后被静默跳过。
+                    // 旧注释说这是 UTTS「合成器忙 ⇒ 对 preload 走 callback.start/done
+                    // 不写音频」。11-28 用整场 8 小时日志查证：真正的让路（回
+                    // ERROR_INVALID_REQUEST=-8）**只发生 1 次**，其余 1372 次空壳时
+                    // UTTS 侧全都正常合成成功（同一 reqId 有「获取成功」）。
                     //
-                    // ## 后果链（用户看到的三个现象全是它）
-                    // 谎报已备 ⇒ 进度表推到下一段 ⇒ 下轮探测「文件不存在」⇒
-                    // 判「探测失配」⇒ **整章退避 5 分钟** ⇒ 调度器跳下一章 ⇒
-                    // 播放到该段永远 MISS、只能现场合成 ⇒ 每段等 5~14 秒「磕磕绊绊」。
+                    // 真因在 UTTS `writeToCallBack` 的存活判据：
+                    //     while (offset < pcmData.size && synthesizerJob?.isActive == true)
+                    // 而预热笔**刻意不占 synthesizerJob**（那个槽位只留给播放，
+                    // 否则预热会让播放请求破不到窗）⇒ 判据恒假 ⇒ 一个采样字节都不写
+                    // ⇒ tmp 只有 44 字节 WAV 头。已在 UTTS 侧修正（判据改看本笔自己的 Job）。
                     //
-                    // ## 修法：先判「有没有真音频」，再谈收编
-                    // 空壳（<= 44B 裸头 / 全零静音）一律判**失败**：返回 false、
-                    // 不推进进度、按真失败退避重试，并打一条 WARN 让下次直接可见。
+                    // 本处（U阅）保留「<=44B 一律判失败」不变——**无论上游是什么原因**，
+                    // 一个只有文件头、没有任何采样的文件都不能记成「已备」。
+                    // 这是防御性判据，不依赖上游修没修好。
+                    // 24B/44B 头长、全零静音都归此类。
+                    //
                     val deliveredSize = delivered.length()
                     if (deliveredSize <= MIN_VALID_AUDIO_BYTES) {
+                        // ===== 11-28：文案不再甩给「让路」=====
+                        //
+                        // 旧文案写「UTTS 预热让路未合成」。但让路在本方法**前面已经分流**
+                        // （`yielded` 分支直接 return，走不到这里），所以能到这里时
+                        // **必然不是让路**。查证也吻合：整场 8 小时真让路只 1 次，
+                        // 其余 1372 次空壳时 UTTS 侧全都正常合成成功。
+                        //
+                        // 真因：UTTS `writeToCallBack` 的存活判据挂在播放专属的
+                        // `synthesizerJob` 上，而预热笔刻意不占那个槽位 ⇒ 判据恒假
+                        // ⇒ 一个采样字节都不写。已在 UTTS 侧改掉（改看本笔自己的 Job）。
+                        //
+                        // 这里保持「<=44B 一律判失败」不变——无论上游什么原因，
+                        // 只有文件头、零采样的文件都不能记成「已备」。
                         AppLog.put(
-                            "预加载返回空壳音频（仅 ${deliveredSize}B 文件头，UTTS 预热让路未合成）：" +
-                                "第${index + 1}段 text=${rawText.take(12)}" +
-                                " —— 判失败，不记已备"
+                            "预加载返回空壳音频（仅 ${deliveredSize}B 文件头，零采样；" +
+                                "非让路——让路在前面已分流）：第${index + 1}段 " +
+                                "text=${rawText.take(12)} —— 判失败，不记已备"
                         )
+                        // ===== 11-28：空壳走**独立**的「壳故障」通道，不碰「连续失败 3 次」 =====
+                        //
+                        // 现场：整场 194 个段被「连续失败 3 次，跳过」永久判死
+                        //（353 次跳过事件；第26/27/28 章分别 184/118/41 次）。
+                        // 它们不是"这段文字合不出"——是上游 UTTS 写 0 字节导致整批失败，
+                        // 属于**全局故障**。全局故障算到单个段头上，会让本来完全正常的
+                        // 段被永久拉黑，上游修好后也不再重试。
+                        //
+                        // 处置：不记真失败次数（真失败 = 引擎/插件对这段文字合不出，
+                        // 与写音频故障是两回事），只记 [shellFailCount] 这个独立的、
+                        // 上限宽松得多的壳故障计数，交给外层按「壳故障」分支处理。
+                        //
+                        // 为什么要上限：上游一直坏时若永不放弃，备货就死磕在这一段、
+                        // 整章卡住。上限够它熬过偶发故障，又保证长期故障时能往前推进。
+                        if (shellFailCount.size > 128) shellFailCount.clear()
+                        shellFailCount[chapterTitle + "|" + index] =
+                            (shellFailCount[chapterTitle + "|" + index] ?: 0) + 1
+                        // 通知外层「本轮是壳故障，不是真失败」——与让路同机制、不同标记集
+                        if (shellSegmentKeys.size > 64) shellSegmentKeys.clear()
+                        shellSegmentKeys.add(chapterTitle + "|" + index)
                         return false
                     }
                     if (!isValidAudioFile(delivered)) {
@@ -3452,6 +3518,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
             preloadSegmentFailCount.clear()
             preloadDesyncRounds.clear()
             preloadInterruptCount.clear()
+            // 11-28：空壳标记/计数必须一起清。键是「章名|段号」，两本书的章名/段号
+            // 完全可能撞（都是「第1章|0」）⇒ 不清会让新书首轮被判成「上轮空壳」。
+            shellSegmentKeys.clear()
+            shellFailCount.clear()
             Companion.preloadBookUrl = bookUrl
             // 11-24 02:0x（用户实报「换书后吸顶还显示缓冲 34 段·跨章」）：
             // 清内存账本**不够**——`bufferedAheadSegs` 是落盘字段，只有段切换/合成提交/
@@ -3964,7 +4034,9 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                 // 11-28：这里提前 return ⇒ 下面的 when 不会执行 ⇒ 让路标记不会被清除。
                 // 标记集是短命账本，残留会让**下次同一段**（章名|段号相同）被误判成
                 // 「本轮让路」而跳过一次失败计数。所以任何绕过 when 的出口都要自己清。
+                // 空壳标记同理（11-28 新增，与让路同一泄漏风险）。
                 yieldedSegmentKeys.remove("${preloaded.title}|$from")
+                shellSegmentKeys.remove("${preloaded.title}|$from")
                 return false
             }
             when {
@@ -4041,13 +4113,42 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener,
                             "不计失败、下轮重试"
                     )
                 }
+                // ===== 11-28：空壳故障，独立通道（不碰真失败的 3 次上限）=====
+                //
+                // 内层已把「本轮是空壳」写进 shellSegmentKeys、并把壳故障次数记进
+                // shellFailCount。这里只决定「再熬一轮」还是「放弃这段让整章推进」：
+                //   · 未到 [PRELOAD_SHELL_MAX_FAILS] ⇒ 不计真失败、下轮重试同一段；
+                //   · 到达上限 ⇒ 清计数、**故意落到下面的 else 真失败分支**去跳过该段
+                //     （上层若长期坏，必须能往前推进，否则整章永远备不完）。
+                !ok && shellSegmentKeys.remove("${preloaded.title}|$from") &&
+                    (shellFailCount["${preloaded.title}|$from"] ?: 0) < PRELOAD_SHELL_MAX_FAILS -> {
+                    preloadInterruptCount.remove("$idx|$from")
+                    // 空壳多半是上游全局故障，退避比让路略长，避免每轮都撞同一个坏状态
+                    preloadChapterRetryAt[idx] = SystemClock.elapsedRealtime() +
+                        PRELOAD_SEGMENT_RETRY_MS * 4
+                    AppLog.putDebug(
+                        "跨章预加载诊断: 第${idx + 1}章第${from + 1}段 空壳" +
+                            "（第 ${shellFailCount["${preloaded.title}|$from"] ?: 0}/$PRELOAD_SHELL_MAX_FAILS 次），" +
+                            "不计真失败、下轮重试"
+                    )
+                }
                 else -> {
                     AppLog.putDebug("跨章预加载诊断: 第${idx + 1}章第${from + 1}段 合成返回失败")
                     // 真失败**不推进进度**，退避后重试同一段；
                     // 连续 3 次仍失败才跳过，避免死磕合不出的段。
                     val failKey = "$idx|$from"
                     val fails = (preloadSegmentFailCount[failKey] ?: 0) + 1
-                    if (fails >= PRELOAD_SEGMENT_MAX_FAILS) {
+                    // 11-28：若这段其实是被「空壳」熬到上限才落到这里的，日志要说实话，
+                    // 否则下次排查又会把它当成「这段文字合不出」而找错方向。
+                    val shellFailKey = "${preloaded.title}|$from"
+                    val shellHits = shellFailCount.remove(shellFailKey) ?: 0
+                    if (shellHits >= PRELOAD_SHELL_MAX_FAILS) {
+                        preloadChapterProgress[idx] = from + 1
+                        AppLog.put(
+                            "跨章预加载第 ${from + 1} 段空壳 ${shellHits} 次，跳过以免整章卡住" +
+                                "（${preloaded.title.take(12)}；上游写音频故障，非本段文字问题）"
+                        )
+                    } else if (fails >= PRELOAD_SEGMENT_MAX_FAILS) {
                         preloadSegmentFailCount.remove(failKey)
                         preloadChapterProgress[idx] = from + 1
                         AppLog.putDebug(
