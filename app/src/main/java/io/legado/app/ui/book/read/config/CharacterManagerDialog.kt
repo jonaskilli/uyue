@@ -1514,6 +1514,10 @@ class CharacterManagerDialog : DialogFragment() {
                 ).filter { it.isNotBlank() && it != "." && it != ".." }
                     .map { File(xiaoRoot + it) }
                     .forEach { it.takeIf { d -> d.exists() }?.deleteRecursively() }
+                // 11-28：删完目录不等于标注就没了——内存缓存与已画的 roleAnnotations
+                // 还在（同「清空 AI 缓存后正文标注不消失」那个 bug 的同一根因）。
+                io.legado.app.ui.book.read.page.DialogRoleManager
+                    .notifyCacheCleared(bookName)
             }
             // 4) 角色对话记录：rolechat/{书名}_*.json
             runCatching {

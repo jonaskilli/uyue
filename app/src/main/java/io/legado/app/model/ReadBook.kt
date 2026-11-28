@@ -276,6 +276,21 @@ object ReadBook : CoroutineScope by MainScope() {
     }
 
     /**
+     * 外部清空 AI 缓存后重挂当前章标注（11-28）。
+     *
+     * 目录页「删除全部AI缓存」/单章删除、朗读设置的「删除本章角色缓存」删的是
+     * 磁盘 json，而标注是挂在已排版 TextChapter 的行对象上的。清空后若不重挂，
+     * 旧标注会一直留在屏上，要等切章/重启（重排版）才消失——即用户报的
+     * 「清空后正文标注不会立马消失」。
+     *
+     * [loadRoleAnnotations] 内部会 clearChapterCache 再 attachAnnotations；
+     * attachAnnotations 在缓存为空时清空各行标注，故这里直接复用。
+     */
+    fun reloadRoleAnnotations() {
+        loadRoleAnnotations(curTextChapter)
+    }
+
+    /**
      * 异步加载指定章节的角色标注，并在完成后刷新视图。
      * 切换章节时调用，可确保读取到 AI 最新保存的数据。
      */

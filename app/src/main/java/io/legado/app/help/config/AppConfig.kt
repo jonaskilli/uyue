@@ -1347,6 +1347,9 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, io.legado.app.model.ReadBook.durChapterIndex)
             ?: return false
         io.legado.app.ui.book.toc.AiCacheFileUtil.deleteChapterCache(book, chapter)
+        // 11-28：删完必须立刻把屏上已画的标注抹掉（否则要等切章/重进才消失）。
+        // notifyCacheCleared 会同时作废内存缓存并重挂当前章。
+        io.legado.app.ui.book.read.page.DialogRoleManager.notifyCacheCleared(book.name)
         return true
     }
 

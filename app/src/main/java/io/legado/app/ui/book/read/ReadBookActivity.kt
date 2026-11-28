@@ -486,6 +486,10 @@ class ReadBookActivity : BaseReadBookActivity(),
         upSystemUiVisibility()
         registerReceiver(timeBatteryReceiver, timeBatteryReceiver.filter)
         binding.readView.upTime()
+        // 11-28：从目录页「清空 AI 缓存」回来时补做一次标注刷新。
+        // 目录页与阅读页是两个 Activity，删除瞬间本页可能排不上重绘，
+        // 这里凭脏标记幂等补做（无脏标记零开销）。
+        DialogRoleManager.flushPendingClear()
         screenOffTimerStart()
         // 网络监听，当从无网切换到网络环境时同步进度（注意注册的同时就会收到监听，因此界面激活时无需重复执行同步操作）
         networkChangedListener.register()

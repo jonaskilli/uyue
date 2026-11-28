@@ -24,6 +24,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.model.AiImagePersistentCache
 import io.legado.app.lib.theme.getPrimaryTextColor
+import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.ui.widget.recycler.UpLinearLayoutManager
 import io.legado.app.ui.widget.recycler.VerticalDivider
 import io.legado.app.service.HttpTtsAudioCache
@@ -209,6 +210,10 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
         val book = book ?: return
         lifecycleScope.launch(IO) {
             val deleted = AiCacheFileUtil.deleteChapterCache(book, bookChapter)
+            // 11-28：删了磁盘 json 还得让阅读页把已画的标注抹掉。
+            // 不通知的话内存缓存仍持有旧条目、行上的 roleAnnotations 也没人清，
+            // 回阅读页看到的就是「标注还在」。
+            if (deleted) DialogRoleManager.notifyCacheCleared(book.name)
             withContext(Main) {
                 if (deleted) {
                     adapter.aiCacheTitles.remove(bookChapter.title)
@@ -227,6 +232,8 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
         val book = book ?: return
         lifecycleScope.launch(IO) {
             val deletedCount = AiCacheFileUtil.deleteAllChapterCaches(book)
+            // 11-28：同上，清完必须立刻抹掉阅读页已画的标注
+            DialogRoleManager.notifyCacheCleared(book.name)
             withContext(Main) {
                 adapter.aiCacheTitles.clear()
                 adapter.notifyItemRangeChanged(0, adapter.itemCount, true)

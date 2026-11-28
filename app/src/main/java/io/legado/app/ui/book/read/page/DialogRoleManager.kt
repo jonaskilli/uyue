@@ -44,7 +44,10 @@ object DialogRoleManager {
         val labelEnd: Float
     )
 
-    private val memoryCache = hashMapOf<String, Map<Int, RoleInfo>>()
+    // 11-28：改 ConcurrentHashMap。清空缓存（invalidateBookMemoryCache）会遍历
+    // keys，而写盘/挂载在 IO 协程里并发读写；普通 HashMap 遍历时并发写会抛
+    // ConcurrentModificationException（一旦抛在这里，标注刷新就整体失效）。
+    private val memoryCache = java.util.concurrent.ConcurrentHashMap<String, Map<Int, RoleInfo>>()
 
     fun getCacheRoot(): String = CACHE_ROOT
 
@@ -283,6 +286,82 @@ object DialogRoleManager {
 
     fun clearChapterCache(bookName: String, chapterTitle: String) {
         memoryCache.remove("$bookName|$chapterTitle")
+    }
+
+    /**
+     * 作废整本书的内存缓存。
+     *
+     * 11-28 用户实报「清空阅读小说目录的 AI 缓存后，正文标注不会立马消失」：
+     * 目录页的删除只删磁盘 json（[AiCacheFileUtil.deleteAllChapterCaches] /
+     * [AiCacheFileUtil.deleteChapterCache]），**没人清 [memoryCache]**。
+     * 于是即便重新挂载，[loadChapterCache] 仍从内存里拿到旧条目 → 标注照旧。
+     * 删除侧必须显式调用本函数。
+     */
+    fun invalidateBookMemoryCache(bookName: String) {
+        synchronized(memoryCache) {
+            val prefix = "$bookName|"
+            memoryCache.keys.filter { it.startsWith(prefix) }.forEach { memoryCache.remove(it) }
+        }
+    }
+
+    /**
+     * 缓存被清空后的强制刷新：作废内存缓存 + 清掉已画的标注 + 重绘。
+     *
+     * 与 [notifyCacheWritten] 同一套重挂，但语义相反——那边是「缓存变多了」，
+     * 这边是「缓存变没了」，必须保证空缓存也能把旧标注抹掉。
+     *
+     * 删除动作多发生在**目录页（另一个 Activity）**，此时本页可能排不上重绘；
+     * 所以同时记一个脏标记，由阅读页 onResume 调 [flushPendingClear] 兜底。
+     */
+    fun notifyCacheCleared(bookName: String) {
+        invalidateBookMemoryCache(bookName)
+        // 「删除全部AI缓存」在目录为空时会把书目录本身也删掉（AiCacheFileUtil），
+        // 观察器盯的就是这个目录 —— 目录没了 inotify 就静默失效，且 watchBook 里
+        // `watchedBook == target` 会让它以后都不再重挂。这里主动作废观察器，
+        // 下一次 watchBook（翻页/切章都会调）在目录重建后重新挂上。
+        synchronized(watcherLock) {
+            pendingClearedBook = bookName
+            if (watchedBook == bookName) {
+                cacheWatcher?.stopWatching()
+                cacheWatcher = null
+                watchedBook = null
+            }
+        }
+        reattachCleared(bookName)
+    }
+
+    /** 有清空动作待阅读页确认（跨 Activity 兜底用） */
+    @Volatile
+    private var pendingClearedBook: String? = null
+
+    /**
+     * 阅读页 onResume 调用：把上次没排上的清空刷新补做一次。
+     *
+     * 正常路径下 [notifyCacheCleared] 已经重挂过了，这里只是幂等补做，不增加
+     * 任何额外绘制（无脏标记直接返回）。存在的理由：目录页删缓存时阅读页处于
+     * paused，重绘可能被推迟，用户回来看到的就是「标注还在」。
+     */
+    fun flushPendingClear() {
+        val bookName = synchronized(watcherLock) {
+            val b = pendingClearedBook
+            pendingClearedBook = null
+            b
+        } ?: return
+        invalidateBookMemoryCache(bookName)
+        reattachCleared(bookName)
+    }
+
+    /** 真正执行「作废并重挂」。清的不是当前书时只作废内存缓存，不碰屏上内容 */
+    private fun reattachCleared(bookName: String) {
+        // 目录页是独立 Activity，任何书都可能在这里被清，不能盲目抹当前页标注
+        val curBookName = ReadBook.book?.name
+        if (curBookName != null && curBookName != bookName) return
+        if (ReadBook.curTextChapter == null) return
+        // 走阅读页的标准重挂链：watchBook（观察器刚才被我主动停掉，目录重建后
+        // 要重新挂上，否则以后朗读写盘不再即时上屏）+ clearChapterCache +
+        // attachAnnotations + upContent。attachAnnotations 在缓存空时会清空
+        // 各行已画的标注，故这里不需要再单独抹一遍。
+        ReadBook.reloadRoleAnnotations()
     }
 
     // ===== 11-21（缓存重排）：替换规则改正文后，旧分析结果搬到新序号上 =====
@@ -562,7 +641,17 @@ object DialogRoleManager {
         if (bookName.isBlank()) return
         realignCacheIfNeeded(textChapter, bookName)
         val cache = loadChapterCache(bookName, textChapter.title)
-        if (cache.isEmpty()) return
+        if (cache.isEmpty()) {
+            // 11-28：缓存为空必须**清掉已画的标注**，不能直接 return。
+            // 用户「清空 AI 缓存后正文标注不消失」的最后一环就在这里：清空 →
+            // 重挂 → 缓存空 → 早退 → 上一次挂上的 roleAnnotations 原样留在行上，
+            // 要等重排版（切章/重启）才消失。这里补 setRoleAnnotations(emptyList())，
+            // 与关开关那条清理路径同一口径。
+            textChapter.pages.forEach { page ->
+                page.lines.forEach { line -> line.setRoleAnnotations(emptyList()) }
+            }
+            return
+        }
 
         var globalSeq = 0
         textChapter.pages.forEach { page ->
