@@ -1364,6 +1364,20 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         return io.legado.app.service.HttpTtsAudioCache.deleteChapterRoleAudioCache(book, chapter, roleName)
     }
 
+    /**
+     * 删除**指定章节**中所有名为 [roleName] 的角色所在段落的缓存音频。
+     *
+     * 与 [deleteCurrentChapterRoleAudioCache] 的区别：后者固定用「当前阅读章」，
+     * 而角色弹窗里的标注可能来自上一章/下一章（collectNeighborRoles 会跨章取），
+     * 此时按当前章删会删错章节。调用方须把被点击标注所属章节传进来。
+     */
+    fun deleteChapterRoleAudioCache(
+        book: io.legado.app.data.entities.Book,
+        chapter: io.legado.app.data.entities.BookChapter,
+        roleName: String
+    ): Int =
+        io.legado.app.service.HttpTtsAudioCache.deleteChapterRoleAudioCache(book, chapter, roleName)
+
     // 系统TTS单句合成超时（秒），默认120秒
     var sysTtsSynthesizeTimeout: Int
         get() = try {

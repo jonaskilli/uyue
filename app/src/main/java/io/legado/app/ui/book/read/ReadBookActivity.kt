@@ -2388,13 +2388,23 @@ class ReadBookActivity : BaseReadBookActivity(),
             textSize = 11f
             setPadding(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
             setOnClickListener { _ ->
-                val deleted = AppConfig.deleteCurrentChapterRoleAudioCache(name)
-                android.widget.Toast.makeText(
-                    context,
-                    if (deleted > 0) "已删除 $deleted 个同名角色段落的音频缓存"
-                    else "未找到同名角色对应的音频缓存",
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
+                lifecycleScope.launch(IO) {
+                    // 弹窗可能来自上一章/下一章的标注（相邻角色跨章取），
+                    // 必须用被点击标注所属章节，不能固定用 ReadBook.durChapterIndex，
+                    // 否则会删错章节的音频缓存。
+                    val book = ReadBook.book ?: return@launch
+                    val chapter = appDb.bookChapterDao.getChapterList(book.bookUrl)
+                        .firstOrNull { AiCacheFileUtil.chapterCacheTitle(book, it) == chapterTitle }
+                    val deleted = chapter?.let { AppConfig.deleteChapterRoleAudioCache(book, it, name) } ?: 0
+                    withContext(Main) {
+                        android.widget.Toast.makeText(
+                            context,
+                            if (deleted > 0) "已删除 $deleted 个同名角色段落的音频缓存"
+                            else "未找到同名角色对应的音频缓存",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
             }
         }
         // 右列拆两行：上面是发音人实际配置名（与发音人按钮上下对齐，点击进 TTS 配置编辑页），
