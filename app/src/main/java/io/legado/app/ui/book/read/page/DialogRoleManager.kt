@@ -253,6 +253,9 @@ object DialogRoleManager {
         gender: String,
         age: String
     ) {
+        // 序号 0 是脚本给章节标题引号留的占位，不对应正文任何一句对话，
+        // 不允许被标注编辑覆盖（否则会污染脚本的缓存结构）。
+        if (seq <= 0) return
         val file = getCacheFile(bookName, chapterTitle)
         val json = if (file.exists()) {
             try {
@@ -467,6 +470,9 @@ object DialogRoleManager {
         val results = json.optJSONObject("results") ?: return
         var changed = false
         results.keys().forEach { key ->
+            // seq 0 是标题引号占位，不是角色，不能参与改名
+            val seq = key.toIntOrNull() ?: return@forEach
+            if (seq <= 0) return@forEach
             val obj = results.optJSONObject(key) ?: return@forEach
             if (obj.optString("name", "") == oldName) {
                 obj.put("name", name)
@@ -482,7 +488,7 @@ object DialogRoleManager {
         val cacheKey = "$bookName|$chapterTitle"
         val map = memoryCache[cacheKey]?.toMutableMap() ?: return
         map.values.forEach { role ->
-            if (role.name == oldName) {
+            if (role.seq > 0 && role.name == oldName) {
                 role.name = name
                 role.gender = gender
                 role.age = age
@@ -518,6 +524,9 @@ object DialogRoleManager {
             val results = json.optJSONObject("results") ?: return@forEach
             var changed = false
             results.keys().forEach { key ->
+                // seq 0 是标题引号占位，不是角色，不能参与改名
+                val seq = key.toIntOrNull() ?: return@forEach
+                if (seq <= 0) return@forEach
                 val obj = results.optJSONObject(key) ?: return@forEach
                 if (obj.optString("name", "") == oldName) {
                     obj.put("name", name)
@@ -529,18 +538,26 @@ object DialogRoleManager {
             if (!changed) return@forEach
             file.writeText(json.toString(2))
 
-            // 同步刷新内存缓存（文件名即章节名去扩展名）
-            val chapterTitle = file.nameWithoutExtension
-            val cacheKey = "$bookName|$chapterTitle"
-            val map = memoryCache[cacheKey]?.toMutableMap() ?: return@forEach
-            map.values.forEach { role ->
-                if (role.name == oldName) {
-                    role.name = name
-                    role.gender = gender
-                    role.age = age
+            // 同步刷新内存缓存。
+            // 内存缓存的 key 是调用方传入的章节标题（cacheTitle），**不是**净化后的
+            // 文件名：标题含引号/用途字符时两者不同，按文件名反推会刷不到当前页。
+            // 故按「同一缓存标题解析出的文件名」反查所有匹配的 key。
+            val prefix = "$bookName|"
+            memoryCache.keys.toList().forEach { cacheKey ->
+                if (!cacheKey.startsWith(prefix)) return@forEach
+                val chapterTitle = cacheKey.substring(prefix.length)
+                val expected = AiCacheFileUtil.getChapterCacheFileByName(bookName, chapterTitle)
+                if (expected.name != file.name) return@forEach
+                val map = memoryCache[cacheKey]?.toMutableMap() ?: return@forEach
+                map.values.forEach { role ->
+                    if (role.seq > 0 && role.name == oldName) {
+                        role.name = name
+                        role.gender = gender
+                        role.age = age
+                    }
                 }
+                memoryCache[cacheKey] = map
             }
-            memoryCache[cacheKey] = map
         }
     }
 
@@ -656,6 +673,13 @@ object DialogRoleManager {
         var globalSeq = 0
         textChapter.pages.forEach { page ->
             page.lines.forEach { line ->
+                // 章节标题行里的左引号不参与对话编号（与朗读脚本口径一致）。
+                // 标题若带 “，这里会把它当成第 1 句对话，导致正文姓名整体错一位；
+                // 上游同款修法：标题行清空标注且不计入 globalSeq。
+                if (line.isTitle) {
+                    line.setRoleAnnotations(emptyList())
+                    return@forEach
+                }
                 val tempAnnotations = mutableListOf<RoleAnnotation>()
                 line.columns.forEachIndexed { index, column ->
                     if (column is io.legado.app.ui.book.read.page.entities.column.TextColumn

@@ -379,7 +379,7 @@ class BookScriptAnalysisService : BaseService() {
 
             // 轻量跳章：缓存文件自带 totalDialogs 且连续序号已覆盖，就直接跳过，
             // 不再读正文、不再拼三章窗口、不再拆段。
-            val cacheInfo = readChapterCacheInfo(book.name, ch.title)
+            val cacheInfo = readChapterCacheInfo(book.name, AiCacheFileUtil.chapterCacheTitle(book, ch))
             if (cacheInfo?.complete == true) {
                 progressIndex = idx + 1
                 upNotification(progressText(idx, total, "已有完整缓存，跳过"))
@@ -408,7 +408,8 @@ class BookScriptAnalysisService : BaseService() {
 
             val tasks = buildTasks(book, ch, idx, clean, window)
             val analysisJson = buildAnalysisJson(book, ch, engineDir)
-            val initialCachedSeq = readChapterCacheMaxSeq(book.name, ch.title) ?: 0
+            val initialCachedSeq =
+                readChapterCacheMaxSeq(book.name, AiCacheFileUtil.chapterCacheTitle(book, ch)) ?: 0
             if (tasks.isNotEmpty()) {
                 analyzeChapterPipeline(analysisJson, tasks, idx, total, initialCachedSeq)
             } else {
@@ -443,9 +444,12 @@ class BookScriptAnalysisService : BaseService() {
     }
 
     private fun buildAnalysisJson(book: Book, ch: BookChapter, engineDir: String): String {
+        // 脚本按 chapterTitle 给角色缓存命名，必须与 data.json 首行/阅读端同源，
+        // 故用 chapterCacheTitle 而不是原始 ch.title。
+        val cacheTitle = AiCacheFileUtil.chapterCacheTitle(book, ch)
         return JSONObject()
             .put("bookName", book.name)
-            .put("chapterTitle", ch.title)
+            .put("chapterTitle", cacheTitle)
             .put("engineDir", engineDir)
             .put("cunfangPath", engineDir + "cunfang.txt")
             .put("characterRecordsPath", engineDir + "characterRecords.json")
@@ -453,7 +457,7 @@ class BookScriptAnalysisService : BaseService() {
             .put("keyPath", engineDir + "miyue.txt")
             .put(
                 "chapterCachePath",
-                AiCacheFileUtil.getChapterCacheFileByName(book.name, ch.title).absolutePath
+                AiCacheFileUtil.getChapterCacheFile(book, ch).absolutePath
             )
             .toString()
     }
@@ -503,8 +507,7 @@ class BookScriptAnalysisService : BaseService() {
                         start = start,
                         end = end,
                         dialogueCount = countDialogues(bodyText),
-                        cachePath = AiCacheFileUtil
-                            .getChapterCacheFileByName(book.name, ch.title).absolutePath
+                        cachePath = AiCacheFileUtil.getChapterCacheFile(book, ch).absolutePath
                     )
                 )
             }
@@ -590,7 +593,10 @@ class BookScriptAnalysisService : BaseService() {
         val fullText = window.fullText
         val currentSpan = window.spans.firstOrNull { it.chapterIndex == chapterIndex }
             ?: return emptyList()
-        val cachedSeq = readChapterCacheMaxSeq(book.name, ch.title) ?: 0
+        val cachedSeq = readChapterCacheMaxSeq(
+            book.name,
+            AiCacheFileUtil.chapterCacheTitle(book, ch)
+        ) ?: 0
         val allParagraphs = splitParagraphsWithOffsets(clean)
         // 第一行是 cleanContentForTts 重新加入的章节标题，不参与对话编号。
         val paragraphs = allParagraphs.drop(1)

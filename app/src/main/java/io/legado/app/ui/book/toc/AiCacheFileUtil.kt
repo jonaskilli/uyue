@@ -2,6 +2,8 @@ package io.legado.app.ui.book.toc
 
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
+import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.QuoteFix
 import org.json.JSONObject
 import java.io.File
 
@@ -61,10 +63,28 @@ object AiCacheFileUtil {
         File(CACHE_ROOT + sanitizeBookName(bookName) + "/")
 
     /**
+     * 角色缓存统一使用的标题：替换规则 + 双引号修复后的标题。
+     *
+     * 朗读脚本按 data.json 首行标题定位章节并给角色缓存 json 命名，而阅读端此前
+     * 用 `chapter.title`（原始标题）去找文件。一旦本书配了改标题的替换规则，
+     * 两边名字对不上 ⇒ 标注全部丢失。三处（data.json 首行、脚本写盘、阅读端读盘）
+     * 必须同源，故统一收口到本函数。
+     */
+    fun chapterCacheTitle(book: Book, chapter: BookChapter): String {
+        val title = chapter.getDisplayTitle(
+            ContentProcessor.get(book).getTitleReplaceRules(),
+            book.getUseReplaceRule()
+        )
+        // 标题里的全角双引号要去掉：它与正文引号同形，会干扰「按左引号数序号」的
+        // 全部逻辑（阅读端标注、脚本给对话编号同理）。
+        return if (book.getFixQuote()) QuoteFix.fixTitle(title) else title
+    }
+
+    /**
      * 获取章节的 AI 缓存文件
      */
     fun getChapterCacheFile(book: Book, chapter: BookChapter): File =
-        getChapterCacheFileByName(book.name, chapter.title)
+        getChapterCacheFileByName(book.name, chapterCacheTitle(book, chapter))
 
     /**
      * 按书名与章节名获取缓存文件。

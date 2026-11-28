@@ -21,6 +21,20 @@ object QuoteFix {
 
     private const val RULES_SIZE = 15
 
+    /** 标题专用：中文全角双引号一律去掉，不参与正文引号配对规则。 */
+    private val titleQuotePattern = Pattern.compile("[“”]")
+
+    /**
+     * 去掉标题里的中文全角双引号。
+     *
+     * 章节标题里的引号不参与对话编号：朗读剧本按 data.json 首行标题定位章节并给
+     * 角色缓存命名，若标题带引号，阅读端 attachAnnotations 逐行数 `“` 时会把标题
+     * 那个也算进去，导致正文姓名整体错位一位。故标题在「显示 / 进缓存名 / 进
+     * data.json 首行」三处统一走这个口径。
+     */
+    fun fixTitle(title: String): String =
+        titleQuotePattern.matcher(title).replaceAll("")
+
     private class FixRule(
         val name: String,
         val pattern: Pattern,

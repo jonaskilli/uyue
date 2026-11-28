@@ -12,6 +12,7 @@ import io.legado.app.help.config.AppConfig
 import io.legado.app.model.AiImagePersistentCache
 import io.legado.app.model.ReadAloud
 import io.legado.app.ui.book.read.page.DialogRoleManager
+import io.legado.app.ui.book.toc.AiCacheFileUtil
 import io.legado.app.utils.AudioConcatUtil
 import io.legado.app.utils.AudioConvertUtil
 import io.legado.app.utils.AudioLogCollector
@@ -369,7 +370,10 @@ object HttpTtsAudioCache {
         if (segments.isEmpty()) return 0
 
         // 取出本章所有名字 == roleName 的 seq 集合
-        val cache = DialogRoleManager.loadChapterCache(book.name, chapter.title)
+        val cache = DialogRoleManager.loadChapterCache(
+            book.name,
+            AiCacheFileUtil.chapterCacheTitle(book, chapter)
+        )
         if (cache.isEmpty()) return 0
         val targetSeqs = cache.filterValues { it.name == roleName }.keys
 

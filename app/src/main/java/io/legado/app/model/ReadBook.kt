@@ -12,6 +12,7 @@ import io.legado.app.data.entities.ReadRecord
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.QuoteFix
 import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isPdf
@@ -33,6 +34,7 @@ import io.legado.app.ui.book.read.page.DialogRoleManager
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.read.page.provider.ChapterProvider
 import io.legado.app.ui.book.read.page.provider.LayoutProgressListener
+import io.legado.app.ui.book.toc.AiCacheFileUtil
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.postEvent
 import io.legado.app.utils.stackTraceStr
@@ -930,10 +932,13 @@ object ReadBook : CoroutineScope by MainScope() {
         chapterLoadingJobs[chapter.index]?.cancel()
         val job = Coroutine.async(this, start = CoroutineStart.LAZY) {
             val contentProcessor = ContentProcessor.get(book.name, book.origin)
-            val displayTitle = chapter.getDisplayTitle(
+            var displayTitle = chapter.getDisplayTitle(
                 contentProcessor.getTitleReplaceRules(),
                 book.getUseReplaceRule()
             )
+            // 标题里的全角双引号去掉：TextChapter.title 同时是「角色缓存的键」，
+            // 与脚本写盘、data.json 首行必须同源（见 AiCacheFileUtil.chapterCacheTitle）。
+            if (book.getFixQuote()) displayTitle = QuoteFix.fixTitle(displayTitle)
             val contents = contentProcessor
                 .getContent(book, chapter, content, includeTitle = false)
             ensureActive()
@@ -1032,10 +1037,13 @@ object ReadBook : CoroutineScope by MainScope() {
         }
         kotlin.runCatching {
             val contentProcessor = ContentProcessor.get(book.name, book.origin)
-            val displayTitle = chapter.getDisplayTitle(
+            var displayTitle = chapter.getDisplayTitle(
                 contentProcessor.getTitleReplaceRules(),
                 book.getUseReplaceRule()
             )
+            // 标题里的全角双引号去掉：TextChapter.title 同时是「角色缓存的键」，
+            // 与脚本写盘、data.json 首行必须同源（见 AiCacheFileUtil.chapterCacheTitle）。
+            if (book.getFixQuote()) displayTitle = QuoteFix.fixTitle(displayTitle)
             val contents = contentProcessor
                 .getContent(book, chapter, content, includeTitle = false)
             val textChapter = ChapterProvider.getTextChapterAsync(
@@ -1210,10 +1218,12 @@ object ReadBook : CoroutineScope by MainScope() {
                     val clean = cleanContentForTts(book, ch, raw)
                     if (clean.isNotBlank()) {
                         if (sb.isNotEmpty()) sb.append("\n")
-                        // data.json 每章第一行统一放原始章节名：脚本按这个标题定位章节，
-                        // 角色识别 json 也按原始章节名命名，三处必须是同一个名字。
+                        // data.json 每章第一行统一放「替换后的标题」：脚本按这个标题定位
+                        // 章节，角色识别 json 也按它命名，阅读端还按它找缓存，
+                        // 三处必须是同一个名字（故统一走 AiCacheFileUtil.chapterCacheTitle）。
                         val lines = clean.split("\n").toMutableList()
-                        lines[0] = ch.title.replace(Regex("[\r\n]"), "")
+                        lines[0] = AiCacheFileUtil.chapterCacheTitle(book, ch)
+                            .replace(Regex("[\r\n]"), "")
                         sb.append(lines.joinToString("\n"))
                         chapterCount++
                     }

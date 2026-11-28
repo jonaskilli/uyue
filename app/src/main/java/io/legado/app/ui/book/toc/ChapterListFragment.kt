@@ -328,14 +328,18 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
     private fun renameChapter(book: Book, chapter: BookChapter, newTitle: String) {
         lifecycleScope.launch(IO) {
             val oldTitle = chapter.title
+            // 角色缓存按「替换后的标题」命名，改名前后都要用同一口径，
+            // 否则遇到配了改标题替换规则的书籍，改名后缓存会全部失联。
+            val oldCacheTitle = AiCacheFileUtil.chapterCacheTitle(book, chapter)
             val oldFileName = chapter.getFileName()
             chapter.title = newTitle
             // titleMD5 是惰性缓存，清掉才会按新标题重算文件名
             chapter.titleMD5 = null
             val newFileName = chapter.getFileName()
+            val newCacheTitle = AiCacheFileUtil.chapterCacheTitle(book, chapter)
 
             BookHelp.renameChapterCacheFile(book, oldFileName, newFileName)
-            AiCacheFileUtil.renameChapterCache(book.name, oldTitle, newTitle)
+            AiCacheFileUtil.renameChapterCache(book.name, oldCacheTitle, newCacheTitle)
             AiImagePersistentCache.renameChapter(book.name, chapter.index, oldTitle, newTitle)
             appDb.bookChapterDao.update(chapter)
 

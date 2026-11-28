@@ -215,11 +215,17 @@ class ContentProcessor private constructor(
             }
         }
         if (includeTitle) {
-            //重新添加标题
-            mContent = chapter.getDisplayTitle(
+            // 重新添加「替换后的标题」，并在开双引号修复时去掉标题里的全角双引号：
+            // 朗读脚本按 data.json 第一行标题定位章节并给角色缓存 json 命名，
+            // 阅读端也按同一标题找缓存，三处必须是同一个名字。
+            var displayTitle = chapter.getDisplayTitle(
                 getTitleReplaceRules(),
                 useReplace = useReplace && book.getUseReplaceRule()
-            ) + "\n" + mContent
+            )
+            if (fixQuote && book.getFixQuote()) {
+                displayTitle = QuoteFix.fixTitle(displayTitle)
+            }
+            mContent = displayTitle + "\n" + mContent
         }
         if (isAndroid8) {
             mContent = mContent.replace('\u00A0', ' ')

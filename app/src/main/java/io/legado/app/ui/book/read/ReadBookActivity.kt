@@ -145,6 +145,7 @@ import io.legado.app.ui.book.searchContent.SearchContentActivity
 import io.legado.app.ui.book.searchContent.SearchResult
 import io.legado.app.model.SourceCallBack
 import io.legado.app.ui.book.source.edit.BookSourceEditActivity
+import io.legado.app.ui.book.toc.AiCacheFileUtil
 import io.legado.app.ui.book.toc.TocActivityResult
 import io.legado.app.ui.book.toc.rule.TxtTocRuleDialog
 import io.legado.app.ui.browser.WebViewActivity
@@ -2541,8 +2542,11 @@ class ReadBookActivity : BaseReadBookActivity(),
         }
 
         lifecycleScope.launch(IO) {
-            val chapterTitles = book?.let {
-                appDb.bookChapterDao.getChapterList(it.bookUrl).map { c -> c.title }
+            // 章节标题必须用「缓存口径」（替换规则 + 去引号），与脚本写盘、
+            // 阅读端读盘同源；用原始 c.title 会查不到换成新名后的缓存。
+            val chapterTitles = book?.let { b ->
+                appDb.bookChapterDao.getChapterList(b.bookUrl)
+                    .map { c -> AiCacheFileUtil.chapterCacheTitle(b, c) }
             } ?: emptyList()
             val currentChapterIndex = chapterTitles.indexOf(chapterTitle)
             // 只看当前章与前后各一章，立刻出前后名字
