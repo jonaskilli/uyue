@@ -55,6 +55,11 @@ class SoundEffectRuleEditActivity :
     /** 给测试文本加 Span 时避免再次触发 TextWatcher */
     private var applyingHighlight = false
 
+    /** 从预览页带入的临时测试文本：只用于显示/测试，保存时不写回 sampleText。 */
+    private val previewTestText: String? by lazy {
+        intent.getStringExtra(EXTRA_PREVIEW_TEST_TEXT)
+    }
+
     private val textEditLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode != RESULT_OK) return@registerForActivityResult
@@ -109,7 +114,8 @@ class SoundEffectRuleEditActivity :
         binding.etName.setText(rule.name)
         binding.etPattern.setText(rule.pattern)
         binding.etReplacement.setText(rule.replacement)
-        binding.etTestText.setText(rule.sampleText)
+        // 预览页带入的“规则执行前文本”优先显示，但 rule.sampleText 保持原值不被污染
+        binding.etTestText.setText(previewTestText ?: rule.sampleText)
         binding.cbUseRegex.isChecked = rule.isRegex
         binding.cbEnabled.isChecked = rule.isEnabled
         binding.etGroup.setText(
@@ -118,26 +124,15 @@ class SoundEffectRuleEditActivity :
             ).orEmpty()
         )
         updateTestResult()
-        locateTargetMarker()
+        scrollToBottom()
     }
 
-    /** 从阅读页音效标记跳转过来时，定位到“替换为”里对应的那个标记。 */
-    private fun locateTargetMarker() {
-        val marker = intent.getStringExtra(EXTRA_TARGET_MARKER) ?: return
-        if (marker.isBlank()) return
-        val markerIndex = intent.getIntExtra(EXTRA_TARGET_MARKER_INDEX, 0).coerceAtLeast(0)
-        val text = binding.etReplacement.text?.toString().orEmpty()
-        var from = 0
-        var found = -1
-        repeat(markerIndex + 1) {
-            found = text.indexOf(marker, from)
-            if (found < 0) return
-            from = found + marker.length
-        }
-        if (found >= 0) {
-            binding.etReplacement.setSelection(found, found + marker.length)
-            binding.etReplacement.requestFocus()
-            toastOnUi("已定位到点击的音效标记")
+    /** 进入编辑页时直接滚到最底部（替换结果），不聚焦输入框、不弹出输入法。 */
+    private fun scrollToBottom() {
+        binding.scrollView.post {
+            val child = binding.scrollView.getChildAt(0) ?: return@post
+            // 不用 fullScroll：该容器禁用了 requestChildRectangleOnScreen，fullScroll 不生效
+            binding.scrollView.scrollTo(0, child.height)
         }
     }
 
@@ -162,7 +157,10 @@ class SoundEffectRuleEditActivity :
         rule.replacement = binding.etReplacement.text.toString()
         rule.isRegex = binding.cbUseRegex.isChecked
         rule.isEnabled = binding.cbEnabled.isChecked
-        rule.sampleText = binding.etTestText.text.toString()
+        // 预览带入的测试文本只是临时演示用，不写回规则的 sampleText
+        if (previewTestText == null) {
+            rule.sampleText = binding.etTestText.text.toString()
+        }
         return rule
     }
 
@@ -192,25 +190,123 @@ class SoundEffectRuleEditActivity :
             null
         }
 
-        val result = try {
-            if (compiled != null) {
-                compiled.replace(testText, replacement)
-            } else {
-                testText.replace(pattern, replacement)
-            }
+        val outcome = try {
+            replaceWithTrackedMarkers(testText, pattern, replacement, compiled)
         } catch (e: Exception) {
-            "正则无效：${e.localizedMessage}"
+            ReplaceOutcome("正则无效：${e.localizedMessage}", emptyList())
         }
-        binding.etReplaceResult.setText(result)
+        binding.etReplaceResult.setText(outcome.text)
 
-        if (result.startsWith("正则无效：")) {
+        if (outcome.text.startsWith("正则无效：")) {
             clearTestHighlight()
             clearResultMarkerHighlight()
         } else {
             applyTestHighlight(testText, pattern, compiled, isRegex)
-            applyResultMarkerHighlight(result)
+            applyResultMarkerHighlight(outcome.newMarkerRanges)
         }
     }
+
+    /**
+     * 执行替换，同时记录每次替换中新插入文本里的音效标记位置。
+     * 这样结果里只有“本次替换产生”的标记会加底色，测试文本里原有的标记不加。
+     */
+    private fun replaceWithTrackedMarkers(
+        testText: String,
+        pattern: String,
+        replacement: String,
+        compiled: Regex?
+    ): ReplaceOutcome {
+        if (pattern.isEmpty()) return ReplaceOutcome(testText, emptyList())
+        val sb = StringBuilder()
+        val ranges = ArrayList<IntRange>()
+        var last = 0
+
+        // 只把 replacement 模板里字面写出的音效标记计入底色；
+        // $1 等捕获组从测试文本带回的旧标记不算“本次替换产生”。
+        fun appendReplacement(match: MatchResult?) {
+            var i = 0
+            while (i < replacement.length) {
+                val literal = EFFECT_MARKER_REGEX.find(replacement, i)
+                if (literal == null || literal.range.first >= replacement.length) break
+                // 先输出标记之前的模板片段（含 $捕获 展开）
+                val prefix = replacement.substring(i, literal.range.first)
+                sb.append(if (match != null) expandReplacement(match, prefix) else prefix)
+                // 标记本身是模板字面写的，记录其在结果中的位置并加底色
+                val markerStart = sb.length
+                sb.append(literal.value)
+                ranges.add(markerStart..(markerStart + literal.value.length - 1))
+                i = literal.range.last + 1
+            }
+            val tail = replacement.substring(i)
+            sb.append(if (match != null && tail.isNotEmpty()) expandReplacement(match, tail) else tail)
+        }
+
+        if (compiled != null) {
+            compiled.findAll(testText).forEach { match ->
+                if (match.range.first < last) return@forEach
+                sb.append(testText, last, match.range.first)
+                appendReplacement(match)
+                last = match.range.last + 1
+            }
+        } else {
+            var from = 0
+            while (from <= testText.length - pattern.length) {
+                val pos = testText.indexOf(pattern, from)
+                if (pos < 0) break
+                sb.append(testText, from, pos)
+                appendReplacement(null)
+                from = pos + pattern.length
+            }
+            last = from
+        }
+        sb.append(testText, last, testText.length)
+        return ReplaceOutcome(sb.toString(), ranges)
+    }
+
+    /** 展开替换串里的 $0/$1..$9/${name}，与 Regex.replace 的捕获组语义一致。 */
+    private fun expandReplacement(match: MatchResult, template: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < template.length) {
+            if (template[i] != '$') {
+                sb.append(template[i++])
+                continue
+            }
+            if (i + 1 >= template.length) {
+                sb.append('$')
+                i++
+                continue
+            }
+            if (template[i + 1] == '$') {
+                sb.append('$')
+                i += 2
+                continue
+            }
+            if (template[i + 1] == '{') {
+                val end = template.indexOf('}', i + 2)
+                if (end > i + 2) {
+                    val name = template.substring(i + 2, end)
+                    val value = match.groups[name]?.value.orEmpty()
+                    sb.append(value)
+                    i = end + 1
+                    continue
+                }
+            }
+            val c = template[i + 1]
+            if (c.isDigit()) {
+                sb.append(match.groupValues.getOrNull(c - '0').orEmpty())
+            } else {
+                sb.append('$').append(c)
+            }
+            i += 2
+        }
+        return sb.toString()
+    }
+
+    private data class ReplaceOutcome(
+        val text: String,
+        val newMarkerRanges: List<IntRange>
+    )
 
     /** 在测试文本里给命中的原文加深色背景，只影响显示，不改变文本内容。 */
     private fun applyTestHighlight(
@@ -260,17 +356,19 @@ class SoundEffectRuleEditActivity :
             .forEach { editable.removeSpan(it) }
     }
 
-    /** 给替换结果里的 (xxx音效) 标记加背景色。 */
-    private fun applyResultMarkerHighlight(result: String) {
+    /** 只给本次替换新产生的 (xxx音效) 标记加背景色；测试文本里原有的标记不加。 */
+    private fun applyResultMarkerHighlight(ranges: List<IntRange>) {
         val editable = binding.etReplaceResult.text as? Spannable ?: return
         clearResultMarkerHighlight()
-        EFFECT_MARKER_REGEX.findAll(result).take(MAX_HIGHLIGHTS).forEach { match ->
-            editable.setSpan(
-                ResultMarkerSpan(HIGHLIGHT_COLOR),
-                match.range.first,
-                match.range.last + 1,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
+        ranges.take(MAX_HIGHLIGHTS).forEach { range ->
+            if (range.first >= 0 && range.last < editable.length) {
+                editable.setSpan(
+                    ResultMarkerSpan(HIGHLIGHT_COLOR),
+                    range.first,
+                    range.last + 1,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
         }
     }
 
@@ -372,6 +470,7 @@ class SoundEffectRuleEditActivity :
         const val EXTRA_TARGET_MARKER = "extraTargetMarker"
         const val EXTRA_TARGET_MARKER_INDEX = "extraTargetMarkerIndex"
         const val EXTRA_SOURCE_MODE = "extraSourceMode"
+        const val EXTRA_PREVIEW_TEST_TEXT = "extraPreviewTestText"
 
         fun startIntent(
             context: Context,
@@ -381,7 +480,8 @@ class SoundEffectRuleEditActivity :
             groupNames: Array<String>,
             targetMarker: String? = null,
             targetMarkerIndex: Int = 0,
-            sourceMode: String? = null
+            sourceMode: String? = null,
+            previewTestText: String? = null
         ): Intent = Intent(context, SoundEffectRuleEditActivity::class.java).apply {
             putExtra(EXTRA_RULE, rule)
             putExtra(EXTRA_GROUP_ID, groupId)
@@ -390,6 +490,7 @@ class SoundEffectRuleEditActivity :
             targetMarker?.let { putExtra(EXTRA_TARGET_MARKER, it) }
             putExtra(EXTRA_TARGET_MARKER_INDEX, targetMarkerIndex)
             sourceMode?.let { putExtra(EXTRA_SOURCE_MODE, it) }
+            previewTestText?.let { putExtra(EXTRA_PREVIEW_TEST_TEXT, it) }
         }
     }
 }

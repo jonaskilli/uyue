@@ -579,6 +579,11 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
                 val paragraphStart = paragraphFirstLine?.chapterPosition ?: textLine.chapterPosition
                 val startPos = (paragraphStart - pageStart).coerceAtLeast(0)
 
+                // 单击喇叭时顺带把整段文字设为选中态，方便直接复制或做其它操作
+                if (!continuePlay) {
+                    selectWholeParagraph(paragraphNum, textLine)
+                }
+
                 if (continuePlay) {
                     // 长按：从该段开头连续朗读，播完不停止，继续后续段落。
                     // 走朗读服务而非直接播缓存文件，这样才能跨段落、跨章节持续播放；
@@ -621,6 +626,31 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
             }
         }
         return false
+    }
+
+    /**
+     * 把指定段落的全部文字设为选中态（复用长按选择的选区状态）。
+     * 段落可能跨页：按当前可视页映射相对页位置；首行在上一页时回退到当前页可见部分。
+     */
+    private fun selectWholeParagraph(paragraphNum: Int, lastLine: TextLine) {
+        val paragraph = lastLine.textPage.textChapter.getParagraphs(false)
+            .find { it.num == paragraphNum } ?: return
+        var firstLine = paragraph.firstLine
+        var startRel = firstLine.textPage.index - textPage.index
+        if (startRel < 0) {
+            firstLine = textPage.lines.firstOrNull { it.paragraphNum == paragraphNum } ?: return
+            startRel = 0
+        }
+        if (startRel > 2) return
+        val endRel = lastLine.textPage.index - textPage.index
+        if (endRel !in 0..2) return
+        val startLineIndex = relativePage(startRel).lines.indexOf(firstLine)
+        val endLineIndex = relativePage(endRel).lines.indexOf(lastLine)
+        if (startLineIndex < 0 || endLineIndex < 0) return
+        if (firstLine.columns.isEmpty() || lastLine.columns.isEmpty()) return
+        selectStartMoveIndex(startRel, startLineIndex, 0)
+        selectEndMoveIndex(endRel, endLineIndex, lastLine.columns.lastIndex)
+        callBack.onParagraphSelected()
     }
 
     /**
@@ -1155,6 +1185,7 @@ class ContentTextView(context: Context, attrs: AttributeSet?) : View(context, at
         fun upSelectedStart(x: Float, y: Float, top: Float)
         fun upSelectedEnd(x: Float, y: Float)
         fun onImageLongPress(x: Float, y: Float, src: String)
+        fun onParagraphSelected()
         fun onCancelSelect()
         fun onLongScreenshotTouchEvent(event: MotionEvent): Boolean
         fun oldClickImg(src: String): Boolean
