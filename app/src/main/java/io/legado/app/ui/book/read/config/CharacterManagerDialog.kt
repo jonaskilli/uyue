@@ -817,7 +817,7 @@ class CharacterManagerDialog : DialogFragment() {
                     put("voice", char.optString("voice", ""))  // 暂不做映射
                     put("gender", char.optString("gender", ""))
                     put("age", char.optString("age", ""))
-                    put("usageCount", char.optInt("usageCount", 0))
+                    put("usageCount", char.optInt("usageCount", 100))
                     // 保留其他字段
                     if (char.has("fixedVoice")) put("fixedVoice", char.optBoolean("fixedVoice", false))
                     if (char.has("fixedGenderAge")) put("fixedGenderAge", char.optBoolean("fixedGenderAge", false))
@@ -1000,18 +1000,9 @@ class CharacterManagerDialog : DialogFragment() {
     }
 
     private fun setMainCharacter(position: Int) {
-        for (i in 0 until characterRecords.length()) {
-            val char = characterRecords.optJSONObject(i)
-            if (i == position) {
-                char?.put("age", "主角")
-                char?.put("usageCount", 100)
-            } else {
-                // 如果之前是主角，清除主角标记（保留age字段但改usageCount）
-                if (char?.optString("age", "") == "主角") {
-                    char.put("usageCount", 0)
-                }
-            }
-        }
+        val character = characterRecords.optJSONObject(position) ?: return
+        character.put("age", "主角")
+        character.put("usageCount", 100)
         saveCharacters()
         updateCharacterList()
         toast("已设为主角")
@@ -1147,7 +1138,7 @@ class CharacterManagerDialog : DialogFragment() {
                     put("voice", "")
                     put("gender", "")
                     put("age", "")
-                    put("usageCount", 0)
+                    put("usageCount", 100)
                 }
                 newCharacters.add(newRecord)
             }
@@ -1331,7 +1322,7 @@ class CharacterManagerDialog : DialogFragment() {
                                         put("voice", "")
                                         put("gender", "")
                                         put("age", "")
-                                        put("usageCount", 0)
+                                        put("usageCount", 100)
                                     }
                                     newRecords.put(newRecord)
                                 }
@@ -1837,7 +1828,7 @@ class CharacterManagerDialog : DialogFragment() {
                 val name = character.optString("name", "")
                 val aliasesStr = character.optString("aliases", "")
                 val voice = character.optString("voice", "")
-                val usageCount = character.optInt("usageCount", 0)
+                val usageCount = character.optInt("usageCount", 100)
                 val fixedVoice = character.optBoolean("fixedVoice", false)
                 val age = character.optString("age", "")
 

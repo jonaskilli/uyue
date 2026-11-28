@@ -112,7 +112,7 @@ object CharacterVoiceHelper {
                 put("gender", "")
                 put("age", "")
                 put("voice", voice)
-                put("usageCount", 0)
+                put("usageCount", 100)
             }
             records.put(newChar)
         }
@@ -155,7 +155,7 @@ object CharacterVoiceHelper {
                     put("voice", char.optString("voice", ""))
                     put("gender", char.optString("gender", ""))
                     put("age", char.optString("age", ""))
-                    put("usageCount", char.optInt("usageCount", 0))
+                    put("usageCount", char.optInt("usageCount", 100))
                     if (char.has("fixedVoice")) put("fixedVoice", char.optBoolean("fixedVoice", false))
                     if (char.has("fixedGenderAge")) put("fixedGenderAge", char.optBoolean("fixedGenderAge", false))
                     if (char.has("genderAgeHistory")) put("genderAgeHistory", char.opt("genderAgeHistory"))
