@@ -46,6 +46,8 @@ class ProxyService : android.app.Service() {
             val kimi = loadList(prefs, "kimi_cookies", "kimi_tokens")
             val qwen = loadList(prefs, "qwen_cookies", "qwen_cookie")
             val deepseek = loadList(prefs, "deepseek_tokens", "deepseek_token")
+            val maxTokens = loadList(prefs, "max_tokens", "max_token")
+            val maxDetails = loadList(prefs, "max_token_details", "max_token_detail")
             val longcat = loadList(prefs, "longcat_configs", "longcat_config")
             val cnb = loadList(prefs, "cnb_cookies", "cnb_cookie")
             val hunyuan = loadList(prefs, "hunyuan_cookies", "hunyuan_cookie")
@@ -67,6 +69,7 @@ class ProxyService : android.app.Service() {
             ProxyServer.setCnbCookieList(cnb)
             ProxyServer.setHunyuanCookieList(hunyuan)
             ProxyServer.setDeepSeekTokenList(deepseek)
+            ProxyServer.setMiniMaxTokenList(maxTokens, maxDetails)
             ProxyServer.setLongCatConfigList(longcat)
             ProxyServer.setBailianConfigList(bailian)
 
@@ -132,6 +135,10 @@ class ProxyService : android.app.Service() {
         ProxyServer.setLongCatConfigList(longcat)
         // 百炼：任何启动路径（界面启动 / 自动恢复）都要还原，否则轮换列表为空
         ProxyServer.setBailianConfigList(loadList(lcPrefs, "bailian_configs", "bailian_config"))
+        ProxyServer.setMiniMaxTokenList(
+            loadList(lcPrefs, "max_tokens", "max_token"),
+            loadList(lcPrefs, "max_token_details", "max_token_detail")
+        )
         // 混元3（CNB）登录 Cookie 不经过 intent 传递，统一在此从配置还原，
         // 保证任何启动路径（界面启动 / 自动恢复）都能带上登录态 Cookie。
         ProxyServer.setCnbCookieList(loadList(lcPrefs, "cnb_cookies", "cnb_cookie"))

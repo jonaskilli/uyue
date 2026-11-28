@@ -101,6 +101,7 @@ private val PROVIDERS = listOf(
     "bailian" to "百炼",
     "kimi" to "Kimi",
     "qwen" to "千问",
+    "max" to "max",
     "doubao" to "豆包",
     "deepseek" to "DeepSeek"
 )
@@ -517,6 +518,7 @@ fun App(vm: ProxyViewModel) {
                 )
             } else {
                 BrowserScreen(
+                    vm = vm,
                     provider = provider,
                     onProviderChange = { provider = it; vm.setProvider(it) },
                     onClearCredentials = { vm.clearProviderCredentials(it) },
@@ -534,6 +536,10 @@ fun App(vm: ProxyViewModel) {
                     onDeepSeekTokenExtracted = {
                         vm.setDeepSeekToken(it.trim())
                         dsToken = it
+                    },
+                    onMiniMaxToken = { token ->
+                        vm.updateSelectedCookie(token.trim())
+                        cookieText = token.trim()
                     },
                     modifier = Modifier.fillMaxSize().padding(padding)
                 )
@@ -595,6 +601,10 @@ fun ProxyScreen(
         "hunyuan4-flash" to "hunyuan4-flash",
         "hunyuan4-flash-think" to "hunyuan4-flash-think",
         "hunyuan-image" to "混元生图",
+        "MiniMax-M3.1-Flash-Preview" to "M3.1-Flash-Preview",
+        "MiniMax-M3" to "MiniMax-M3",
+        "MiniMax-M2.7" to "MiniMax-M2.7",
+        "MiniMax-M2.7-highspeed" to "MiniMax-M2.7-highspeed",
         "doubao" to "豆包",
         "doubao-think" to "豆包-思考",
         "doubao-auto" to "豆包-自动",
@@ -725,6 +735,7 @@ fun ProxyScreen(
                             "hunyuan" -> "在内置浏览器登录 aistudio.tencent.com 后点「提取Cookie」（含 hunyuan_user / hunyuan_token）"
                             "kimi" -> "粘贴 kimi.com 的 Cookie（含 JWT 自动提取）"
                             "qwen" -> "粘贴 qianwen.com 的 Cookie（含 tongyi_sso_ticket）"
+                            "max" -> "MiniMax：授权接入中，暂可粘贴 access_token；或先在内置浏览器登录 account.minimax.cn"
                             else -> "粘贴 doubao.com 的完整 Cookie 字符串"
                         },
                         singleLine = false, maxLines = 2,
@@ -1063,6 +1074,7 @@ fun LogScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BrowserScreen(
+    vm: ProxyViewModel,
     provider: String,
     onProviderChange: (String) -> Unit,
     onClearCredentials: (String) -> Unit,
@@ -1073,9 +1085,11 @@ fun BrowserScreen(
     bailianCount: Int = 0,
     onCookieExtracted: (String) -> Unit,
     onDeepSeekTokenExtracted: (String) -> Unit,
+    onMiniMaxToken: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
     // 「清空」的跨源存储清理：Cookie 只是一半，cna/umid 等设备标识还存在
     // 各埋点源的 localStorage/IndexedDB 里，localStorage 只能清当前加载页的源，
@@ -1086,6 +1100,8 @@ fun BrowserScreen(
     // 跨源清理「进行中」标志。不能拿 wipeQueue.isNotEmpty() 代替：队列在加载最后一个源时
     // 就已经空了，会导致最后一个源的存储没被清、而且永远不会跳回目标页（停在空白页）。
     val wiping = remember { mutableStateOf(false) }
+    // 深度清理归属：bailian / max。决定收尾时走哪套清理逻辑
+    val wipeKind = remember { mutableStateOf("bailian") }
     // DeepSeek 的 Bearer 在请求头 authorization 里（不在 cookie），靠 shouldInterceptRequest 拦截抓取
     val capturedToken = remember { mutableStateOf<String?>(null) }
     val capturedLongCat = remember { mutableStateOf<LongCatCaptured?>(null) }
@@ -1106,6 +1122,7 @@ fun BrowserScreen(
                 "hunyuan" -> "https://aistudio.tencent.com/"
                 "kimi" -> "https://www.kimi.com/"
                 "qwen" -> "https://www.qianwen.com/"
+                "max" -> "https://agent.minimax.cn/"
                 "deepseek" -> "https://chat.deepseek.com/"
                 "longcat" -> "https://longcat.chat/t"
                 "bailian" -> "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
@@ -1115,6 +1132,45 @@ fun BrowserScreen(
     }
     var progress by remember { mutableStateOf(0) }
     var toast by remember { mutableStateOf<String?>(null) }
+
+    // MiniMax 深度清理收尾：只清 MiniMax 域名 Cookie/存储，不影响其它服务商登录态。
+    fun finishMiniMaxWipe(view: WebView) {
+        if (!wiping.value) return
+        wiping.value = false
+        val cm = CookieManager.getInstance()
+        val hosts = listOf(
+            "minimax.cn", "www.minimax.cn", "account.minimax.cn",
+            "agent.minimax.cn", "agent.minimaxi.com"
+        )
+        val roots = listOf("minimax.cn", "minimaxi.com")
+        val expired = "expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; path=/"
+        val names = mutableSetOf<String>()
+        hosts.forEach { h ->
+            cm.getCookie("https://$h")?.split(";")?.forEach { piece ->
+                val n = piece.substringBefore("=").trim()
+                if (n.isNotEmpty() && !n.startsWith(".")) {
+                    cm.setCookie("https://$h", "$n=; $expired", null)
+                    names.add(n)
+                }
+            }
+        }
+        names.forEach { n ->
+            roots.forEach { r ->
+                cm.setCookie("https://$r", "$n=; domain=.$r; $expired", null)
+                cm.setCookie("https://$r", "$n=; domain=$r; $expired", null)
+            }
+        }
+        cm.flush()
+        listOf(
+            "https://www.minimax.cn", "https://account.minimax.cn",
+            "https://agent.minimax.cn", "https://agent.minimaxi.com"
+        ).forEach { origin ->
+            try { android.webkit.WebStorage.getInstance().deleteOrigin(origin) } catch (_: Throwable) {}
+        }
+        try { view.clearCache(true) } catch (_: Throwable) {}
+        view.loadUrl(wipeTarget.value ?: "https://agent.minimax.cn/")
+        LogStore.i("MiniMax", "深度清理完成：MiniMax Cookie 与站点存储已清空")
+    }
 
     // 跨源清理收尾：所有源的存储都清完后，才轮到 Cookie / WebStorage / HTTP 缓存，
     // 最后回目标页。顺序不能反——先清 Cookie 的话 Aplus 会立刻从备份写回。
@@ -1147,7 +1203,9 @@ fun BrowserScreen(
             if (wipeQueue.isNotEmpty()) {
                 view.post { view.loadUrl(wipeQueue.removeFirst()) }
             } else {
-                view.post { finishBailianWipe(view) }
+                view.post {
+                    if (wipeKind.value == "max") finishMiniMaxWipe(view) else finishBailianWipe(view)
+                }
             }
         }
     }
@@ -1182,6 +1240,7 @@ fun BrowserScreen(
         }
         lastAutoBailianKey.value = null
         lastAutoBailianWriteAt.value = 0L
+        wipeKind.value = "bailian"
         if (wiping.value) {
             LogStore.i("Bailian", "深度清理进行中，忽略重复触发")
             return
@@ -1217,6 +1276,38 @@ fun BrowserScreen(
         // 20 秒后不管队列剩多少都强制收尾，避免流程卡死在空白页
         Handler(Looper.getMainLooper()).postDelayed({
             if (wiping.value) finishBailianWipe(wv)
+        }, 20000)
+    }
+
+    /** MiniMax 深度清空：与百炼同款随机 UA + 跨源清存储，但只清 MiniMax 域名。 */
+    fun startMiniMaxDeepWipe() {
+        if (wiping.value) {
+            LogStore.i("MiniMax", "深度清理进行中，忽略重复触发")
+            return
+        }
+        val wv = webViewRef.value
+        if (wv == null) {
+            LogStore.i("MiniMax", "浏览器未就绪，无法深度清空")
+            return
+        }
+        wv.settings.userAgentString = randomMobileUa()
+        CookieManager.getInstance().flush()
+        val target = "https://agent.minimax.cn/"
+        url = target
+        wipeKind.value = "max"
+        wipeQueue.clear()
+        listOf(
+            "https://www.minimax.cn/",
+            "https://account.minimax.cn/",
+            "https://agent.minimax.cn/",
+            "https://agent.minimaxi.com/"
+        ).forEach { wipeQueue.add(it) }
+        wipeTarget.value = target
+        wiping.value = true
+        LogStore.i("MiniMax", "开始深度清理浏览器标识与 MiniMax 站点存储")
+        wipeCurrentThenNext(wv)
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (wiping.value) finishMiniMaxWipe(wv)
         }, 20000)
     }
 
@@ -1265,6 +1356,7 @@ fun BrowserScreen(
             "hunyuan" -> "https://aistudio.tencent.com/"
             "kimi" -> "https://www.kimi.com/"
             "qwen" -> "https://www.qianwen.com/"
+            "max" -> "https://agent.minimax.cn/"
             "deepseek" -> "https://chat.deepseek.com/"
             "longcat" -> "https://longcat.chat/t"
             "bailian" -> "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
@@ -1321,6 +1413,7 @@ fun BrowserScreen(
                     )
                     "kimi" -> listOf("kimi.com", "www.kimi.com", "api.kimi.com", "chat.kimi.com", "m.kimi.com")
                     "qwen" -> listOf("qianwen.com", "www.qianwen.com", "chat.qianwen.com", "m.qianwen.com")
+                    "max" -> listOf("minimax.cn", "www.minimax.cn", "account.minimax.cn", "agent.minimax.cn", "agent.minimaxi.com")
                     "deepseek" -> listOf(
                         "deepseek.com", "www.deepseek.com", "chat.deepseek.com", "api.deepseek.com"
                     )
@@ -1355,6 +1448,7 @@ fun BrowserScreen(
                     "hunyuan" -> listOf("tencent.com")
                     "kimi" -> listOf("kimi.com")
                     "qwen" -> listOf("qianwen.com")
+                    "max" -> listOf("minimax.cn")
                     "deepseek" -> listOf("deepseek.com")
                     "bailian" -> listOf("aliyun.com", "aliapp.org", "mmstat.com", "aliyuncs.com")
                     else -> listOf("doubao.com")
@@ -1406,6 +1500,9 @@ fun BrowserScreen(
                         // 百炼深度清空：与一键获取共用同一套逐源清理（cancelQueue=true
                         // 作废正在排队的获取周期，防止两条流程互相抢页面）
                         startBailianDeepWipe(cancelQueue = true)
+                    } else if (p == "max") {
+                        // MiniMax 深度清空：随机 UA + 逐源清存储，只清 MiniMax 域名
+                        startMiniMaxDeepWipe()
                     } else {
                         webViewRef.value?.evaluateJavascript(WIPE_STORAGE_JS, null)
                         webViewRef.value?.loadUrl(url)
@@ -1465,6 +1562,27 @@ fun BrowserScreen(
                 }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
                     Text("提取Token", fontSize = CompactBtnFont)
                 }
+            } else if (provider == "max") {
+                Button(onClick = {
+                    scope.launch {
+                        toast = "正在申请 MiniMax 授权..."
+                        try {
+                            val token = vm.authorizeMiniMax(
+                                onPending = { authUrl, userCode ->
+                                    url = authUrl
+                                    webViewRef.value?.loadUrl(authUrl)
+                                    toast = "请在浏览器登录并确认授权，验证码：$userCode"
+                                },
+                                onStatus = { msg -> toast = msg }
+                            )
+                            onMiniMaxToken(token)
+                        } catch (e: Exception) {
+                            toast = "MiniMax 授权失败：${e.localizedMessage ?: e.toString()}"
+                        }
+                    }
+                }, contentPadding = CompactBtnPadding, modifier = Modifier.heightIn(min = CompactBtnHeight)) {
+                    Text("获取授权", fontSize = CompactBtnFont)
+                }
             } else if (provider == "longcat") {
                 Button(onClick = {
                     val cap = capturedLongCat.value
@@ -1506,6 +1624,11 @@ fun BrowserScreen(
                         ) to "混元"
                         "kimi" -> listOf("https://www.kimi.com", "https://kimi.com") to "Kimi"
                         "qwen" -> listOf("https://www.qianwen.com", "https://qianwen.com") to "千问"
+                        "max" -> listOf(
+                            "https://account.minimax.cn",
+                            "https://www.minimax.cn",
+                            "https://minimax.cn"
+                        ) to "MiniMax"
                         else -> listOf("https://www.doubao.com", "https://doubao.com") to "豆包"
                     }
                     // 按 Cookie 名去重：同名 Cookie 在多个域重复出现时只保留第一条

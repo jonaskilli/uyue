@@ -214,6 +214,10 @@ object HunyuanLocalGateway : Interceptor {
                 .onFailure { LogStore.w("Gateway", "混元3 凭证刷新失败: ${it.message}") }
         }
         ProxyServer.setDeepSeekTokenList(loadList(p, "deepseek_tokens", "deepseek_token"))
+        ProxyServer.setMiniMaxTokenList(
+            loadList(p, "max_tokens", "max_token"),
+            loadList(p, "max_token_details", "max_token_detail")
+        )
 
         val longcat = loadList(p, "longcat_configs", "longcat_config")
         ProxyServer.setLongCatConfigList(longcat)

@@ -155,6 +155,10 @@ internal fun configureApplication(application: io.ktor.server.application.Applic
                         {"id":"hunyuan4-flash","object":"model","owned_by":"hunyuan"},
                         {"id":"hunyuan4-flash-think","object":"model","owned_by":"hunyuan"},
                         {"id":"hunyuan-image","object":"model","owned_by":"hunyuan"},
+                        {"id":"MiniMax-M3.1-Flash-Preview","object":"model","owned_by":"max"},
+                        {"id":"MiniMax-M3","object":"model","owned_by":"max"},
+                        {"id":"MiniMax-M2.7","object":"model","owned_by":"max"},
+                        {"id":"MiniMax-M2.7-highspeed","object":"model","owned_by":"max"},
                         {"id":"longcat","object":"model","owned_by":"longcat"},
                         {"id":"longcat-search","object":"model","owned_by":"longcat"},
                         {"id":"bailian","object":"model","owned_by":"bailian"},
@@ -419,6 +423,70 @@ object ProxyServer {
         return c
     }
 
+    // ── MiniMax（max）凭证轮换 ──
+    private data class MiniMaxCred(
+        val token: String,
+        val refresh: String,
+        val expiresAt: Long
+    )
+
+    private val minimaxLock = Any()
+    @Volatile private var minimaxCreds: List<MiniMaxCred> = emptyList()
+    private val minimaxRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** token 刷新后回写给 ViewModel 持久化：(旧 access_token, 新 access_token, 新 refresh_token, expires_at)。 */
+    var onMiniMaxTokenRefreshed: ((String, String, String, Long) -> Unit)? = null
+
+    /**
+     * @param tokens 与 max_tokens 对应的 access_token 列表
+     * @param details 与 tokens 对齐的 JSON 字符串列表，可含 refresh_token / expires_at
+     */
+    fun setMiniMaxTokenList(tokens: List<String>, details: List<String> = emptyList()) {
+        synchronized(minimaxLock) {
+            val refreshed = minimaxCreds.associateBy { it.token }
+            minimaxCreds = tokens.mapIndexed { i, token ->
+                val o = runCatching { org.json.JSONObject(details.getOrNull(i) ?: "{}") }
+                    .getOrElse { org.json.JSONObject() }
+                val old = refreshed[token]
+                MiniMaxCred(
+                    token = token,
+                    refresh = o.optString("refresh_token").ifBlank { old?.refresh.orEmpty() },
+                    expiresAt = if (o.has("expires_at")) o.optLong("expires_at") else old?.expiresAt ?: 0L
+                )
+            }.filter { it.token.isNotBlank() }
+            if (minimaxRotationIdx.get() >= minimaxCreds.size) minimaxRotationIdx.set(0)
+        }
+    }
+
+    private suspend fun nextMiniMaxCred(): MiniMaxCred {
+        var cred: MiniMaxCred
+        synchronized(minimaxLock) {
+            if (minimaxCreds.isEmpty()) throw IllegalStateException("MiniMax 未配置，请在 max 页面点「获取授权」")
+            val idx = minimaxRotationIdx.getAndUpdate { (it + 1) % minimaxCreds.size }
+            cred = minimaxCreds[idx]
+        }
+        if (cred.expiresAt > 0 && System.currentTimeMillis() / 1000 >= cred.expiresAt - 60 &&
+            cred.refresh.isNotBlank()
+        ) {
+            try {
+                val grant = MiniMaxClient.refresh(cred.refresh)
+                val expires = System.currentTimeMillis() / 1000 + grant.expiresIn
+                synchronized(minimaxLock) {
+                    minimaxCreds = minimaxCreds.map {
+                        if (it.token == cred.token) {
+                            MiniMaxCred(grant.accessToken, grant.refreshToken.ifBlank { cred.refresh }, expires)
+                        } else it
+                    }
+                }
+                onMiniMaxTokenRefreshed?.invoke(cred.token, grant.accessToken, grant.refreshToken.ifBlank { cred.refresh }, expires)
+                cred = MiniMaxCred(grant.accessToken, grant.refreshToken.ifBlank { cred.refresh }, expires)
+            } catch (e: Exception) {
+                LogStore.w("MiniMax", "续期失败: ${e.localizedMessage}")
+            }
+        }
+        return cred
+    }
+
     /** 识别为豆包模型的名称（前缀匹配，大小写不敏感）。 */
     private val DOUBAO_MODELS = listOf("doubao", "豆包")
 
@@ -465,6 +533,9 @@ object ProxyServer {
 
     /** 识别为百炼（阿里云）模型的名称（前缀匹配，大小写不敏感）。 */
     private val BAILIAN_MODELS = listOf("bailian")
+
+    /** 识别为 MiniMax 模型的名称（前缀匹配，大小写不敏感）。 */
+    private val MINIMAX_MODELS = listOf("minimax")
 
     // ── 百炼配置轮换（百炼配置为整段 JSON：cookies / bx_ua / bx_et / bx_umidtoken / model_id）──
     private val bailianLock = Any()
@@ -768,6 +839,12 @@ object ProxyServer {
     internal fun isBailianModel(m: String): Boolean {
         val lower = m.lowercase()
         return BAILIAN_MODELS.any { lower.startsWith(it) || lower.contains(it) }
+    }
+
+    /** 是否 MiniMax 模型（MiniMax-M3.1-Flash-Preview 等）。 */
+    internal fun isMiniMaxModel(m: String): Boolean {
+        val lower = m.lowercase()
+        return MINIMAX_MODELS.any { lower.startsWith(it) || lower.contains(it) }
     }
 
     /** 是否文心模型（免登录匿名会话，聊天与生图同一入口）。 */
@@ -1360,6 +1437,105 @@ object ProxyServer {
             ChatCompletion(
                 completionId, "chat.completion", created, model,
                 listOf(Choice(message = Msg("assistant", contentText), finish_reason = "stop")),
+                Usage(), ""
+            )
+        )
+    }
+
+    internal suspend fun RoutingContext.handleMiniMaxChat(
+        req: ChatCompletionRequest,
+        completionId: String,
+        created: Int
+    ) {
+        val cred = try {
+            nextMiniMaxCred()
+        } catch (e: Exception) {
+            call.respond(
+                HttpStatusCode.BadGateway,
+                mapOf("error" to (e.localizedMessage ?: "MiniMax 未配置，请点「获取授权」"))
+            )
+            return
+        }
+        LogStore.i("MiniMax", "调用 /messages model=${req.model} msgs=${req.messages.size}")
+
+        if (req.stream) {
+            call.respond(object : OutgoingContent.WriteChannelContent() {
+                override val contentType = ContentType.Text.EventStream
+                override val headers = Headers.build {
+                    append("Cache-Control", "no-cache")
+                    append("Connection", "keep-alive")
+                    append("X-Accel-Buffering", "no")
+                }
+
+                override suspend fun writeTo(channel: ByteWriteChannel) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            withTimeout(300_000) {
+                                MiniMaxClient.chat(req.messages, req.model, cred.token, req.max_tokens).use { resp ->
+                                    val roleChunk = ChatCompletionChunk(
+                                        completionId, "chat.completion.chunk", created, req.model,
+                                        listOf(ChunkChoice(delta = ChoiceDelta(role = "assistant")))
+                                    )
+                                    channel.writeFully(
+                                        ("data: " + json.encodeToString(ChatCompletionChunk.serializer(), roleChunk) + "\n\n").toByteArray()
+                                    )
+                                    channel.flush()
+                                    MiniMaxClient.consume(resp) { delta ->
+                                        if (delta.isNotEmpty()) {
+                                            val chunk = ChatCompletionChunk(
+                                                completionId, "chat.completion.chunk", created, req.model,
+                                                listOf(ChunkChoice(delta = ChoiceDelta(content = delta)))
+                                            )
+                                            channel.writeFully(
+                                                ("data: " + json.encodeToString(ChatCompletionChunk.serializer(), chunk) + "\n\n").toByteArray()
+                                            )
+                                            channel.flush()
+                                        }
+                                    }
+                                }
+                                channel.writeFully(
+                                    ("data: " + json.encodeToString(
+                                        ChatCompletionChunk.serializer(),
+                                        ChatCompletionChunk(
+                                            completionId, "chat.completion.chunk", created, req.model,
+                                            listOf(ChunkChoice(delta = ChoiceDelta(), finish_reason = "stop"))
+                                        )
+                                    ) + "\n\n").toByteArray()
+                                )
+                                channel.writeFully("data: [DONE]\n\n".toByteArray())
+                                channel.flush()
+                            }
+                        } catch (e: Exception) {
+                            LogStore.e("MiniMax", "流式转发异常: ${e.stackTraceToString()}")
+                        }
+                    }
+                }
+            })
+            return
+        }
+
+        val (content, errMsg) = withContext(Dispatchers.IO) {
+            try {
+                withTimeout(300_000) {
+                    MiniMaxClient.chat(req.messages, req.model, cred.token, req.max_tokens).use { resp ->
+                        val sb = StringBuilder()
+                        MiniMaxClient.consume(resp) { sb.append(it) }
+                        sb.toString() to null
+                    }
+                }
+            } catch (e: Exception) {
+                LogStore.e("MiniMax", "请求异常: ${e.stackTraceToString()}")
+                null to (e.localizedMessage ?: e.toString())
+            }
+        }
+        if (errMsg != null) {
+            call.respond(HttpStatusCode.BadGateway, mapOf("error" to errMsg))
+            return
+        }
+        call.respond(
+            ChatCompletion(
+                completionId, "chat.completion", created, req.model,
+                listOf(Choice(message = Msg("assistant", content.orEmpty()), finish_reason = "stop")),
                 Usage(), ""
             )
         )
@@ -2273,6 +2449,10 @@ object ProxyServer {
             "hunyuan4-flash" to "hunyuan",
             "hunyuan4-flash-think" to "hunyuan",
             "hunyuan-image" to "hunyuan",
+            "MiniMax-M3.1-Flash-Preview" to "max",
+            "MiniMax-M3" to "max",
+            "MiniMax-M2.7" to "max",
+            "MiniMax-M2.7-highspeed" to "max",
             "longcat" to "longcat",
             "longcat-search" to "longcat",
             "bailian" to "bailian",
@@ -2557,6 +2737,14 @@ internal suspend fun RoutingContext.handleChatCompletions() {
             val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
             val created = (System.currentTimeMillis() / 1000).toInt()
             handleBailianChat(req, completionId, created)
+            return
+        }
+
+        // MiniMax（max）模型 → 走 MiniMax Code 会员接口（设备码授权 + 凭证轮换）
+        if (ProxyServer.isMiniMaxModel(req.model)) {
+            val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
+            val created = (System.currentTimeMillis() / 1000).toInt()
+            handleMiniMaxChat(req, completionId, created)
             return
         }
 

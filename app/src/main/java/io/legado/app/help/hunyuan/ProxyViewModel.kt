@@ -7,6 +7,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
@@ -23,6 +25,7 @@ import org.json.JSONObject
 import io.legado.app.help.hunyuan.proxy.BailianClient
 import io.legado.app.help.hunyuan.proxy.LogStore
 import io.legado.app.help.hunyuan.proxy.LongCatClient
+import io.legado.app.help.hunyuan.proxy.MiniMaxClient
 import io.legado.app.help.hunyuan.proxy.ProxyServer
 
 /** 一条聊天消息：可含文本和/或图片 URL 列表。 */
@@ -79,6 +82,12 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     /** DeepSeek Bearer Token 列表（索引 0 为「默认Token」），支持多个并自动轮换。 */
     private val deepseekTokens = MutableStateFlow(loadList("deepseek_tokens", "deepseek_token"))
 
+    /** MiniMax（max）凭证列表，独立于豆包，避免误用豆包 Cookie。 */
+    private val maxTokens = MutableStateFlow(loadList("max_tokens", "max_token"))
+
+    /** 与 maxTokens 对齐的附加信息（refresh_token / expires_at）。 */
+    private val maxTokenDetails = MutableStateFlow(loadList("max_token_details", "max_token_detail"))
+
     /** 当前选中的 DeepSeek Token 下标（浏览器提取会写入此下标）。 */
     val deepseekSelectedIndex = MutableStateFlow(loadDeepSeekSelectedIndex())
 
@@ -111,6 +120,25 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         // 启动时把当前选中的 LongCat 配置应用到客户端，并把列表交给服务端用于轮换
         applyLongCatConfig(longCatConfigs.value.getOrNull(longCatSelectedIndex.value) ?: "")
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
+        ProxyServer.onMiniMaxTokenRefreshed = { old, access, refresh, expires ->
+            val tokens = maxTokens.value.toMutableList()
+            val details = maxTokenDetails.value.toMutableList()
+            val i = tokens.indexOf(old)
+            if (i >= 0) {
+                tokens[i] = access
+                while (details.size <= i) details.add("{}")
+                details[i] = JSONObject(details[i].ifBlank { "{}" })
+                    .put("refresh_token", refresh)
+                    .put("expires_at", expires)
+                    .toString()
+                maxTokens.value = tokens
+                maxTokenDetails.value = details
+                prefs.edit()
+                    .putString("max_tokens", JSONArray(tokens).toString())
+                    .putString("max_token_details", JSONArray(details).toString())
+                    .apply()
+            }
+        }
     }
 
     // ── 百炼（阿里云）配置：cookies + 无痕验证三件套（bx_ua/bx_et/bx_umidtoken）+ model_id ──
@@ -237,11 +265,11 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * 当前服务商对应的凭证列表（供 UI 展示/编辑）。
-     * 用 vararg 版 combine：服务商 5 个 Cookie 列表 + provider 共 6 个流，
+     * 用 vararg 版 combine：服务商 6 个凭证列表 + provider 共 7 个流，
      * 超出带类型的 combine 重载上限（5 个），只能走 Array<*> 形式。
      */
     val cookies: StateFlow<List<String>> = combine(
-        provider, doubaoCookies, kimiCookies, qwenCookies, cnbCookies, hunyuanCookies
+        provider, doubaoCookies, kimiCookies, qwenCookies, cnbCookies, hunyuanCookies, maxTokens
     ) { arr ->
         val p = arr[0] as String
         val d = arr[1] as List<String>
@@ -249,11 +277,13 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         val q = arr[3] as List<String>
         val c = arr[4] as List<String>
         val h = arr[5] as List<String>
+        val m = arr[6] as List<String>
         when (p) {
             "kimi" -> k
             "qwen" -> q
             "cnb" -> c
             "hunyuan" -> h
+            "max" -> m
             else -> d
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, doubaoCookies.value)
@@ -284,6 +314,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "qwen" -> "qwen_cookie_selected"
             "cnb" -> "cnb_cookie_selected"
             "hunyuan" -> "hunyuan_cookie_selected"
+            "max" -> "max_token_selected"
             else -> "doubao_cookie_selected"
         }
         val list = when (p) {
@@ -291,6 +322,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "qwen" -> qwenCookies
             "cnb" -> cnbCookies
             "hunyuan" -> hunyuanCookies
+            "max" -> maxTokens
             else -> doubaoCookies
         }.value
         return prefs.getInt(key, 0).coerceIn(0, list.lastIndex)
@@ -302,6 +334,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "qwen" -> qwenCookies
             "cnb" -> cnbCookies
             "hunyuan" -> hunyuanCookies
+            "max" -> maxTokens
             else -> doubaoCookies
         }
 
@@ -313,6 +346,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "qwen" -> "qwen_cookies"
             "cnb" -> "cnb_cookies"
             "hunyuan" -> "hunyuan_cookies"
+            "max" -> "max_tokens"
             else -> "doubao_cookies"
         }
         prefs.edit().putString(key, arr.toString()).apply()
@@ -324,6 +358,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "qwen" -> "qwen_cookie_selected"
             "cnb" -> "cnb_cookie_selected"
             "hunyuan" -> "hunyuan_cookie_selected"
+            "max" -> "max_token_selected"
             else -> "doubao_cookie_selected"
         }
         prefs.edit().putInt(key, selectedIndex.value).apply()
@@ -356,6 +391,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "qwen" -> "qwen_cookie_selected"
             "cnb" -> "cnb_cookie_selected"
             "hunyuan" -> "hunyuan_cookie_selected"
+            "max" -> "max_token_selected"
             else -> "doubao_cookie_selected"
         }
         val list = activeList().value
@@ -403,6 +439,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.setCnbCookieList(cnbCookies.value)
         ProxyServer.setHunyuanCookieList(hunyuanCookies.value)
         ProxyServer.setDeepSeekTokenList(deepseekTokens.value)
+        ProxyServer.setMiniMaxTokenList(maxTokens.value, maxTokenDetails.value)
         ProxyServer.setLongCatConfigList(longCatConfigs.value)
         ProxyServer.setBailianConfigList(bailianConfigs.value)
         // 界面改了凭证 → 让本地网关下次请求重新读取，避免沿用旧缓存
@@ -473,6 +510,10 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     fun clearProviderCredentials(p: String) {
         when (p) {
             "deepseek" -> setDeepSeekToken("")
+            "max" -> {
+                setMiniMaxTokenDetails(selectedIndex.value, "", 0L)
+                updateSelectedCookie("")
+            }
             "longcat" -> setLongCatConfig("")   // 原版行为：只清当前选中这条
             "bailian" -> {
                 // 百炼的「清空」是为了轮换游客身份：清掉浏览器里的访客标识，重新提取一份新的。
@@ -593,6 +634,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         syncServerCookies()
     }
     val chatModel = MutableStateFlow(prefs.getString("chat_model", "hy3-preview") ?: "hy3-preview")
+
     /**
      * 混元太极独立端口，与「转发器」(SystemTtsForwarderConfig.port) 互不干扰，
      * 各自可单独设置。默认 8801。
@@ -610,6 +652,47 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     fun setChatModel(m: String) {
         chatModel.value = m
         prefs.edit().putString("chat_model", m).apply()
+    }
+
+    /** 保存 MiniMax 账号的 refresh_token / 过期时间，与 max_tokens 下标对齐。 */
+    fun setMiniMaxTokenDetails(index: Int, refresh: String, expiresAt: Long) {
+        val details = maxTokenDetails.value.toMutableList()
+        while (details.size <= index) details.add("{}")
+        val o = runCatching { JSONObject(details[index].ifBlank { "{}" }) }.getOrElse { JSONObject() }
+        o.put("refresh_token", refresh).put("expires_at", expiresAt)
+        details[index] = o.toString()
+        maxTokenDetails.value = details
+        prefs.edit().putString("max_token_details", JSONArray(details).toString()).apply()
+        syncServerCookies()
+    }
+
+    /**
+     * MiniMax 设备码授权：申请 device_code → 回调 UI 打开授权页 → 轮询 token → 保存。
+     * 返回的 access_token 会写入当前选中的 max 凭证槽位。
+     */
+    suspend fun authorizeMiniMax(
+        onPending: suspend (String, String) -> Unit,
+        onStatus: suspend (String) -> Unit
+    ): String = withContext(Dispatchers.IO) {
+        val pending = MiniMaxClient.startDeviceAuth()
+        withContext(Dispatchers.Main) { onPending(pending.url, pending.userCode) }
+        val deadline = System.currentTimeMillis() + pending.expiresIn * 1000L
+        var grant: MiniMaxClient.Grant? = null
+        while (System.currentTimeMillis() < deadline) {
+            delay(pending.interval * 1000L)
+            grant = MiniMaxClient.pollToken(pending)
+            if (grant != null) break
+        }
+        val g = grant ?: throw IllegalStateException("MiniMax 授权超时，请重新点击「获取授权」")
+        val idx = selectedIndex.value.coerceIn(0, maxTokens.value.lastIndex.coerceAtLeast(0))
+        val tokens = maxTokens.value.toMutableList()
+        while (tokens.size <= idx) tokens.add("")
+        tokens[idx] = g.accessToken
+        maxTokens.value = tokens
+        prefs.edit().putString("max_tokens", JSONArray(tokens).toString()).apply()
+        setMiniMaxTokenDetails(idx, g.refreshToken, System.currentTimeMillis() / 1000 + g.expiresIn)
+        withContext(Dispatchers.Main) { onStatus("MiniMax 授权完成，token 已填入") }
+        g.accessToken
     }
 
     fun setPort(p: Int) {
