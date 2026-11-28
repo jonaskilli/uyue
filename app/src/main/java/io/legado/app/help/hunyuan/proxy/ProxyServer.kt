@@ -34,6 +34,7 @@ import io.legado.app.help.hunyuan.proxy.ProxyServer.handleKimiChat
 import io.legado.app.help.hunyuan.proxy.ProxyServer.handleDeepSeekChat
 import io.legado.app.help.hunyuan.proxy.ProxyServer.handleHunyuanChat
 import io.legado.app.help.hunyuan.proxy.ProxyServer.handleQwenChat
+import io.legado.app.help.hunyuan.proxy.ProxyServer.handleMiniMaxChat
 
 @Serializable
 data class ChatMessage(val role: String, val content: String)
