@@ -130,6 +130,7 @@ import io.legado.app.ui.soundeffect.SoundEffectRuleEditViewModel.Companion.EXTRA
 import io.legado.app.ui.soundeffect.SoundEffectRuleEditViewModel.Companion.EXTRA_RULE
 import io.legado.app.ui.soundeffect.SoundEffectRuleManager
 import io.legado.app.ui.soundeffect.SoundEffectPlayer
+import io.legado.app.ui.soundeffect.SoundEffectRuleActivity
 import io.legado.app.ui.book.read.config.SpeakEngineDialog
 import io.legado.app.ui.book.read.config.TipConfigDialog.Companion.TIP_COLOR
 import io.legado.app.ui.book.read.config.TipConfigDialog.Companion.TIP_DIVIDER_COLOR
@@ -1036,6 +1037,12 @@ class ReadBookActivity : BaseReadBookActivity(),
         textActionMenu.dismiss()
     }
 
+    /** 点击段落小喇叭后，整段文字已进入选中态，直接显示文本操作菜单。 */
+    override fun onParagraphSelected() {
+        binding.readView.isTextSelected = true
+        showTextActionMenu()
+    }
+
     override fun onLongScreenshotTouchEvent(event: MotionEvent): Boolean {
         return binding.readView.onTouchEvent(event)
     }
@@ -1102,23 +1109,31 @@ class ReadBookActivity : BaseReadBookActivity(),
                         }
                     }.minByOrNull { it.second }?.first ?: -1
                 }
+                // 预览必须用朗读服务的原文（speakLines 与 contentList 生成方式一致），
+                // 不能用排版段落文本，否则段首缩进/按页朗读的差异会让正则命中不一致，
+                // 出现“播放有音效、预览上方却少标记”的问题。
+                val speakText = speakLines.getOrNull(speakIndex) ?: text
                 val prevText = speakLines.getOrNull(speakIndex - 1).orEmpty()
                 val bookUrl = ReadBook.book?.bookUrl.orEmpty()
                 val mode = AppConfig.getEffectiveSoundEffectMode(bookUrl)
                 showDialogFragment(
                     SoundEffectPreviewDialog.create(
-                        text = text,
+                        text = speakText,
                         prevText = prevText,
                         mode = mode,
                         bookUrl = bookUrl,
                         chapterIndex = ReadBook.durChapterIndex,
                         paraIndex = speakIndex
                     ).apply {
-                        onEditRule = { effectName, marker, markerIndex, isAiEffect, effectPath ->
+                        onManageRules = { startActivity<SoundEffectRuleActivity>() }
+                        onEditRule = { effectName, marker, markerIndex, isAiEffect, effectPath, sourceMode, previewTestText ->
                             if (isAiEffect) {
                                 openAiSoundEditor(effectName, effectPath)
                             } else {
-                                openSoundEffectRuleEditor(effectName, marker, markerIndex, mode, text)
+                                openSoundEffectRuleEditor(
+                                    effectName, marker, markerIndex, mode, speakText,
+                                    exactMode = sourceMode, previewTestText = previewTestText
+                                )
                             }
                         }
                     }
@@ -1352,14 +1367,21 @@ class ReadBookActivity : BaseReadBookActivity(),
         marker: String,
         markerIndex: Int,
         mode: String,
-        testText: String
+        testText: String,
+        exactMode: String = "",
+        previewTestText: String? = null
     ) {
-        // 衔接音效始终在朗读时执行，所以反查规则也必须覆盖衔接文件，不能只看当前模式。
+        // 预览底部规则名点击时带了真实来源模式：只在该文件里定位，避免同名规则串到别的模式。
+        // 从上方音效标记点击时 exactMode 为空，仍按原来的多模式回退查找。
         val searchModes = LinkedHashSet<String>().apply {
-            add(mode)
-            add(SoundEffectRuleManager.MODE_TRANSITION)
-            add(SoundEffectRuleManager.MODE_ALL)
-            add(SoundEffectRuleManager.MODE_NORMAL)
+            if (exactMode.isNotBlank()) {
+                add(exactMode)
+            } else {
+                add(mode)
+                add(SoundEffectRuleManager.MODE_TRANSITION)
+                add(SoundEffectRuleManager.MODE_ALL)
+                add(SoundEffectRuleManager.MODE_NORMAL)
+            }
         }.filter {
             it == SoundEffectRuleManager.MODE_ALL ||
                 it == SoundEffectRuleManager.MODE_NORMAL ||
@@ -1372,11 +1394,19 @@ class ReadBookActivity : BaseReadBookActivity(),
             val data = SoundEffectRuleManager.load(searchMode)
             if (data.isEmpty()) return@forEach
             dataByMode[searchMode] = data
+            // 从预览页规则名进入时 marker 就是规则名本身，按名字精确匹配，不再用 marker 模糊匹配，
+            // 否则规则名里的特殊字符可能误命中其它规则。
+            val byName = marker.isNotBlank() &&
+                data.any { group -> group.list.any { it.name == marker } }
             data.forEach { group ->
                 group.list.forEach { rule ->
-                    if (rule.replacement.contains(marker) ||
-                        rule.replacement.contains("($effectName)")
-                    ) {
+                    val matched = if (byName) {
+                        marker == rule.name
+                    } else {
+                        rule.replacement.contains(marker) ||
+                            rule.replacement.contains("($effectName)")
+                    }
+                    if (matched) {
                         candidates.add(SoundEffectRuleCandidate(searchMode, group, rule))
                     }
                 }
@@ -1407,7 +1437,9 @@ class ReadBookActivity : BaseReadBookActivity(),
         fun launch(candidate: SoundEffectRuleCandidate) {
             val data = dataByMode[candidate.mode].orEmpty()
             pendingSoundEffectMode = candidate.mode
-            val prepared = candidate.rule.copyRule().apply { sampleText = testText }
+            // sampleText 保留规则自身的值，预览带入的测试文本通过独立 extra 传入，
+            // 避免编辑页保存时把临时文本写回规则文件。
+            val prepared = candidate.rule.copyRule()
             soundEffectRuleEditActivity.launch(
                 SoundEffectRuleEditActivity.startIntent(
                     context = this,
@@ -1417,7 +1449,8 @@ class ReadBookActivity : BaseReadBookActivity(),
                     groupNames = data.map { it.group.name }.toTypedArray(),
                     targetMarker = marker,
                     targetMarkerIndex = markerIndex,
-                    sourceMode = candidate.mode
+                    sourceMode = candidate.mode,
+                    previewTestText = previewTestText ?: testText
                 )
             )
         }

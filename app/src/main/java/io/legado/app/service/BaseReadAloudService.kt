@@ -243,6 +243,7 @@ abstract class BaseReadAloudService : BaseService(),
          * 应用内置音效替换规则，在文本中插入 (音效) 标记。
          * 若文本中已存在音效标记，则跳过，避免重复。
          * 根据当前书籍生效的音效模式选择不同的规则文件。
+         * 仅处理普通/全部音效；衔接音效由朗读脚本触发，不在这里追加。
          *
          * @param text 当前段落
          * @param prevText 上一段落。当前段落不足 [MIN_MATCH_CHARS] 字时，
@@ -255,6 +256,7 @@ abstract class BaseReadAloudService : BaseService(),
             val mode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
                 AppConfig.getEffectiveSoundEffectMode(it)
             } ?: AppConfig.soundEffectMode
+            if (mode == "off") return text
 
             // 短段落补上文，原文两段之间是换行，这里换成衔接符，便于规则识别与删除
             val withContext = prevText.isNotBlank() && text.length < MIN_MATCH_CHARS
@@ -279,11 +281,7 @@ abstract class BaseReadAloudService : BaseService(),
                 if (mainFileName != null) {
                     loadSoundEffectRules(mainFileName)?.let { result = applyCompiledRules(result, it) }
                 }
-
-                // 衔接音效始终在前面的规则替换完成后再执行，不和音效开关绑定
-                loadSoundEffectRules("ttsrv-replaces4.json")?.let {
-                    result = applyCompiledRules(result, it)
-                }
+                // 衔接音效只在预览里追加，由朗读脚本自行触发，不能在朗读服务里生成标记并后台播放。
 
                 // 只有"替换后确实配出了音效"才值得记一条：
                 // 规则跑完但没配上音效是常态，每段落打一条汇总会把有用的日志全淹掉
@@ -349,7 +347,8 @@ abstract class BaseReadAloudService : BaseService(),
             val replacement: String,
             val regex: Regex?,
             val isRegex: Boolean,
-            val order: Int
+            val order: Int,
+            val name: String = ""
         )
 
         /**
@@ -504,7 +503,8 @@ abstract class BaseReadAloudService : BaseService(),
                             replacement = item.optString("replacement", ""),
                             regex = regex,
                             isRegex = isRegex,
-                            order = order
+                            order = order,
+                            name = item.optString("name", "")
                         )
                     )
                 }
@@ -556,7 +556,8 @@ abstract class BaseReadAloudService : BaseService(),
         }
 
         /**
-         * 供合并流程使用：对文本应用音效替换规则并提取音效标记。
+         * 供合并流程使用：对文本应用当前模式的音效替换规则并提取音效标记。
+         * 不追加衔接音效规则（衔接音效由朗读脚本触发）。
          * 返回 (去掉标记后的净文本, 音效列表)，不依赖播放时的 paragraphEffects 状态。
          * 可在无 service 实例时静态调用（如目录界面手动保存）。
          */
@@ -565,6 +566,89 @@ abstract class BaseReadAloudService : BaseService(),
             prevText: String = ""
         ): Pair<String, List<SoundEffect>> {
             return parseSoundEffects(applySoundEffectRules(text, prevText))
+        }
+
+        /** 预览命中一条规则的信息：规则名、首个音效标记名、来源模式、该规则执行前的文本。 */
+        data class PreviewHit(
+            val name: String,
+            val marker: String,
+            val sourceMode: String,
+            val inputText: String
+        )
+
+        /**
+         * 预览专用：在当前音效模式规则之后，再追加衔接音效规则，
+         * 只在长按选段时展示本段可能命中的全部标记和规则名。
+         * 额外返回本次真正匹配生效的规则名（含衔接规则、含未生成音效标记的清理规则）。
+         * 复用同一份已编译规则缓存，不重复读取/解析规则文件。
+         * 衔接规则只在这里追加，不写回 [applySoundEffectRules]，因此不影响朗读和混音。
+         */
+        fun extractSoundEffectsForPreview(
+            text: String,
+            prevText: String = ""
+        ): Triple<String, List<SoundEffect>, List<PreviewHit>> {
+            if (text.isEmpty()) return Triple(text, emptyList(), emptyList())
+            val mode = io.legado.app.model.ReadBook.book?.bookUrl?.let {
+                AppConfig.getEffectiveSoundEffectMode(it)
+            } ?: AppConfig.soundEffectMode
+
+            val withContext = prevText.isNotBlank() && text.length < MIN_MATCH_CHARS
+            val source = if (withContext) {
+                val head =
+                    if (prevText.length > CONTEXT_CHARS) prevText.takeLast(CONTEXT_CHARS) else prevText
+                head + PARA_JOINER + text
+            } else {
+                text
+            }
+
+            val hitRules = ArrayList<PreviewHit>()
+            // 文件名 → 模式，和 SoundEffectRuleManager.fileNameOf 保持一致
+            fun modeOf(fileName: String) = when (fileName) {
+                "ttsrv-replaces5.json" -> "normal"
+                "ttsrv-replaces3.json" -> "all"
+                "ttsrv-replaces4.json" -> "transition"
+                else -> ""
+            }
+            fun apply(result: String, fileName: String): String {
+                val rules = loadSoundEffectRules(fileName) ?: return result
+                val sourceMode = modeOf(fileName)
+                var out = result
+                for (rule in rules) {
+                    if (rule.isRegex && rule.regex == null) continue
+                    val before = out
+                    try {
+                        val next = if (rule.regex != null) {
+                            rule.regex.replace(out, rule.replacement)
+                        } else {
+                            out.replace(rule.pattern, rule.replacement)
+                        }
+                        if (next != out && rule.name.isNotBlank()) {
+                            val marker = soundEffectPattern.find(rule.replacement)
+                                ?.groupValues?.get(1).orEmpty()
+                            hitRules.add(PreviewHit(rule.name, marker, sourceMode, before))
+                        }
+                        out = next
+                    } catch (e: Exception) {
+                        AppLog.put("[ttsrv] 规则失败 [order=${rule.order}]: ${e.message}")
+                    }
+                }
+                return out
+            }
+
+            val result = try {
+                var out = source
+                when (mode) {
+                    "normal" -> out = apply(out, "ttsrv-replaces5.json")
+                    "all" -> out = apply(out, "ttsrv-replaces3.json")
+                }
+                out = apply(out, "ttsrv-replaces4.json")
+                if (withContext) out.substringAfterLast(PARA_JOINER) else out
+            } catch (e: Exception) {
+                AppLog.put("[ttsrv] 预览替换异常: ${e.message}")
+                text
+            }
+            val (cleanText, effects) = parseSoundEffects(result)
+            return Triple(cleanText, effects, hitRules)
         }
 
         /**
