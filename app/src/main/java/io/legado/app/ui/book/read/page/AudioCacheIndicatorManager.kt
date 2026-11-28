@@ -63,7 +63,11 @@ object AudioCacheIndicatorManager {
         File(sysTtsFolderPath).listFiles()?.filter { it.isFile && it.name.endsWith(".wav") }
             ?.forEach { sysCacheFiles.add(it.name.removeSuffix(".wav")) }
 
-        val title = textChapter.title
+        // 音频缓存文件名由朗读服务按**原始章节名**（chapter.title）计算哈希：
+        // 见 HttpReadAloudService/TTSReadAloudService 的 getFileNameHelper 调用点。
+        // 不能用 textChapter.title——那是「替换规则 + 去引号」后的显示标题，
+        // 本书一旦配了改标题的替换规则或标题带引号，两者不同，标记会全部失效。
+        val title = textChapter.chapter.title
         val speechRateHttp = AppConfig.speechRatePlay + 5
 
         // 朗读服务 contentList 会过滤空段落，索引只计非空段落，
@@ -137,7 +141,11 @@ object AudioCacheIndicatorManager {
         val nonEmptyParagraphs = paragraphs.filter { prepareParagraphText(it.text).trim().isNotEmpty() }
         val index = nonEmptyParagraphs.indexOfFirst { it.num == paragraphNum }
         if (index < 0) return null
-        val title = textChapter.title
+        // 音频缓存文件名由朗读服务按**原始章节名**（chapter.title）计算哈希：
+        // 见 HttpReadAloudService/TTSReadAloudService 的 getFileNameHelper 调用点。
+        // 不能用 textChapter.title——那是「替换规则 + 去引号」后的显示标题，
+        // 本书一旦配了改标题的替换规则或标题带引号，两者不同，标记会全部失效。
+        val title = textChapter.chapter.title
 
         // 1) 尝试 HttpTTS（算法统一走 TtsCacheFileName，11-21）
         val httpFileName = TtsCacheFileName.httpTts(
